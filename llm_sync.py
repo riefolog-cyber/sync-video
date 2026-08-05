@@ -444,6 +444,19 @@ def is_interactive() -> bool:
         return False
 
 
+def _flush_logs() -> None:
+    """Svuota subito i log (stdout+stderr) così gli avvisi di PAUSA appaiono
+    immediatamente anche quando l'output è reindirizzato (pipe/file), dove
+    Python bufferizza e il messaggio resterebbe invisibile finché il processo
+    non termina (che in pausa non succede mai)."""
+    for handler in log.handlers:
+        with suppress(Exception):
+            handler.flush()
+    for stream in (sys.stdout, sys.stderr):
+        with suppress(Exception):
+            stream.flush()
+
+
 def wait_for_router(
     endpoints: list[dict[str, Any]],
     wait_timeout: float = 0.0,
@@ -508,6 +521,7 @@ def wait_for_router(
     log.warning("")
     log.warning(" Non serve premere altro: appena 9Router è online riparte.")
     log.warning("=" * 70)
+    _flush_logs()
     start = time.time()
     while True:
         time.sleep(5)
