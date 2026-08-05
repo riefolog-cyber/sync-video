@@ -112,12 +112,17 @@ free. Serve a mantenere pulito il router lato server.
 
 ---
 
-## 🖥️ Primo avvio su un altro PC
+## 🖥️ Setup su un altro PC
 
 1. **Installa Python 3.10+** da [python.org](https://python.org) — spunta **"Add Python to PATH"**.
-2. **Copia la cartella** `sync_video_portable` sul nuovo PC.
-3. **Aggiungi i tuoi file**: `presentazione.pdf` e `podcast.m4a` nella stessa cartella.
-4. **Lancia `genera_video.bat`** — tutto il resto è automatico.
+2. **Installa Git** da [git-scm.com](https://git-scm.com) (se non presente).
+3. **Clona il repository**:
+   ```bash
+   git clone https://github.com/riefolog-cyber/sync-video.git
+   cd sync-video
+   ```
+4. **Aggiungi i tuoi file**: `presentazione.pdf` e `podcast.m4a` nella stessa cartella.
+5. **Lancia `genera_video.bat`** — tutto il resto è automatico.
 
 ### Cosa viene installato automaticamente al primo avvio
 
@@ -155,7 +160,7 @@ python main.py --no-cache
 # Whisper invece di Vosk
 python main.py --transcriber whisper --whisper-model medium
 
-# Esegui i test (106 unit test: pipeline, LLM, chunks, integrazione)
+# Esegui i test (127 unit test: pipeline, LLM, chunks, integrazione)
 python -m unittest test_sync test_integration test_llm_sync test_chunks
 ```
 
@@ -182,7 +187,34 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--llm` | `auto` | Selezione slide con LLM: `auto` (9Router online → MiniLM), `off`, `9router`. Libero: slide per chunk. Ordinato: solo le slide senza ancora esplicita |
 | `--llm-model` | — | Override modello LLM (es. `comboact`, `cf/@cf/mistralai/mistral-small-3.1-24b-instruct`) |
 | `--llm-chunk` | `30.0` | Secondi per chunk inviato all'LLM |
+| `--llm-wait-timeout` | `0.0` | Se 9Router è necessario ma spento: secondi massimi di attesa prima del fallback MiniLM. `0` = attesa illimitata (pausa + avviso, riprende appena 9Router risponde) |
 | `--llm-review` | — | Dopo la timeline LLM nel flusso libero, secondo passaggio LLM che ri-verifica la selezione chunk→slide e avvisa (senza modificare la timeline) sui chunk sospetti. Risultato cachato. |
+
+---
+
+## ⏸️ Gestione on-demand di 9Router
+
+La pipeline usa 9Router **solo quando serve davvero** e non si blocca mai
+inutilmente:
+
+- **9Router non necessario** (ancore "slide N" complete, risultato in cache,
+  `--llm off`) → nessuna chiamata, nessuna attesa.
+- **9Router necessario ma spento**, in **terminale interattivo** → avviso
+  chiaro e **pausa** con verifica ogni 5s; il processo **riprende da solo**
+  appena avvii 9Router. Durante la pausa:
+  - premi **`S`** → salta l'LLM e usa subito il MiniLM locale;
+  - oppure imposta `--llm-wait-timeout <secondi>` → fallback MiniLM automatico
+    allo scadere (0 = illimitato).
+- **Flusso libero senza terminale** (es. CI, automazione): il fallback MiniLM
+  non basta (tetto ~50% ed è lento su audio lunghi), quindi il programma si
+  **interrompe subito con un errore chiaro** invece di produrre un video
+  scadente in silenzio. Usa `--llm off` per forzare il MiniLM esplicitamente.
+
+```bash
+python main.py --llm auto                 # pausa + ripresa automatica (consigliato)
+python main.py --llm auto --llm-wait-timeout 60   # fallback MiniLM dopo 60s
+python main.py --llm off                  # solo MiniLM, nessuna attesa
+```
 
 ---
 
@@ -216,7 +248,7 @@ tessdata/                ← Modelli lingua Tesseract portatili
 Comandi verificati per chi modifica il codice:
 
 ```bash
-# Test (suite completa, unittest — 106 test)
+# Test (suite completa, unittest — 127 test)
 python -m unittest test_sync test_integration test_llm_sync test_chunks
 
 # Type-check (mypy, 13 moduli sorgente)
@@ -266,7 +298,7 @@ pipeline prende una strada diversa a seconda del segnale presente nell'audio.
 |---|---|---|
 | **A. `slide-audio`** | "Passiamo alla slide 3" | Estratte ancore deterministiche "slide N" (cifre, cardinali o **ordinali**: "la terza diapositiva") → vincoli ad alta precisione. Sincronizzazione semantica (MiniLM offline): ogni blocco audio → slide più vicina, DP monotona. Con `--llm` attivo e slide SENZA ancora → **flusso ibrido**: l'LLM posiziona solo quelle (dove il contenuto è discusso), le ancore restano esatte. Riconciliazione (tempi crescenti, durate positive); se impossibile → **interruzione**. Slide in ordine 1→N. Un log diagnostico distingue riferimenti trovati/usati/scartati e segnala le slide senza ancora esplicita. |
 | **B. `audio-slide`** | "Passiamo al blocco successivo" | Stesse ancore (numeriche o ordinali), stessa pipeline ordinata (+ flusso ibrido LLM come in A); la slide cambia sulle transizioni di blocco non numerate. |
-| **C. `free`** | nessuno | Riordino libero: la slide segue il contenuto del podcast, anche ripetuta, durata minima ~8s (anti-flicker). **Con LLM** (`--llm auto`): chunk 30s inviati a 9Router (combo `comboact` → Mistral 24B → Gemma 31B), fallback MiniLM se nessuno risponde. **Senza LLM** (`--llm off`): solo MiniLM in modalità libera. `--llm-review` ri-verifica e avvisa senza modificare la timeline. |
+| **C. `free`** | nessuno | Riordino libero: la slide segue il contenuto del podcast, anche ripetuta, durata minima ~8s (anti-flicker). **Con LLM** (`--llm auto`): chunk 30s inviati a 9Router (combo `comboact` → Mistral 24B → Gemma 31B); se 9Router è spento il processo si mette in pausa con avviso e riprende da solo appena torna online (o premi `S` / `--llm-wait-timeout` per il fallback MiniLM; senza terminale interattivo si interrompe con errore chiaro). **Senza LLM** (`--llm off`): solo MiniLM in modalità libera. `--llm-review` ri-verifica e avvisa senza modificare la timeline. |
 
 Il raggruppamento in finestre temporali è condiviso da `chunks.py`
 (`build_windows`): finestre corte (4s) per la semantica, larghe (30s) per
