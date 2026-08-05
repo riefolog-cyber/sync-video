@@ -496,14 +496,17 @@ def wait_for_router(
     log.warning(" [ATTENZIONE] 9Router NON è avviato e serve per: %s",
                 context or "sincronizzazione LLM")
     log.warning("=" * 70)
-    log.warning(" Il processo è in PAUSA e riprenderà da solo appena 9Router")
-    log.warning(" risponde. Per procedere:")
+    log.warning(" Il processo è in PAUSA in attesa di 9Router.")
     log.warning("")
-    log.warning("   > Avvia 9Router  (es. http://localhost:20128/v1)")
-    log.warning("                       -> ripresa automatica")
-    log.warning("   > premi 'S'      -> salta l'LLM e usa il MiniLM locale")
+    log.warning(" COSA FARE:")
+    log.warning("   1) AVVIA 9Router (gateway su http://localhost:20128/v1)")
+    log.warning("      -> il processo riprende da SOLO con la qualità LLM")
+    log.warning("   2) oppure premi il tasto 'S' per SALTARE l'LLM e usare")
+    log.warning("      subito il MiniLM locale (qualità inferiore)")
     if wait_timeout > 0:
-        log.warning("   > attendi > %ds  -> fallback MiniLM automatico", wait_timeout)
+        log.warning("   3) oppure non fare nulla: dopo %ds passa al MiniLM", wait_timeout)
+    log.warning("")
+    log.warning(" Non serve premere altro: appena 9Router è online riparte.")
     log.warning("=" * 70)
     start = time.time()
     while True:
