@@ -1,0 +1,41 @@
+# Configurazione Ruff per il progetto slide2video.
+# Esegui:  python -m ruff check .
+# Autofix:  python -m ruff check . --fix
+
+target-version = "py310"
+line-length = 120
+
+[lint]
+# E/F (bug, pycodestyle), W (warning), I (import sort), UP (pyupgrade),
+# SIM (simplify), PL (pylint), B (bugbear), RUF (ruff-specific), BLE (blind except)
+select = [
+    "E", "F", "W",
+    "I",
+    "UP",
+    "SIM",
+    "B",
+    "RUF",
+    "BLE",
+    "PIE",
+]
+# Le regole di complessità (PLR09xx) e l'import-outside-top-level (PLC0415,
+# volutamente usato in config.py per il bootstrap lazy) sono il backlog di
+# refactoring, non guardrail di stile: li teniamo fuori dal check di default.
+ignore = [
+    "PLR0911",  # too-many-return-statements
+    "PLR0912",  # too-many-branches
+    "PLR0913",  # too-many-arguments
+    "PLR0915",  # too-many-statements
+    "PLR0917",  # too-many-positional-arguments
+    "PLC0415",  # import-outside-top-level (bootstrap lazy in config.py)
+    "PLR2004",  # magic-value-comparison
+]
+
+[lint.per-file-ignores]
+# I test usano patch/assert interni in modo volutamente permissivo
+"test_*.py" = ["BLE001"]
+
+[lint.flake8-bugbear]
+# Tolleranza per i "except Exception" difensivi (fallback robusti),
+# documentati nel piano di miglioramento.
+extend-immutable-calls = ["log.error", "log.warning"]

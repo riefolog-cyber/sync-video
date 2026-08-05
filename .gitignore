@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Cache e temporanei
+.cache/
+.mypy_cache/
+.ruff_cache/
+temp_slides/
+temp_vosk_audio.wav
+
+# Segreti
+.env
+.env.*
+*.pem
+*.key
+
+# Output generati
+video_finale.mp4
+info_video.txt
+transcript_raw.txt
+llm_debug_output.txt
+llm_content_based_debug.txt
+
+# Modelli Vosk e Tesseract (troppo grandi per git)
+vosk-model-*/
+tessdata/
+
+# Manutenzione 9Router: script ok, ma i log possono contenere stati/percorsi
+9router-maintenance/logs/
+
+# File audio/video progetto (sostituisci con i tuoi)
+Audio
+*.mp3
+*.m4a
+*.wav
+*.aac
+*.ogg
+*.flac
+presentazione.pdf
+
+# Documenti didattici generati / locali
+RELAZIONE_DIDATTICA_AGGIORNATA.md
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
