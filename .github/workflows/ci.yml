@@ -10,8 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.12 escluso: vosk dipende da `srt`, che richiede Python <3.12
-        # (ultimo rilascio 2021, abbandonato). Il progetto richiede >=3.10.
+        # Python 3.12 escluso: dipendenza vosk/srt non compatibile.
         python-version: ["3.10", "3.11"]
     steps:
       - uses: actions/checkout@v4
