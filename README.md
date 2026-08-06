@@ -1,5 +1,7 @@
 # Slide2Video 🎬
 
+[![CI](https://github.com/riefolog-cyber/sync-video/actions/workflows/ci.yml/badge.svg)](https://github.com/riefolog-cyber/sync-video/actions/workflows/ci.yml)
+
 Sincronizza automaticamente una presentazione PDF con un podcast audio e genera un video in cui ogni slide appare al momento giusto.
 
 **Pipeline:** PDF → OCR → Trascrizione (Vosk/Whisper) → Ancore "slide N" → Sincronizzazione semantica (embeddings) → Video MP4
