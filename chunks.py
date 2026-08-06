@@ -12,6 +12,25 @@ from collections.abc import Sequence
 from typing import TypedDict
 
 
+class Word(TypedDict):
+    """Parola riconosciuta con timestamp (formato Vosk/Whisper).
+
+    Le trascrizioni possono includere chiavi extra (confidenza, ecc.): il
+    TypedDict richiede solo ``word`` e ``start``.
+    """
+
+    word: str
+    start: float
+
+
+class Segment(TypedDict):
+    """Segmento di timeline: una slide con inizio e fine."""
+
+    slide: int
+    start: float
+    end: float
+
+
 class WordWindow(TypedDict):
     """Finestra temporale grezza di parole (dati non filtrati)."""
 
@@ -23,7 +42,7 @@ class WordWindow(TypedDict):
 
 
 def build_windows(
-    words: Sequence[dict],
+    words: Sequence[Word],
     total_duration: float,
     window_seconds: float,
 ) -> list[WordWindow]:

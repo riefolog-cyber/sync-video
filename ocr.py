@@ -150,7 +150,7 @@ def extract_slides_text_ocr(
                 with Image.open(str(output_path)) as test_img:
                     test_img.verify()
                 valid_cache = True
-            except Exception:
+            except (OSError, ValueError, SyntaxError):
                 log.debug("   Cache corrotta per %s, ri-renderizzo.", output_path.name)
                 output_path.unlink(missing_ok=True)
         if not valid_cache:

@@ -37,8 +37,12 @@ Il modulo supporta DUE flussi LLM:
    deterministiche restano vincoli esatti; l'LLM posiziona SOLO le slide
    senza ancora, dove il loro contenuto viene effettivamente discusso.
 
-L'LLM è OPZIONALE: se nessun endpoint risponde, la pipeline torna al motore
-locale senza interrompere (stessa filosofia offline-first del progetto).
+Quando serve l'LLM ma 9Router è spento, la pipeline tenta di AVVIARLO in
+automatico (``9router --tray`` via subprocess) e riprende appena il gateway
+risponde. Se 9Router non arriva online: nei flussi di sincronizzazione
+(``strict=True``) il processo si ARRESTA con un avviso chiaro che spiega come
+lanciare 9Router — mai un fallback silenzioso sul MiniLM —; solo il secondo
+passaggio di revisione (opzionale, ``--llm-review``) può essere saltato.
 
 La risposta LLM viene cachata per contenuto (hash slide+audio+chunk): la
 timeline non si ripaga a ogni run e i file ``llm_*.json`` non vengono mai
@@ -61,13 +65,15 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 from collections.abc import Sequence
 from contextlib import suppress
 from typing import Any, cast
 
-from chunks import build_windows
+from chunks import Word, build_windows
 from config import CACHE_DIR, log
 from timeline import _complete_from_anchors, _lis_anchors
 
@@ -83,6 +89,9 @@ except ImportError:  # pragma: no cover
 # =====================================================================
 # Unico provider LLM: 9Router (gateway online multi-modello).
 # Ogni endpoint è un dizionario {url, model, api_key_env, timeout}.
+# Secondi massimi di attesa dopo l'avvio automatico di 9Router prima di
+# considerarlo irraggiungibile (il gateway node impiega qualche secondo).
+_AUTO_LAUNCH_WAIT = 90.0
 def endpoints_for(provider: str) -> list[dict[str, Any]]:
     """Restituisce gli endpoint da usare per il provider scelto.
 
@@ -151,7 +160,7 @@ def _endpoints() -> list[dict[str, Any]]:
 # CHUNK DELLA TRASCRIZIONE (finestre temporali)
 # =====================================================================
 def build_llm_chunks(
-    words: list[dict],
+    words: list[Word],
     total_duration: float,
     chunk_seconds: float = 30.0,
 ) -> list[dict[str, object]]:
@@ -206,6 +215,45 @@ def clean_slide_text_for_llm(text: str, max_chars: int = 900) -> str:
 # =====================================================================
 # PROMPT E PARSING
 # =====================================================================
+def _slide_block(slide_texts: Sequence[str], max_chars: int = 400) -> str:
+    """Blocco prompt "Diapositive:" (testo pulito, una per riga, numerate 1..N)."""
+    return "\n".join(
+        f"{i + 1}. {clean_slide_text_for_llm(t)[:max_chars]}"
+        for i, t in enumerate(slide_texts)
+    )
+
+
+def _chunk_block(chunks: Sequence[dict[str, object]]) -> str:
+    """Blocco prompt "Parlato (chunk):" (una riga per chunk con finestra temporale)."""
+    return "\n".join(
+        f"chunk {c['num']} [{c['start']:.0f}s-{c['end']:.0f}s]: {c['text']}"
+        for c in chunks
+    )
+
+
+def _extract_json_array(content: str) -> Any | None:
+    """Trova e decodifica il PRIMO array JSON nel testo, in modo tollerante.
+
+    Gestisce codice fenced, testo extra attorno all'array e apostrofi singoli
+    al posto delle virgolette. Con ``.*?`` (non-greedy) prende il primo array
+    valido: un modello che emette due array (es. spiegazione + array finale)
+    non fa fallire il parse sul secondo.
+    """
+    if not content:
+        return None
+    m = re.search(r"\[.*?\]", content, re.DOTALL)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except (json.JSONDecodeError, TypeError):
+        # Prova a riparare: apostrofi singoli al posto di virgolette
+        try:
+            return json.loads(re.sub(r"'", '"', m.group(0)))
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+
 def build_prompt(
     slide_texts: Sequence[str],
     chunks: Sequence[dict[str, object]],
@@ -216,14 +264,6 @@ def build_prompt(
     due regole anti-errore: niente slide-riassunto quando esiste una slide
     specifica, e "mantieni la slide" sui chunk di transizione/ricapitolazione.
     """
-    slide_block = "\n".join(
-        f"{i + 1}. {clean_slide_text_for_llm(t)[:400]}"
-        for i, t in enumerate(slide_texts)
-    )
-    chunk_block = "\n".join(
-        f"chunk {c['num']} [{c['start']:.0f}s-{c['end']:.0f}s]: {c['text']}"
-        for c in chunks
-    )
     system = (
         "Sei un esperto di sincronizzazione audiovisiva. Ti vengono date le "
         "diapositive di una presentazione (numeri 1..N) e il parlato di un "
@@ -245,8 +285,8 @@ def build_prompt(
         "formato esatto: [{\"chunk\": 1, \"slide\": 3}, {\"chunk\": 2, \"slide\": null}]"
     )
     user = (
-        f"Diapositive:\n{slide_block}\n\n"
-        f"Parlato (chunk):\n{chunk_block}\n\n"
+        f"Diapositive:\n{_slide_block(slide_texts)}\n\n"
+        f"Parlato (chunk):\n{_chunk_block(chunks)}\n\n"
         "Rispondi con l'array JSON."
     )
     return system, user
@@ -263,20 +303,7 @@ def parse_llm_response(
     accetta oggetti con chiavi "chunk"/"slide", riempiendo i buchi con None.
     Se `total_slides` non è dato, accetta qualsiasi numero di slide >= 1.
     """
-    if not content:
-        return None
-    m = re.search(r"\[.*\]", content, re.DOTALL)
-    if not m:
-        return None
-    try:
-        data = json.loads(m.group(0))
-    except (json.JSONDecodeError, TypeError):
-        # Prova a riparare: apostrofi singoli al posto di virgolette
-        try:
-            data = json.loads(re.sub(r"'", '"', m.group(0)))
-        except (json.JSONDecodeError, TypeError):
-            return None
-
+    data = _extract_json_array(content)
     if not isinstance(data, list):
         return None
 
@@ -350,7 +377,7 @@ def _call_endpoint(
                 endpoint["url"], headers=headers, json=payload,
                 timeout=endpoint.get("timeout", 120),
             )
-        except Exception as e:
+        except (requests.RequestException, OSError) as e:
             if attempt < max_attempts - 1:
                 log.warning(
                     "   [LLM] %s non raggiungibile (tentativo %d/%d): %s",
@@ -397,6 +424,30 @@ def _call_endpoint(
     return None
 
 
+def _call_cascade(
+    endpoints: Sequence[dict[str, Any]],
+    messages: list[dict[str, str]],
+    prefix: str,
+) -> tuple[str | None, str | None, str | None]:
+    """Prova gli endpoint in cascata e restituisce la prima risposta utile.
+
+    Returns:
+        (content, used_endpoint, used_model) del primo endpoint che risponde,
+        oppure (None, None, None) se tutti falliscono.
+    """
+    for ep in endpoints:
+        t0 = time.time()
+        log.info("   %s Provo %s (modello %s)...", prefix, ep["name"], ep["model"])
+        content = _call_endpoint(ep, messages)
+        if content is not None:
+            log.info(
+                "   %s %s [%s] ha risposto in %.1fs.",
+                prefix, ep["name"], ep["model"], time.time() - t0,
+            )
+            return content, ep["name"], ep["model"]
+    return None, None, None
+
+
 # =====================================================================
 # HEALTH-CHECK 9Router + PAUSA/RIPRESA
 # =====================================================================
@@ -430,7 +481,7 @@ def _skip_key_pressed() -> bool:
         import msvcrt
         if msvcrt.kbhit():
             ch = msvcrt.getch()
-            return ch in (b"s", b"S", b"116") if isinstance(ch, bytes) else ch.lower() == "s"
+            return ch in (b"s", b"S") if isinstance(ch, bytes) else ch.lower() == "s"
     except (ImportError, OSError, UnicodeDecodeError):
         pass
     return False
@@ -441,6 +492,32 @@ def is_interactive() -> bool:
     try:
         return bool(sys.stdin.isatty())
     except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _launch_9router() -> bool:
+    """Avvia il gateway 9Router in background (modalità tray).
+
+    Il comando ``9router`` è uno shim npm (9router.cmd / 9router.ps1): per
+    eseguirlo serve il resolver di shell di Windows, quindi si usa
+    ``shell=True`` con argomenti letterali (nessun input utente). Il processo
+    è staccato (DEVNULL su stdin/stdout/stderr) e vive oltre il run: al
+    prossimo run la health-check lo trova online. NON garantisce che il
+    gateway risponda subito: ``wait_for_router`` verifica con polling.
+    """
+    if shutil.which("9router") is None:
+        return False
+    try:
+        subprocess.Popen(
+            "9router --tray --skip-update",
+            shell=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return True
+    except (OSError, ValueError):
         return False
 
 
@@ -457,56 +534,86 @@ def _flush_logs() -> None:
             stream.flush()
 
 
+def _router_unavailable_error(context: str) -> RuntimeError:
+    """Errore che ARRESTA il processo quando 9Router serve ma non risponde."""
+    return RuntimeError(
+        "9Router è necessario per " + (context or "la sincronizzazione LLM")
+        + ", ma non risponde su http://localhost:20128/v1 e non c'è un "
+        "terminale interattivo per scegliere.\n"
+        "Opzioni:\n"
+        "   > avvia 9Router e rilancia il comando (in PowerShell: "
+        "'9router --tray');\n"
+        "   > esegui in un terminale interattivo e premi 'S' per ripiegare "
+        "sul MiniLM locale;\n"
+        "   > usa --llm off per il MiniLM locale esplicito (qualità "
+        "inferiore, nessuna attesa)."
+    )
+
+
 def wait_for_router(
     endpoints: list[dict[str, Any]],
     wait_timeout: float = 0.0,
     context: str = "",
     strict: bool = False,
 ) -> bool:
-    """Attende che 9Router sia online quando serve l'LLM.
+    """Garantisce che 9Router sia online quando serve l'LLM.
 
-    Se il router risponde subito ritorna True senza attese. Altrimenti stampa
-    un avviso ben chiaro che spiega come avviarlo, entra in PAUSA con polling
-    (ogni 5s) e riprende automaticamente quando il router torna online.
+    Se il router risponde subito ritorna True senza attese. Altrimenti:
 
-    Durante l'attesa l'utente può:
-      * avviare 9Router   -> il processo riprende da solo;
-      * premere 'S'        -> salta l'LLM e usa il MiniML locale (fallback);
-      * attendere oltre ``wait_timeout`` secondi (0 = illimitato) -> fallback.
-
-    In un ambiente non interattivo (stdin non è un terminale, es. test o CI):
-      * se ``strict=False`` si ripiega SUBITO sul MiniLM (fallback silenzioso);
-      * se ``strict=True`` si solleva ``RuntimeError`` con un messaggio chiaro:
-        meglio fermarsi che produrre un video scadente/lento senza poter
-        scegliere (usato nel flusso libero, dove il MiniLM ha un tetto di
-        precisione ~50% ed è lento su audio lunghi).
+    1. Tenta l'AVVIO AUTOMATICO di 9Router (``9router --tray`` in background)
+       e fa polling (ogni 5s, fino a ``_AUTO_LAUNCH_WAIT`` secondi): appena il
+       gateway risponde riprende da solo, garantendo la sincronia LLM.
+    2. Se dopo l'avvio automatico 9Router non è ancora online:
+       - con terminale interattivo: stampa un avviso ben chiaro su come
+         avviarlo e resta in PAUSA (polling ogni 5s); l'utente può avviare
+         9Router (riprende da solo), premere 'S' (fallback MiniLM) o attendere
+         ``wait_timeout`` secondi (0 = illimitato);
+       - senza terminale interattivo (test/CI/automazione): se ``strict=True``
+         solleva ``RuntimeError`` (il processo si ARRESTA con l'avviso di
+         lanciare 9Router — mai un fallback silenzioso); se ``strict=False``
+         ripiega subito sul MiniLM (usato solo dal secondo passaggio di
+         revisione, che è opzionale).
 
     Returns:
         True se si può procedere con l'LLM, False per ripiegare sul MiniLM.
 
     Raises:
-        RuntimeError: solo con ``strict=True`` e senza terminale interattivo
-            quando 9Router è necessario ma spento.
+        RuntimeError: con ``strict=True`` e senza terminale interattivo quando
+            9Router è necessario ma non risponde.
     """
     if router_alive(endpoints):
         return True
+
+    # 1) Avvio automatico di 9Router + polling finché non risponde.
+    if _launch_9router():
+        log.warning("   [LLM] 9Router non raggiungibile: avvio automatico...")
+        start = time.time()
+        while time.time() - start < _AUTO_LAUNCH_WAIT:
+            time.sleep(5)
+            if router_alive(endpoints):
+                log.warning("   9Router avviato: riprendo con l'LLM.")
+                return True
+            if _skip_key_pressed():
+                log.warning("   'S' premuto: salto l'LLM e uso il MiniLM locale.")
+                return False
+        log.warning(
+            "   [LLM] 9Router non online dopo %d secondi dall'avvio "
+            "automatico.", int(_AUTO_LAUNCH_WAIT),
+        )
+    else:
+        log.warning(
+            "   [LLM] Comando '9router' non disponibile: avvio manuale "
+            "richiesto (9router --tray).",
+        )
+
     if not is_interactive():
         if strict:
-            raise RuntimeError(
-                "Il flusso libero richiede 9Router per la selezione delle slide, "
-                "ma 9Router non è avviato e non c'è un terminale interattivo per "
-                "scegliere il fallback. "
-                "Opzioni:\n"
-                "   > avvia 9Router e rilancia il comando;\n"
-                "   > usa --llm off per il MiniLM locale esplicito (qualità "
-                "inferiore, nessuna attesa);\n"
-                "   > esegui in un terminale e premi 'S' per saltare l'LLM."
-            )
+            raise _router_unavailable_error(context)
         log.warning("   [LLM] 9Router non raggiungibile e stdin non interattivo: "
                     "ripiego subito sul MiniLM locale.")
         return False
     log.warning("\n" + "=" * 70)
-    log.warning(" [ATTENZIONE] 9Router NON è avviato e serve per: %s",
+    log.warning(" [ATTENZIONE] 9Router NON è online e serve per: %s",
                 context or "sincronizzazione LLM")
     log.warning("=" * 70)
     log.warning(" Il processo è in PAUSA in attesa di 9Router.")
@@ -541,7 +648,7 @@ def wait_for_router(
 # =====================================================================
 def llm_timeline_segments(
     slide_texts: list[str],
-    words_raw: list[dict],
+    words_raw: list[Word],
     total_slides: int,
     total_duration: float,
     chunk_seconds: float = 30.0,
@@ -614,23 +721,7 @@ def llm_timeline_segments(
         {"role": "user", "content": user},
     ]
 
-    used_endpoint: str | None = None
-    used_model: str | None = None
-    content: str | None = None
-    for ep in eps:
-        t0 = time.time()
-        log.info(
-            "   [LLM] Provo %s (modello %s)...", ep["name"], ep["model"],
-        )
-        content = _call_endpoint(ep, messages)
-        if content is not None:
-            used_endpoint = ep["name"]
-            used_model = ep["model"]
-            log.info(
-                "   [LLM] %s [%s] ha risposto in %.1fs.",
-                used_endpoint, used_model, time.time() - t0,
-            )
-            break
+    content, used_endpoint, used_model = _call_cascade(eps, messages, "[LLM]")
     if content is None:
         log.warning("   [LLM] Nessun endpoint disponibile: fallback al motore locale.")
         return None
@@ -717,14 +808,6 @@ def build_ordered_prompt(
     e gli comunica le ancore temporali già note ("slide N" nominate dallo
     speaker) come riferimenti certi per collocare le slide senza ancora.
     """
-    slide_block = "\n".join(
-        f"{i + 1}. {clean_slide_text_for_llm(t)[:400]}"
-        for i, t in enumerate(slide_texts)
-    )
-    chunk_block = "\n".join(
-        f"chunk {c['num']} [{c['start']:.0f}s-{c['end']:.0f}s]: {c['text']}"
-        for c in chunks
-    )
     anchor_block = ""
     if anchors:
         lines = [
@@ -760,8 +843,8 @@ def build_ordered_prompt(
         "formato esatto: [{\"chunk\": 1, \"slide\": 3}, {\"chunk\": 2, \"slide\": null}]"
     )
     user = (
-        f"Diapositive:\n{slide_block}\n\n"
-        f"Parlato (chunk):\n{chunk_block}\n\n"
+        f"Diapositive:\n{_slide_block(slide_texts)}\n\n"
+        f"Parlato (chunk):\n{_chunk_block(chunks)}\n\n"
         f"{anchor_block}"
         "Rispondi con l'array JSON."
     )
@@ -770,13 +853,14 @@ def build_ordered_prompt(
 
 def llm_ordered_timeline(
     slide_texts: list[str],
-    words_raw: list[dict],
+    words_raw: list[Word],
     total_slides: int,
     total_duration: float,
     anchors: dict[int, float],
     chunk_seconds: float = 30.0,
     endpoints: list[dict[str, Any]] | None = None,
     wait_timeout: float = 0.0,
+    strict: bool = False,
 ) -> dict[int, float] | None:
     """Timeline monotona per i flussi ordinati: ancore deterministiche ESATTE
     + posizione LLM per le slide senza ancora esplicita.
@@ -789,10 +873,18 @@ def llm_ordered_timeline(
     ``wait_timeout``: come in ``llm_timeline_segments`` (pausa con avviso se
     9Router è spento, 'S' o scadenza -> None per il fallback MiniLM).
 
+    ``strict``: se True e 9Router è necessario ma non risponde senza terminale
+    interattivo, solleva ``RuntimeError`` (il processo si arresta con l'avviso
+    di lanciare 9Router) invece di ripiegare in silenzio sul MiniLM.
+
     Returns:
         Timeline {slide: start} valida (reconcile_timeline) oppure None
         (nessun endpoint risponde / risposta non interpretabile: il chiamante
         usa il fallback MiniLM).
+
+    Raises:
+        RuntimeError: con ``strict=True`` e senza terminale interattivo quando
+            9Router è necessario ma non risponde.
     """
     if not words_raw:
         return None
@@ -815,9 +907,11 @@ def llm_ordered_timeline(
                  cache_key[:12])
         return _timeline_from_cached(cached, anchors)
 
-    # Health-check: se 9Router è spento, PAUSA con avviso e ripresa automatica
-    # appena torna online (o 'S' per il fallback MiniLM).
-    if not wait_for_router(eps, wait_timeout=wait_timeout, context="le slide senza ancora"):
+    # Health-check: se 9Router è spento, avvio automatico + PAUSA con avviso
+    # e ripresa automatica appena torna online (o 'S' per il fallback MiniLM).
+    # In modalità strict (senza terminale): errore chiaro, niente fallback.
+    if not wait_for_router(eps, wait_timeout=wait_timeout,
+                           context="le slide senza ancora", strict=strict):
         return None
 
     system, user = build_ordered_prompt(slide_texts[:total_slides], chunks, anchors)
@@ -826,19 +920,7 @@ def llm_ordered_timeline(
         {"role": "user", "content": user},
     ]
 
-    used_endpoint: str | None = None
-    used_model: str | None = None
-    content: str | None = None
-    for ep in eps:
-        t0 = time.time()
-        log.info("   [LLM/Ordinato] Provo %s (modello %s)...", ep["name"], ep["model"])
-        content = _call_endpoint(ep, messages)
-        if content is not None:
-            used_endpoint = ep["name"]
-            used_model = ep["model"]
-            log.info("   [LLM/Ordinato] %s [%s] ha risposto in %.1fs.",
-                     used_endpoint, used_model, time.time() - t0)
-            break
+    content, used_endpoint, used_model = _call_cascade(eps, messages, "[LLM/Ordinato]")
     if content is None:
         log.warning("   [LLM/Ordinato] Nessun endpoint disponibile: fallback al motore locale.")
         return None
@@ -901,7 +983,7 @@ def _timeline_from_cached(
 
 def _ordered_cache_key(
     slide_texts: Sequence[str],
-    words_raw: list[dict],
+    words_raw: Sequence[Word],
     total_slides: int,
     chunk_seconds: float,
     endpoints: Sequence[dict[str, Any]],
@@ -909,17 +991,13 @@ def _ordered_cache_key(
 ) -> str:
     """Hash stabile per la cache del flusso ordinato (prefisso "ord" +
     ancore esplicite, che influenzano il prompt e i vincoli)."""
-    h = hashlib.md5()
-    h.update(b"ord")
-    for t in slide_texts[:total_slides]:
-        h.update(str(t).encode("utf-8", errors="replace"))
-    h.update(str(len(words_raw)).encode())
-    h.update(repr(words_raw[:500]).encode("utf-8", errors="replace"))
-    h.update(f"{chunk_seconds}".encode())
-    h.update(repr(sorted(anchors.items())).encode("utf-8", errors="replace"))
-    for ep in endpoints:
-        h.update(f"|{ep.get('name')}:{ep.get('model')}".encode("utf-8", errors="replace"))
-    return h.hexdigest()
+    return _hash_cache(
+        [f"ord|{chunk_seconds}"],
+        slide_texts[:total_slides],
+        _words_hash(words_raw),
+        _endpoints_hash(endpoints),
+        [repr(sorted(anchors.items()))],
+    )
 
 
 # =====================================================================
@@ -934,15 +1012,11 @@ def _ordered_cache_key(
 def build_anchor_verify_prompt(
     slide_texts: Sequence[str],
     anchors: dict[int, float],
-    words_raw: list[dict],
+    words_raw: list[Word],
     window_seconds: float = 40.0,
 ) -> tuple[str, str]:
     """Prompt: per ogni ancora 'slide N' parlata determina la slide PDF reale
     basandosi sul contenuto discusso subito dopo il riferimento."""
-    slide_block = "\n".join(
-        f"{i + 1}. {clean_slide_text_for_llm(t)[:400]}"
-        for i, t in enumerate(slide_texts)
-    )
     lines = []
     for s, t in sorted(anchors.items(), key=lambda kv: kv[1]):
         excerpt = " ".join(
@@ -975,7 +1049,7 @@ def build_anchor_verify_prompt(
         '[{"timestamp": 371.1, "slide": 5}, {"timestamp": 475.7, "slide": 6}]'
     )
     user = (
-        f"Diapositive:\n{slide_block}\n\n"
+        f"Diapositive:\n{_slide_block(slide_texts)}\n\n"
         f"Parlato ai timestamp indicati:\n{excerpt_block}\n\n"
         "Rispondi con l'array JSON."
     )
@@ -988,18 +1062,7 @@ def parse_anchor_verification(content: str) -> dict[float, int] | None:
     Tollerante come ``parse_llm_response``: cerca il primo array JSON (anche
     dentro code fence o con testo extra attorno).
     """
-    if not content:
-        return None
-    m = re.search(r"\[.*\]", content, re.DOTALL)
-    if not m:
-        return None
-    try:
-        data = json.loads(m.group(0))
-    except (json.JSONDecodeError, TypeError):
-        try:
-            data = json.loads(re.sub(r"'", '"', m.group(0)))
-        except (json.JSONDecodeError, TypeError):
-            return None
+    data = _extract_json_array(content)
     if not isinstance(data, list):
         return None
     mapping: dict[float, int] = {}
@@ -1017,12 +1080,13 @@ def parse_anchor_verification(content: str) -> dict[float, int] | None:
 
 def llm_verify_anchor_mapping(
     slide_texts: list[str],
-    words_raw: list[dict],
+    words_raw: list[Word],
     anchors: dict[int, float],
     total_slides: int,
     window_seconds: float = 40.0,
     endpoints: list[dict[str, Any]] | None = None,
     wait_timeout: float = 0.0,
+    strict: bool = False,
 ) -> dict[int, float] | None:
     """Corregge il mapping numero parlato -> slide PDF delle ancore esplicite.
 
@@ -1035,9 +1099,16 @@ def llm_verify_anchor_mapping(
     ``wait_timeout``: come in ``llm_timeline_segments`` (pausa con avviso se
     9Router è spento, 'S' o scadenza -> None, il chiamante usa le originali).
 
+    ``strict``: come in ``llm_ordered_timeline`` (se True e 9Router è
+    necessario ma non risponde senza terminale, solleva ``RuntimeError``).
+
     Returns:
         Ancore corrette {slide_pdf: tempo} oppure None se l'LLM non risponde o
         la correzione non è interpretabile (il chiamante usa le originali).
+
+    Raises:
+        RuntimeError: con ``strict=True`` e senza terminale interattivo quando
+            9Router è necessario ma non risponde.
     """
     if not words_raw or not anchors:
         return None
@@ -1052,9 +1123,12 @@ def llm_verify_anchor_mapping(
                  cache_key[:12])
         return _verified_anchors_from_cached(cached)
 
-    # Health-check: se 9Router è spento, PAUSA con avviso e ripresa automatica
-    # appena torna online (o 'S' per usare le ancore originali).
-    if not wait_for_router(eps, wait_timeout=wait_timeout, context="la verifica del mapping delle ancore"):
+    # Health-check: se 9Router è spento, avvio automatico + PAUSA con avviso
+    # e ripresa automatica appena torna online (o 'S' per usare le originali).
+    # In modalità strict (senza terminale): errore chiaro, niente fallback.
+    if not wait_for_router(eps, wait_timeout=wait_timeout,
+                           context="la verifica del mapping delle ancore",
+                           strict=strict):
         return None
 
     system, user = build_anchor_verify_prompt(
@@ -1065,19 +1139,7 @@ def llm_verify_anchor_mapping(
         {"role": "user", "content": user},
     ]
 
-    used_endpoint: str | None = None
-    used_model: str | None = None
-    content: str | None = None
-    for ep in eps:
-        t0 = time.time()
-        log.info("   [LLM/Ancore] Provo %s (modello %s)...", ep["name"], ep["model"])
-        content = _call_endpoint(ep, messages)
-        if content is not None:
-            used_endpoint = ep["name"]
-            used_model = ep["model"]
-            log.info("   [LLM/Ancore] %s [%s] ha risposto in %.1fs.",
-                     used_endpoint, used_model, time.time() - t0)
-            break
+    content, used_endpoint, used_model = _call_cascade(eps, messages, "[LLM/Ancore]")
     if content is None:
         log.warning("   [LLM/Ancore] Nessun endpoint disponibile: uso le ancore originali.")
         return None
@@ -1093,6 +1155,13 @@ def llm_verify_anchor_mapping(
         if new_slide is None:
             corrected[s] = t  # l'LLM non ha risposto per questo timestamp
         elif 1 <= new_slide <= total_slides:
+            if new_slide in corrected:
+                log.warning(
+                    "   [LLM/Ancore] Conflitto: l'ancora 'slide %d' a %.1fs è "
+                    "stata mappata sulla slide %d, già occupata dall'ancora a "
+                    "%.1fs: la precedente viene scartata.",
+                    s, t, new_slide, corrected[new_slide],
+                )
             corrected[new_slide] = t
             if new_slide != s:
                 log.info(
@@ -1130,21 +1199,18 @@ def _verified_anchors_from_cached(
 
 def _verify_cache_key(
     slide_texts: Sequence[str],
-    words_raw: list[dict],
+    words_raw: Sequence[Word],
     anchors: dict[int, float],
     endpoints: Sequence[dict[str, Any]],
 ) -> str:
-    """Hash stabile della verifica ancore (prefisso "av" + ancore originali)."""
-    h = hashlib.md5()
-    h.update(b"anchver")
-    for t in slide_texts:
-        h.update(str(t).encode("utf-8", errors="replace"))
-    h.update(str(len(words_raw)).encode())
-    h.update(repr(words_raw[:500]).encode("utf-8", errors="replace"))
-    h.update(repr(sorted(anchors.items())).encode("utf-8", errors="replace"))
-    for ep in endpoints:
-        h.update(f"|{ep.get('name')}:{ep.get('model')}".encode("utf-8", errors="replace"))
-    return h.hexdigest()
+    """Hash stabile della verifica ancore (prefisso "anchver" + ancore originali)."""
+    return _hash_cache(
+        ["anchver"],
+        slide_texts,
+        _words_hash(words_raw),
+        _endpoints_hash(endpoints),
+        [repr(sorted(anchors.items()))],
+    )
 
 
 # =====================================================================
@@ -1162,14 +1228,6 @@ def build_review_prompt(
     slides: Sequence[int | None],
 ) -> tuple[str, str]:
     """Prompt del secondo passaggio: ri-verifica la mappa chunk->slide."""
-    slide_block = "\n".join(
-        f"{i + 1}. {clean_slide_text_for_llm(t)[:400]}"
-        for i, t in enumerate(slide_texts)
-    )
-    chunk_block = "\n".join(
-        f"chunk {c['num']} [{c['start']:.0f}s-{c['end']:.0f}s]: {c['text']}"
-        for c in chunks
-    )
     mapping = "\n".join(
         f"chunk {c['num']}: slide {s if s is not None else 'null'}"
         for c, s in zip(chunks, slides, strict=True)
@@ -1189,8 +1247,8 @@ def build_review_prompt(
         "esatto: [{\"chunk\": 1, \"slide\": 3}, {\"chunk\": 2, \"slide\": null}]"
     )
     user = (
-        f"Diapositive:\n{slide_block}\n\n"
-        f"Parlato (chunk):\n{chunk_block}\n\n"
+        f"Diapositive:\n{_slide_block(slide_texts)}\n\n"
+        f"Parlato (chunk):\n{_chunk_block(chunks)}\n\n"
         f"Proposta attuale:\n{mapping}\n\n"
         "Rispondi con l'array JSON corretto."
     )
@@ -1263,16 +1321,7 @@ def review_llm_timeline(
         {"role": "user", "content": user},
     ]
 
-    used_model: str | None = None
-    content: str | None = None
-    for ep in eps:
-        t0 = time.time()
-        content = _call_endpoint(ep, messages)
-        if content is not None:
-            used_model = ep["model"]
-            log.info("   [LLM/Review] %s ha risposto in %.1fs.", used_model,
-                     time.time() - t0)
-            break
+    content, _, _ = _call_cascade(eps, messages, "[LLM/Review]")
     if content is None:
         log.warning("   [LLM/Review] Nessun endpoint disponibile: salto la revisione.")
         return None
@@ -1297,17 +1346,13 @@ def _review_cache_key(
     endpoints: Sequence[dict[str, Any]],
 ) -> str:
     """Chiave di cache della revisione: hash contenuti + mappa + modelli."""
-    h = hashlib.md5()
-    for t in slide_texts:
-        h.update(str(t).encode("utf-8", errors="replace"))
-    for c in chunks:
-        h.update(f"{c['num']}:{c['start']}:{c['end']}:{c['text']}".encode("utf-8", errors="replace"))
-    h.update(repr(list(slides)).encode("utf-8", errors="replace"))
-    # I modelli influenzano il giudizio di revisione: come per la timeline,
-    # includerli evita di riusare la cache di un modello diverso.
-    for ep in endpoints:
-        h.update(f"|{ep.get('name')}:{ep.get('model')}".encode("utf-8", errors="replace"))
-    return h.hexdigest()
+    return _hash_cache(
+        ["review"],
+        slide_texts,
+        [f"{c['num']}:{c['start']}:{c['end']}:{c['text']}" for c in chunks],
+        [repr(list(slides))],
+        _endpoints_hash(endpoints),
+    )
 
 
 def _warn_review_diffs(
@@ -1341,25 +1386,47 @@ def _warn_review_diffs(
 # =====================================================================
 # CACHE LLM (per hash audio+slide+chunk)
 # =====================================================================
+def _hash_cache(*parts: Sequence[str]) -> str:
+    """Hash MD5 stabile di sequenze di stringhe (chiavi di cache LLM)."""
+    h = hashlib.md5()
+    for part in parts:
+        for s in part:
+            h.update(s.encode("utf-8", errors="replace"))
+    return h.hexdigest()
+
+
+def _words_hash(words_raw: Sequence[Word]) -> list[str]:
+    """Rappresentazione delle parole per l'hash: lunghezza + contenuto INTEGRO.
+
+    Due trascrizioni identiche all'inizio ma diverse nel resto non devono
+    riusare la timeline LLM precedente.
+    """
+    return [str(len(words_raw)), repr(words_raw)]
+
+
+def _endpoints_hash(endpoints: Sequence[dict[str, Any]]) -> list[str]:
+    """Rappresentazione degli endpoint per l'hash: nome + modello.
+
+    I modelli (e il loro ordine nella cascata) influenzano il risultato:
+    includerli evita di riusare la cache di un modello diverso.
+    """
+    return [f"|{ep.get('name')}:{ep.get('model')}" for ep in endpoints]
+
+
 def _cache_key(
     slide_texts: Sequence[str],
-    words_raw: list[dict],
+    words_raw: Sequence[Word],
     total_slides: int,
     chunk_seconds: float,
     endpoints: Sequence[dict[str, Any]],
 ) -> str:
     """Hash stabile del contenuto (slide + parole + chunk + modelli) per la cache."""
-    h = hashlib.md5()
-    for t in slide_texts[:total_slides]:
-        h.update(str(t).encode("utf-8", errors="replace"))
-    h.update(str(len(words_raw)).encode())
-    h.update(repr(words_raw[:500]).encode("utf-8", errors="replace"))
-    h.update(f"{chunk_seconds}".encode())
-    # I modelli (e il loro ordine nella cascata) influenzano il risultato:
-    # includerli evita di riusare la cache di un modello diverso.
-    for ep in endpoints:
-        h.update(f"|{ep.get('name')}:{ep.get('model')}".encode("utf-8", errors="replace"))
-    return h.hexdigest()
+    return _hash_cache(
+        [f"tl|{chunk_seconds}"],
+        slide_texts[:total_slides],
+        _words_hash(words_raw),
+        _endpoints_hash(endpoints),
+    )
 
 
 def _load_llm_cache(key: str) -> list[dict[str, object]] | None:

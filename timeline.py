@@ -10,6 +10,7 @@ citazioni a posteriori), la timeline viene completata usando le ancore reali
 
 import re
 
+from chunks import Word
 from config import log
 
 
@@ -17,7 +18,7 @@ from config import log
 # ESTRAZIONE DETERMINISTICA TIMELINE
 # =====================================================================
 def extract_timeline_from_transcript(
-    words: list[dict],
+    words: list[Word],
     total_slides: int,
     total_duration: float,
     flow: str = "audio-slide",
@@ -40,6 +41,12 @@ def extract_timeline_from_transcript(
         troppo pochi per una sincronizzazione affidabile (fallback LLM).
         Se alcune slide mancano di riferimento esplicito, vengono interpolate
         tra le ancore reali trovate (slide citate fuori ordine escluse via LIS).
+
+    Note:
+        In produzione main.py usa direttamente ``extract_slide_anchors``
+        (solo le ancore ad alta precisione, lasciando il posizionamento al DP
+        semantico). Questa funzione è il motore deterministico completo:
+        viene usata dai test come superficie di verifica end-to-end del flusso.
     """
     if not words:
         return None
@@ -51,7 +58,7 @@ def extract_timeline_from_transcript(
 
 
 def extract_slide_anchors(
-    words: list[dict],
+    words: list[Word],
     total_slides: int,
     flow: str = "slide-audio",
     window_seconds: float = 2.0,
@@ -67,7 +74,11 @@ def extract_slide_anchors(
     if not words:
         return {}
     if flow == "audio-slide":
-        return {i + 2: t for i, t in enumerate(_collect_transitions(words, window_seconds))}
+        # Clamp: al massimo total_slides - 1 transizioni (una per slide 2..N).
+        # Troppe frasi "blocco successivo" non devono generare ancore oltre il
+        # numero reale di slide del PDF (ignorate dal DP, ma confondono i log).
+        transitions = _collect_transitions(words, window_seconds)
+        return {i + 2: t for i, t in enumerate(transitions[: max(0, total_slides - 1)])}
     refs = _collect_slide_references(words, total_slides)
     anchors = _lis_anchors(refs)
     if refs:
@@ -92,7 +103,7 @@ def extract_slide_anchors(
 # FLUSSO audio-slide: "Passiamo al blocco successivo"
 # =====================================================================
 def _extract_audio_slide_flow(
-    words: list[dict],
+    words: list[Word],
     total_slides: int,
     total_duration: float,
     window_seconds: float,
@@ -139,8 +150,41 @@ def _extract_audio_slide_flow(
     return timeline
 
 
+def _find_block_transition(
+    words: list[Word],
+    idx: int,
+    window_seconds: float,
+) -> float | None:
+    """Timestamp della frase "passiamo ... blocco successivo/prossimo" che parte
+    dall'indice del trigger, oppure None se non trovata entro la finestra.
+
+    Condivisa tra ``_collect_transitions`` e ``detect_flow_from_words``: la
+    scansione (parole successive entro ``window_seconds``, gestione "il blocco")
+    è identica nei due casi.
+    """
+    start_time = words[idx]["start"]
+    found_blocco = False
+    found_successivo = False
+    for j in range(idx + 1, min(idx + 15, len(words))):
+        word_time = words[j]["start"]
+        if word_time - start_time > window_seconds:
+            break
+        w_norm = _normalize(words[j]["word"])
+        if w_norm == "blocco" or (
+            w_norm == "il"
+            and j + 1 < len(words)
+            and _normalize(words[j + 1]["word"]) == "blocco"
+        ):
+            found_blocco = True
+        if w_norm in ("successivo", "prossimo"):
+            found_successivo = True
+    if found_blocco and found_successivo:
+        return start_time
+    return None
+
+
 def _collect_transitions(
-    words: list[dict],
+    words: list[Word],
     window_seconds: float,
 ) -> list[float]:
     """Raccoglie i timestamp delle frasi "passiamo/procediamo/andiamo ...
@@ -153,38 +197,14 @@ def _collect_transitions(
     ]
 
     transitions: list[float] = []
-
     for idx in trigger_indices:
-        # Cerca "blocco" e "successivo"/"prossimo" nelle parole successive
-        # entro una finestra di N parole o window_seconds secondi
-        start_time = words[idx]["start"]
-        found_blocco = False
-        found_successivo = False
-        transition_time = start_time
-
-        for j in range(idx + 1, min(idx + 15, len(words))):
-            word_time = words[j]["start"]
-            if word_time - start_time > window_seconds:
-                break
-
-            w_norm = _normalize(words[j]["word"])
-            if w_norm == "blocco" or (
-                w_norm == "il"
-                and j + 1 < len(words)
-                and _normalize(words[j + 1]["word"]) == "blocco"
-            ):
-                found_blocco = True
-            if w_norm in ("successivo", "prossimo"):
-                found_successivo = True
-                transition_time = start_time  # Usa il momento in cui inizia la frase
-
-        if found_blocco and found_successivo:
+        transition_time = _find_block_transition(words, idx, window_seconds)
+        if transition_time is not None:
             transitions.append(transition_time)
             log.debug(
                 "   [Deterministico] Trovato 'passiamo al blocco successivo' a %.1fs",
                 transition_time,
             )
-
     return transitions
 
 
@@ -208,7 +228,7 @@ def _complete_transitions(
 # FLUSSO slide-audio: "Passiamo alla slide N"
 # =====================================================================
 def _extract_slide_audio_flow(
-    words: list[dict],
+    words: list[Word],
     total_slides: int,
     total_duration: float,
 ) -> dict[int, float] | None:
@@ -270,7 +290,7 @@ def _extract_slide_audio_flow(
 
 
 def _collect_slide_references(
-    words: list[dict],
+    words: list[Word],
     total_slides: int,
 ) -> dict[int, float]:
     """Raccoglie TUTTI i riferimenti 'slide N' / 'N ... slide' trovati,
@@ -527,7 +547,7 @@ def _normalize(word: str) -> str:
 # AUTO-DETECTION FLUSSO (word-level)
 # =====================================================================
 def detect_flow_from_words(
-    words: list[dict],
+    words: list[Word],
     window_seconds: float = 2.0,
 ) -> str | None:
     """
@@ -560,20 +580,8 @@ def detect_flow_from_words(
                     return "slide-audio"
 
         # audio-slide: "passiamo ... blocco successivo"
-        if w_norm in triggers:
-            start_time = w["start"]
-            found_blocco = False
-            found_successivo = False
-            for j in range(i + 1, min(i + 15, len(words))):
-                if words[j]["start"] - start_time > window_seconds:
-                    break
-                wj = _normalize(words[j]["word"])
-                if wj == "blocco":
-                    found_blocco = True
-                elif wj in ("successivo", "prossimo"):
-                    found_successivo = True
-            if found_blocco and found_successivo:
-                return "audio-slide"
+        if w_norm in triggers and _find_block_transition(words, i, window_seconds) is not None:
+            return "audio-slide"
 
     return None
 

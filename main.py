@@ -14,6 +14,7 @@ from typing import NoReturn
 
 from moviepy import AudioFileClip, VideoFileClip
 
+from chunks import Word
 from config import (
     BASE_DIR,
     CACHE_DIR,
@@ -63,12 +64,12 @@ def find_audio_file(directory: Path) -> Path | None:
 # =====================================================================
 # UTILITY: Parse transcript_raw.txt come fallback per words_raw
 # =====================================================================
-def _parse_transcript_raw(raw_path: Path) -> list[dict] | None:
+def _parse_transcript_raw(raw_path: Path) -> list[Word] | None:
     """Legge transcript_raw.txt e ricostruisce la lista di parole Vosk.
     Formato atteso: 'parola [X.Xs]' per riga."""
     if not raw_path.exists():
         return None
-    words: list[dict] = []
+    words: list[Word] = []
     pattern = re.compile(r'^(\S+)\s+\[([\d.]+)s\]')
     for line in raw_path.read_text(encoding="utf-8").splitlines():
         m = pattern.match(line.strip())
@@ -158,8 +159,12 @@ def _print_timing(t_ocr: float, t_vosk: float, t_sync: float,
 # CACHE SYSTEM
 # =====================================================================
 def _file_hash(path: Path) -> str:
-    """MD5 hash del contenuto di un file."""
-    return hashlib.md5(path.read_bytes()).hexdigest()
+    """MD5 hash del contenuto di un file (streaming: non carica il file in memoria)."""
+    md5 = hashlib.md5()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            md5.update(block)
+    return md5.hexdigest()
 
 
 def _cache_path(key: str) -> Path:
@@ -192,7 +197,7 @@ def _save_cache(key: str, data: dict) -> None:
 # =====================================================================
 # AUTO-DETECTION FLUSSO
 # =====================================================================
-def _detect_flow(transcript: str, words: list[dict] | None = None) -> str:
+def _detect_flow(transcript: str, words: list[Word] | None = None) -> str:
     """
     Auto-rileva il flusso di sincronizzazione dal contenuto della trascrizione.
 
@@ -275,8 +280,14 @@ def main(argv: list | None = None) -> None:
     # --- Hash per cache ---
     pdf_hash = _file_hash(pdf_path)
     audio_hash = _file_hash(audio_path)
-    cache_key_slides = f"slides_{pdf_hash[:12]}_{args.dpi}"
-    cache_key_transcript = f"transcript_{audio_hash[:12]}_{args.lang}"
+    cache_key_slides = f"slides_{pdf_hash[:12]}_{args.dpi}_{args.lang}"
+    # Il transcriber e il modello fanno parte della chiave: passando da Vosk a
+    # Whisper (o cambiando --whisper-model) non deve riusarsi la cache dell'altro
+    # motore, che produce timestamp/token diversi.
+    cache_key_transcript = (
+        f"transcript_{audio_hash[:12]}_{args.lang}"
+        f"_{args.transcriber}_{args.whisper_model}"
+    )
     active_cache_keys: set[str] = {cache_key_slides, cache_key_transcript}
 
     # --- Timing ---
@@ -287,7 +298,7 @@ def main(argv: list | None = None) -> None:
     slide_files: list[str] | None = None
     slide_texts: list[str] | None = None
     transcript: str | None = None
-    words_raw: list[dict] | None = None
+    words_raw: list[Word] | None = None
 
     # --- Fase 1: Slide + OCR (con cache) ---
     t_phase_start = time.time()
@@ -429,9 +440,9 @@ def main(argv: list | None = None) -> None:
                 if segments is not None:
                     log.info("   Timeline generata dall'LLM.")
 
-            if segments is None:
+            if not segments:
                 log.info("   Sincronizzazione semantica locale (MiniLM)...")
-                segments = free_order_segments_from_words(
+                local_segments = free_order_segments_from_words(
                     slide_texts, words_raw, total_slides, total_duration,
                     model_name=args.semantic_model,
                     cache_dir=args.semantic_cache_dir,
@@ -439,7 +450,11 @@ def main(argv: list | None = None) -> None:
                     min_segment_seconds=max(8.0, 2 * args.semantic_min_duration),
                     min_avg_similarity=args.semantic_min_sim,
                 )
-            if segments is None:
+                # I segmenti MiniLM sono "Segment" (TypedDict): convertiti in
+                # dict generici per restare omogenei ai segmenti LLM.
+                if local_segments is not None:
+                    segments = [dict(s) for s in local_segments]
+            if not segments:
                 _abort("Selezione libera fallita: nessun segmento affidabile "
                        "generabile da slide + trascrizione.")
 
@@ -491,11 +506,17 @@ def main(argv: list | None = None) -> None:
                     for ep in endpoints:
                         ep["model"] = args.llm_model
                 log.info("   Verifica mapping ancore con LLM (--llm %s)...", args.llm)
-                verified = llm_verify_anchor_mapping(
-                    slide_texts, words_raw, semantic_anchors, total_slides,
-                    endpoints=endpoints,
-                    wait_timeout=args.llm_wait_timeout,
-                )
+                try:
+                    verified = llm_verify_anchor_mapping(
+                        slide_texts, words_raw, semantic_anchors, total_slides,
+                        endpoints=endpoints,
+                        wait_timeout=args.llm_wait_timeout,
+                        strict=True,
+                    )
+                except RuntimeError as e:
+                    # 9Router necessario ma non avviabile/non online: niente
+                    # fallback silenzioso, il processo si arresta con l'avviso.
+                    _abort(str(e))
                 if verified is not None:
                     log.info(
                         "   Mapping ancore corretto dall'LLM: %d ancore verificate.",
@@ -519,13 +540,19 @@ def main(argv: list | None = None) -> None:
                 log.info("   Flusso ibrido: ancore esatte + LLM per le %d slide "
                          "senza ancora (--llm %s)...",
                          (total_slides - 1) - len(semantic_anchors), args.llm)
-                timeline = llm_ordered_timeline(
-                    slide_texts, words_raw, total_slides, total_duration,
-                    anchors=semantic_anchors,
-                    chunk_seconds=args.llm_chunk,
-                    endpoints=endpoints,
-                    wait_timeout=args.llm_wait_timeout,
-                )
+                try:
+                    timeline = llm_ordered_timeline(
+                        slide_texts, words_raw, total_slides, total_duration,
+                        anchors=semantic_anchors,
+                        chunk_seconds=args.llm_chunk,
+                        endpoints=endpoints,
+                        wait_timeout=args.llm_wait_timeout,
+                        strict=True,
+                    )
+                except RuntimeError as e:
+                    # 9Router necessario ma non avviabile/non online: niente
+                    # fallback silenzioso, il processo si arresta con l'avviso.
+                    _abort(str(e))
                 if timeline is not None:
                     log.info("   Timeline ibrida generata dall'LLM (ancore esatte preservate).")
 
@@ -626,7 +653,7 @@ def main(argv: list | None = None) -> None:
                     "   ✅ Verifica durata video OK: %.1fs (audio %.1fs + buffer %.1fs).",
                     out_dur, total_duration, DEFAULT_VIDEO_BUFFER_SEC,
                 )
-        except Exception as e:
+        except (OSError, ValueError, RuntimeError) as e:
             log.warning("   Impossibile verificare il video generato: %s", e)
 
         # --- Riepilogo finale ---

@@ -26,7 +26,7 @@ from typing import Any, cast
 
 import numpy as np
 
-from chunks import build_windows
+from chunks import Segment, Word, build_windows
 from config import (
     DEFAULT_EMBEDDING_CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL,
@@ -48,7 +48,7 @@ EmbedFn = Callable[[Sequence[str]], np.ndarray]
 # COSTRUZIONE BLOCCHI TRASCRIZIONE (finestre temporali)
 # =====================================================================
 def build_semantic_blocks(
-    words: list[dict],
+    words: list[Word],
     total_duration: float,
     window_seconds: float = 4.0,
     min_words: int = 3,
@@ -96,7 +96,7 @@ def _load_embed_model(
 
     Se il modello principale non si carica (es. download interrotto, modello
     non più disponibile), riprova con `alternate_name` prima di restituire
-    None: il MiniLM resta così il piano B del default mpnet.
+    None: il MiniLM è il default (vedi config.py), mpnet è l'alternativa.
     """
     if not _HAS_FASTEMBED:
         log.warning(
@@ -120,7 +120,7 @@ def _load_embed_model(
             else:
                 log.info("   [Semantico] Modello embedding: %s", candidate)
             return model
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - fastembed può lanciare molti tipi
             log.warning(
                 "   [Semantico] Impossibile caricare il modello embedding "
                 "(%s): %s", candidate, e,
@@ -147,6 +147,41 @@ def _make_embed_fn(model: TextEmbedding, batch_size: int = 64) -> EmbedFn:
         return cast(np.ndarray, arr / norms)
 
     return _embed
+
+
+# =====================================================================
+# EMBEDDING + QUALITÀ SEGNALE (blocco condiviso tra i due flussi)
+# =====================================================================
+def _embed_and_report(
+    slide_texts: Sequence[str],
+    blocks: Sequence[dict[str, Any]],
+    total_slides: int,
+    embed_fn: EmbedFn,
+    context: str,
+) -> tuple[np.ndarray, dict[str, float]] | None:
+    """Embedding slide+blocchi, cosine (B, N) e report di qualità del segnale.
+
+    Blocco condiviso tra il flusso monotono e la selezione libera: embeddare
+    i testi e calcolare il report è identico nei due casi, cambia solo il
+    prefisso dei log. Restituisce ``(sim, report)`` oppure None in caso di
+    errore (il chiamante ripiega).
+    """
+    slide_clean = [_clean_slide_text(t) for t in slide_texts[:total_slides]]
+    block_texts = [str(b["text"]) for b in blocks]
+
+    try:
+        slide_emb = embed_fn(slide_clean)
+        block_emb = embed_fn(block_texts)
+    except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
+        log.warning("   [%s] Errore durante l'embedding: %s", context, e)
+        return None
+
+    if slide_emb.shape[0] != total_slides or block_emb.shape[0] != len(blocks):
+        log.warning("   [%s] Dimensioni embedding inattese.", context)
+        return None
+
+    sim = block_emb @ slide_emb.T  # (B, N) cosine
+    return sim, signal_quality_report(sim, slide_emb)
 
 
 # =====================================================================
@@ -417,26 +452,14 @@ def semantic_timeline_from_texts(
         )
         return None
 
-    slide_clean = [_clean_slide_text(t) for t in slide_texts[:total_slides]]
-    block_texts = [str(b["text"]) for b in blocks]
-
-    try:
-        slide_emb = embed_fn(slide_clean)
-        block_emb = embed_fn(block_texts)
-    except Exception as e:
-        log.warning("   [Semantico] Errore durante l'embedding: %s", e)
+    embedded = _embed_and_report(slide_texts, blocks, total_slides, embed_fn, "Semantico")
+    if embedded is None:
         return None
-
-    if slide_emb.shape[0] != total_slides or block_emb.shape[0] != len(blocks):
-        log.warning("   [Semantico] Dimensioni embedding inattese.")
-        return None
-
-    sim = block_emb @ slide_emb.T  # (B, N) cosine
+    sim, report = embedded
 
     # Guard-rail: segnale debole (es. slide generate dalla stessa fonte, non
     # dal podcast). Non blocca: avvisa che la sincronizzazione è inaffidabile
     # così l'utente può rigenerare la presentazione dal podcast.
-    report = signal_quality_report(sim, slide_emb)
     if weak_signal(report):
         log.warning(
             "   [Semantico] AVVISO: segnale debole (concordanza picchi %.0f%%, "
@@ -531,7 +554,7 @@ def semantic_timeline_from_texts(
 # =====================================================================
 def semantic_timeline_from_words(
     slide_texts: list[str],
-    words_raw: list[dict],
+    words_raw: list[Word],
     total_slides: int,
     total_duration: float,
     model_name: str | None = None,
@@ -657,7 +680,7 @@ def free_order_segments_from_texts(
     window_seconds: float = 4.0,
     min_segment_seconds: float = 8.0,
     min_avg_similarity: float = 0.10,
-) -> list[dict[str, Any]] | None:
+) -> list[Segment] | None:
     """
     Selezione libera delle slide: per ogni blocco audio prende la slide
     semanticamente più vicina, SENZA vincolo di ordine crescente. Le slide
@@ -677,19 +700,11 @@ def free_order_segments_from_texts(
             len(blocks),
         )
         return None
-    slide_clean = [_clean_slide_text(t) for t in slide_texts[:total_slides]]
-    block_texts = [str(b["text"]) for b in blocks]
-
-    try:
-        slide_emb = embed_fn(slide_clean)
-        block_emb = embed_fn(block_texts)
-    except Exception as e:
-        log.warning("   [Libero] Errore durante l'embedding: %s", e)
+    embedded = _embed_and_report(slide_texts, blocks, total_slides, embed_fn, "Libero")
+    if embedded is None:
         return None
+    sim, report = embedded
 
-    sim = block_emb @ slide_emb.T  # (B, N) cosine
-
-    report = signal_quality_report(sim, slide_emb)
     if weak_signal(report):
         log.warning(
             "   [Libero] AVVISO: segnale debole (concordanza picchi %.0f%%, "
@@ -720,7 +735,7 @@ def free_order_segments_from_texts(
         )
         return None
 
-    timeline_segments: list[dict[str, object]] = []
+    timeline_segments: list[Segment] = []
     for s, a, b in segs:
         start = float(blocks[a].get("first_time", blocks[a]["time"]))
         end = (float(blocks[b].get("first_time", blocks[b]["time"]))
@@ -735,6 +750,13 @@ def free_order_segments_from_texts(
     if timeline_segments:
         timeline_segments[0]["start"] = 0.0
 
+    if not timeline_segments:
+        log.warning(
+            "   [Libero] Nessun segmento con durata minima: segnale "
+            "insufficiente per la selezione libera.",
+        )
+        return None
+
     log.info(
         "   [Libero] %d segmenti generati (similarità media %.3f, %d blocchi).",
         len(timeline_segments), avg_sim, len(blocks),
@@ -744,7 +766,7 @@ def free_order_segments_from_texts(
 
 def free_order_segments_from_words(
     slide_texts: list[str],
-    words_raw: list[dict],
+    words_raw: list[Word],
     total_slides: int,
     total_duration: float,
     model_name: str | None = None,
@@ -753,7 +775,7 @@ def free_order_segments_from_words(
     window_seconds: float = 4.0,
     min_segment_seconds: float = 8.0,
     min_avg_similarity: float = 0.10,
-) -> list[dict[str, Any]] | None:
+) -> list[Segment] | None:
     """
     Pipeline completa della selezione libera: blocchi, modello embedding,
     segmenti non monotoni (stesso motore del flusso classico).

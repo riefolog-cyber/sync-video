@@ -18,10 +18,8 @@ temp_vosk_audio.wav
 
 # Output generati
 video_finale.mp4
-info_video.txt
 transcript_raw.txt
 llm_debug_output.txt
-llm_content_based_debug.txt
 
 # Modelli Vosk e Tesseract (troppo grandi per git)
 vosk-model-*/

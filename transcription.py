@@ -12,6 +12,7 @@ from pathlib import Path
 from pydub import AudioSegment
 from vosk import KaldiRecognizer, Model
 
+from chunks import Word
 from config import (
     DEFAULT_AUDIO_SAMPLE_RATE,
     DEFAULT_MIN_WORD_LENGTH,
@@ -122,11 +123,11 @@ def _transcribe_wav(
     model: Model,
     sample_rate: int,
     chunk_bytes: int,
-) -> list[dict]:
+) -> list[Word]:
     """Esegue il riconoscimento Vosk e restituisce la lista di parole con timestamp."""
     rec = KaldiRecognizer(model, sample_rate)
     rec.SetWords(True)
-    all_words: list[dict] = []
+    all_words: list[Word] = []
 
     file_size = wav_path.stat().st_size
     with open(wav_path, "rb") as f:
@@ -155,7 +156,7 @@ def _transcribe_wav(
 # COMPRESSIONE TRASCRIZIONE
 # =====================================================================
 def _compress_words(
-    words: list[dict],
+    words: list[Word],
     stopwords: frozenset,
     window: float = DEFAULT_TRANSCRIPT_WINDOW,
     min_word_len: int = DEFAULT_MIN_WORD_LENGTH,
@@ -204,6 +205,17 @@ def _compress_words(
     return "\n".join(blocks)
 
 
+def _write_raw_transcript(words: list[Word], audio_path: Path) -> Path:
+    """Salva la trascrizione RAW ('parola [X.Xs]' per riga) per debug, accanto
+    all'audio. Condivisa da Vosk e Whisper (stesso formato consumato da
+    ``main._parse_transcript_raw`` come fallback per le parole raw)."""
+    raw_path = audio_path.parent / "transcript_raw.txt"
+    raw_lines = [f"{w['word']} [{w['start']:.1f}s]" for w in words]
+    raw_path.write_text("\n".join(raw_lines), encoding="utf-8")
+    log.debug("   Trascrizione RAW salvata in: %s", raw_path)
+    return raw_path
+
+
 # =====================================================================
 # FUNZIONE PRINCIPALE
 # =====================================================================
@@ -215,7 +227,7 @@ def generate_compact_transcript(
     temp_wav: Path = Path("temp_vosk_audio.wav"),
     sample_rate: int = DEFAULT_AUDIO_SAMPLE_RATE,
     chunk_bytes: int = DEFAULT_VOSK_CHUNK_BYTES,
-) -> tuple[str, list[dict]]:
+) -> tuple[str, list[Word]]:
     """
     Pipeline completa di trascrizione:
       1. Conversione audio in WAV
@@ -243,10 +255,7 @@ def generate_compact_transcript(
     log.info("   Parole riconosciute: %d", len(words))
 
     # --- Step 3b: Salva trascrizione RAW per debug ---
-    raw_path = audio_path.parent / "transcript_raw.txt"
-    raw_lines = [f"{w['word']} [{w['start']:.1f}s]" for w in words]
-    raw_path.write_text("\n".join(raw_lines), encoding="utf-8")
-    log.debug("   Trascrizione RAW salvata in: %s", raw_path)
+    _write_raw_transcript(words, audio_path)
 
     # --- Step 4: Compressione ---
     stopwords = get_stopwords(lang)
@@ -272,7 +281,7 @@ def transcribe_with_whisper(
     beam_size: int = 5,
     vad_filter: bool = True,
     vad_parameters: dict | None = None,
-) -> tuple[str, list[dict]]:
+) -> tuple[str, list[Word]]:
     """
     Trascrizione audio con faster-whisper.
 
@@ -320,7 +329,7 @@ def transcribe_with_whisper(
     log.info("   Rilevata lingua: %s (probabilità %.2f)", info.language, info.language_probability)
 
     # Accumula parole con timestamp
-    all_words: list[dict] = []
+    all_words: list[Word] = []
     for seg in segments:
         if seg.text:
             # Ogni segmento ha: seg.start, seg.end, seg.text
@@ -343,10 +352,7 @@ def transcribe_with_whisper(
     log.info("   Parole riconosciute: %d", len(all_words))
 
     # Genera trascrizione compressa (stesso formato di Vosk)
-    raw_path = audio_path.parent / "transcript_raw.txt"
-    raw_lines = [f"{w['word']} [{w['start']:.1f}s]" for w in all_words]
-    raw_path.write_text("\n".join(raw_lines), encoding="utf-8")
-    log.debug("   Trascrizione RAW salvata in: %s", raw_path)
+    _write_raw_transcript(all_words, audio_path)
 
     # Compressione semantica
     stopwords = get_stopwords(language)

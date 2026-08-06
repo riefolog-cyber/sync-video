@@ -22,8 +22,6 @@ from config import (
     log,
 )
 
-# reconcile_timeline è stato spostato in timeline.py per disaccoppiamento
-
 
 # =====================================================================
 # ASSEMBLAGGIO VIDEO
@@ -75,6 +73,10 @@ def build_video(
     log.info("\n4. Generazione rapida del flusso video definitivo...")
 
     # Validazione: slide_files e durations devono avere la stessa lunghezza
+    if not slide_files or not durations:
+        raise ValueError(
+            "Nessuna slide/durata: impossibile assemblare il video."
+        )
     if len(slide_files) != len(durations):
         raise ValueError(
             f"slide_files ({len(slide_files)}) != durations ({len(durations)}). "

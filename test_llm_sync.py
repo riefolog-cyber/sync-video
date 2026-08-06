@@ -444,13 +444,50 @@ class TestRouterHealthCheck(unittest.TestCase):
     def test_noninteractive_falls_back_immediately(self):
         # stdin non è un terminale: senza 9Router si ripiega SUBITO (niente pausa)
         with patch("llm_sync.router_alive", return_value=False), \
+             patch("llm_sync._launch_9router", return_value=False), \
              patch("llm_sync.is_interactive", return_value=False):
             self.assertFalse(wait_for_router([self._ep("9router", "http://x/v1/chat/completions")]))
 
     def test_noninteractive_strict_raises(self):
         # Flusso libero + senza terminale: NIENTE fallback silenzioso, errore chiaro.
         with patch("llm_sync.router_alive", return_value=False), \
+             patch("llm_sync._launch_9router", return_value=False), \
              patch("llm_sync.is_interactive", return_value=False):
+            with self.assertRaises(RuntimeError) as ctx:
+                wait_for_router(
+                    [self._ep("9router", "http://x/v1/chat/completions")],
+                    strict=True,
+                )
+            self.assertIn("9Router", str(ctx.exception))
+
+    def test_auto_launch_brings_router_online(self):
+        # 9Router spento: avvio automatico + polling -> riprende con l'LLM.
+        calls = {"n": 0}
+        def alive(*a, **k):
+            calls["n"] += 1
+            return calls["n"] >= 2
+        with patch("llm_sync.router_alive", side_effect=alive), \
+             patch("llm_sync._launch_9router", return_value=True), \
+             patch("llm_sync.is_interactive", return_value=False), \
+             patch("llm_sync.time.sleep"):
+            self.assertTrue(wait_for_router(
+                [self._ep("9router", "http://x/v1/chat/completions")],
+                strict=True,
+            ))
+
+    def test_noninteractive_strict_raises_after_failed_auto_launch(self):
+        # L'avvio automatico parte ma 9Router non arriva online entro la
+        # finestra: NIENTE fallback silenzioso, il processo si ARRESTA.
+        def fake_time():
+            fake_time.n += 1
+            return fake_time.n * 10  # +10s a iterazione: scatta dopo 90s
+        fake_time.n = 0
+        with patch("llm_sync.router_alive", return_value=False), \
+             patch("llm_sync._launch_9router", return_value=True), \
+             patch("llm_sync.is_interactive", return_value=False), \
+             patch("llm_sync._skip_key_pressed", return_value=False), \
+             patch("llm_sync.time.sleep"), \
+             patch("llm_sync.time.time", side_effect=fake_time):
             with self.assertRaises(RuntimeError) as ctx:
                 wait_for_router(
                     [self._ep("9router", "http://x/v1/chat/completions")],
@@ -461,6 +498,7 @@ class TestRouterHealthCheck(unittest.TestCase):
     def test_interactive_strict_pauses_but_can_skip(self):
         # Con terminale, anche in strict l'utente può premere 'S' e procedere.
         with patch("llm_sync.router_alive", return_value=False), \
+             patch("llm_sync._launch_9router", return_value=False), \
              patch("llm_sync.is_interactive", return_value=True), \
              patch("llm_sync._skip_key_pressed", return_value=True), \
              patch("llm_sync.time.sleep"):
@@ -483,6 +521,7 @@ class TestRouterHealthCheck(unittest.TestCase):
             calls["n"] += 1
             return calls["n"] >= 3
         with patch("llm_sync.router_alive", side_effect=alive), \
+             patch("llm_sync._launch_9router", return_value=False), \
              patch("llm_sync.is_interactive", return_value=True), \
              patch("llm_sync.time.sleep"):
             self.assertTrue(wait_for_router([self._ep("9router", "http://x/v1/chat/completions")]))
@@ -490,6 +529,7 @@ class TestRouterHealthCheck(unittest.TestCase):
     def test_interactive_skip_with_key(self):
         # Tasto 'S' durante la pausa: salta l'LLM e usa il MiniLM.
         with patch("llm_sync.router_alive", return_value=False), \
+             patch("llm_sync._launch_9router", return_value=False), \
              patch("llm_sync.is_interactive", return_value=True), \
              patch("llm_sync._skip_key_pressed", return_value=True), \
              patch("llm_sync.time.sleep"):
@@ -502,6 +542,7 @@ class TestRouterHealthCheck(unittest.TestCase):
             return fake_time.n  # 1, 2, ... : dopo il 60° secondo scatta il timeout
         fake_time.n = 0
         with patch("llm_sync.router_alive", return_value=False), \
+             patch("llm_sync._launch_9router", return_value=False), \
              patch("llm_sync.is_interactive", return_value=True), \
              patch("llm_sync._skip_key_pressed", return_value=False), \
              patch("llm_sync.time.sleep"), \
