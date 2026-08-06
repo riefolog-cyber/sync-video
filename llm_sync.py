@@ -479,8 +479,8 @@ def _skip_key_pressed() -> bool:
     """True se l'utente ha premuto 'S' (Windows: msvcrt, senza bloccare)."""
     try:
         import msvcrt
-        if msvcrt.kbhit():
-            ch = msvcrt.getch()
+        if msvcrt.kbhit():  # type: ignore[attr-defined]  # solo su Windows (mypy Linux)
+            ch = msvcrt.getch()  # type: ignore[attr-defined]
             return ch in (b"s", b"S") if isinstance(ch, bytes) else ch.lower() == "s"
     except (ImportError, OSError, UnicodeDecodeError):
         pass
