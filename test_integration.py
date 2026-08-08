@@ -18,7 +18,7 @@ from video import build_video
 
 
 def _words(items):
-    """Converte [(word, start)] in lista di dict Vosk."""
+    """Converte [(word, start)] in lista di dict Whisper."""
     return [{"word": w, "start": t} for w, t in items]
 
 
@@ -27,17 +27,20 @@ class TestPipelineIntegration(unittest.TestCase):
 
     def test_full_timeline_pipeline(self):
         """Fase 1→2→3: trascrizione → deterministica → riconciliazione."""
-        # Simula parole Vosk con segnali "slide N"
-        words = _words([
-            ("slide", 30.0), ("2", 30.3),
-            ("slide", 80.0), ("3", 80.3),
-            ("slide", 130.0), ("4", 130.3),
-        ])
+        # Simula parole Whisper con segnali "slide N"
+        words = _words(
+            [
+                ("slide", 30.0),
+                ("2", 30.3),
+                ("slide", 80.0),
+                ("3", 80.3),
+                ("slide", 130.0),
+                ("4", 130.3),
+            ]
+        )
 
         # Fase 3a: estrazione deterministica
-        timeline = extract_timeline_from_transcript(
-            words, total_slides=4, total_duration=200.0, flow="slide-audio"
-        )
+        timeline = extract_timeline_from_transcript(words, total_slides=4, total_duration=200.0, flow="slide-audio")
         self.assertEqual(timeline, {1: 0.0, 2: 30.0, 3: 80.0, 4: 130.0})
 
         # Fase 3c: riconciliazione
@@ -57,13 +60,19 @@ class TestPipelineIntegration(unittest.TestCase):
 
     def test_audio_slide_flow_pipeline(self):
         """Flusso audio-slide: 'passiamo al blocco successivo'."""
-        words = _words([
-            ("passiamo", 30.0), ("al", 30.2), ("blocco", 30.4), ("successivo", 30.6),
-            ("passiamo", 100.0), ("al", 100.2), ("blocco", 100.4), ("successivo", 100.6),
-        ])
-        timeline = extract_timeline_from_transcript(
-            words, total_slides=3, total_duration=200.0, flow="audio-slide"
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("al", 30.2),
+                ("blocco", 30.4),
+                ("successivo", 30.6),
+                ("passiamo", 100.0),
+                ("al", 100.2),
+                ("blocco", 100.4),
+                ("successivo", 100.6),
+            ]
         )
+        timeline = extract_timeline_from_transcript(words, total_slides=3, total_duration=200.0, flow="audio-slide")
         self.assertEqual(timeline, {1: 0.0, 2: 30.0, 3: 100.0})
 
         durations = reconcile_timeline(timeline, 3, 200.0)
@@ -73,4 +82,3 @@ class TestPipelineIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

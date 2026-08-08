@@ -86,6 +86,7 @@ def _env_float(name: str, default: float) -> float:
         log.warning("   Variabile %s non numerica ('%s'), uso default %s.", name, value, default)
         return default
 
+
 # =====================================================================
 # PATH DI BASE
 # =====================================================================
@@ -113,6 +114,7 @@ def setup_debug_logging() -> None:
 # ---------------------------------------------------------------------------
 try:
     from tqdm import tqdm
+
     HAS_TQDM = True
 except ImportError:
     HAS_TQDM = False
@@ -148,12 +150,10 @@ _REQUIRED_PACKAGES = {
     "PIL": "pillow",
     "pytesseract": "pytesseract",
     "pydub": "pydub",
-    "vosk": "vosk",
     "moviepy": "moviepy",
     "numpy": "numpy",
     "tqdm": "tqdm",
     "fastembed": "fastembed",
-    # Opzionale: alternativa Whisper a Vosk
     "faster_whisper": "faster-whisper",
 }
 
@@ -169,29 +169,30 @@ def _try_system_install(name: str, winget_id: str, apt_pkg: str, brew_pkg: str) 
     """
     commands = []
     if sys.platform == "win32":
-        commands.append((
-            ["winget", "install", "--accept-source-agreements",
-             "--accept-package-agreements", winget_id],
-            f"winget install {winget_id}",
-        ))
+        commands.append(
+            (
+                ["winget", "install", "--accept-source-agreements", "--accept-package-agreements", winget_id],
+                f"winget install {winget_id}",
+            )
+        )
     elif sys.platform == "darwin":
         if brew_pkg:
             commands.append((["brew", "install", brew_pkg], f"brew install {brew_pkg}"))
     if apt_pkg:
-        commands.append((
-            ["sudo", "apt-get", "install", "-y", apt_pkg],
-            f"sudo apt-get install -y {apt_pkg}",
-        ))
+        commands.append(
+            (
+                ["sudo", "apt-get", "install", "-y", apt_pkg],
+                f"sudo apt-get install -y {apt_pkg}",
+            )
+        )
 
     for cmd, label in commands:
         try:
             print(f"   ⏳ {label} ...", end=" ", flush=True)
-            subprocess.run(cmd, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=120, check=True)
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120, check=True)
             print("✅")
             return True
-        except (subprocess.CalledProcessError, FileNotFoundError,
-                subprocess.TimeoutExpired):
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
             print("❌ (tento alternativa)")
     return False
 
@@ -296,9 +297,9 @@ def bootstrap() -> None:
     if not tesseract_found:
         # Prova nel PATH
         try:
-            subprocess.run(["tesseract", "--version"],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=5, check=False)
+            subprocess.run(
+                ["tesseract", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False
+            )
             log.debug("   Tesseract trovato nel PATH.")
             tesseract_found = True
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -321,9 +322,13 @@ def bootstrap() -> None:
                 break
         if not tesseract_found:
             try:
-                subprocess.run(["tesseract", "--version"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                               timeout=5, check=False)
+                subprocess.run(
+                    ["tesseract", "--version"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
                 tesseract_found = True
                 log.info("   ✅ Tesseract installato nel PATH.")
             except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -341,9 +346,9 @@ def bootstrap() -> None:
 
     # --- ffmpeg (verifica rapida) ---
     try:
-        subprocess.run(["ffmpeg", "-version"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=5, check=False)
+        subprocess.run(
+            ["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False
+        )
         log.debug("   ffmpeg trovato.")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         log.info("🔧 ffmpeg non trovato — tentativo auto-install...")
@@ -368,7 +373,6 @@ def bootstrap() -> None:
 DEFAULT_PDF = "presentazione.pdf"  # supporta anche .pptx (convertito automaticamente)
 DEFAULT_OUTPUT_VIDEO = "video_finale.mp4"
 DEFAULT_SLIDES_DIR = "temp_slides"
-DEFAULT_TEMP_WAV = "temp_vosk_audio.wav"
 
 # --- Sincronizzazione semantica (sentence embeddings, offline) ---
 # Modelli multilingue ONNX (fastembed). Supportano l'italiano senza prefissi.
@@ -386,12 +390,10 @@ DEFAULT_EMBEDDING_MODEL_ALTERNATE = os.environ.get(
     "EMBEDDING_MODEL_ALTERNATE",
     "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
 )
-DEFAULT_EMBEDDING_CACHE_DIR = os.environ.get(
-    "EMBEDDING_CACHE_DIR", str(CACHE_DIR / "embedding_model")
-)
-DEFAULT_SEMANTIC_WINDOW = _env_float("SEMANTIC_WINDOW", 4.0)       # secondi per blocco
+DEFAULT_EMBEDDING_CACHE_DIR = os.environ.get("EMBEDDING_CACHE_DIR", str(CACHE_DIR / "embedding_model"))
+DEFAULT_SEMANTIC_WINDOW = _env_float("SEMANTIC_WINDOW", 4.0)  # secondi per blocco
 DEFAULT_SEMANTIC_MIN_DURATION = _env_float("SEMANTIC_MIN_DURATION", 3.0)  # durata minima slide
-DEFAULT_SEMANTIC_MIN_SIM = _env_float("SEMANTIC_MIN_SIM", 0.10)    # soglia qualità
+DEFAULT_SEMANTIC_MIN_SIM = _env_float("SEMANTIC_MIN_SIM", 0.10)  # soglia qualità
 # Temperatura della "competizione softmax" tra slide per blocco: più è bassa,
 # più il posizionamento privilegia i picchi locali (evita che una slide-riepilogo
 # con similarità uniforme catturi metà dell'audio).
@@ -399,11 +401,8 @@ DEFAULT_SEMANTIC_MIN_SIM = _env_float("SEMANTIC_MIN_SIM", 0.10)    # soglia qual
 DEFAULT_SEMANTIC_TEMPERATURE = _env_float("SEMANTIC_TEMPERATURE", 0.15)
 
 # --- Parametri tecnici (sovrascrivibili da .env) ---
-DEFAULT_AUDIO_SAMPLE_RATE = 16000            # Hz (Vosk)
-DEFAULT_VOSK_CHUNK_BYTES = 4000
-DEFAULT_VOSK_MODEL_NAME = os.environ.get("VOSK_MODEL", "vosk-model-it-0.22")
-DEFAULT_TRANSCRIPT_WINDOW = 3.0              # secondi per raggruppamento parole
-DEFAULT_MIN_WORD_LENGTH = 2                  # ignora parole più corte
+DEFAULT_TRANSCRIPT_WINDOW = 3.0  # secondi per raggruppamento parole
+DEFAULT_MIN_WORD_LENGTH = 2  # ignora parole più corte
 DEFAULT_VIDEO_FPS = _env_int("VIDEO_FPS", 5)  # fps > 1 evita che l'ultimo frame tagli l'audio finale
 DEFAULT_VIDEO_BUFFER_SEC = _env_float("VIDEO_BUFFER_SEC", 3.0)  # secondi extra sul video per proteggere l'audio finale
 # Risoluzione massima video (larghezza, altezza) — sovrascrivibile con VIDEO_RES="WxH"
@@ -421,35 +420,130 @@ DEFAULT_VIDEO_THREADS = min(8, os.cpu_count() or 4)
 DEFAULT_OCR_DPI = _env_int("OCR_DPI", 300)
 DEFAULT_OCR_LANG = os.environ.get("OCR_LANG", "ita")
 DEFAULT_OCR_WORKERS = _env_int("OCR_WORKERS", min(4, os.cpu_count() or 2))
-DEFAULT_TRANSITION_DURATION = 0.0            # secondi (0 = nessuna transizione)
-DEFAULT_TRANSCRIBER = os.environ.get("TRANSCRIBER", "vosk")  # 'vosk' o 'whisper'
+DEFAULT_TRANSITION_DURATION = 0.0  # secondi (0 = nessuna transizione)
+DEFAULT_TRANSCRIBER = os.environ.get("TRANSCRIBER", "whisper")  # 'whisper'
 DEFAULT_WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")  # tiny/base/small/medium/large
+# Motore OpenVINO GenAI (più veloce su iGPU Intel). Modello IR pre-convertito,
+# scaricabile da HuggingFace: OpenVINO/whisper-small-fp16-ov
+DEFAULT_OPENVINO_MODEL_DIR = os.environ.get("OPENVINO_MODEL_DIR", str(CACHE_DIR / "whisper_openvino_small"))
+DEFAULT_OPENVINO_DEVICE = os.environ.get("OPENVINO_DEVICE", "GPU")  # 'GPU' (iGPU) o 'CPU'
+DEFAULT_OPENVINO_MODEL_ID = "OpenVINO/whisper-small-fp16-ov"
 
 # =====================================================================
 # STOPWORDS ITALIANE
 # =====================================================================
-STOPWORDS_ITA = frozenset([
-    "il", "lo", "la", "i", "gli", "le", "di", "a", "da", "in", "con", "su",
-    "per", "tra", "fra", "un", "una", "uno", "del", "dello", "della", "dei",
-    "degli", "delle", "al", "allo", "alla", "ai", "agli", "alle", "dal",
-    "dallo", "dalla", "dai", "dagli", "dalle", "nel", "nello", "nella", "nei",
-    "negli", "nelle", "sul", "sullo", "sulla", "sui", "sugli", "sulle",
-    "che", "non", "ci", "ne", "si", "mi", "ti", "vi", "ma", "ed", "anche",
-])
+STOPWORDS_ITA = frozenset(
+    [
+        "il",
+        "lo",
+        "la",
+        "i",
+        "gli",
+        "le",
+        "di",
+        "a",
+        "da",
+        "in",
+        "con",
+        "su",
+        "per",
+        "tra",
+        "fra",
+        "un",
+        "una",
+        "uno",
+        "del",
+        "dello",
+        "della",
+        "dei",
+        "degli",
+        "delle",
+        "al",
+        "allo",
+        "alla",
+        "ai",
+        "agli",
+        "alle",
+        "dal",
+        "dallo",
+        "dalla",
+        "dai",
+        "dagli",
+        "dalle",
+        "nel",
+        "nello",
+        "nella",
+        "nei",
+        "negli",
+        "nelle",
+        "sul",
+        "sullo",
+        "sulla",
+        "sui",
+        "sugli",
+        "sulle",
+        "che",
+        "non",
+        "ci",
+        "ne",
+        "si",
+        "mi",
+        "ti",
+        "vi",
+        "ma",
+        "ed",
+        "anche",
+    ]
+)
 
 # Parole di TRANSIZIONE che NON vanno MAI filtrate — segnalano cambi di slide
-TRANSITION_WORDS_ITA = frozenset([
-    "passiamo", "vediamo", "guardiamo", "guardate", "osserviamo",
-    "slide", "diapositiva", "prossima", "successiva", "precedente",
-    "andiamo", "parliamo", "ecco", "eccoci", "quindi", "dunque",
-    "allora", "ora", "adesso", "invece", "prima", "dopo", "infine",
-    "iniziamo", "concludiamo", "conclusione", "passo", "passa",
-    "affrontiamo", "occupiamoci", "dedichiamoci", "concentriamoci",
-    "torniamo", "riprendiamo", "introduciamo", "presentiamo",
-    "mostriamo", "illustriamo", "spieghiamo", "approfondiamo",
-    # Per flusso "audio dibattito → slide": segnale "Passiamo al blocco successivo"
-    "blocco", "successivo",
-])
+TRANSITION_WORDS_ITA = frozenset(
+    [
+        "passiamo",
+        "vediamo",
+        "guardiamo",
+        "guardate",
+        "osserviamo",
+        "slide",
+        "diapositiva",
+        "prossima",
+        "successiva",
+        "precedente",
+        "andiamo",
+        "parliamo",
+        "ecco",
+        "eccoci",
+        "quindi",
+        "dunque",
+        "allora",
+        "ora",
+        "adesso",
+        "invece",
+        "prima",
+        "dopo",
+        "infine",
+        "iniziamo",
+        "concludiamo",
+        "conclusione",
+        "passo",
+        "passa",
+        "affrontiamo",
+        "occupiamoci",
+        "dedichiamoci",
+        "concentriamoci",
+        "torniamo",
+        "riprendiamo",
+        "introduciamo",
+        "presentiamo",
+        "mostriamo",
+        "illustriamo",
+        "spieghiamo",
+        "approfondiamo",
+        # Per flusso "audio dibattito → slide": segnale "Passiamo al blocco successivo"
+        "blocco",
+        "successivo",
+    ]
+)
 
 
 def get_stopwords(lang: str = "ita") -> frozenset:
@@ -466,7 +560,7 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
     """Configura e parsare gli argomenti da riga di comando."""
     parser = argparse.ArgumentParser(
         description="Sincronizza PDF + audio in un video con timeline generata "
-                    "da embeddings semantici (offline, senza LLM).",
+        "da embeddings semantici (offline, senza LLM).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Esempi:
@@ -478,115 +572,178 @@ Esempi:
     )
 
     # File I/O
-    parser.add_argument("--pdf", default=DEFAULT_PDF,
-                        help=f"Percorso presentazione PDF o PPTX (default: {DEFAULT_PDF})")
-    parser.add_argument("--audio", default=None,
-                        help="Percorso file audio (default: cerca podcast.mp3/m4a/wav)")
-    parser.add_argument("--output", default=DEFAULT_OUTPUT_VIDEO,
-                        help=f"Percorso video output (default: {DEFAULT_OUTPUT_VIDEO})")
-    parser.add_argument("--slides-dir", default=DEFAULT_SLIDES_DIR,
-                        help=f"Directory temporanea slide (default: {DEFAULT_SLIDES_DIR})")
+    parser.add_argument(
+        "--pdf", default=DEFAULT_PDF, help=f"Percorso presentazione PDF o PPTX (default: {DEFAULT_PDF})"
+    )
+    parser.add_argument("--audio", default=None, help="Percorso file audio (default: cerca podcast.mp3/m4a/wav)")
+    parser.add_argument(
+        "--output", default=DEFAULT_OUTPUT_VIDEO, help=f"Percorso video output (default: {DEFAULT_OUTPUT_VIDEO})"
+    )
+    parser.add_argument(
+        "--slides-dir", default=DEFAULT_SLIDES_DIR, help=f"Directory temporanea slide (default: {DEFAULT_SLIDES_DIR})"
+    )
 
-    # Modello Vosk
-    parser.add_argument("--vosk-model", default=DEFAULT_VOSK_MODEL_NAME,
-                        help=f"Nome modello Vosk (default: {DEFAULT_VOSK_MODEL_NAME})")
-
-    # Transcriber
-    parser.add_argument("--transcriber", default=DEFAULT_TRANSCRIBER,
-                        choices=["vosk", "whisper"],
-                        help="Motore di trascrizione: 'vosk' (locale, veloce, default) o 'whisper' (faster-whisper)")
-    parser.add_argument("--whisper-model", default=DEFAULT_WHISPER_MODEL,
-                        help=f"Dimensione modello faster-whisper (tiny/base/small/medium/large). "
-                             f"tiny/base = più veloce, medium/large = più preciso (default: {DEFAULT_WHISPER_MODEL})")
+    # Transcriber (faster-whisper, unico motore)
+    parser.add_argument(
+        "--whisper-model",
+        default=DEFAULT_WHISPER_MODEL,
+        help=f"Dimensione modello faster-whisper (tiny/base/small/medium/large). "
+        f"tiny/base = più veloce, medium/large = più preciso (default: {DEFAULT_WHISPER_MODEL})",
+    )
+    parser.add_argument(
+        "--transcriber",
+        default="auto",
+        choices=["auto", "openvino", "whisper"],
+        help="Motore di trascrizione. 'auto' (default): usa OpenVINO GenAI "
+        "se il modello IR è presente, altrimenti faster-whisper. "
+        "'openvino': solo OpenVINO (errore se manca). 'whisper': solo "
+        "faster-whisper. OpenVINO è ~1.5x più veloce sulla iGPU Intel.",
+    )
+    parser.add_argument(
+        "--openvino-model-dir",
+        default=DEFAULT_OPENVINO_MODEL_DIR,
+        help=f"Directory del modello Whisper OpenVINO IR (default: {DEFAULT_OPENVINO_MODEL_DIR})",
+    )
+    parser.add_argument(
+        "--openvino-device",
+        default=DEFAULT_OPENVINO_DEVICE,
+        help=f"Device OpenVINO: 'GPU' (iGPU Intel, default) o 'CPU' (default: {DEFAULT_OPENVINO_DEVICE})",
+    )
+    parser.add_argument(
+        "--openvino-download",
+        action="store_true",
+        help="Scarica una tantum il modello Whisper OpenVINO IR "
+        f"({DEFAULT_OPENVINO_MODEL_ID}) in {DEFAULT_OPENVINO_MODEL_DIR}, "
+        "poi esce. Necessario prima del primo uso con --transcriber openvino/auto.",
+    )
 
     # Opzioni
-    parser.add_argument("--lang", default=DEFAULT_OCR_LANG,
-                        help=f"Lingua OCR (default: {DEFAULT_OCR_LANG})")
-    parser.add_argument("--transitions", type=float, default=DEFAULT_TRANSITION_DURATION,
-                        help="Durata dissolvenza tra slide in secondi (0=nessuna)")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Ferma dopo la generazione timeline, non produce video")
-    parser.add_argument("--preview", action="store_true",
-                        help="Mostra la timeline in formato visuale e esci (non genera il video)")
-    parser.add_argument("--no-cache", action="store_true",
-                        help="Ignora la cache e rifai tutto da zero")
-    parser.add_argument("--debug", action="store_true",
-                        help="Logging DEBUG dettagliato")
-    parser.add_argument("--ocr-workers", type=int, default=DEFAULT_OCR_WORKERS,
-                        help=f"Thread paralleli per OCR (default: {DEFAULT_OCR_WORKERS})")
-    parser.add_argument("--dpi", type=int, default=DEFAULT_OCR_DPI,
-                        help=f"DPI rendering slide (default: {DEFAULT_OCR_DPI})")
-    parser.add_argument("--flow", default=None,
-                        choices=["slide-audio", "audio-slide", "free"],
-                        help="Flusso di sincronizzazione: 'slide-audio' (speaker dicono "
-                             "'passiamo alla slide X'), 'audio-slide' (speaker dicono "
-                             "'passiamo al blocco successivo') oppure 'free' (riordino "
-                             "libero: le slide possono apparire in qualsiasi ordine e "
-                             "ripetersi, seguendo il contenuto del podcast). Default: "
-                             "auto-detect: slide-audio/audio-slide se il podcast segue "
-                             "i vincoli del prompt NotebookLM ('slide N' / 'blocco "
-                             "successivo'), altrimenti 'free'.")
-    parser.add_argument("--semantic-model", default=DEFAULT_EMBEDDING_MODEL,
-                        help=f"Modello embedding per la sincronizzazione semantica "
-                             f"(default: {DEFAULT_EMBEDDING_MODEL}; fallback "
-                             f"automatico: {DEFAULT_EMBEDDING_MODEL_ALTERNATE})")
-    parser.add_argument("--semantic-cache-dir", default=DEFAULT_EMBEDDING_CACHE_DIR,
-                        help="Directory di cache per i modelli embedding "
-                             "(default: .cache/embedding_model)")
-    parser.add_argument("--semantic-window", type=float, default=DEFAULT_SEMANTIC_WINDOW,
-                        help=f"Secondi per blocco trascrizione nella sincronizzazione "
-                             f"semantica (default: {DEFAULT_SEMANTIC_WINDOW})")
-    parser.add_argument("--semantic-min-duration", type=float,
-                        default=DEFAULT_SEMANTIC_MIN_DURATION,
-                        help=f"Durata minima di una slide nella sincronizzazione "
-                             f"semantica, in secondi (default: {DEFAULT_SEMANTIC_MIN_DURATION})")
-    parser.add_argument("--semantic-min-sim", type=float, default=DEFAULT_SEMANTIC_MIN_SIM,
-                        help=f"Soglia di similarità media sotto cui la sincronizzazione "
-                             f"semantica viene scartata (default: {DEFAULT_SEMANTIC_MIN_SIM})")
-    parser.add_argument("--semantic-temperature", type=float,
-                        default=DEFAULT_SEMANTIC_TEMPERATURE,
-                        help=f"Temperatura della competizione softmax tra slide per blocco: "
-                             f"più bassa = privilegia i picchi locali, evita che una "
-                             f"slide-riepilogo catturi metà dell'audio "
-                             f"(default: {DEFAULT_SEMANTIC_TEMPERATURE})")
+    parser.add_argument("--lang", default=DEFAULT_OCR_LANG, help=f"Lingua OCR (default: {DEFAULT_OCR_LANG})")
+    parser.add_argument(
+        "--transitions",
+        type=float,
+        default=DEFAULT_TRANSITION_DURATION,
+        help="Durata dissolvenza tra slide in secondi (0=nessuna)",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Ferma dopo la generazione timeline, non produce video")
+    parser.add_argument(
+        "--preview", action="store_true", help="Mostra la timeline in formato visuale e esci (non genera il video)"
+    )
+    parser.add_argument("--no-cache", action="store_true", help="Ignora la cache e rifai tutto da zero")
+    parser.add_argument("--debug", action="store_true", help="Logging DEBUG dettagliato")
+    parser.add_argument(
+        "--ocr-workers",
+        type=int,
+        default=DEFAULT_OCR_WORKERS,
+        help=f"Thread paralleli per OCR (default: {DEFAULT_OCR_WORKERS})",
+    )
+    parser.add_argument(
+        "--dpi", type=int, default=DEFAULT_OCR_DPI, help=f"DPI rendering slide (default: {DEFAULT_OCR_DPI})"
+    )
+    parser.add_argument(
+        "--flow",
+        default=None,
+        choices=["slide-audio", "audio-slide", "free"],
+        help="Flusso di sincronizzazione: 'slide-audio' (speaker dicono "
+        "'passiamo alla slide X'), 'audio-slide' (speaker dicono "
+        "'passiamo al blocco successivo') oppure 'free' (riordino "
+        "libero: le slide possono apparire in qualsiasi ordine e "
+        "ripetersi, seguendo il contenuto del podcast). Default: "
+        "auto-detect: slide-audio/audio-slide se il podcast segue "
+        "i vincoli del prompt NotebookLM ('slide N' / 'blocco "
+        "successivo'), altrimenti 'free'.",
+    )
+    parser.add_argument(
+        "--semantic-model",
+        default=DEFAULT_EMBEDDING_MODEL,
+        help=f"Modello embedding per la sincronizzazione semantica "
+        f"(default: {DEFAULT_EMBEDDING_MODEL}; fallback "
+        f"automatico: {DEFAULT_EMBEDDING_MODEL_ALTERNATE})",
+    )
+    parser.add_argument(
+        "--semantic-cache-dir",
+        default=DEFAULT_EMBEDDING_CACHE_DIR,
+        help="Directory di cache per i modelli embedding (default: .cache/embedding_model)",
+    )
+    parser.add_argument(
+        "--semantic-window",
+        type=float,
+        default=DEFAULT_SEMANTIC_WINDOW,
+        help=f"Secondi per blocco trascrizione nella sincronizzazione semantica (default: {DEFAULT_SEMANTIC_WINDOW})",
+    )
+    parser.add_argument(
+        "--semantic-min-duration",
+        type=float,
+        default=DEFAULT_SEMANTIC_MIN_DURATION,
+        help=f"Durata minima di una slide nella sincronizzazione "
+        f"semantica, in secondi (default: {DEFAULT_SEMANTIC_MIN_DURATION})",
+    )
+    parser.add_argument(
+        "--semantic-min-sim",
+        type=float,
+        default=DEFAULT_SEMANTIC_MIN_SIM,
+        help=f"Soglia di similarità media sotto cui la sincronizzazione "
+        f"semantica viene scartata (default: {DEFAULT_SEMANTIC_MIN_SIM})",
+    )
+    parser.add_argument(
+        "--semantic-temperature",
+        type=float,
+        default=DEFAULT_SEMANTIC_TEMPERATURE,
+        help=f"Temperatura della competizione softmax tra slide per blocco: "
+        f"più bassa = privilegia i picchi locali, evita che una "
+        f"slide-riepilogo catturi metà dell'audio "
+        f"(default: {DEFAULT_SEMANTIC_TEMPERATURE})",
+    )
 
     # Selezione slide via LLM (opzionale, supera il tetto del MiniLM)
-    parser.add_argument("--llm", default="auto",
-                        choices=["off", "auto", "9router"],
-                        help="Selezione slide via LLM. 'auto' (default: "
-                             "prova 9Router online, poi fallback MiniLM), 'off' "
-                             "(solo MiniLM locale), '9router' (solo 9Router "
-                             "online). Nel flusso libero (senza segnali 'slide "
-                             "N') sceglie la slide per ogni chunk; nei flussi "
-                             "ordinati (slide-audio/audio-slide) posiziona SOLO "
-                             "le slide senza ancora esplicita, rispettando le "
-                             "ancore deterministiche. Se nessun servizio "
-                             "risponde si ripiega sul MiniLM senza interrompere.")
-    parser.add_argument("--llm-model", default=None,
-                        help="Override del modello LLM (es. comboact, "
-                             "openrouter/google/gemma-4-26b-a4b-it:free, "
-                             "cf/@cf/mistralai/mistral-small-3.1-24b-instruct). "
-                             "Default: la combo 'comboact' configurata per "
-                             "l'endpoint 9Router.")
-    parser.add_argument("--llm-chunk", type=float, default=30.0,
-                        help="Secondi per chunk trascrizione inviata all'LLM "
-                             "(default: 30.0)")
-    parser.add_argument("--llm-review", action="store_true",
-                        help="Dopo la timeline LLM nel flusso libero, esegue un "
-                             "secondo passaggio LLM che ri-verifica la selezione "
-                             "chunk->slide e avvisa (senza modificare la timeline) "
-                             "sui chunk sospetti. Costo: una chiamata extra (free, "
-                             "cachata). Default: disattivato.")
-    parser.add_argument("--llm-wait-timeout", type=float, default=0.0,
-                        help="Secondi massimi di attesa che 9Router sia avviato "
-                             "prima di ripiegare sul MiniLM, quando serve l'LLM ma "
-                             "il router non risponde. 0 (default) = attesa "
-                             "illimitata: il processo si mette in pausa con un "
-                             "avviso e riprende appena 9Router è online; si può "
-                             "premere 'S' in ogni momento per saltare e usare "
-                             "subito il MiniLM locale.")
-    parser.add_argument("--log-file", default=None,
-                        help="Percorso file di log (salva i log anche su file)")
+    parser.add_argument(
+        "--llm",
+        default="auto",
+        choices=["off", "auto", "9router"],
+        help="Selezione slide via LLM. 'auto' (default: "
+        "prova 9Router online, poi fallback MiniLM), 'off' "
+        "(solo MiniLM locale), '9router' (solo 9Router "
+        "online). Nel flusso libero (senza segnali 'slide "
+        "N') sceglie la slide per ogni chunk; nei flussi "
+        "ordinati (slide-audio/audio-slide) posiziona SOLO "
+        "le slide senza ancora esplicita, rispettando le "
+        "ancore deterministiche. Se nessun servizio "
+        "risponde si ripiega sul MiniLM senza interrompere.",
+    )
+    parser.add_argument(
+        "--llm-model",
+        default=None,
+        help="Override del modello LLM (es. comboact, "
+        "openrouter/google/gemma-4-26b-a4b-it:free, "
+        "cf/@cf/mistralai/mistral-small-3.1-24b-instruct). "
+        "Default: la combo 'comboact' configurata per "
+        "l'endpoint 9Router.",
+    )
+    parser.add_argument(
+        "--llm-chunk", type=float, default=30.0, help="Secondi per chunk trascrizione inviata all'LLM (default: 30.0)"
+    )
+    parser.add_argument(
+        "--llm-review",
+        action="store_true",
+        help="Dopo la timeline LLM nel flusso libero, esegue un "
+        "secondo passaggio LLM che ri-verifica la selezione "
+        "chunk->slide e avvisa (senza modificare la timeline) "
+        "sui chunk sospetti. Costo: una chiamata extra (free, "
+        "cachata). Default: disattivato.",
+    )
+    parser.add_argument(
+        "--llm-wait-timeout",
+        type=float,
+        default=0.0,
+        help="Secondi massimi di attesa che 9Router sia avviato "
+        "prima di ripiegare sul MiniLM, quando serve l'LLM ma "
+        "il router non risponde. 0 (default) = attesa "
+        "illimitata: il processo si mette in pausa con un "
+        "avviso e riprende appena 9Router è online; si può "
+        "premere 'S' in ogni momento per saltare e usare "
+        "subito il MiniLM locale.",
+    )
+    parser.add_argument("--log-file", default=None, help="Percorso file di log (salva i log anche su file)")
 
     args = parser.parse_args(argv)
 
@@ -605,9 +762,7 @@ Esempi:
     args.pdf_path = BASE_DIR / args.pdf
     args.output_video = BASE_DIR / args.output
     args.slides_dir = BASE_DIR / args.slides_dir
-    args.vosk_model_path = BASE_DIR / args.vosk_model
 
     # Sincronizzazione semantica
     args.semantic_cache_dir = args.semantic_cache_dir or DEFAULT_EMBEDDING_CACHE_DIR
     return args
-

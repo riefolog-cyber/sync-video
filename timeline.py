@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Estrazione deterministica della timeline dalla trascrizione Vosk.
+Estrazione deterministica della timeline dalla trascrizione Whisper.
 Supporta entrambi i flussi: 'audio-slide' e 'slide-audio'.
 
 Quando i riferimenti sono parziali o fuori ordine cronologico (anticipazioni,
@@ -12,6 +12,14 @@ import re
 
 from chunks import Word
 from config import log
+
+# Parole che introducono un riferimento di slide. Include le varianti di
+# trascrizione misheard comuni: "sla" e "asl" per "slide" ("passiamo
+# alla sla e due", "passiamo alla asl cinque"), oltre alle deformazioni
+# fonetiche "sallay" e "slaib" (whisper-small su pronuncia italiana).
+# Le varianti non elencate vengono riconosciute dal fuzzy fonetico in
+# ``_is_slide_word``.
+_SLIDE_WORDS = frozenset({"slide", "diapositiva", "sla", "asl", "sallay", "slaib"})
 
 
 # =====================================================================
@@ -25,11 +33,11 @@ def extract_timeline_from_transcript(
     window_seconds: float = 2.0,
 ) -> dict[int, float] | None:
     """
-    Estrae la timeline deterministicamente dalla trascrizione Vosk,
+    Estrae la timeline deterministicamente dalla trascrizione Whisper,
     usando i timestamp precisi (al decimo di secondo).
 
     Args:
-        words: lista di parole Vosk con 'word' e 'start'
+        words: lista di parole Whisper con 'word' e 'start'
         total_slides: numero totale di slide
         total_duration: durata audio in secondi
         flow: "audio-slide" (frase "passiamo al blocco successivo")
@@ -91,9 +99,9 @@ def extract_slide_anchors(
         missing = sorted(s for s in range(2, total_slides + 1) if s not in anchors)
         if missing:
             log.info(
-                "   [Ancore] %d riferimenti trovati, %d usati come ancore; "
-                "slide senza riferimento esplicito: %s.",
-                len(refs), len(anchors),
+                "   [Ancore] %d riferimenti trovati, %d usati come ancore; slide senza riferimento esplicito: %s.",
+                len(refs),
+                len(anchors),
                 ", ".join(str(s) for s in missing) or "nessuna",
             )
     return anchors
@@ -125,14 +133,17 @@ def _extract_audio_slide_flow(
             log.warning(
                 "   [Deterministico] Transizioni parziali (%d/%d): timeline "
                 "completata con interpolazione delle slide mancanti.",
-                len(transitions), needed,
+                len(transitions),
+                needed,
             )
             return completed
         log.warning(
             "   [Deterministico] Trovate %d frasi 'passiamo al blocco successivo', "
             "ma servono %d per sincronizzare tutte le %d slide. "
             "Sincronizzazione impossibile senza distribuzione uniforme.",
-            len(transitions), needed, total_slides,
+            len(transitions),
+            needed,
+            total_slides,
         )
         return None
 
@@ -171,9 +182,7 @@ def _find_block_transition(
             break
         w_norm = _normalize(words[j]["word"])
         if w_norm == "blocco" or (
-            w_norm == "il"
-            and j + 1 < len(words)
-            and _normalize(words[j + 1]["word"]) == "blocco"
+            w_norm == "il" and j + 1 < len(words) and _normalize(words[j + 1]["word"]) == "blocco"
         ):
             found_blocco = True
         if w_norm in ("successivo", "prossimo"):
@@ -191,10 +200,7 @@ def _collect_transitions(
     blocco successivo/prossimo"."""
     # Parole che introducono una transizione di blocco
     triggers = {"passiamo", "procediamo", "andiamo"}
-    trigger_indices = [
-        i for i, w in enumerate(words)
-        if _normalize(w["word"]) in triggers
-    ]
+    trigger_indices = [i for i, w in enumerate(words) if _normalize(w["word"]) in triggers]
 
     transitions: list[float] = []
     for idx in trigger_indices:
@@ -259,7 +265,10 @@ def _extract_slide_audio_flow(
                 log.warning(
                     "   [Deterministico] Riferimento 'slide %d' a %.1fs ignorato "
                     "(viola l'ordine crescente dopo la slide %d a %.1fs).",
-                    s, timeline[s], s - 1, prev_time,
+                    s,
+                    timeline[s],
+                    s - 1,
+                    prev_time,
                 )
                 del timeline[s]
             else:
@@ -284,7 +293,9 @@ def _extract_slide_audio_flow(
     log.warning(
         "   [Deterministico] Riferimenti 'slide N' trovati solo per %d slide su %d "
         "(mancanti: %s). Sincronizzazione impossibile senza distribuzione uniforme.",
-        len(timeline), total_slides, ", ".join(str(s) for s in missing),
+        len(timeline),
+        total_slides,
+        ", ".join(str(s) for s in missing),
     )
     return None
 
@@ -298,9 +309,18 @@ def _collect_slide_references(
     refs: dict[int, float] = {}
     for i, w in enumerate(words):
         w_norm = _normalize(w["word"])
-        if w_norm in ("slide", "diapositiva"):
+        if _is_slide_word(w["word"]):
             # Pattern 1: "slide N" con N nelle 8 parole successive
             # (finestra ampia: gestisce "slide, come potete vedere, la numero tre")
+            embedded = _number_from_word(w_norm)
+            if embedded is not None and 2 <= embedded <= total_slides and embedded not in refs:
+                refs[embedded] = w["start"]
+                log.debug(
+                    "   [Deterministico] Trovato '%s' con numero incorporato a %.1fs",
+                    w["word"],
+                    w["start"],
+                )
+                continue
             for j in range(i + 1, min(i + 8, len(words))):
                 slide_num = _number_from_word(_normalize(words[j]["word"]))
                 if slide_num is not None:
@@ -308,7 +328,8 @@ def _collect_slide_references(
                         refs[slide_num] = w["start"]
                         log.debug(
                             "   [Deterministico] Trovato 'slide %d' a %.1fs",
-                            slide_num, w["start"],
+                            slide_num,
+                            w["start"],
                         )
                     break
         else:
@@ -316,11 +337,12 @@ def _collect_slide_references(
             num = _number_from_word(w_norm)
             if num is not None and 2 <= num <= total_slides and num not in refs:
                 for j in range(i + 1, min(i + 7, len(words))):
-                    if _normalize(words[j]["word"]) in ("slide", "diapositiva"):
+                    if _is_slide_word(words[j]["word"]):
                         refs[num] = words[j]["start"]
                         log.debug(
                             "   [Deterministico] Trovato '%s ... slide' a %.1fs",
-                            w["word"], words[j]["start"],
+                            w["word"],
+                            words[j]["start"],
                         )
                         break
     return refs
@@ -333,6 +355,7 @@ def _lis_anchors(refs: dict[int, float]) -> dict[int, float]:
     if not refs:
         return {}
     import bisect
+
     items = sorted(refs.items(), key=lambda kv: (kv[1], kv[0]))
     seq = [s for s, _ in items]
     n = len(seq)
@@ -392,8 +415,7 @@ def _complete_from_anchors(
             step = max(5.0, total_duration * 0.005)
             non1 = sorted(k for k in completed if k != 1)
             if len(non1) >= 2:
-                step = max(step, (completed[non1[-1]] - completed[non1[0]]) /
-                           max(1, non1[-1] - non1[0]))
+                step = max(step, (completed[non1[-1]] - completed[non1[0]]) / max(1, non1[-1] - non1[0]))
             completed[s] = completed[lo] + step
         # Garanzia: strettamente crescente rispetto alla slide precedente
         if completed[s] <= completed[s - 1]:
@@ -401,8 +423,7 @@ def _complete_from_anchors(
 
     # Clamp finale: se l'ultima slide supera la durata, scala tutto
     if completed[total_slides] > total_duration:
-        scale = (total_duration - 1.0) / completed[total_slides] \
-            if completed[total_slides] > 0 else 1.0
+        scale = (total_duration - 1.0) / completed[total_slides] if completed[total_slides] > 0 else 1.0
         if 0 < scale < 1.0:
             for s in completed:
                 completed[s] *= scale
@@ -420,37 +441,73 @@ def _complete_from_anchors(
 # Numeri cardinali italiani (per "slide tre", "slide undici", ...)
 # Nota: chiavi SENZA accenti (la normalizzazione li rimuove)
 _ITALIAN_NUMBERS_BASE = {
-    "uno": 1, "due": 2, "tre": 3, "quattro": 4, "cinque": 5,
-    "sei": 6, "sette": 7, "otto": 8, "nove": 9, "dieci": 10,
-    "undici": 11, "dodici": 12, "tredici": 13, "quattordici": 14,
-    "quindici": 15, "sedici": 16, "diciassette": 17, "diciotto": 18,
-    "diciannove": 19, "venti": 20, "ventuno": 21, "ventidue": 22,
-    "ventitre": 23, "ventiquattro": 24, "venticinque": 25,
-    "ventisei": 26, "ventisette": 27, "ventotto": 28, "ventinove": 29,
+    "uno": 1,
+    "due": 2,
+    "tre": 3,
+    "quattro": 4,
+    "cinque": 5,
+    "sei": 6,
+    "sette": 7,
+    "otto": 8,
+    "nove": 9,
+    "dieci": 10,
+    "undici": 11,
+    "dodici": 12,
+    "tredici": 13,
+    "quattordici": 14,
+    "quindici": 15,
+    "sedici": 16,
+    "diciassette": 17,
+    "diciotto": 18,
+    "diciannove": 19,
+    "venti": 20,
+    "ventuno": 21,
+    "ventidue": 22,
+    "ventitre": 23,
+    "ventiquattro": 24,
+    "venticinque": 25,
+    "ventisei": 26,
+    "ventisette": 27,
+    "ventotto": 28,
+    "ventinove": 29,
     "trenta": 30,
-    # Varianti di trascrizione Vosk comuni (misheard):
+    # Varianti di trascrizione Whisper comuni (misheard):
     "nonna": 9,  # per "nona slide" trascritto "nonna slide"
 }
 
 # Ordinali italiani, forma maschile e femminile ("terza diapositiva").
 # La normale elisione dei composti vale anche qui (21° = "ventunesimo").
 _ITALIAN_ORDINALS_UNITS = {
-    1: ("primo", "prima"), 2: ("secondo", "seconda"), 3: ("terzo", "terza"),
-    4: ("quarto", "quarta"), 5: ("quinto", "quinta"), 6: ("sesto", "sesta"),
-    7: ("settimo", "settima"), 8: ("ottavo", "ottava"), 9: ("nono", "nona"),
+    1: ("primo", "prima"),
+    2: ("secondo", "seconda"),
+    3: ("terzo", "terza"),
+    4: ("quarto", "quarta"),
+    5: ("quinto", "quinta"),
+    6: ("sesto", "sesta"),
+    7: ("settimo", "settima"),
+    8: ("ottavo", "ottava"),
+    9: ("nono", "nona"),
     10: ("decimo", "decima"),
-    11: ("undicesimo", "undicesima"), 12: ("dodicesimo", "dodicesima"),
-    13: ("tredicesimo", "tredicesima"), 14: ("quattordicesimo", "quattordicesima"),
-    15: ("quindicesimo", "quindicesima"), 16: ("sedicesimo", "sedicesima"),
+    11: ("undicesimo", "undicesima"),
+    12: ("dodicesimo", "dodicesima"),
+    13: ("tredicesimo", "tredicesima"),
+    14: ("quattordicesimo", "quattordicesima"),
+    15: ("quindicesimo", "quindicesima"),
+    16: ("sedicesimo", "sedicesima"),
     17: ("diciassettesimo", "diciassettesima"),
     18: ("diciottesimo", "diciottesima"),
     19: ("diciannovesimo", "diciannovesima"),
 }
 
 _ITALIAN_ORDINALS_TENS = {
-    20: "ventesimo", 30: "trentesimo", 40: "quarantesimo",
-    50: "cinquantesimo", 60: "sessantesimo", 70: "settantesimo",
-    80: "ottantesimo", 90: "novantesimo",
+    20: "ventesimo",
+    30: "trentesimo",
+    40: "quarantesimo",
+    50: "cinquantesimo",
+    60: "sessantesimo",
+    70: "settantesimo",
+    80: "ottantesimo",
+    90: "novantesimo",
 }
 
 
@@ -463,12 +520,24 @@ def _generate_italian_numbers() -> dict:
     entrambi i generi (es. 'terzo'/'terza' -> 3).
     """
     units = {
-        1: "uno", 2: "due", 3: "tre", 4: "quattro", 5: "cinque",
-        6: "sei", 7: "sette", 8: "otto", 9: "nove",
+        1: "uno",
+        2: "due",
+        3: "tre",
+        4: "quattro",
+        5: "cinque",
+        6: "sei",
+        7: "sette",
+        8: "otto",
+        9: "nove",
     }
     tens = {
-        30: "trenta", 40: "quaranta", 50: "cinquanta",
-        60: "sessanta", 70: "settanta", 80: "ottanta", 90: "novanta",
+        30: "trenta",
+        40: "quaranta",
+        50: "cinquanta",
+        60: "sessanta",
+        70: "settanta",
+        80: "ottanta",
+        90: "novanta",
     }
 
     numbers = dict(_ITALIAN_NUMBERS_BASE)
@@ -493,10 +562,14 @@ def _generate_italian_numbers() -> dict:
         # 21° = "ventunesimo": usa la decina cardinale + suffisso ordinale
         tens_card = "venti" if d == 20 else tens[d]
         for u, (um, uf) in {
-            1: ("unesimo", "unesima"), 2: ("duesimo", "duesima"),
-            3: ("treesimo", "treesima"), 4: ("quattresimo", "quattresima"),
-            5: ("cinquesimo", "cinquesima"), 6: ("seiesimo", "seiesima"),
-            7: ("settesimo", "settesima"), 8: ("ottesimo", "ottesima"),
+            1: ("unesimo", "unesima"),
+            2: ("duesimo", "duesima"),
+            3: ("treesimo", "treesima"),
+            4: ("quattresimo", "quattresima"),
+            5: ("cinquesimo", "cinquesima"),
+            6: ("seiesimo", "seiesima"),
+            7: ("settesimo", "settesima"),
+            8: ("ottesimo", "ottesima"),
             9: ("novesimo", "novesima"),
         }.items():
             if um[0] in "aeiou":  # elisione: venti + unesimo -> ventunesimo
@@ -524,7 +597,7 @@ def _number_from_word(word: str) -> int | None:
     cifre ("3", "3,") oppure cardinali italiani ("tre", "undici").
     Restituisce None se non è un numero.
     """
-    num_clean = re.sub(r'[^\d]', '', word)
+    num_clean = re.sub(r"[^\d]", "", word)
     if num_clean and num_clean.isdigit():
         return int(num_clean)
     return _ITALIAN_NUMBERS.get(word)
@@ -533,14 +606,47 @@ def _number_from_word(word: str) -> int | None:
 def _normalize(word: str) -> str:
     """Normalizza una parola: lowercase, senza accenti, senza punteggiatura."""
     # Rimuovi punteggiatura
-    w = re.sub(r'[^\w\s]', '', word.lower().strip())
+    w = re.sub(r"[^\w\s]", "", word.lower().strip())
     # Rimuovi accenti comuni italiani
     replacements = {
-        'à': 'a', 'è': 'e', 'é': 'e', 'ì': 'i', 'ò': 'o', 'ù': 'u',
+        "à": "a",
+        "è": "e",
+        "é": "e",
+        "ì": "i",
+        "ò": "o",
+        "ù": "u",
     }
     for accented, plain in replacements.items():
         w = w.replace(accented, plain)
     return w
+
+
+def _is_slide_word(word: str) -> bool:
+    """
+    True se ``word`` è "slide"/"diapositiva" o una variante fonetica ASR.
+
+    Il modello di trascrizione (faster-whisper/OpenVINO) deforma spesso "slide"
+    in base alla pronuncia italiana: "sla", "asl", "sallay", "slaib",
+    "slayd", "slade", ... Oltre al match esatto in ``_SLIDE_WORDS``,
+    riconosce le varianti che iniziano letteralmente per "sl" (la grafia
+    della pronuncia all'italiana di "slide" è sempre "sl..."): questo
+    esclude le parole comuni tipo "solo"/"salvo"/"sale" che contengono la
+    sottosequenza consonantica "sl" ma non iniziano con essa. Il falso
+    positivo residuo è mitigato dal chiamante, che richiede sempre un
+    numero di slide adiacente (o incorporato, es. "slaib6").
+    """
+    w = _normalize(word)
+    if not w:
+        return False
+    if w in _SLIDE_WORDS:
+        return True
+    if not (3 <= len(w) <= 7):
+        return False
+    if not w.startswith("sl"):
+        return False
+    cons = re.sub(r"[aeiou]", "", w)
+    cons = re.sub(r"(.)\1+", r"\1", cons)
+    return cons.startswith("sl") and len(cons) <= 4
 
 
 # =====================================================================
@@ -568,7 +674,7 @@ def detect_flow_from_words(
         w_norm = _normalize(w["word"])
 
         # slide-audio: "slide N" (cifre o parole)
-        if w_norm in ("slide", "diapositiva"):
+        if _is_slide_word(w["word"]):
             for j in range(i + 1, min(i + 4, len(words))):
                 if _number_from_word(_normalize(words[j]["word"])) is not None:
                     return "slide-audio"
@@ -576,7 +682,7 @@ def detect_flow_from_words(
         # slide-audio: numero prima di "slide" (es. "nove ... la slide")
         if _number_from_word(w_norm) is not None:
             for j in range(i + 1, min(i + 7, len(words))):
-                if _normalize(words[j]["word"]) in ("slide", "diapositiva"):
+                if _is_slide_word(words[j]["word"]):
                     return "slide-audio"
 
         # audio-slide: "passiamo ... blocco successivo"
@@ -611,8 +717,7 @@ def reconcile_timeline(
     for s_num in range(1, total_slides + 1):
         if s_num not in timeline_raw:
             raise ValueError(
-                f"Slide {s_num} mancante dalla timeline. "
-                f"Impossibile sincronizzare senza tutti i timestamp."
+                f"Slide {s_num} mancante dalla timeline. Impossibile sincronizzare senza tutti i timestamp."
             )
         starts[s_num] = max(0.0, timeline_raw[s_num])
 
@@ -629,18 +734,18 @@ def reconcile_timeline(
     # Calcola durate esatte
     durations: list[float] = []
     for i in range(1, total_slides + 1):
-        dur = (starts[i + 1] - starts[i] if i < total_slides
-               else total_duration - starts[i])
+        dur = starts[i + 1] - starts[i] if i < total_slides else total_duration - starts[i]
         if dur <= 0:
             raise ValueError(
-                f"Sincronizzazione impossibile: durata non positiva per la slide {i} "
-                f"({dur:.1f}s). Timeline non valida."
+                f"Sincronizzazione impossibile: durata non positiva per la slide {i} ({dur:.1f}s). Timeline non valida."
             )
         durations.append(dur)
         log.info(
             "   -> Slide %d: da %.1fs a %.1fs (durata: %.1fs)",
-            i, starts[i], starts[i] + dur, dur,
+            i,
+            starts[i],
+            starts[i] + dur,
+            dur,
         )
 
     return durations
-

@@ -34,6 +34,8 @@ ignore = [
 [lint.per-file-ignores]
 # I test usano patch/assert interni in modo volutamente permissivo
 "test_*.py" = ["BLE001"]
+# Script standalone di analisi: sys.path insert e except difensivi sono voluti
+"analysis_sync.py" = ["E402", "BLE001"]
 
 [lint.flake8-bugbear]
 # Tolleranza per i "except Exception" difensivi (fallback robusti),

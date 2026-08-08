@@ -76,15 +76,17 @@ def convert_pptx_to_pdf(pptx_path: Path, out_dir: Path) -> Path:
     log.info("   Conversione PPTX -> PDF (LibreOffice)...")
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=180, check=False,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
             creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError("Conversione PPTX->PDF terminata per timeout (180s).") from None
     if proc.returncode != 0 or not pdf_path.exists():
-        raise RuntimeError(
-            f"Conversione PPTX->PDF fallita (exit={proc.returncode}):\n{proc.stderr}"
-        )
+        raise RuntimeError(f"Conversione PPTX->PDF fallita (exit={proc.returncode}):\n{proc.stderr}")
     log.info("   -> PDF convertito: %s", pdf_path)
     return pdf_path
 
@@ -112,8 +114,14 @@ def _ocr_single_slide(image_path: Path, lang: str, max_retries: int = 3) -> str:
         except (pytesseract.TesseractError, OSError) as e:
             if attempt < max_retries - 1:
                 wait = (attempt + 1) * 1.0
-                log.debug("   OCR retry %d/%d per %s (errore: %s), attesa %.0fs...",
-                          attempt + 1, max_retries, image_path.name, e, wait)
+                log.debug(
+                    "   OCR retry %d/%d per %s (errore: %s), attesa %.0fs...",
+                    attempt + 1,
+                    max_retries,
+                    image_path.name,
+                    e,
+                    wait,
+                )
                 time.sleep(wait)
             else:
                 log.debug("   OCR fallito con lang=%s, riprovo senza lingua.", lang)
@@ -183,4 +191,3 @@ def extract_slides_text_ocr(
 
     log.info("   -> OCR completato su %d slide.", total_pages)
     return slide_files, slide_texts
-

@@ -3,7 +3,6 @@ pymupdf>=1.23.0
 pillow>=10.0.0
 pytesseract>=0.3.10
 pydub>=0.25.0
-vosk>=0.3.45
 moviepy>=2.0.0
 numpy>=1.24.0
 tqdm>=4.66.0
@@ -14,8 +13,12 @@ fastembed>=0.8.0
 # Selezione slide via LLM opzionale (9Router online, endpoint OpenAI-compatibile)
 requests>=2.31.0
 
-# Opzionale: transcriber whisper (python main.py --transcriber whisper)
+# Trascrizione audio (faster-whisper, fallback CPU)
 faster-whisper>=1.0.0
+
+# Trascrizione veloce su iGPU Intel (opzionale ma raccomandato):
+# openvino>=2025.1.0
+# openvino-genai>=2025.1.0
 
 # Dipendenze di sviluppo
 mypy>=1.10.0

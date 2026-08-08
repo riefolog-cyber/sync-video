@@ -11,7 +11,13 @@ from itertools import pairwise
 
 import numpy as np
 
-from semantic_sync import semantic_timeline_from_texts
+from semantic_sync import (
+    SemanticOptions,
+    merge_short_segments,
+    refine_llm_segment_boundaries,
+    refine_ordered_llm_timeline,
+    semantic_timeline_from_texts,
+)
 from timeline import (
     detect_flow_from_words,
     extract_timeline_from_transcript,
@@ -20,7 +26,7 @@ from timeline import (
 
 
 def _words(items):
-    """Converte [(word, start)] in lista di dict Vosk."""
+    """Converte [(word, start)] in lista di dict Whisper."""
     return [{"word": w, "start": t} for w, t in items]
 
 
@@ -28,158 +34,324 @@ class TestSlideAudioFlow(unittest.TestCase):
     """Flusso slide-audio: 'slide N' esplicito."""
 
     def test_complete(self):
-        words = _words([
-            ("slide", 30.0), ("2", 30.3),
-            ("slide", 80.0), ("3", 80.3),
-        ])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=3, total_duration=120.0, flow="slide-audio"
+        words = _words(
+            [
+                ("slide", 30.0),
+                ("2", 30.3),
+                ("slide", 80.0),
+                ("3", 80.3),
+            ]
         )
+        tl = extract_timeline_from_transcript(words, total_slides=3, total_duration=120.0, flow="slide-audio")
         self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0})
 
     def test_italian_number_words(self):
-        words = _words([
-            ("slide", 30.0), ("due", 30.3),
-            ("slide", 80.0), ("tre", 80.3),
-            ("slide", 130.0), ("quattro", 130.3),
-        ])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=4, total_duration=200.0, flow="slide-audio"
+        words = _words(
+            [
+                ("slide", 30.0),
+                ("due", 30.3),
+                ("slide", 80.0),
+                ("tre", 80.3),
+                ("slide", 130.0),
+                ("quattro", 130.3),
+            ]
         )
+        tl = extract_timeline_from_transcript(words, total_slides=4, total_duration=200.0, flow="slide-audio")
         self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0, 4: 130.0})
 
     def test_italian_ordinals(self):
         # Ordinali femminili italiani ("la terza diapositiva", "la sesta slide")
         # riconosciuti come riferimenti di slide.
-        words = _words([
-            ("diapositiva", 30.0), ("la", 30.3), ("seconda", 30.6),
-            ("diapositiva", 80.0), ("la", 80.3), ("terza", 80.6),
-            ("diapositiva", 130.0), ("la", 130.3), ("quarta", 130.6),
-            ("diapositiva", 180.0), ("la", 180.3), ("quinta", 180.6),
-            ("diapositiva", 230.0), ("la", 230.3), ("sesta", 230.6),
-        ])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=6, total_duration=300.0, flow="slide-audio"
+        words = _words(
+            [
+                ("diapositiva", 30.0),
+                ("la", 30.3),
+                ("seconda", 30.6),
+                ("diapositiva", 80.0),
+                ("la", 80.3),
+                ("terza", 80.6),
+                ("diapositiva", 130.0),
+                ("la", 130.3),
+                ("quarta", 130.6),
+                ("diapositiva", 180.0),
+                ("la", 180.3),
+                ("quinta", 180.6),
+                ("diapositiva", 230.0),
+                ("la", 230.3),
+                ("sesta", 230.6),
+            ]
         )
+        tl = extract_timeline_from_transcript(words, total_slides=6, total_duration=300.0, flow="slide-audio")
         self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0, 4: 130.0, 5: 180.0, 6: 230.0})
 
     def test_ordinal_masculine(self):
-        words = _words([
-            ("slide", 30.0), ("il", 30.3), ("secondo", 30.6),
-            ("slide", 80.0), ("il", 80.3), ("terzo", 80.6),
-            ("slide", 130.0), ("il", 130.3), ("quarto", 130.6),
-        ])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=4, total_duration=200.0, flow="slide-audio"
+        words = _words(
+            [
+                ("slide", 30.0),
+                ("il", 30.3),
+                ("secondo", 30.6),
+                ("slide", 80.0),
+                ("il", 80.3),
+                ("terzo", 80.6),
+                ("slide", 130.0),
+                ("il", 130.3),
+                ("quarto", 130.6),
+            ]
         )
+        tl = extract_timeline_from_transcript(words, total_slides=4, total_duration=200.0, flow="slide-audio")
         self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0, 4: 130.0})
 
     def test_ordinal_with_article_between(self):
         # "diapositiva la numero due": numero dopo articolo e "numero"
-        words = _words([
-            ("diapositiva", 30.0), ("la", 30.3), ("numero", 30.6), ("due", 30.9),
-            ("diapositiva", 80.0), ("la", 80.3), ("numero", 80.6), ("tre", 80.9),
-        ])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=3, total_duration=120.0, flow="slide-audio"
+        words = _words(
+            [
+                ("diapositiva", 30.0),
+                ("la", 30.3),
+                ("numero", 30.6),
+                ("due", 30.9),
+                ("diapositiva", 80.0),
+                ("la", 80.3),
+                ("numero", 80.6),
+                ("tre", 80.9),
+            ]
         )
+        tl = extract_timeline_from_transcript(words, total_slides=3, total_duration=120.0, flow="slide-audio")
         self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0})
 
     def test_number_from_word_ordinals(self):
         from timeline import _number_from_word
 
         for word, expected in {
-            "primo": 1, "prima": 1, "secondo": 2, "seconda": 2,
-            "terzo": 3, "terza": 3, "quarto": 4, "quarta": 4,
-            "quinto": 5, "quinta": 5, "sesto": 6, "sesta": 6,
-            "settimo": 7, "settima": 7, "ottavo": 8, "ottava": 8,
-            "nono": 9, "nona": 9, "decimo": 10, "decima": 10,
-            "undicesimo": 11, "undicesima": 11, "dodicesimo": 12,
-            "dodicesima": 12, "tredicesimo": 13, "tredicesima": 13,
-            "ventesimo": 20, "ventesima": 20, "trentesimo": 30,
-            "trentesima": 30, "ventunesimo": 21, "ventunesima": 21,
+            "primo": 1,
+            "prima": 1,
+            "secondo": 2,
+            "seconda": 2,
+            "terzo": 3,
+            "terza": 3,
+            "quarto": 4,
+            "quarta": 4,
+            "quinto": 5,
+            "quinta": 5,
+            "sesto": 6,
+            "sesta": 6,
+            "settimo": 7,
+            "settima": 7,
+            "ottavo": 8,
+            "ottava": 8,
+            "nono": 9,
+            "nona": 9,
+            "decimo": 10,
+            "decima": 10,
+            "undicesimo": 11,
+            "undicesima": 11,
+            "dodicesimo": 12,
+            "dodicesima": 12,
+            "tredicesimo": 13,
+            "tredicesima": 13,
+            "ventesimo": 20,
+            "ventesima": 20,
+            "trentesimo": 30,
+            "trentesima": 30,
+            "ventunesimo": 21,
+            "ventunesima": 21,
         }.items():
             with self.subTest(word=word):
                 self.assertEqual(_number_from_word(word), expected)
 
     def test_number_before_slide(self):
-        words = _words([
-            ("due", 100.0), ("alla", 100.4), ("rivoluzione", 100.8),
-            ("del", 101.0), ("mahayana", 101.2), ("la", 101.5), ("slide", 101.8),
-        ])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=2, total_duration=200.0, flow="slide-audio"
+        words = _words(
+            [
+                ("due", 100.0),
+                ("alla", 100.4),
+                ("rivoluzione", 100.8),
+                ("del", 101.0),
+                ("mahayana", 101.2),
+                ("la", 101.5),
+                ("slide", 101.8),
+            ]
         )
+        tl = extract_timeline_from_transcript(words, total_slides=2, total_duration=200.0, flow="slide-audio")
         # Timestamp coerente col pattern 1: quello della parola "slide"
         self.assertEqual(tl, {1: 0.0, 2: 101.8})
 
     def test_punctuation_in_number_word(self):
-        words = _words([
-            ("slide", 30.0), ("due,", 30.3),
-            ("slide", 80.0), ("tre.", 80.3),
-        ])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=3, total_duration=120.0, flow="slide-audio"
+        words = _words(
+            [
+                ("slide", 30.0),
+                ("due,", 30.3),
+                ("slide", 80.0),
+                ("tre.", 80.3),
+            ]
         )
+        tl = extract_timeline_from_transcript(words, total_slides=3, total_duration=120.0, flow="slide-audio")
         self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0})
+
+    def test_misheard_slide_variants_sla(self):
+        # Whisper trascrive "slide due" come "sla e due": le varianti fonetiche
+        # vanno riconosciute come ancore deterministiche, non affidate all'LLM.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 390.0),
+                ("alla", 398.0),
+                ("sla", 398.3),
+                ("e", 398.4),
+                ("due", 398.6),
+                ("il", 399.0),
+                ("pappagallo", 399.5),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=3, flow="slide-audio")
+        self.assertEqual(anchors, {2: 398.3})
+
+    def test_misheard_slide_variants_asl(self):
+        # "slide cinque" trascritto da Whisper come "asl cinque".
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 1090.0),
+                ("alla", 1095.0),
+                ("asl", 1095.7),
+                ("cinque", 1096.2),
+                ("il", 1096.6),
+                ("dissenso", 1097.0),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=6, flow="slide-audio")
+        self.assertEqual(anchors, {5: 1095.7})
+
+    def test_misheard_slide_variants_sallay(self):
+        # "slide due" trascritto da whisper-small come "sallay 2".
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 390.0),
+                ("alla", 397.0),
+                ("sallay", 397.6),
+                ("2", 398.5),
+                ("il", 399.0),
+                ("pappagallo", 399.5),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=6, flow="slide-audio")
+        self.assertEqual(anchors, {2: 397.6})
+
+    def test_misheard_slide_variant_embedded_digit(self):
+        # "slide sei" trascritto come "slaib6" (numero incorporato nella parola).
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 1330.0),
+                ("alla", 1337.5),
+                ("slaib6", 1338.1),
+                ("le", 1339.0),
+                ("implicazioni", 1339.4),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=6, flow="slide-audio")
+        self.assertEqual(anchors, {6: 1338.1})
+
+    def test_common_words_with_sl_sequence_not_anchors(self):
+        # Regressione: "solo", "salvo", "sale" NON devono essere scambiate
+        # per "slide". "in realtà sei solo un passeggero" produceva un falso
+        # riferimento {6: 371.5} che faceva scartare la vera slide 6.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("in", 370.0),
+                ("realtà", 371.0),
+                ("sei", 371.2),
+                ("solo", 371.5),
+                ("un", 371.8),
+                ("passeggero", 372.0),
+                ("passiamo", 1338.0),
+                ("alla", 1338.4),
+                ("slaib6", 1338.8),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=6, flow="slide-audio")
+        self.assertEqual(anchors, {6: 1338.8})
+
+    def test_misheard_slide_variant_flow_detection(self):
+        # L'auto-detection deve riconoscere il flusso slide-audio anche con
+        # la variante misheard "sla".
+        from timeline import detect_flow_from_words
+
+        words = _words(
+            [
+                ("passiamo", 398.0),
+                ("alla", 398.1),
+                ("sla", 398.3),
+                ("e", 398.4),
+                ("due", 398.6),
+            ]
+        )
+        self.assertEqual(detect_flow_from_words(words), "slide-audio")
 
     def test_partial_returns_none(self):
         words = _words([("slide", 30.0), ("2", 30.3)])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=3, total_duration=120.0, flow="slide-audio"
-        )
+        tl = extract_timeline_from_transcript(words, total_slides=3, total_duration=120.0, flow="slide-audio")
         self.assertIsNone(tl)
 
     def test_no_signals_returns_none(self):
         words = _words([("ciao", 1.0), ("mondo", 2.0)])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=3, total_duration=120.0, flow="slide-audio"
-        )
+        tl = extract_timeline_from_transcript(words, total_slides=3, total_duration=120.0, flow="slide-audio")
         self.assertIsNone(tl)
 
     def test_empty_words_returns_none(self):
         self.assertIsNone(
-            extract_timeline_from_transcript(
-                [], total_slides=3, total_duration=120.0, flow="slide-audio"
-            )
+            extract_timeline_from_transcript([], total_slides=3, total_duration=120.0, flow="slide-audio")
         )
 
     def test_out_of_order_reference_returns_none(self):
         # Falso positivo: "slide 8" citata in anticipo (39.2s) prima della
         # slide 7 (634.3s) — il riferimento va scartato e, mancando slide,
         # la timeline è None → il fallback LLM viene attivato dal chiamante.
-        words = _words([
-            ("slide", 39.2), ("8", 39.5),
-            ("slide", 634.3), ("7", 634.6),
-        ])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=8, total_duration=925.4, flow="slide-audio"
+        words = _words(
+            [
+                ("slide", 39.2),
+                ("8", 39.5),
+                ("slide", 634.3),
+                ("7", 634.6),
+            ]
         )
+        tl = extract_timeline_from_transcript(words, total_slides=8, total_duration=925.4, flow="slide-audio")
         self.assertIsNone(tl)
 
     def test_out_of_order_reference_recuperato_con_ancore(self):
         # "slide 3" a 80.0s precede "slide 2" a 120.0s → 3 è un'anticipazione.
         # Le ancore coerenti sono {2: 120.0, 4: 160.0}; slide 3 interpolata tra 2 e 4.
-        words = _words([
-            ("slide", 120.0), ("2", 120.3),
-            ("slide", 80.0), ("3", 80.3),
-            ("slide", 160.0), ("4", 160.3),
-        ])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=4, total_duration=200.0, flow="slide-audio"
+        words = _words(
+            [
+                ("slide", 120.0),
+                ("2", 120.3),
+                ("slide", 80.0),
+                ("3", 80.3),
+                ("slide", 160.0),
+                ("4", 160.3),
+            ]
         )
+        tl = extract_timeline_from_transcript(words, total_slides=4, total_duration=200.0, flow="slide-audio")
         self.assertEqual(tl, {1: 0.0, 2: 120.0, 3: 140.0, 4: 160.0})
 
     def test_valid_timeline_not_affected_by_post_filter(self):
         # Timeline già valida: il post-filtro non deve alterarla.
-        words = _words([
-            ("slide", 30.0), ("2", 30.3),
-            ("slide", 80.0), ("3", 80.3),
-            ("slide", 130.0), ("4", 130.3),
-        ])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=4, total_duration=200.0, flow="slide-audio"
+        words = _words(
+            [
+                ("slide", 30.0),
+                ("2", 30.3),
+                ("slide", 80.0),
+                ("3", 80.3),
+                ("slide", 130.0),
+                ("4", 130.3),
+            ]
         )
+        tl = extract_timeline_from_transcript(words, total_slides=4, total_duration=200.0, flow="slide-audio")
         self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0, 4: 130.0})
 
 
@@ -187,32 +359,47 @@ class TestAudioSlideFlow(unittest.TestCase):
     """Flusso audio-slide: 'passiamo al blocco successivo'."""
 
     def test_complete(self):
-        words = _words([
-            ("passiamo", 30.0), ("al", 30.2), ("blocco", 30.4), ("successivo", 30.6),
-            ("passiamo", 100.0), ("al", 100.2), ("blocco", 100.4), ("successivo", 100.6),
-        ])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=3, total_duration=200.0, flow="audio-slide"
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("al", 30.2),
+                ("blocco", 30.4),
+                ("successivo", 30.6),
+                ("passiamo", 100.0),
+                ("al", 100.2),
+                ("blocco", 100.4),
+                ("successivo", 100.6),
+            ]
         )
+        tl = extract_timeline_from_transcript(words, total_slides=3, total_duration=200.0, flow="audio-slide")
         self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 100.0})
 
     def test_insufficient_transitions_returns_none(self):
-        words = _words([
-            ("passiamo", 30.0), ("al", 30.2), ("blocco", 30.4), ("successivo", 30.6),
-        ])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=4, total_duration=200.0, flow="audio-slide"
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("al", 30.2),
+                ("blocco", 30.4),
+                ("successivo", 30.6),
+            ]
         )
+        tl = extract_timeline_from_transcript(words, total_slides=4, total_duration=200.0, flow="audio-slide")
         self.assertIsNone(tl)
 
     def test_procediamo_variant(self):
-        words = _words([
-            ("procediamo", 30.0), ("al", 30.2), ("blocco", 30.4), ("successivo", 30.6),
-            ("passiamo", 90.0), ("al", 90.2), ("blocco", 90.4), ("successivo", 90.6),
-        ])
-        tl = extract_timeline_from_transcript(
-            words, total_slides=3, total_duration=200.0, flow="audio-slide"
+        words = _words(
+            [
+                ("procediamo", 30.0),
+                ("al", 30.2),
+                ("blocco", 30.4),
+                ("successivo", 30.6),
+                ("passiamo", 90.0),
+                ("al", 90.2),
+                ("blocco", 90.4),
+                ("successivo", 90.6),
+            ]
         )
+        tl = extract_timeline_from_transcript(words, total_slides=3, total_duration=200.0, flow="audio-slide")
         self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 90.0})
 
 
@@ -228,21 +415,35 @@ class TestDetectFlow(unittest.TestCase):
         self.assertEqual(detect_flow_from_words(words), "slide-audio")
 
     def test_number_before_slide_detected(self):
-        words = _words([
-            ("due", 100.0), ("la", 101.5), ("slide", 101.8),
-        ])
+        words = _words(
+            [
+                ("due", 100.0),
+                ("la", 101.5),
+                ("slide", 101.8),
+            ]
+        )
         self.assertEqual(detect_flow_from_words(words), "slide-audio")
 
     def test_blocco_successivo(self):
-        words = _words([
-            ("passiamo", 30.0), ("al", 30.2), ("blocco", 30.4), ("successivo", 30.6),
-        ])
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("al", 30.2),
+                ("blocco", 30.4),
+                ("successivo", 30.6),
+            ]
+        )
         self.assertEqual(detect_flow_from_words(words), "audio-slide")
 
     def test_prossimo_variant(self):
-        words = _words([
-            ("andiamo", 30.0), ("al", 30.2), ("blocco", 30.4), ("prossimo", 30.6),
-        ])
+        words = _words(
+            [
+                ("andiamo", 30.0),
+                ("al", 30.2),
+                ("blocco", 30.4),
+                ("prossimo", 30.6),
+            ]
+        )
         self.assertEqual(detect_flow_from_words(words), "audio-slide")
 
     def test_no_signals_returns_none(self):
@@ -284,15 +485,13 @@ class TestReconcileTimeline(unittest.TestCase):
             reconcile_timeline({1: 0.0, 2: 350.0}, 2, 300.0)
 
 
-
-
-
 class TestSemanticSync(unittest.TestCase):
     """Sincronizzazione semantica (embeddings): DP monotona senza LLM."""
 
     @staticmethod
     def _fake_embed(themes):
         """Embedder finto: vettore one-hot per ogni parola-tema presente."""
+
         def _embed(texts):
             out = []
             for t in texts:
@@ -303,39 +502,41 @@ class TestSemanticSync(unittest.TestCase):
                 norm = np.linalg.norm(v)
                 out.append(v / norm if norm else v)
             return np.array(out)
+
         return _embed
 
     def _blocks_sequential(self, themes, window=5.0):
         # Ogni coppia di blocchi parla dello stesso tema (transizioni ogni 10s)
-        return [
-            {"time": i * window, "text": (themes[i // 2] + " ") * 4}
-            for i in range(len(themes) * 2)
-        ]
+        return [{"time": i * window, "text": (themes[i // 2] + " ") * 4} for i in range(len(themes) * 2)]
 
     def test_in_order_perfect_match(self):
         themes = ["alfa", "beta", "gamma", "delta"]
         tl = semantic_timeline_from_texts(
             [f"{t} slide" for t in themes],
             self._blocks_sequential(themes),
-            total_slides=4, total_duration=40.0,
+            total_slides=4,
+            total_duration=40.0,
             embed_fn=self._fake_embed(themes),
-            window_seconds=5.0, min_slide_duration=2.0,
+            options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
         )
         self.assertEqual(tl, {1: 0.0, 2: 10.0, 3: 20.0, 4: 30.0})
 
     def test_monotonic_with_out_of_order_topics(self):
         themes = ["alfa", "beta", "gamma", "delta"]
         blocks = [
-            {"time": i * 5.0, "text": ("alpha" if i < 2 else
-                                       ("gamma" if i < 4 else
-                                        ("beta" if i < 6 else "delta"))) * 4}
+            {
+                "time": i * 5.0,
+                "text": ("alpha" if i < 2 else ("gamma" if i < 4 else ("beta" if i < 6 else "delta"))) * 4,
+            }
             for i in range(8)
         ]
         tl = semantic_timeline_from_texts(
-            [f"{t} slide" for t in themes], blocks,
-            total_slides=4, total_duration=40.0,
+            [f"{t} slide" for t in themes],
+            blocks,
+            total_slides=4,
+            total_duration=40.0,
             embed_fn=self._fake_embed(themes),
-            window_seconds=5.0, min_slide_duration=2.0,
+            options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
         )
         self.assertIsNotNone(tl)
         times = [tl[s] for s in sorted(tl)]
@@ -346,9 +547,10 @@ class TestSemanticSync(unittest.TestCase):
         tl = semantic_timeline_from_texts(
             [f"{t} slide" for t in themes],
             self._blocks_sequential(themes),
-            total_slides=4, total_duration=40.0,
+            total_slides=4,
+            total_duration=40.0,
             embed_fn=self._fake_embed(themes),
-            window_seconds=5.0, min_slide_duration=2.0,
+            options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
             anchors={2: 25.0},
         )
         # La slide 2 è vincolata vicino a 25s (blocco 4/5)
@@ -361,9 +563,10 @@ class TestSemanticSync(unittest.TestCase):
         tl = semantic_timeline_from_texts(
             [f"{t} slide" for t in themes],
             self._blocks_sequential(themes),
-            total_slides=4, total_duration=40.0,
+            total_slides=4,
+            total_duration=40.0,
             embed_fn=self._fake_embed(themes),
-            window_seconds=5.0, min_slide_duration=2.0,
+            options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
             anchors={2: 12.3, 3: 27.8},
         )
         self.assertEqual(tl[2], 12.3)
@@ -376,29 +579,27 @@ class TestSemanticSync(unittest.TestCase):
         tl = semantic_timeline_from_texts(
             [f"{t} slide" for t in themes],
             self._blocks_sequential(themes)[:3],
-            total_slides=4, total_duration=40.0,
+            total_slides=4,
+            total_duration=40.0,
             embed_fn=self._fake_embed(themes),
-            window_seconds=5.0,
+            options=SemanticOptions(window_seconds=5.0),
         )
         self.assertIsNone(tl)
 
     def test_build_blocks_skips_silence(self):
         from semantic_sync import build_semantic_blocks
-        words = [{"word": "ciao", "start": 1.0},
-                 {"word": "mondo", "start": 1.5}]
-        blocks = build_semantic_blocks(words, total_duration=20.0,
-                                       window_seconds=4.0, min_words=2)
+
+        words = [{"word": "ciao", "start": 1.0}, {"word": "mondo", "start": 1.5}]
+        blocks = build_semantic_blocks(words, total_duration=20.0, window_seconds=4.0, min_words=2)
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0]["time"], 0.0)
         self.assertIn("ciao", blocks[0]["text"])
 
     def test_build_blocks_first_time_is_word_timestamp(self):
         from semantic_sync import build_semantic_blocks
-        words = [{"word": "uno", "start": 0.7},
-                 {"word": "due", "start": 1.2},
-                 {"word": "tre", "start": 5.3}]
-        blocks = build_semantic_blocks(words, total_duration=20.0,
-                                       window_seconds=4.0, min_words=1)
+
+        words = [{"word": "uno", "start": 0.7}, {"word": "due", "start": 1.2}, {"word": "tre", "start": 5.3}]
+        blocks = build_semantic_blocks(words, total_duration=20.0, window_seconds=4.0, min_words=1)
         self.assertEqual(blocks[0]["first_time"], 0.7)
         self.assertEqual(blocks[1]["first_time"], 5.3)
 
@@ -411,29 +612,33 @@ class TestSemanticSync(unittest.TestCase):
             for i, t in enumerate(["alfa", "beta", "gamma", "delta"] * 2)
         ]
         tl = semantic_timeline_from_texts(
-            [f"{t} slide" for t in themes], blocks,
-            total_slides=4, total_duration=40.0,
+            [f"{t} slide" for t in themes],
+            blocks,
+            total_slides=4,
+            total_duration=40.0,
             embed_fn=self._fake_embed(themes),
-            window_seconds=5.0, min_slide_duration=2.0,
+            options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
         )
         self.assertIsNotNone(tl)
         # Verifica che le slide partano dal first_time (non dal time di finestra)
         for s in range(2, 5):
             block_time = blocks[int(tl[s] / 5.0)]["time"]
-            self.assertNotEqual(tl[s], block_time,
-                f"Slide {s}: first_time {tl[s]} non deve coincidere con time {block_time}")
-            self.assertGreater(tl[s], block_time,
-                f"Slide {s}: first_time {tl[s]} > time {block_time}")
+            self.assertNotEqual(
+                tl[s], block_time, f"Slide {s}: first_time {tl[s]} non deve coincidere con time {block_time}"
+            )
+            self.assertGreater(tl[s], block_time, f"Slide {s}: first_time {tl[s]} > time {block_time}")
 
     def test_quality_guard_rejects_noise(self):
         themes = ["alfa", "beta", "gamma", "delta"]
         # Blocchi di rumore: nessuna parola tema -> similarità zero
         blocks = [{"time": i * 5.0, "text": "zappa qwerty nullo"} for i in range(8)]
         tl = semantic_timeline_from_texts(
-            [f"{t} slide" for t in themes], blocks,
-            total_slides=4, total_duration=40.0,
+            [f"{t} slide" for t in themes],
+            blocks,
+            total_slides=4,
+            total_duration=40.0,
             embed_fn=self._fake_embed(themes),
-            window_seconds=5.0, min_slide_duration=2.0,
+            options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
         )
         self.assertIsNone(tl)
 
@@ -442,12 +647,16 @@ class TestSemanticSync(unittest.TestCase):
         # blocchi: lo z-score la porta a ~0 (neutra), mentre i picchi locali
         # delle altre slide emergono sopra il loro baseline.
         from semantic_sync import zscore_matrix
-        sim = np.array([
-            [0.45, 0.10],  # blocco 0: picco locale slide 1
-            [0.45, 0.10],  # blocco 1: picco locale slide 1
-            [0.45, 0.95],  # blocco 2: picco locale slide 2
-            [0.45, 0.10],  # blocco 3
-        ], dtype=np.float64)
+
+        sim = np.array(
+            [
+                [0.45, 0.10],  # blocco 0: picco locale slide 1
+                [0.45, 0.10],  # blocco 1: picco locale slide 1
+                [0.45, 0.95],  # blocco 2: picco locale slide 2
+                [0.45, 0.10],  # blocco 3
+            ],
+            dtype=np.float64,
+        )
         z = zscore_matrix(sim)
         # Slide 1 (uniforme): tutti gli z ~0 -> non vince mai
         self.assertTrue(np.all(np.abs(z[:, 0]) < 1e-6))
@@ -457,6 +666,7 @@ class TestSemanticSync(unittest.TestCase):
     def test_zscore_constant_column_is_zero(self):
         # Colonna costante (std=0) -> z = 0 (neutra, nessuna divisione per 0)
         from semantic_sync import zscore_matrix
+
         sim = np.array([[0.3, 0.1], [0.3, 0.9]], dtype=np.float64)
         z = zscore_matrix(sim)
         self.assertTrue(np.all(np.abs(z[:, 0]) < 1e-6))
@@ -465,11 +675,15 @@ class TestSemanticSync(unittest.TestCase):
         # Slide 3 "riepilogo" con similarità uniforme su tutti i blocchi:
         # la competizione softmax deve favorire i picchi locali delle altre slide.
         from semantic_sync import competition_matrix
-        sim = np.array([
-            [0.50, 0.30, 0.40, 0.40],  # blocco 0: picco slide 1
-            [0.30, 0.55, 0.40, 0.40],  # blocco 1: picco slide 2
-            [0.35, 0.35, 0.40, 0.60],  # blocco 2: picco slide 4
-        ], dtype=np.float64)
+
+        sim = np.array(
+            [
+                [0.50, 0.30, 0.40, 0.40],  # blocco 0: picco slide 1
+                [0.30, 0.55, 0.40, 0.40],  # blocco 1: picco slide 2
+                [0.35, 0.35, 0.40, 0.60],  # blocco 2: picco slide 4
+            ],
+            dtype=np.float64,
+        )
         comp = competition_matrix(sim, temperature=0.2)
         for row, winner in zip(comp, (0, 1, 3), strict=True):
             self.assertEqual(int(np.argmax(row)), winner)
@@ -480,6 +694,7 @@ class TestSemanticSync(unittest.TestCase):
     def test_weak_signal_detects_out_of_order_audio(self):
         # Guard-rail: audio che non segue l'ordine delle slide -> segnale debole.
         from semantic_sync import signal_quality_report, weak_signal
+
         # Slide 1..4 con picchi nel parlato in ordine diverso (5,2,4,3)
         sim = np.zeros((5, 4))
         sim[:, 0] = np.arange(5)  # picco slide 1 = blocco 4
@@ -492,15 +707,19 @@ class TestSemanticSync(unittest.TestCase):
     def test_signal_quality_detects_confusable_slides(self):
         # Guard-rail: slide quasi-duplicati + concordanza moderata -> debole.
         from semantic_sync import signal_quality_report, weak_signal
+
         # Due slide con embedding IDENTICI -> cosine 1.0 (quasi-duplicati)
         slide_emb = np.array([[1.0, 0.0], [1.0, 0.0]], dtype=np.float64)
         # Concordanza moderata (0.5): picco slide 2 in blocco 0, slide 1 in 1
-        sim = np.array([
-            [0.2, 1.0],  # blocco 0: picco slide 2
-            [1.0, 0.2],  # blocco 1: picco slide 1
-            [0.5, 0.5],
-            [0.5, 0.5],
-        ], dtype=np.float64)
+        sim = np.array(
+            [
+                [0.2, 1.0],  # blocco 0: picco slide 2
+                [1.0, 0.2],  # blocco 1: picco slide 1
+                [0.5, 0.5],
+                [0.5, 0.5],
+            ],
+            dtype=np.float64,
+        )
         report = signal_quality_report(sim, slide_emb)
         self.assertEqual(report["confusability"], 1.0)
         self.assertTrue(weak_signal(report))
@@ -509,11 +728,15 @@ class TestSemanticSync(unittest.TestCase):
         # Slide simili MA audio che segue perfettamente l'ordine:
         # nessun falso positivo (caso slide derivate dal podcast).
         from semantic_sync import signal_quality_report, weak_signal
+
         slide_emb = np.array([[1.0, 0.0], [1.0, 0.0]], dtype=np.float64)
-        sim = np.array([
-            [1.0, 0.2],  # blocco 0: picco slide 1
-            [0.2, 1.0],  # blocco 1: picco slide 2
-        ], dtype=np.float64)
+        sim = np.array(
+            [
+                [1.0, 0.2],  # blocco 0: picco slide 1
+                [0.2, 1.0],  # blocco 1: picco slide 2
+            ],
+            dtype=np.float64,
+        )
         report = signal_quality_report(sim, slide_emb)
         self.assertEqual(report["confusability"], 1.0)
         self.assertFalse(weak_signal(report))
@@ -521,6 +744,7 @@ class TestSemanticSync(unittest.TestCase):
     def test_signal_quality_ok_in_order(self):
         # Guard-rail: audio in ordine -> segnale buono (nessun falso positivo).
         from semantic_sync import signal_quality_report, weak_signal
+
         themes = ["alfa", "beta", "gamma", "delta"]
         embed_fn = self._fake_embed(themes)
         slide_emb = embed_fn([f"{t} slide" for t in themes])
@@ -547,6 +771,7 @@ class TestFreeOrderSelection(unittest.TestCase):
                 norm = np.linalg.norm(v)
                 out.append(v / norm if norm else v)
             return np.array(out)
+
         return _embed
 
     @staticmethod
@@ -554,28 +779,24 @@ class TestFreeOrderSelection(unittest.TestCase):
         """Blocchi: 2 per tema, in un ordine volutamente FUORI sequenza."""
         seq = []
         for i, t in enumerate(themes):
-            seq.append({"time": i * window, "first_time": i * window + 1.0,
-                        "text": t * 4})
-            seq.append({"time": i * window + window / 2, "first_time": i * window + window / 2 + 0.5,
-                        "text": t * 4})
+            seq.append({"time": i * window, "first_time": i * window + 1.0, "text": t * 4})
+            seq.append({"time": i * window + window / 2, "first_time": i * window + window / 2 + 0.5, "text": t * 4})
         return seq
 
     def test_out_of_order_repeats(self):
         # Ordine audio: alfa, gamma, beta, gamma (NON 1,2,3,4).
         # La selezione libera deve seguire il contenuto: 1, 3, 2, 3.
         from semantic_sync import free_order_segments_from_texts
+
         themes = ["alfa", "beta", "gamma", "delta"]
-        blocks = (
-            self._blocks(["alfa"])
-            + self._blocks(["gamma"])
-            + self._blocks(["beta"])
-            + self._blocks(["gamma"])
-        )
+        blocks = self._blocks(["alfa"]) + self._blocks(["gamma"]) + self._blocks(["beta"]) + self._blocks(["gamma"])
         segs = free_order_segments_from_texts(
-            [f"{t} slide" for t in themes], blocks,
-            total_slides=4, total_duration=40.0,
+            [f"{t} slide" for t in themes],
+            blocks,
+            total_slides=4,
+            total_duration=40.0,
             embed_fn=self._fake_embed(themes),
-            window_seconds=5.0, min_segment_seconds=5.0,
+            options=SemanticOptions(window_seconds=5.0, min_segment_seconds=5.0),
         )
         self.assertIsNotNone(segs)
         order = [int(s["slide"]) for s in segs]
@@ -588,18 +809,21 @@ class TestFreeOrderSelection(unittest.TestCase):
         # Scenario del caso reale: si parla di "overt" (slide 4) a inizio e
         # di nuovo a fine audio; nel mezzo altri temi. Slide 4 appare 2 volte.
         from semantic_sync import free_order_segments_from_texts
+
         themes = ["alfa", "overt", "beta", "gamma"]
         blocks = (
-            self._blocks(["overt"])      # slide 2 (overt)
-            + self._blocks(["beta"])     # slide 3
-            + self._blocks(["gamma"])    # slide 4
-            + self._blocks(["overt"])    # slide 2 di nuovo
+            self._blocks(["overt"])  # slide 2 (overt)
+            + self._blocks(["beta"])  # slide 3
+            + self._blocks(["gamma"])  # slide 4
+            + self._blocks(["overt"])  # slide 2 di nuovo
         )
         segs = free_order_segments_from_texts(
-            [f"{t} slide" for t in themes], blocks,
-            total_slides=4, total_duration=40.0,
+            [f"{t} slide" for t in themes],
+            blocks,
+            total_slides=4,
+            total_duration=40.0,
             embed_fn=self._fake_embed(themes),
-            window_seconds=5.0, min_segment_seconds=5.0,
+            options=SemanticOptions(window_seconds=5.0, min_segment_seconds=5.0),
         )
         self.assertIsNotNone(segs)
         order = [int(s["slide"]) for s in segs]
@@ -609,17 +833,19 @@ class TestFreeOrderSelection(unittest.TestCase):
         # Alternanza rapida 1,2,1,2 con segmenti da 1 blocco (5s < min 12s):
         # l'anti-flicker deve fonderli in segmenti lunghi, non alternare.
         from semantic_sync import free_order_segments_from_texts
+
         themes = ["alfa", "beta"]
         blocks = [
-            {"time": i * 5.0, "first_time": i * 5.0 + 1.0,
-             "text": ("alfa" if i % 2 == 0 else "beta") * 4}
+            {"time": i * 5.0, "first_time": i * 5.0 + 1.0, "text": ("alfa" if i % 2 == 0 else "beta") * 4}
             for i in range(8)
         ]
         segs = free_order_segments_from_texts(
-            [f"{t} slide" for t in themes], blocks,
-            total_slides=2, total_duration=40.0,
+            [f"{t} slide" for t in themes],
+            blocks,
+            total_slides=2,
+            total_duration=40.0,
             embed_fn=self._fake_embed(themes),
-            window_seconds=5.0, min_segment_seconds=12.0,
+            options=SemanticOptions(window_seconds=5.0, min_segment_seconds=12.0),
         )
         self.assertIsNotNone(segs)
         # Con min_segment_seconds=12 (2.4 blocchi) l'alternanza si stabilizza
@@ -634,6 +860,7 @@ class TestFreeOrderSelection(unittest.TestCase):
         import numpy as np
 
         from semantic_sync import _smooth_segments
+
         # 12 blocchi: 4x slide1, 1x slide2 (corto), 7x slide1
         best = np.array([1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1])
         segs = _smooth_segments(best, min_blocks=2)
@@ -644,13 +871,16 @@ class TestFreeOrderSelection(unittest.TestCase):
 
     def test_too_few_blocks_returns_none(self):
         from semantic_sync import free_order_segments_from_texts
+
         themes = ["alfa", "beta", "gamma", "delta"]
         blocks = self._blocks(["alfa"])[:1]  # 1 solo blocco
         segs = free_order_segments_from_texts(
-            [f"{t} slide" for t in themes], blocks,
-            total_slides=4, total_duration=40.0,
+            [f"{t} slide" for t in themes],
+            blocks,
+            total_slides=4,
+            total_duration=40.0,
             embed_fn=self._fake_embed(themes),
-            window_seconds=5.0,
+            options=SemanticOptions(window_seconds=5.0),
         )
         self.assertIsNone(segs)
 
@@ -658,6 +888,7 @@ class TestFreeOrderSelection(unittest.TestCase):
         # Con silenzio iniziale (prima parola a 2.0s) il video deve comunque
         # partire da 0.0, come nel flusso classico (niente audio perso).
         from semantic_sync import free_order_segments_from_texts
+
         themes = ["alfa", "beta"]
         blocks = [
             {"time": 0.0, "first_time": 2.0, "text": "alfa alfa alfa"},
@@ -665,10 +896,12 @@ class TestFreeOrderSelection(unittest.TestCase):
             {"time": 10.0, "first_time": 10.5, "text": "beta beta beta"},
         ]
         segs = free_order_segments_from_texts(
-            [f"{t} slide" for t in themes], blocks,
-            total_slides=2, total_duration=20.0,
+            [f"{t} slide" for t in themes],
+            blocks,
+            total_slides=2,
+            total_duration=20.0,
             embed_fn=self._fake_embed(themes),
-            window_seconds=5.0, min_segment_seconds=5.0,
+            options=SemanticOptions(window_seconds=5.0, min_segment_seconds=5.0),
         )
         self.assertIsNotNone(segs)
         self.assertEqual(float(segs[0]["start"]), 0.0)
@@ -676,14 +909,16 @@ class TestFreeOrderSelection(unittest.TestCase):
     def test_quality_guard_rejects_noise(self):
         # Blocchi di rumore (nessun tema): similarità zero -> None
         from semantic_sync import free_order_segments_from_texts
+
         themes = ["alfa", "beta", "gamma", "delta"]
-        blocks = [{"time": i * 5.0, "first_time": i * 5.0 + 0.5,
-                   "text": "zappa qwerty nullo"} for i in range(10)]
+        blocks = [{"time": i * 5.0, "first_time": i * 5.0 + 0.5, "text": "zappa qwerty nullo"} for i in range(10)]
         segs = free_order_segments_from_texts(
-            [f"{t} slide" for t in themes], blocks,
-            total_slides=4, total_duration=50.0,
+            [f"{t} slide" for t in themes],
+            blocks,
+            total_slides=4,
+            total_duration=50.0,
             embed_fn=self._fake_embed(themes),
-            window_seconds=5.0,
+            options=SemanticOptions(window_seconds=5.0),
         )
         self.assertIsNone(segs)
 
@@ -694,21 +929,29 @@ class TestEmbedModelFallback(unittest.TestCase):
     @staticmethod
     def _patch_text_embedding(side_effect):
         from unittest.mock import patch
+
         return patch("semantic_sync.TextEmbedding", side_effect=side_effect)
 
-    def _load(self, primary="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
-              alternate="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"):
+    def _load(
+        self,
+        primary="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+        alternate="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    ):
         from semantic_sync import _load_embed_model
+
         return _load_embed_model(primary, ".cache/embedding_model", alternate_name=alternate)
 
     def test_fallback_used_when_primary_fails(self):
         from semantic_sync import _load_embed_model
+
         class FakeModel:
             pass
+
         def side_effect(model_name, cache_dir):
             if "mpnet" in model_name:
                 raise RuntimeError("download interrotto")
             return FakeModel()
+
         with self._patch_text_embedding(side_effect):
             model = _load_embed_model(
                 "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
@@ -719,24 +962,32 @@ class TestEmbedModelFallback(unittest.TestCase):
 
     def test_primary_preferred_over_alternate(self):
         from semantic_sync import _load_embed_model
+
         class FakeModel:
             pass
+
         called = []
+
         def side_effect(model_name, cache_dir):
             called.append(model_name)
             return FakeModel()
+
         with self._patch_text_embedding(side_effect):
             _load_embed_model("primary-model", ".cache", alternate_name="alternate-model")
         self.assertEqual(called, ["primary-model"])
 
     def test_same_primary_and_alternate_tried_once(self):
         from semantic_sync import _load_embed_model
+
         class FakeModel:
             pass
+
         called = []
+
         def side_effect(model_name, cache_dir):
             called.append(model_name)
             return FakeModel()
+
         with self._patch_text_embedding(side_effect):
             _load_embed_model("only-model", ".cache", alternate_name="only-model")
         self.assertEqual(called, ["only-model"])
@@ -744,6 +995,264 @@ class TestEmbedModelFallback(unittest.TestCase):
     def test_both_fail_returns_none(self):
         def side_effect(model_name, cache_dir):
             raise RuntimeError("rete assente")
+
         with self._patch_text_embedding(side_effect):
             model = self._load()
         self.assertIsNone(model)
+
+
+class TestLlmSegmentPostProcessing(unittest.TestCase):
+    """Post-elaborazione dei segmenti LLM (flusso libero): confini a livello
+    di parola (refine) + merge anti-flicker dei segmenti corti."""
+
+    # ------------------------------------------------------------------
+    # merge_short_segments
+    # ------------------------------------------------------------------
+    def test_merge_short_trailing_segment(self):
+        # L'ultimo chunk parziale (10s) viene assorbito dal precedente.
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 100.0},
+            {"slide": 2, "start": 100.0, "end": 110.0},
+        ]
+        out = merge_short_segments(segments, min_seconds=15.0)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["slide"], 1)
+        self.assertAlmostEqual(out[0]["start"], 0.0)
+        self.assertAlmostEqual(out[0]["end"], 110.0)
+
+    def test_merge_short_internal_absorbs_into_longer_neighbor(self):
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 100.0},
+            {"slide": 3, "start": 100.0, "end": 110.0},  # corto
+            {"slide": 2, "start": 110.0, "end": 300.0},
+        ]
+        out = merge_short_segments(segments, min_seconds=15.0)
+        # Assorbito dal vicino più lungo (slide 2, 190s > 100s).
+        self.assertEqual([s["slide"] for s in out], [1, 2])
+        self.assertAlmostEqual(out[1]["start"], 100.0)
+        self.assertAlmostEqual(out[1]["end"], 300.0)
+
+    def test_merge_keeps_long_segments(self):
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 50.0},
+            {"slide": 2, "start": 50.0, "end": 100.0},
+        ]
+        self.assertEqual(merge_short_segments(segments, min_seconds=15.0), segments)
+
+    def test_merge_unites_adjacent_same_slide_after_absorption(self):
+        # Il corto (slide 3, 100-110) assorbito dal vicino più lungo (slide 1)
+        # lascia due segmenti adiacenti con la STESSA slide (1): uniti in uno.
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 100.0},
+            {"slide": 3, "start": 100.0, "end": 110.0},  # corto
+            {"slide": 1, "start": 110.0, "end": 200.0},
+        ]
+        out = merge_short_segments(segments, min_seconds=15.0)
+        self.assertEqual([s["slide"] for s in out], [1])
+        self.assertAlmostEqual(out[0]["start"], 0.0)
+        self.assertAlmostEqual(out[0]["end"], 200.0)
+
+    # ------------------------------------------------------------------
+    # refine_llm_segment_boundaries
+    # ------------------------------------------------------------------
+    def test_refine_moves_boundary_to_topic_change(self):
+        # Fino a 40s si parla del tema A (slide 1), poi del tema B (slide 2).
+        words = []
+        t = 0.0
+        for _ in range(20):
+            words.append({"word": "tema_a", "start": t})
+            t += 2.0
+        for _ in range(20):
+            words.append({"word": "tema_b", "start": t})
+            t += 2.0
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 30.0},
+            {"slide": 2, "start": 30.0, "end": 80.0},
+        ]
+
+        def embed_fn(texts):
+            vecs = []
+            for text in texts:
+                v = np.array([text.count("tema_a"), text.count("tema_b")], dtype=np.float32)
+                v = v / max(np.linalg.norm(v), 1e-9)
+                vecs.append(v)
+            return np.stack(vecs)
+
+        out = refine_llm_segment_boundaries(
+            segments,
+            words,
+            ["tema_a", "tema_b"],
+            embed_fn,
+            window_seconds=30.0,
+            min_segment_seconds=5.0,
+            context_seconds=10.0,
+        )
+        # Il confine si sposta al punto di cambio argomento (40s) e i due
+        # segmenti restano contigui.
+        self.assertGreater(out[1]["start"], 30.0)
+        self.assertLessEqual(out[1]["start"], 42.0)
+        self.assertAlmostEqual(out[0]["end"], out[1]["start"])
+
+    def test_refine_no_move_without_improvement(self):
+        # Embedding piatto: nessun candidato è meglio del confine attuale.
+        words = [{"word": "x", "start": float(i)} for i in range(100)]
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 50.0},
+            {"slide": 2, "start": 50.0, "end": 100.0},
+        ]
+
+        def embed_fn(texts):
+            return np.full((len(texts), 2), 1.0 / np.sqrt(2), dtype=np.float32)
+
+        out = refine_llm_segment_boundaries(segments, words, ["a", "b"], embed_fn)
+        self.assertEqual(len(out), 2)
+        self.assertAlmostEqual(out[1]["start"], 50.0)
+
+    def test_refine_boundary_never_leaves_segment_limits(self):
+        # Il cambio argomento (tema_b) avviene a 75s, OLTRE il limite hi del
+        # confine (70s = t_current + window): il confine si sposta al massimo
+        # fino a hi, senza superare i limiti del segmento.
+        words = [{"word": "tema_a", "start": float(i)} for i in range(75)]
+        words += [{"word": "tema_b", "start": float(i)} for i in range(75, 130)]
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 50.0},
+            {"slide": 2, "start": 50.0, "end": 100.0},
+        ]
+
+        def embed_fn(texts):
+            vecs = []
+            for text in texts:
+                v = np.array([text.count("tema_a"), text.count("tema_b")], dtype=np.float32)
+                v = v / max(np.linalg.norm(v), 1e-9)
+                vecs.append(v)
+            return np.stack(vecs)
+
+        out = refine_llm_segment_boundaries(
+            segments,
+            words,
+            ["tema_a", "tema_b"],
+            embed_fn,
+            window_seconds=20.0,
+            min_segment_seconds=8.0,
+            context_seconds=10.0,
+        )
+        # Clampa a hi = t_current + window = 70 (il cambio argomento è a 75s).
+        self.assertAlmostEqual(out[1]["start"], 70.0)
+        self.assertAlmostEqual(out[0]["end"], out[1]["start"])
+
+    def test_refine_fallback_on_embedding_error(self):
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 30.0},
+            {"slide": 2, "start": 30.0, "end": 60.0},
+        ]
+
+        def embed_fn(texts):
+            raise RuntimeError("modello non disponibile")
+
+        out = refine_llm_segment_boundaries(segments, [{"word": "x", "start": 5.0}], ["a", "b"], embed_fn)
+        self.assertEqual(out, segments)
+
+    def test_refine_restricted_to_refine_slides(self):
+        # ``refine_slides`` limita il raffinamento: il confine della slide 2
+        # (non candidata) resta ESATTAMENTE dov'è, quello della slide 3
+        # (candidata) si sposta al cambio argomento reale (80s).
+        words = [{"word": "tema_a", "start": float(i)} for i in range(0, 40, 2)]
+        words += [{"word": "tema_b", "start": float(i)} for i in range(40, 80, 2)]
+        words += [{"word": "tema_c", "start": float(i)} for i in range(80, 120, 2)]
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 50.0},
+            {"slide": 2, "start": 50.0, "end": 90.0},
+            {"slide": 3, "start": 90.0, "end": 130.0},
+        ]
+
+        def embed_fn(texts):
+            vecs = []
+            for text in texts:
+                v = np.array(
+                    [text.count("tema_a"), text.count("tema_b"), text.count("tema_c")], dtype=np.float32
+                )
+                v = v / max(np.linalg.norm(v), 1e-9)
+                vecs.append(v)
+            return np.stack(vecs)
+
+        out = refine_llm_segment_boundaries(
+            segments,
+            words,
+            ["tema_a", "tema_b", "tema_c"],
+            embed_fn,
+            window_seconds=30.0,
+            min_segment_seconds=5.0,
+            context_seconds=10.0,
+            refine_slides={3},
+        )
+        # La slide 2 non era candidata: confine invariato.
+        self.assertAlmostEqual(out[1]["start"], 50.0)
+        # La slide 3 era candidata: confine spostato al cambio argomento (80s).
+        self.assertAlmostEqual(out[2]["start"], 80.0)
+        self.assertAlmostEqual(out[1]["end"], out[2]["start"])
+
+    def test_refine_ordered_llm_timeline(self):
+        # Flusso ordinato: la slide 2 ha ancora esatta a 25s (vincolo
+        # inviolabile); le slide 3 e 4 (senza ancora) partono su una griglia
+        # chunk (55s e 95s) e vengono raffinati ai cambi argomento reali.
+        words = [{"word": "tema_a", "start": float(i)} for i in range(0, 40, 2)]
+        words += [{"word": "tema_b", "start": float(i)} for i in range(40, 80, 2)]
+        words += [{"word": "tema_c", "start": float(i)} for i in range(80, 120, 2)]
+        words += [{"word": "tema_d", "start": float(i)} for i in range(120, 160, 2)]
+        timeline = {1: 0.0, 2: 25.0, 3: 55.0, 4: 95.0}
+        anchors = {2: 25.0}
+
+        def embed_fn(texts):
+            vecs = []
+            for text in texts:
+                v = np.array(
+                    [
+                        text.count("tema_a"),
+                        text.count("tema_b"),
+                        text.count("tema_c"),
+                        text.count("tema_d"),
+                    ],
+                    dtype=np.float32,
+                )
+                v = v / max(np.linalg.norm(v), 1e-9)
+                vecs.append(v)
+            return np.stack(vecs)
+
+        out = refine_ordered_llm_timeline(
+            timeline,
+            anchors,
+            words,
+            ["tema_a", "tema_b", "tema_c", "tema_d"],
+            total_duration=160.0,
+            embed_fn=embed_fn,
+            window_seconds=30.0,
+            min_segment_seconds=5.0,
+        )
+        # Ancora esatta preservata; slide senza ancora ai cambi argomento (80/120).
+        self.assertAlmostEqual(out[1], 0.0)
+        self.assertAlmostEqual(out[2], 25.0)
+        self.assertAlmostEqual(out[3], 80.0)
+        self.assertAlmostEqual(out[4], 120.0)
+        # Monotonicita strettamente crescente conservata.
+        times = [out[s] for s in sorted(out)]
+        self.assertTrue(all(b > a for a, b in pairwise(times)))
+
+    def test_refine_ordered_all_anchored_no_change(self):
+        # Tutte le slide hanno ancora esplicita: nessun candidato, timeline
+        # restituita invariata (le ancore non si toccano mai).
+        words = [{"word": "x", "start": float(i)} for i in range(100)]
+        timeline = {1: 0.0, 2: 30.0, 3: 60.0}
+        anchors = {2: 30.0, 3: 60.0}
+
+        def embed_fn(texts):
+            return np.full((len(texts), 2), 1.0 / np.sqrt(2), dtype=np.float32)
+
+        out = refine_ordered_llm_timeline(
+            timeline,
+            anchors,
+            words,
+            ["a", "b", "c"],
+            total_duration=100.0,
+            embed_fn=embed_fn,
+        )
+        self.assertEqual(out, timeline)

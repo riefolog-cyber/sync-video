@@ -35,10 +35,7 @@ class TestBuildChunks(unittest.TestCase):
 
     def _words(self):
         # parole ogni 5s per 100s
-        return [
-            {"word": f"parola{i}", "start": i * 5.0}
-            for i in range(20)
-        ]
+        return [{"word": f"parola{i}", "start": i * 5.0} for i in range(20)]
 
     def test_chunks_cover_duration(self):
         chunks = build_llm_chunks(self._words(), total_duration=100.0, chunk_seconds=30.0)
@@ -65,7 +62,8 @@ class TestPrompt(unittest.TestCase):
         slides = ["Slide uno", "Slide due"]
         chunks = build_llm_chunks(
             [{"word": "ciao", "start": 1.0}, {"word": "mondo", "start": 2.0}],
-            total_duration=30.0, chunk_seconds=30.0,
+            total_duration=30.0,
+            chunk_seconds=30.0,
         )
         system, user = build_prompt(slides, chunks)
         self.assertIn("1. Slide uno", user)
@@ -77,18 +75,28 @@ class TestPrompt(unittest.TestCase):
         # Le regole anti-errore devono comparire nel prompt di sistema
         system, _ = build_prompt(
             ["Slide a", "Slide b"],
-            build_llm_chunks([{"word": "ciao", "start": 1.0}],
-                             total_duration=30.0, chunk_seconds=30.0),
+            build_llm_chunks([{"word": "ciao", "start": 1.0}], total_duration=30.0, chunk_seconds=30.0),
         )
         self.assertIn("RIASSUNTO", system)
         self.assertIn("transizione", system.lower())
         self.assertIn("RIPETI", system)
 
+    def test_prompt_has_conclusion_and_dominant_topic_rules(self):
+        # Le nuove regole anti-errore (niente slide di sintesi anticipata sul
+        # solo tema guida, chunk con doppio argomento assegnato al dominante)
+        # devono comparire nel prompt di sistema.
+        system, _ = build_prompt(
+            ["Slide a", "Slide b"],
+            build_llm_chunks([{"word": "ciao", "start": 1.0}], total_duration=30.0, chunk_seconds=30.0),
+        )
+        self.assertIn("tema guida", system)
+        self.assertIn("cassetta degli attrezzi", system)
+        self.assertIn("MAGGIORE parte", system)
+
     def test_prompt_cleans_slide_watermark(self):
         # Il rumore OCR (watermark NotebookLM) non deve arrivare all'LLM
         slides = ["Contenuto utile fù NotebookLM"]
-        chunks = build_llm_chunks([{"word": "ciao", "start": 1.0}],
-                                  total_duration=30.0, chunk_seconds=30.0)
+        chunks = build_llm_chunks([{"word": "ciao", "start": 1.0}], total_duration=30.0, chunk_seconds=30.0)
         _, user = build_prompt(slides, chunks)
         self.assertIn("Contenuto utile", user)
         self.assertNotIn("NotebookLM", user)
@@ -128,10 +136,13 @@ class TestReviewPrompt(unittest.TestCase):
     def test_contains_mapping_and_format(self):
         chunks = build_llm_chunks(
             [{"word": "ciao", "start": 1.0}, {"word": "mondo", "start": 31.0}],
-            total_duration=60.0, chunk_seconds=30.0,
+            total_duration=60.0,
+            chunk_seconds=30.0,
         )
         system, user = build_review_prompt(
-            ["Slide a", "Slide b"], chunks, [1, 2],
+            ["Slide a", "Slide b"],
+            chunks,
+            [1, 2],
         )
         self.assertIn("chunk 1: slide 1", user)
         self.assertIn("chunk 2: slide 2", user)
@@ -145,14 +156,16 @@ class TestChunkSlidesFromSegments(unittest.TestCase):
     def test_reconstructs_assignment(self):
         chunks = build_llm_chunks(
             [{"word": "w", "start": 5.0}, {"word": "x", "start": 35.0}],
-            total_duration=60.0, chunk_seconds=30.0,
+            total_duration=60.0,
+            chunk_seconds=30.0,
         )
         segments = [
             {"slide": 1, "start": 0.0, "end": 30.0},
             {"slide": 4, "start": 30.0, "end": 60.0},
         ]
         self.assertEqual(
-            _chunk_slides_from_segments(chunks, segments), [1, 4],
+            _chunk_slides_from_segments(chunks, segments),
+            [1, 4],
         )
 
     def test_uses_first_time_not_window_start(self):
@@ -173,7 +186,8 @@ class TestChunkSlidesFromSegments(unittest.TestCase):
         # start=30.0 cadrebbe nel segmento 1 (sbagliato); first_time=55.0
         # cade correttamente nel segmento 2.
         self.assertEqual(
-            _chunk_slides_from_segments(chunks, segments), [1, 2, 3],
+            _chunk_slides_from_segments(chunks, segments),
+            [1, 2, 3],
         )
 
 
@@ -182,25 +196,33 @@ class TestReview(unittest.TestCase):
 
     @staticmethod
     def _ep(name, url):
-        return {"name": name, "url": url, "model": f"model-{name}",
-                "api_key": "", "timeout": 5}
+        return {"name": name, "url": url, "model": f"model-{name}", "api_key": "", "timeout": 5}
 
     def _no_cache(self):
-        return patch("llm_sync._load_llm_cache", return_value=None), \
-            patch("llm_sync._save_llm_cache"), \
-            patch("llm_sync.router_alive", return_value=True)
+        return (
+            patch("llm_sync._load_llm_cache", return_value=None),
+            patch("llm_sync._save_llm_cache"),
+            patch("llm_sync.router_alive", return_value=True),
+        )
 
     def test_returns_diffs_when_disagree(self):
         chunks = build_llm_chunks(
             [{"word": "ciao", "start": 1.0}, {"word": "mondo", "start": 31.0}],
-            total_duration=60.0, chunk_seconds=30.0,
+            total_duration=60.0,
+            chunk_seconds=30.0,
         )
         # Proposta: chunk 1->1, chunk 2->2 ; il reviewer corregge il chunk 2 a 3
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint",
-                   return_value='[{"chunk": 1, "slide": 1}, {"chunk": 2, "slide": 3}]'):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value='[{"chunk": 1, "slide": 1}, {"chunk": 2, "slide": 3}]'),
+        ):
             diffs = review_llm_timeline(
-                ["slide a", "slide b", "slide c"], chunks, [1, 2], total_slides=3,
+                ["slide a", "slide b", "slide c"],
+                chunks,
+                [1, 2],
+                total_slides=3,
                 endpoints=[self._ep("9router", "http://x")],
             )
         self.assertIsNotNone(diffs)
@@ -209,48 +231,74 @@ class TestReview(unittest.TestCase):
     def test_empty_diffs_when_agree(self):
         chunks = build_llm_chunks(
             [{"word": "ciao", "start": 1.0}, {"word": "mondo", "start": 31.0}],
-            total_duration=60.0, chunk_seconds=30.0,
+            total_duration=60.0,
+            chunk_seconds=30.0,
         )
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint",
-                   return_value='[{"chunk": 1, "slide": 1}, {"chunk": 2, "slide": 2}]'):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value='[{"chunk": 1, "slide": 1}, {"chunk": 2, "slide": 2}]'),
+        ):
             diffs = review_llm_timeline(
-                ["slide a", "slide b"], chunks, [1, 2], total_slides=2,
+                ["slide a", "slide b"],
+                chunks,
+                [1, 2],
+                total_slides=2,
                 endpoints=[self._ep("9router", "http://x")],
             )
         self.assertEqual(diffs, [])
 
     def test_no_endpoints_returns_none(self):
         chunks = build_llm_chunks(
-            [{"word": "ciao", "start": 1.0}], total_duration=30.0, chunk_seconds=30.0,
+            [{"word": "ciao", "start": 1.0}],
+            total_duration=30.0,
+            chunk_seconds=30.0,
         )
         diffs = review_llm_timeline(
-            ["slide a"], chunks, [1], total_slides=1, endpoints=[],
+            ["slide a"],
+            chunks,
+            [1],
+            total_slides=1,
+            endpoints=[],
         )
         self.assertIsNone(diffs)
 
     def test_unreachable_returns_none(self):
         chunks = build_llm_chunks(
-            [{"word": "ciao", "start": 1.0}], total_duration=30.0, chunk_seconds=30.0,
+            [{"word": "ciao", "start": 1.0}],
+            total_duration=30.0,
+            chunk_seconds=30.0,
         )
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint", return_value=None):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value=None),
+        ):
             diffs = review_llm_timeline(
-                ["slide a"], chunks, [1], total_slides=1,
+                ["slide a"],
+                chunks,
+                [1],
+                total_slides=1,
                 endpoints=[self._ep("9router", "http://x")],
             )
         self.assertIsNone(diffs)
 
     def test_review_invoked_by_timeline_when_flag_set(self):
         # Con review=True la timeline deve chiamare il secondo passaggio.
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint",
-                   return_value='[{"chunk": 1, "slide": 1}]'), \
-             patch("llm_sync.review_llm_timeline", return_value=[]) as mock_review:
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value='[{"chunk": 1, "slide": 1}]'),
+            patch("llm_sync.review_llm_timeline", return_value=[]) as mock_review,
+        ):
             llm_timeline_segments(
                 ["slide a", "slide b"],
                 [{"word": "ciao", "start": 0.5}],
-                total_slides=2, total_duration=30.0,
+                total_slides=2,
+                total_duration=30.0,
                 endpoints=[self._ep("9router", "http://x")],
                 review=True,
             )
@@ -267,16 +315,22 @@ class TestReview(unittest.TestCase):
             {"word": "b", "start": 31.0},
             {"word": "c", "start": 61.0},
         ]
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint",
-                   return_value=('[{"chunk": 1, "slide": 1}, '
-                                 '{"chunk": 2, "slide": null}, '
-                                 '{"chunk": 3, "slide": 3}]')), \
-             patch("llm_sync.review_llm_timeline", return_value=[]) as mock_review:
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch(
+                "llm_sync._call_endpoint",
+                return_value=('[{"chunk": 1, "slide": 1}, {"chunk": 2, "slide": null}, {"chunk": 3, "slide": 3}]'),
+            ),
+            patch("llm_sync.review_llm_timeline", return_value=[]) as mock_review,
+        ):
             llm_timeline_segments(
                 ["slide a", "slide b", "slide c"],
                 words,
-                total_slides=3, total_duration=90.0, chunk_seconds=30.0,
+                total_slides=3,
+                total_duration=90.0,
+                chunk_seconds=30.0,
                 endpoints=[self._ep("9router", "http://x")],
                 review=True,
             )
@@ -297,13 +351,17 @@ class TestReview(unittest.TestCase):
             {"slide": 1, "start": 0.0, "end": 31.0},
             {"slide": 3, "start": 61.0, "end": 90.0},
         ]
-        with patch("llm_sync._load_llm_cache", return_value=cached), \
-             patch("llm_sync._save_llm_cache"), \
-             patch("llm_sync.review_llm_timeline", return_value=[]) as mock_review:
+        with (
+            patch("llm_sync._load_llm_cache", return_value=cached),
+            patch("llm_sync._save_llm_cache"),
+            patch("llm_sync.review_llm_timeline", return_value=[]) as mock_review,
+        ):
             llm_timeline_segments(
                 ["slide a", "slide b", "slide c"],
                 words,
-                total_slides=3, total_duration=90.0, chunk_seconds=30.0,
+                total_slides=3,
+                total_duration=90.0,
+                chunk_seconds=30.0,
                 endpoints=[self._ep("9router", "http://x")],
                 review=True,
             )
@@ -317,25 +375,29 @@ class TestParseResponse(unittest.TestCase):
 
     def test_plain_array(self):
         slides = parse_llm_response(
-            '[{"chunk": 1, "slide": 3}, {"chunk": 2, "slide": null}]', 2,
+            '[{"chunk": 1, "slide": 3}, {"chunk": 2, "slide": null}]',
+            2,
         )
         self.assertEqual(slides, [3, None])
 
     def test_fenced_code_block(self):
         slides = parse_llm_response(
-            '```json\n[{"chunk": 1, "slide": 4}]\n```', 1,
+            '```json\n[{"chunk": 1, "slide": 4}]\n```',
+            1,
         )
         self.assertEqual(slides, [4])
 
     def test_extra_text_around(self):
         slides = parse_llm_response(
-            'Ecco la risposta:\n[{"chunk": 1, "slide": 2}]\nSpero sia utile.', 1,
+            'Ecco la risposta:\n[{"chunk": 1, "slide": 2}]\nSpero sia utile.',
+            1,
         )
         self.assertEqual(slides, [2])
 
     def test_single_quotes_repair(self):
         slides = parse_llm_response(
-            "[{'chunk': 1, 'slide': 5}]", 1,
+            "[{'chunk': 1, 'slide': 5}]",
+            1,
         )
         self.assertEqual(slides, [5])
 
@@ -351,7 +413,8 @@ class TestParseResponse(unittest.TestCase):
     def test_string_and_float_slide(self):
         # I modelli locali a volte emettono stringhe o float: tollerato
         slides = parse_llm_response(
-            '[{"chunk": 1, "slide": "4"}, {"chunk": 2, "slide": 6.0}]', 2,
+            '[{"chunk": 1, "slide": "4"}, {"chunk": 2, "slide": 6.0}]',
+            2,
         )
         self.assertEqual(slides, [4, 6])
 
@@ -370,6 +433,7 @@ class TestEndpointConfig(unittest.TestCase):
         ]
         with self._patch_endpoints(lambda: fake):
             from llm_sync import endpoints_for
+
             for provider in ("auto", "9router"):
                 eps = endpoints_for(provider)
                 self.assertEqual(len(eps), 2)
@@ -379,14 +443,21 @@ class TestEndpointConfig(unittest.TestCase):
         # La configurazione di default non deve contenere LM Studio né OpenAI.
         # I test devono essere ermetici: azzera le variabili d'ambiente LLM.
         import os
+
         env_backup = {}
-        for key in ("LLM_9ROUTER_URL", "LLM_9ROUTER_MODEL",
-                    "LLM_9ROUTER_BACKUP_MODEL", "LLM_9ROUTER_BACKUP_MODEL_2",
-                    "OPENAI_API_KEY", "LLM_LMSTUDIO_URL"):
+        for key in (
+            "LLM_9ROUTER_URL",
+            "LLM_9ROUTER_MODEL",
+            "LLM_9ROUTER_BACKUP_MODEL",
+            "LLM_9ROUTER_BACKUP_MODEL_2",
+            "OPENAI_API_KEY",
+            "LLM_LMSTUDIO_URL",
+        ):
             env_backup[key] = os.environ.get(key)
             os.environ.pop(key, None)
         try:
             from llm_sync import _endpoints
+
             eps = _endpoints()
             names = [e["name"] for e in eps]
             self.assertTrue(names, "devono esserci endpoint configurati")
@@ -408,12 +479,12 @@ class TestRouterHealthCheck(unittest.TestCase):
 
     @staticmethod
     def _ep(name, url):
-        return {"name": name, "url": url, "model": f"model-{name}",
-                "api_key": "", "timeout": 5}
+        return {"name": name, "url": url, "model": f"model-{name}", "api_key": "", "timeout": 5}
 
     def test_alive_when_models_respond_ok(self):
         class FakeResp:
             status_code = 200
+
         with patch("llm_sync.requests.get", return_value=FakeResp()):
             self.assertTrue(router_alive([self._ep("9router", "http://x/v1/chat/completions")]))
 
@@ -421,6 +492,7 @@ class TestRouterHealthCheck(unittest.TestCase):
         # 4xx (es. 401) = il router è SU (risponde), manca solo l'auth.
         class FakeResp:
             status_code = 401
+
         with patch("llm_sync.requests.get", return_value=FakeResp()):
             self.assertTrue(router_alive([self._ep("9router", "http://x/v1/chat/completions")]))
 
@@ -436,23 +508,29 @@ class TestRouterHealthCheck(unittest.TestCase):
         self.assertFalse(router_alive([]))
 
     def test_wait_returns_immediately_when_alive(self):
-        with patch("llm_sync.router_alive", return_value=True), \
-             patch("llm_sync.is_interactive", return_value=True) as mock_it:
+        with (
+            patch("llm_sync.router_alive", return_value=True),
+            patch("llm_sync.is_interactive", return_value=True) as mock_it,
+        ):
             self.assertTrue(wait_for_router([self._ep("9router", "http://x/v1/chat/completions")]))
             mock_it.assert_not_called()  # nessuna attesa: router già su
 
     def test_noninteractive_falls_back_immediately(self):
         # stdin non è un terminale: senza 9Router si ripiega SUBITO (niente pausa)
-        with patch("llm_sync.router_alive", return_value=False), \
-             patch("llm_sync._launch_9router", return_value=False), \
-             patch("llm_sync.is_interactive", return_value=False):
+        with (
+            patch("llm_sync.router_alive", return_value=False),
+            patch("llm_sync._launch_9router", return_value=False),
+            patch("llm_sync.is_interactive", return_value=False),
+        ):
             self.assertFalse(wait_for_router([self._ep("9router", "http://x/v1/chat/completions")]))
 
     def test_noninteractive_strict_raises(self):
         # Flusso libero + senza terminale: NIENTE fallback silenzioso, errore chiaro.
-        with patch("llm_sync.router_alive", return_value=False), \
-             patch("llm_sync._launch_9router", return_value=False), \
-             patch("llm_sync.is_interactive", return_value=False):
+        with (
+            patch("llm_sync.router_alive", return_value=False),
+            patch("llm_sync._launch_9router", return_value=False),
+            patch("llm_sync.is_interactive", return_value=False),
+        ):
             with self.assertRaises(RuntimeError) as ctx:
                 wait_for_router(
                     [self._ep("9router", "http://x/v1/chat/completions")],
@@ -463,17 +541,23 @@ class TestRouterHealthCheck(unittest.TestCase):
     def test_auto_launch_brings_router_online(self):
         # 9Router spento: avvio automatico + polling -> riprende con l'LLM.
         calls = {"n": 0}
+
         def alive(*a, **k):
             calls["n"] += 1
             return calls["n"] >= 2
-        with patch("llm_sync.router_alive", side_effect=alive), \
-             patch("llm_sync._launch_9router", return_value=True), \
-             patch("llm_sync.is_interactive", return_value=False), \
-             patch("llm_sync.time.sleep"):
-            self.assertTrue(wait_for_router(
-                [self._ep("9router", "http://x/v1/chat/completions")],
-                strict=True,
-            ))
+
+        with (
+            patch("llm_sync.router_alive", side_effect=alive),
+            patch("llm_sync._launch_9router", return_value=True),
+            patch("llm_sync.is_interactive", return_value=False),
+            patch("llm_sync.time.sleep"),
+        ):
+            self.assertTrue(
+                wait_for_router(
+                    [self._ep("9router", "http://x/v1/chat/completions")],
+                    strict=True,
+                )
+            )
 
     def test_noninteractive_strict_raises_after_failed_auto_launch(self):
         # L'avvio automatico parte ma 9Router non arriva online entro la
@@ -481,13 +565,16 @@ class TestRouterHealthCheck(unittest.TestCase):
         def fake_time():
             fake_time.n += 1
             return fake_time.n * 10  # +10s a iterazione: scatta dopo 90s
+
         fake_time.n = 0
-        with patch("llm_sync.router_alive", return_value=False), \
-             patch("llm_sync._launch_9router", return_value=True), \
-             patch("llm_sync.is_interactive", return_value=False), \
-             patch("llm_sync._skip_key_pressed", return_value=False), \
-             patch("llm_sync.time.sleep"), \
-             patch("llm_sync.time.time", side_effect=fake_time):
+        with (
+            patch("llm_sync.router_alive", return_value=False),
+            patch("llm_sync._launch_9router", return_value=True),
+            patch("llm_sync.is_interactive", return_value=False),
+            patch("llm_sync._skip_key_pressed", return_value=False),
+            patch("llm_sync.time.sleep"),
+            patch("llm_sync.time.time", side_effect=fake_time),
+        ):
             with self.assertRaises(RuntimeError) as ctx:
                 wait_for_router(
                     [self._ep("9router", "http://x/v1/chat/completions")],
@@ -497,42 +584,54 @@ class TestRouterHealthCheck(unittest.TestCase):
 
     def test_interactive_strict_pauses_but_can_skip(self):
         # Con terminale, anche in strict l'utente può premere 'S' e procedere.
-        with patch("llm_sync.router_alive", return_value=False), \
-             patch("llm_sync._launch_9router", return_value=False), \
-             patch("llm_sync.is_interactive", return_value=True), \
-             patch("llm_sync._skip_key_pressed", return_value=True), \
-             patch("llm_sync.time.sleep"):
-            self.assertFalse(wait_for_router(
-                [self._ep("9router", "http://x/v1/chat/completions")],
-                strict=True,
-            ))
+        with (
+            patch("llm_sync.router_alive", return_value=False),
+            patch("llm_sync._launch_9router", return_value=False),
+            patch("llm_sync.is_interactive", return_value=True),
+            patch("llm_sync._skip_key_pressed", return_value=True),
+            patch("llm_sync.time.sleep"),
+        ):
+            self.assertFalse(
+                wait_for_router(
+                    [self._ep("9router", "http://x/v1/chat/completions")],
+                    strict=True,
+                )
+            )
 
     def test_strict_with_alive_router_ok(self):
         with patch("llm_sync.router_alive", return_value=True):
-            self.assertTrue(wait_for_router(
-                [self._ep("9router", "http://x/v1/chat/completions")],
-                strict=True,
-            ))
+            self.assertTrue(
+                wait_for_router(
+                    [self._ep("9router", "http://x/v1/chat/completions")],
+                    strict=True,
+                )
+            )
 
     def test_interactive_resumes_when_router_comes_up(self):
         # Il router scende (pausa) poi torna su: il polling riprende da solo.
         calls = {"n": 0}
+
         def alive(*a, **k):
             calls["n"] += 1
             return calls["n"] >= 3
-        with patch("llm_sync.router_alive", side_effect=alive), \
-             patch("llm_sync._launch_9router", return_value=False), \
-             patch("llm_sync.is_interactive", return_value=True), \
-             patch("llm_sync.time.sleep"):
+
+        with (
+            patch("llm_sync.router_alive", side_effect=alive),
+            patch("llm_sync._launch_9router", return_value=False),
+            patch("llm_sync.is_interactive", return_value=True),
+            patch("llm_sync.time.sleep"),
+        ):
             self.assertTrue(wait_for_router([self._ep("9router", "http://x/v1/chat/completions")]))
 
     def test_interactive_skip_with_key(self):
         # Tasto 'S' durante la pausa: salta l'LLM e usa il MiniLM.
-        with patch("llm_sync.router_alive", return_value=False), \
-             patch("llm_sync._launch_9router", return_value=False), \
-             patch("llm_sync.is_interactive", return_value=True), \
-             patch("llm_sync._skip_key_pressed", return_value=True), \
-             patch("llm_sync.time.sleep"):
+        with (
+            patch("llm_sync.router_alive", return_value=False),
+            patch("llm_sync._launch_9router", return_value=False),
+            patch("llm_sync.is_interactive", return_value=True),
+            patch("llm_sync._skip_key_pressed", return_value=True),
+            patch("llm_sync.time.sleep"),
+        ):
             self.assertFalse(wait_for_router([self._ep("9router", "http://x/v1/chat/completions")]))
 
     def test_interactive_timeout_falls_back(self):
@@ -540,17 +639,22 @@ class TestRouterHealthCheck(unittest.TestCase):
         def fake_time():
             fake_time.n += 1
             return fake_time.n  # 1, 2, ... : dopo il 60° secondo scatta il timeout
+
         fake_time.n = 0
-        with patch("llm_sync.router_alive", return_value=False), \
-             patch("llm_sync._launch_9router", return_value=False), \
-             patch("llm_sync.is_interactive", return_value=True), \
-             patch("llm_sync._skip_key_pressed", return_value=False), \
-             patch("llm_sync.time.sleep"), \
-             patch("llm_sync.time.time", side_effect=fake_time):
-            self.assertFalse(wait_for_router(
-                [self._ep("9router", "http://x/v1/chat/completions")],
-                wait_timeout=60.0,
-            ))
+        with (
+            patch("llm_sync.router_alive", return_value=False),
+            patch("llm_sync._launch_9router", return_value=False),
+            patch("llm_sync.is_interactive", return_value=True),
+            patch("llm_sync._skip_key_pressed", return_value=False),
+            patch("llm_sync.time.sleep"),
+            patch("llm_sync.time.time", side_effect=fake_time),
+        ):
+            self.assertFalse(
+                wait_for_router(
+                    [self._ep("9router", "http://x/v1/chat/completions")],
+                    wait_timeout=60.0,
+                )
+            )
 
 
 class TestCascadeFallback(unittest.TestCase):
@@ -558,24 +662,30 @@ class TestCascadeFallback(unittest.TestCase):
 
     @staticmethod
     def _ep(name, url):
-        return {"name": name, "url": url, "model": f"model-{name}",
-                "api_key": "", "timeout": 5}
+        return {"name": name, "url": url, "model": f"model-{name}", "api_key": "", "timeout": 5}
 
     # Disabilita la cache nei test di cascata: ogni test deve chiamare davvero
     # gli endpoint mockati, non riusare i risultati del test precedente.
     # router_alive=True: la health-check 9Router è finta nei test.
     def _no_cache(self):
-        return patch("llm_sync._load_llm_cache", return_value=None), \
-            patch("llm_sync._save_llm_cache"), \
-            patch("llm_sync.router_alive", return_value=True)
+        return (
+            patch("llm_sync._load_llm_cache", return_value=None),
+            patch("llm_sync._save_llm_cache"),
+            patch("llm_sync.router_alive", return_value=True),
+        )
 
     def test_first_endpoint_success(self):
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint", return_value='[{"chunk": 1, "slide": 1}]'):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value='[{"chunk": 1, "slide": 1}]'),
+        ):
             segs = llm_timeline_segments(
                 ["slide a", "slide b"],
                 [{"word": "ciao", "start": 0.5}],
-                total_slides=2, total_duration=30.0,
+                total_slides=2,
+                total_duration=30.0,
                 endpoints=[self._ep("9router", "http://x"), self._ep("9router", "http://z")],
             )
         self.assertIsNotNone(segs)
@@ -587,12 +697,18 @@ class TestCascadeFallback(unittest.TestCase):
             if endpoint["url"] == "http://x":
                 return None
             return '[{"chunk": 1, "slide": 2}]'
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint", side_effect=fake):
+
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", side_effect=fake),
+        ):
             segs = llm_timeline_segments(
                 ["slide a", "slide b"],
                 [{"word": "ciao", "start": 0.5}],
-                total_slides=2, total_duration=30.0,
+                total_slides=2,
+                total_duration=30.0,
                 endpoints=[
                     self._ep("9router", "http://x"),
                     self._ep("9router", "http://z"),
@@ -602,12 +718,17 @@ class TestCascadeFallback(unittest.TestCase):
         self.assertEqual(segs[0]["slide"], 2)
 
     def test_all_fail_returns_none(self):
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint", return_value=None):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value=None),
+        ):
             segs = llm_timeline_segments(
                 ["slide a", "slide b"],
                 [{"word": "ciao", "start": 0.5}],
-                total_slides=2, total_duration=30.0,
+                total_slides=2,
+                total_duration=30.0,
                 endpoints=[self._ep("9router", "http://x")],
             )
         self.assertIsNone(segs)
@@ -615,23 +736,31 @@ class TestCascadeFallback(unittest.TestCase):
     def test_retry_on_429_then_success(self):
         # Rate-limit (429) sul primo tentativo: con i retry il secondo risponde.
         # Verifica che la risposta venga restituita senza fallire.
-        good_body = (
-            '{"choices":[{"message":{"role":"assistant",'
-            '"content":"[{\\\"chunk\\\": 1, \\\"slide\\\": 3}]"}]}}'
-        )
+        good_body = '{"choices":[{"message":{"role":"assistant","content":"[{\\"chunk\\": 1, \\"slide\\": 3}]"}]}}'
         responses = [
-            type("FakeResp", (), {"status_code": 429, "text": "rate limited",
-                                   "json": lambda self: (_ for _ in ()).throw(ValueError())})(),
-            type("FakeResp", (), {"status_code": 200, "text": good_body,
-                                   "json": lambda self: (_ for _ in ()).throw(ValueError())})(),
+            type(
+                "FakeResp",
+                (),
+                {"status_code": 429, "text": "rate limited", "json": lambda self: (_ for _ in ()).throw(ValueError())},
+            )(),
+            type(
+                "FakeResp",
+                (),
+                {"status_code": 200, "text": good_body, "json": lambda self: (_ for _ in ()).throw(ValueError())},
+            )(),
         ]
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync.requests.post", side_effect=responses), \
-             patch("llm_sync.time.sleep"):  # niente attese reali nei test
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync.requests.post", side_effect=responses),
+            patch("llm_sync.time.sleep"),
+        ):  # niente attese reali nei test
             segs = llm_timeline_segments(
                 ["slide a", "slide b", "slide c"],
                 [{"word": "ciao", "start": 0.5}],
-                total_slides=3, total_duration=30.0,
+                total_slides=3,
+                total_duration=30.0,
                 endpoints=[self._ep("9router", "http://x")],
             )
         self.assertIsNotNone(segs)
@@ -641,30 +770,42 @@ class TestCascadeFallback(unittest.TestCase):
         # Risposta del gateway con testo extra dopo il JSON (caso reale 9Router)
         raw_body = (
             '{"choices":[{"message":{"role":"assistant",'
-            '"content":"[{\\\"chunk\\\": 1, \\\"slide\\\": 2}]"}]}} '
-            'extra data qui'
+            '"content":"[{\\"chunk\\": 1, \\"slide\\": 2}]"}]}} '
+            "extra data qui"
         )
-        fake_resp = type("FakeResp", (), {"status_code": 200, "text": raw_body,
-                                           "json": lambda self: (_ for _ in ()).throw(ValueError())})()
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync.requests.post", return_value=fake_resp):
+        fake_resp = type(
+            "FakeResp",
+            (),
+            {"status_code": 200, "text": raw_body, "json": lambda self: (_ for _ in ()).throw(ValueError())},
+        )()
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync.requests.post", return_value=fake_resp),
+        ):
             segs = llm_timeline_segments(
                 ["slide a", "slide b"],
                 [{"word": "ciao", "start": 0.5}],
-                total_slides=2, total_duration=30.0,
+                total_slides=2,
+                total_duration=30.0,
                 endpoints=[self._ep("9router", "http://x")],
             )
         self.assertIsNotNone(segs)
         self.assertEqual(segs[0]["slide"], 2)
 
     def test_adjacent_same_slide_merged(self):
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint",
-                   return_value='[{"chunk": 1, "slide": 1}, {"chunk": 2, "slide": 1}]'):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value='[{"chunk": 1, "slide": 1}, {"chunk": 2, "slide": 1}]'),
+        ):
             segs = llm_timeline_segments(
                 ["slide a", "slide b"],
                 [{"word": "w", "start": 1.0}, {"word": "x", "start": 40.0}],
-                total_slides=2, total_duration=60.0,
+                total_slides=2,
+                total_duration=60.0,
                 endpoints=[self._ep("9router", "http://y")],
             )
         self.assertIsNotNone(segs)
@@ -679,21 +820,25 @@ class TestOrderedTimeline(unittest.TestCase):
 
     @staticmethod
     def _ep(name, url):
-        return {"name": name, "url": url, "model": f"model-{name}",
-                "api_key": "", "timeout": 5}
+        return {"name": name, "url": url, "model": f"model-{name}", "api_key": "", "timeout": 5}
 
     def _no_cache(self):
-        return patch("llm_sync._load_llm_cache", return_value=None), \
-            patch("llm_sync._save_llm_cache"), \
-            patch("llm_sync.router_alive", return_value=True)
+        return (
+            patch("llm_sync._load_llm_cache", return_value=None),
+            patch("llm_sync._save_llm_cache"),
+            patch("llm_sync.router_alive", return_value=True),
+        )
 
     def test_prompt_mentions_anchors_and_order(self):
         chunks = build_llm_chunks(
             [{"word": "ciao", "start": 1.0}, {"word": "mondo", "start": 31.0}],
-            total_duration=60.0, chunk_seconds=30.0,
+            total_duration=60.0,
+            chunk_seconds=30.0,
         )
         system, user = build_ordered_prompt(
-            ["Slide uno", "Slide due"], chunks, anchors={2: 25.0},
+            ["Slide uno", "Slide due"],
+            chunks,
+            anchors={2: 25.0},
         )
         self.assertIn("ORDINE", system)
         self.assertIn("NON DECRESCENTE", system)
@@ -708,15 +853,25 @@ class TestOrderedTimeline(unittest.TestCase):
             {"word": "c", "start": 65.0},
             {"word": "d", "start": 95.0},
         ]
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint",
-                   return_value=('[{"chunk": 1, "slide": 1}, '
-                                 '{"chunk": 2, "slide": 3}, '
-                                 '{"chunk": 3, "slide": 3}, '
-                                 '{"chunk": 4, "slide": 4}]')):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch(
+                "llm_sync._call_endpoint",
+                return_value=(
+                    '[{"chunk": 1, "slide": 1}, '
+                    '{"chunk": 2, "slide": 3}, '
+                    '{"chunk": 3, "slide": 3}, '
+                    '{"chunk": 4, "slide": 4}]'
+                ),
+            ),
+        ):
             timeline = llm_ordered_timeline(
                 ["s1", "s2", "s3", "s4"],
-                words, total_slides=4, total_duration=120.0,
+                words,
+                total_slides=4,
+                total_duration=120.0,
                 anchors={3: 40.0},
                 endpoints=[self._ep("9router", "http://x")],
             )
@@ -732,15 +887,25 @@ class TestOrderedTimeline(unittest.TestCase):
             {"word": "c", "start": 70.0},
             {"word": "d", "start": 100.0},
         ]
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint",
-                   return_value=('[{"chunk": 1, "slide": 1}, '
-                                 '{"chunk": 2, "slide": 3}, '
-                                 '{"chunk": 3, "slide": 3}, '
-                                 '{"chunk": 4, "slide": 4}]')):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch(
+                "llm_sync._call_endpoint",
+                return_value=(
+                    '[{"chunk": 1, "slide": 1}, '
+                    '{"chunk": 2, "slide": 3}, '
+                    '{"chunk": 3, "slide": 3}, '
+                    '{"chunk": 4, "slide": 4}]'
+                ),
+            ),
+        ):
             timeline = llm_ordered_timeline(
                 ["s1", "s2", "s3", "s4"],
-                words, total_slides=4, total_duration=130.0,
+                words,
+                total_slides=4,
+                total_duration=130.0,
                 anchors={4: 100.0},
                 endpoints=[self._ep("9router", "http://x")],
             )
@@ -750,24 +915,34 @@ class TestOrderedTimeline(unittest.TestCase):
         self.assertAlmostEqual(timeline[4], 100.0)
 
     def test_unreachable_returns_none(self):
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint", return_value=None):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value=None),
+        ):
             timeline = llm_ordered_timeline(
                 ["s1", "s2"],
                 [{"word": "ciao", "start": 1.0}],
-                total_slides=2, total_duration=30.0,
+                total_slides=2,
+                total_duration=30.0,
                 anchors={2: 10.0},
                 endpoints=[self._ep("9router", "http://x")],
             )
         self.assertIsNone(timeline)
 
     def test_parse_garbage_returns_none(self):
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint", return_value="non è JSON"):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value="non è JSON"),
+        ):
             timeline = llm_ordered_timeline(
                 ["s1", "s2"],
                 [{"word": "ciao", "start": 1.0}],
-                total_slides=2, total_duration=30.0,
+                total_slides=2,
+                total_duration=30.0,
                 anchors={2: 10.0},
                 endpoints=[self._ep("9router", "http://x")],
             )
@@ -785,13 +960,14 @@ class TestAnchorVerification(unittest.TestCase):
 
     @staticmethod
     def _ep(name, url):
-        return {"name": name, "url": url, "model": f"model-{name}",
-                "api_key": "", "timeout": 5}
+        return {"name": name, "url": url, "model": f"model-{name}", "api_key": "", "timeout": 5}
 
     def _no_cache(self):
-        return patch("llm_sync._load_llm_cache", return_value=None), \
-            patch("llm_sync._save_llm_cache"), \
-            patch("llm_sync.router_alive", return_value=True)
+        return (
+            patch("llm_sync._load_llm_cache", return_value=None),
+            patch("llm_sync._save_llm_cache"),
+            patch("llm_sync.router_alive", return_value=True),
+        )
 
     def _words(self):
         # parlato con contenuti distinti a ogni intervallo
@@ -828,12 +1004,17 @@ class TestAnchorVerification(unittest.TestCase):
         # Lo speaker dice "slide 4" a 100s ma il contenuto è l'evoluzione
         # (slide 5 del PDF): l'LLM deve correggere il numero mantenendo il tempo.
         words = self._words()
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint",
-                   return_value='[{"timestamp": 100.0, "slide": 5}]'):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value='[{"timestamp": 100.0, "slide": 5}]'),
+        ):
             verified = llm_verify_anchor_mapping(
                 ["s1", "s2", "s3", "s4", "s5"],
-                words, anchors={4: 100.0}, total_slides=5,
+                words,
+                anchors={4: 100.0},
+                total_slides=5,
                 endpoints=[self._ep("9router", "http://x")],
             )
         self.assertIsNotNone(verified)
@@ -842,14 +1023,24 @@ class TestAnchorVerification(unittest.TestCase):
     def test_times_preserved_exactly(self):
         # I TEMPI delle ancore non devono mai cambiare, solo i numeri.
         words = self._words()
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint",
-                   return_value=('[{"timestamp": 100.0, "slide": 5}, '
-                                 '{"timestamp": 180.0, "slide": 6}, '
-                                 '{"timestamp": 260.0, "slide": 9}]')):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch(
+                "llm_sync._call_endpoint",
+                return_value=(
+                    '[{"timestamp": 100.0, "slide": 5}, '
+                    '{"timestamp": 180.0, "slide": 6}, '
+                    '{"timestamp": 260.0, "slide": 9}]'
+                ),
+            ),
+        ):
             verified = llm_verify_anchor_mapping(
                 [f"s{i}" for i in range(1, 10)],
-                words, anchors={4: 100.0, 5: 180.0, 8: 260.0}, total_slides=9,
+                words,
+                anchors={4: 100.0, 5: 180.0, 8: 260.0},
+                total_slides=9,
                 endpoints=[self._ep("9router", "http://x")],
             )
         self.assertIsNotNone(verified)
@@ -858,26 +1049,43 @@ class TestAnchorVerification(unittest.TestCase):
         self.assertAlmostEqual(verified[9], 260.0)
 
     def test_unreachable_returns_none(self):
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint", return_value=None):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value=None),
+        ):
             verified = llm_verify_anchor_mapping(
-                ["s1", "s2"], self._words(), anchors={2: 100.0}, total_slides=2,
+                ["s1", "s2"],
+                self._words(),
+                anchors={2: 100.0},
+                total_slides=2,
                 endpoints=[self._ep("9router", "http://x")],
             )
         self.assertIsNone(verified)
 
     def test_parse_garbage_returns_none(self):
-        with self._no_cache()[0], self._no_cache()[1], self._no_cache()[2], \
-             patch("llm_sync._call_endpoint", return_value="non è JSON"):
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value="non è JSON"),
+        ):
             verified = llm_verify_anchor_mapping(
-                ["s1", "s2"], self._words(), anchors={2: 100.0}, total_slides=2,
+                ["s1", "s2"],
+                self._words(),
+                anchors={2: 100.0},
+                total_slides=2,
                 endpoints=[self._ep("9router", "http://x")],
             )
         self.assertIsNone(verified)
 
     def test_no_anchors_returns_none(self):
         verified = llm_verify_anchor_mapping(
-            ["s1", "s2"], self._words(), anchors={}, total_slides=2,
+            ["s1", "s2"],
+            self._words(),
+            anchors={},
+            total_slides=2,
         )
         self.assertIsNone(verified)
 

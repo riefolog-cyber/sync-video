@@ -4,12 +4,12 @@
 
 Sincronizza automaticamente una presentazione PDF con un podcast audio e genera un video in cui ogni slide appare al momento giusto.
 
-**Pipeline:** PDF → OCR → Trascrizione (Vosk/Whisper) → Ancore "slide N" → Sincronizzazione semantica (embeddings) → Video MP4
+**Pipeline:** PDF → OCR → Trascrizione (Whisper) → Ancore "slide N" → Sincronizzazione semantica (embeddings) → Video MP4
 
 ```mermaid
 graph LR
     A[PDF] -->|OCR Tesseract| B[Testi Slide]
-    C[Audio] -->|Vosk/Whisper| D[Trascrizione]
+    C[Audio] -->|Whisper| D[Trascrizione]
     D -->|riferimenti 'slide N'| E[Ancore]
     B --> F[Sincronizzazione semantica - embeddings]
     D --> F
@@ -89,7 +89,7 @@ python main.py --llm auto --preview     # valuta senza generare video
 python main.py --llm 9router           # forza 9Router online
 ```
 
-> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto. Prompt ottimale per NotebookLM: [`PROMPT_NOTEBOOKLM.md`](PROMPT_NOTEBOOKLM.md).
+> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto. Prompt ottimali per NotebookLM: [`PROMPT_NOTEBOOKLM PRIMA PODCAST.md`](PROMPT_NOTEBOOKLM%20PRIMA%20PODCAST.md) (podcast → presentazione) e [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE.md) (presentazione → podcast) — vedi "Quale prompt usare".
 
 #### Manutenzione 9Router (`9router-maintenance/`)
 
@@ -134,10 +134,24 @@ free. Serve a mantenere pulito il router lato server.
 | Tesseract OCR | ~40 MB | `winget` / `apt-get` / `brew` |
 | ffmpeg | ~80 MB | `winget` / `apt-get` / `brew` |
 | Modello embedding MiniLM | ~240 MB | fastembed (download automatico) |
-| Modello Vosk italiano | ~1.5 GB | Download da alphacephei.com |
+| Modello Whisper `small` | ~460 MB | faster-whisper (download automatico) |
+| Modello Whisper OpenVINO `small` | ~930 MB | `--openvino-download` (una tantum, consigliato) |
 | Lingua Tesseract ITA | inclusa | `tessdata/ita.traineddata` |
 
-> **Alternativa Whisper**: `python main.py --transcriber whisper` — usa faster-whisper (~500 MB) invece di Vosk. Qualità spesso superiore.
+> **Trascrizione veloce (consigliata): OpenVINO GenAI.** Su PC Intel con iGPU
+> Iris Xe e senza GPU NVIDIA, faster-whisper su CPU impiega ~8 min per 28 min
+> di audio. Il motore **OpenVINO** (default `--transcriber auto`) usa la iGPU
+> via IR e ci mette ~5 min, con word timestamps identici. Setup una tantum:
+>
+> ```bash
+> pip install openvino openvino-genai
+> python main.py --openvino-download   # scarica il modello OpenVINO IR
+> python main.py                       # ora usa OpenVINO in automatico
+> ```
+>
+> Fallback automatico a faster-whisper se OpenVINO non è installato o il
+> modello manca. Seleziona il motore con `--transcriber {auto,openvino,whisper}`
+> e il device con `--openvino-device {GPU,CPU}`.
 
 ---
 
@@ -159,10 +173,15 @@ python main.py --dry-run --debug
 # Forza nuova analisi (ignora cache)
 python main.py --no-cache
 
-# Whisper invece di Vosk
-python main.py --transcriber whisper --whisper-model medium
+# Whisper con modello più piccolo (più veloce) o più grande (più preciso)
+python main.py --whisper-model small
+python main.py --whisper-model large-v3
 
-# Esegui i test (127 unit test: pipeline, LLM, chunks, integrazione)
+# Trascrizione: forza OpenVINO (iGPU, più veloce) o solo faster-whisper
+python main.py --transcriber openvino
+python main.py --transcriber whisper
+
+# Esegui i test (147 unit test: pipeline, LLM, chunks, integrazione)
 python -m unittest test_sync test_integration test_llm_sync test_chunks
 ```
 
@@ -180,8 +199,10 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--debug` | — | Log dettagliato |
 | `--transitions` | `0.0` | Dissolvenza tra slide (s) |
 | `--lang` | `ita` | Lingua OCR |
-| `--transcriber` | `vosk` | `vosk` o `whisper` |
-| `--whisper-model` | `small` | tiny/base/small/medium/large |
+| `--whisper-model` | `small` | tiny/base/small/medium/large/large-v3 |
+| `--transcriber` | `auto` | `auto`/`openvino`/`whisper` (OpenVINO ~1.5x più veloce) |
+| `--openvino-device` | `GPU` | Device OpenVINO (`GPU` iGPU o `CPU`) |
+| `--openvino-download` | — | Scarica modello OpenVINO IR (una tantum) |
 | `--semantic-model` | MiniLM | Modello embedding |
 | `--semantic-window` | `4.0` | Secondi per blocco |
 | `--semantic-min-duration` | `3.0` | Durata minima slide (s) |
@@ -227,7 +248,7 @@ main.py                  ← Orchestratore (auto-detection, cache, timing)
 config.py                ← Bootstrap auto-dipendenze + costanti + CLI
 chunks.py                ← Finestre temporali condivise (semantic_sync + llm_sync)
 ocr.py                   ← Fase 1: PDF → immagini → OCR
-transcription.py         ← Fase 2: Audio → Vosk/Whisper → trascrizione
+transcription.py         ← Fase 2: Audio → Whisper → trascrizione
 timeline.py              ← Ancore "slide N" + riconciliazione timeline
 semantic_sync.py         ← Sincronizzazione semantica (embeddings, DP)
 llm_sync.py              ← Selezione slide con LLM (9Router) + cache
@@ -240,7 +261,8 @@ genera_video.bat         ← Launcher 1-click
 requirements.txt         ← Dipendenze pip
 ruff.toml                ← Configurazione lint (guardrail di stile)
 mypy.ini                 ← Configurazione type-check
-PROMPT_NOTEBOOKLM.md     ← Prompt per generare podcast ottimizzati
+PROMPT_NOTEBOOKLM PRIMA PODCAST.md ← Workflow 1: prompt per generare podcast ottimizzati (podcast → presentazione)
+PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md ← Workflow 2: prompt multi-fonte (presentazione → podcast)
 tessdata/                ← Modelli lingua Tesseract portatili
 9router-maintenance/     ← Script manutenzione combo `comboact` di 9Router (vedi sotto)
 ```
@@ -250,10 +272,10 @@ tessdata/                ← Modelli lingua Tesseract portatili
 Comandi verificati per chi modifica il codice:
 
 ```bash
-# Test (suite completa, unittest — 127 test)
+# Test (suite completa, unittest — 147 test)
 python -m unittest test_sync test_integration test_llm_sync test_chunks
 
-# Type-check (mypy, 13 moduli sorgente)
+# Type-check (mypy, 15 moduli sorgente)
 python -m mypy .
 
 # Lint (ruff; 6 warning residui sono gli "except Exception" difensivi intenzionali)
@@ -283,9 +305,9 @@ embedding fallito) e non vanno "stretti" senza motivo.
 ## 🔧 Come funziona
 
 1. **OCR** — Ogni pagina PDF → immagine (DPI 300) → Tesseract.
-2. **Trascrizione** — Audio → Vosk (o Whisper) con timestamp al decimo di secondo. Stopword rimosse, parole di transizione ("passiamo", "slide", "blocco"...) preservate.
+2. **Trascrizione** — Audio → Whisper (faster-whisper) con timestamp al decimo di secondo. Stopword rimosse, parole di transizione ("passiamo", "slide", "blocco"...) preservate.
 3. **Auto-detection** — Scansione trascrizione per decidere il flusso (`slide-audio` o `audio-slide`).
-4. **Ancore "slide N"** — Riferimenti espliciti → ancore deterministiche ad alta precisione. Riconosce numeri in cifre (*"slide 3"*), cardinali (*"slide tre"*, *"numero due"*), **ordinali** (*"la terza diapositiva"*, *"la quinta slide"*) in entrambi i generi, con articolo o "numero" in mezzo, e varianti fonetiche di trascrizione (*"nonna slide"* → slide 9).
+4. **Ancore "slide N"** — Riferimenti espliciti → ancore deterministiche ad alta precisione. Riconosce numeri in cifre (*"slide 3"*), cardinali (*"slide tre"*, *"numero due"*), **ordinali** (*"la terza diapositiva"*, *"la quinta slide"*) in entrambi i generi, con articolo o "numero" in mezzo, e varianti fonetiche di trascrizione (*"nonna slide"* → slide 9, *"sla e due"* → slide 2, *"asl cinque"* → slide 5, *"sallay 2"* / *"slaib6"* → slide 2/6 con numero incorporato).
 5. **Sincronizzazione semantica** — Embedding (MiniLM via fastembed, offline ONNX) + programmazione dinamica monotona. Assegna ogni blocco audio alla slide semanticamente più vicina, con competizione softmax (temperatura 0.15).
 6. **Riconciliazione** — Validazione: tempi crescenti, durate positive, ultima slide entro fine audio. Se invalida → interruzione.
 7. **Video** — Slide ridimensionate a 1080p, assemblate con MoviePy (fps=5, buffer 3.0s anti-troncamento).
@@ -317,14 +339,45 @@ mai inventando distribuzioni uniformi.
 - **Fallback**: `paraphrase-multilingual-mpnet-base-v2` (768 dim, ~1.0 GB) — usato automaticamente se MiniLM non disponibile.
 - **Ambiente**: `EMBEDDING_MODEL` e `EMBEDDING_MODEL_ALTERNATE` sovrascrivibili.
 
-### Processo di input consigliato
+### Quale prompt usare: i due workflow
 
-Per sincronizzazione perfetta, prepara audio e slide con [`PROMPT_NOTEBOOKLM.md`](PROMPT_NOTEBOOKLM.md):
+Due processi di input possibili, uno per obiettivo. In ENTRAMBI il podcast deve
+pronunciare le ancore "slide N" **in cifre** a ogni sezione: senza ancore il
+pipeline non può sapere dove cambia la slide e passa al flusso libero (che usa
+l'LLM — un avviso in console lo segnala).
 
-1. **Podcast**: nomina "slide N" in cifre a ogni transizione, una slide per sezione.
-2. **Presentazione**: genera dal podcast (stesso ordine, stessi temi).
+| | [`PROMPT_NOTEBOOKLM PRIMA PODCAST.md`](PROMPT_NOTEBOOKLM%20PRIMA%20PODCAST.md) | [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE.md) |
+|---|---|---|
+| **Direzione** | **Podcast → Presentazione** (consigliato) | **Presentazione → Podcast** |
+| **Quando** | Sincronizzazione massima 1:1 | Podcast **multi-fonte** che arricchisce una presentazione già pronta |
+| **Ancore** | Strittissime (cifre, "slide" chiara, mai "la slide successiva", recupero salti) | Stesse regole rinforzate + arricchimento con le altre fonti |
+| **Flusso atteso** | `slide-audio` con ancore → **senza LLM** | `slide-audio` con ancore → **senza LLM** |
 
-Risultato su test reale: 6 ancore deterministiche, durate uniformi ~130s, sincronizzazione perfetta.
+**Workflow 1 — Podcast → Presentazione** (precisione massima):
+
+1. Genera il **podcast** con [`PROMPT_NOTEBOOKLM PRIMA PODCAST.md`](PROMPT_NOTEBOOKLM%20PRIMA%20PODCAST.md) (ancore "slide N" in cifre a ogni sezione).
+2. Genera la **presentazione** dal podcast: UNA slide per ogni sezione, stesso ordine.
+3. Verifica le ancore prima di lanciare il pipeline:
+   ```bash
+   grep -c "slide" transcript_raw.txt   # deve essere ≥ N-1 (una per transizione)
+   ```
+   Se è 0 il prompt non è stato seguito: rigenera il podcast.
+4. `python main.py` → auto-detection `slide-audio`, ancore deterministiche, nessuna chiamata a 9Router (o `--llm off` per escluderlo del tutto).
+
+**Workflow 2 — Presentazione → Podcast** (podcast ricco multi-fonte):
+
+1. Crea la **presentazione** e mettila nelle fonti, come da [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE.md).
+2. Genera il **podcast** seguendo l'ordine della presentazione, con le ancore rinforzate + riferimenti alle altre fonti.
+3. Stessa verifica `grep -c "slide" transcript_raw.txt`.
+4. `python main.py` → stesso flusso ordinato deterministico.
+
+**Se il podcast non pronuncia le ancore** (dibattito libero): il pipeline
+avvisa e usa il flusso libero (LLM via 9Router). Fallback senza LLM:
+`python main.py --flow slide-audio --llm off` (allineamento monotono MiniLM,
+meno preciso senza ancore ma deterministico).
+
+Risultato su test reale (workflow 1): 6 ancore deterministiche, durate
+uniformi ~130s, sincronizzazione perfetta.
 
 ---
 

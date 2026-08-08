@@ -13,7 +13,7 @@ from typing import TypedDict
 
 
 class Word(TypedDict):
-    """Parola riconosciuta con timestamp (formato Vosk/Whisper).
+    """Parola riconosciuta con timestamp (formato Whisper/OpenVINO).
 
     Le trascrizioni possono includere chiavi extra (confidenza, ecc.): il
     TypedDict richiede solo ``word`` e ``start``.
@@ -67,12 +67,14 @@ def build_windows(
                 first_time = float(words[idx]["start"])
             chunk_words.append(words[idx]["word"])
             idx += 1
-        windows.append({
-            "start": start,
-            "end": min(end, total_duration),
-            "first_time": first_time if first_time is not None else start,
-            "words": chunk_words,
-            "text": " ".join(chunk_words) if chunk_words else "...",
-        })
+        windows.append(
+            {
+                "start": start,
+                "end": min(end, total_duration),
+                "first_time": first_time if first_time is not None else start,
+                "words": chunk_words,
+                "text": " ".join(chunk_words) if chunk_words else "...",
+            }
+        )
         start = end
     return windows

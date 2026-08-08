@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Sincronizzazione semantica (sentence embeddings) senza LLM — unico motore
-di sincronizzazione del pipeline.
+Sincronizzazione semantica offline (sentence embeddings, MiniLM) — motore
+di allineamento del pipeline per il flusso ordinato.
 
 Offline e deterministico: allinea le slide (OCR) con la trascrizione usando
 la somiglianza semantica blocco-slide, senza chiamate di rete e senza modelli
 LLM locali:
 
-  1. raggruppa le parole Vosk/Whisper in blocchi temporali
+  1. raggruppa le parole Whisper/OpenVINO in blocchi temporali
   2. codifica slide (OCR) e blocchi con fastembed (ONNX, multilingue)
   3. normalizza la similarità per-slide (z-score sul baseline della singola
      slide: conta i picchi locali, non la distanza assoluta) così una slide
@@ -18,10 +18,16 @@ LLM locali:
 
 Stessa filosofia del progetto: se il segnale è insufficiente restituisce None
 invece di inventare distribuzioni uniformi (il chiamante interrompe con avviso).
+
+L'LLM (llm_sync.py) non sostituisce questo motore: nel flusso ordinato
+posiziona SOLO le slide senza ancora esplicita (vincolate da qui), mentre nel
+flusso libero guida la selezione chunk→slide.
 """
 
+import bisect
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
 import numpy as np
@@ -38,11 +44,37 @@ from timeline import reconcile_timeline
 
 try:
     from fastembed import TextEmbedding
+
     _HAS_FASTEMBED = True
 except ImportError:  # pragma: no cover
     _HAS_FASTEMBED = False
 
 EmbedFn = Callable[[Sequence[str]], np.ndarray]
+
+# Concordanza dei picchi "moderata": soglia usata da weak_signal come aggravante
+# quando le slide sono anche confondibili tra loro (concordanza < 70%).
+MODERATE_CONCORDANCE_THRESHOLD = 0.7
+
+
+@dataclass(frozen=True)
+class SemanticOptions:
+    """Parametri di tuning della sincronizzazione semantica.
+
+    Raggruppa le soglie/tempi condivisi tra l'orchestratore (``*_from_words``)
+    e le funzioni pure (``*_from_texts``): così i default e i valori effettivi
+    non possono divergere tra i due livelli e i call-site passano un solo
+    oggetto invece di filetti di parametri posizionali.
+    """
+
+    window_seconds: float = 4.0
+    min_slide_duration: float = 3.0
+    min_avg_similarity: float = 0.10
+    temperature: float = DEFAULT_SEMANTIC_TEMPERATURE
+    min_segment_seconds: float = 8.0
+    model_name: str | None = None
+    alternate_model_name: str | None = None
+    cache_dir: str | None = None
+
 
 # =====================================================================
 # COSTRUZIONE BLOCCHI TRASCRIZIONE (finestre temporali)
@@ -62,11 +94,13 @@ def build_semantic_blocks(
     for w in build_windows(words, total_duration, window_seconds):
         if len(w["words"]) < min_words:
             continue
-        blocks.append({
-            "time": w["start"],
-            "first_time": w["first_time"],
-            "text": w["text"],
-        })
+        blocks.append(
+            {
+                "time": w["start"],
+                "first_time": w["first_time"],
+                "text": w["text"],
+            }
+        )
     return blocks
 
 
@@ -99,10 +133,7 @@ def _load_embed_model(
     None: il MiniLM è il default (vedi config.py), mpnet è l'alternativa.
     """
     if not _HAS_FASTEMBED:
-        log.warning(
-            "   [Semantico] fastembed non installato. "
-            "Installa con: pip install fastembed"
-        )
+        log.warning("   [Semantico] fastembed non installato. Installa con: pip install fastembed")
         return None
 
     candidates: list[tuple[str, bool]] = [(model_name, False)]
@@ -114,16 +145,17 @@ def _load_embed_model(
             model = TextEmbedding(model_name=candidate, cache_dir=str(cache_dir))
             if is_alt:
                 log.warning(
-                    "   [Semantico] Modello principale non disponibile: "
-                    "uso il fallback %s.", candidate,
+                    "   [Semantico] Modello principale non disponibile: uso il fallback %s.",
+                    candidate,
                 )
             else:
                 log.info("   [Semantico] Modello embedding: %s", candidate)
             return model
         except Exception as e:  # noqa: BLE001 - fastembed può lanciare molti tipi
             log.warning(
-                "   [Semantico] Impossibile caricare il modello embedding "
-                "(%s): %s", candidate, e,
+                "   [Semantico] Impossibile caricare il modello embedding (%s): %s",
+                candidate,
+                e,
             )
     return None
 
@@ -139,8 +171,7 @@ def _make_embed_fn(model: TextEmbedding, batch_size: int = 64) -> EmbedFn:
         prepared = list(texts)
         if getattr(model, "model_name", "") and "e5" in str(model.model_name).lower():
             prepared = ["passage: " + t for t in prepared]
-        vecs = [np.asarray(v, dtype=np.float32)
-                for v in model.embed(prepared, batch_size=batch_size)]
+        vecs = [np.asarray(v, dtype=np.float32) for v in model.embed(prepared, batch_size=batch_size)]
         arr = np.vstack(vecs)
         norms = np.linalg.norm(arr, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
@@ -279,7 +310,7 @@ def weak_signal(
     """
     low_concordance = report["concordance"] < min_concordance
     confusable = report["confusability"] > max_confusability
-    moderate_concordance = report["concordance"] < 0.7
+    moderate_concordance = report["concordance"] < MODERATE_CONCORDANCE_THRESHOLD
     return low_concordance or (confusable and moderate_concordance)
 
 
@@ -355,8 +386,8 @@ def monotonic_alignment(
     for s in range(N):
         pref[s, 1:] = np.cumsum(sim[:, s])
 
-    dp: list[np.ndarray] = [np.array([0.0])]        # dp[s] parallelo a candidates[s]
-    parents: list[list[int | None]] = [[None]]   # parents[s][j] = indice in candidates[s-1]
+    dp: list[np.ndarray] = [np.array([0.0])]  # dp[s] parallelo a candidates[s]
+    parents: list[list[int | None]] = [[None]]  # parents[s][j] = indice in candidates[s-1]
 
     for s in range(1, N):
         cur = candidates[s]
@@ -423,10 +454,7 @@ def semantic_timeline_from_texts(
     total_slides: int,
     total_duration: float,
     embed_fn: EmbedFn,
-    window_seconds: float = 4.0,
-    min_slide_duration: float = 3.0,
-    min_avg_similarity: float = 0.10,
-    temperature: float = DEFAULT_SEMANTIC_TEMPERATURE,
+    options: SemanticOptions | None = None,
     anchors: dict[int, float] | None = None,
 ) -> dict[int, float] | None:
     """
@@ -438,17 +466,23 @@ def semantic_timeline_from_texts(
         total_slides: numero totale di slide.
         total_duration: durata audio in secondi.
         embed_fn: funzione testi -> matrice (N, dim) normalizzata.
-        window_seconds / min_slide_duration: vincoli temporali della DP.
-        min_avg_similarity: soglia di qualità sotto cui restituire None.
+        options: parametri di tuning (finestre, soglie, temperature); None = default.
         anchors: timestamp reali (slide -> sec) da rispettare.
 
     Returns:
         Timeline {slide: start_second} valida, oppure None.
     """
+    opts = options or SemanticOptions()
+    window_seconds = opts.window_seconds
+    min_slide_duration = opts.min_slide_duration
+    min_avg_similarity = opts.min_avg_similarity
+    temperature = opts.temperature
+
     if total_slides < 2 or len(blocks) < total_slides:
         log.warning(
             "   [Semantico] %d blocchi < %d slide: segnale insufficiente.",
-            len(blocks), total_slides,
+            len(blocks),
+            total_slides,
         )
         return None
 
@@ -467,13 +501,18 @@ def semantic_timeline_from_texts(
             "l'ordine delle slide (es. slide generate dalla stessa fonte e non "
             "dal podcast): la sincronizzazione sarà inaffidabile. Rigenera la "
             "presentazione derivandola dal podcast per un allineamento 1:1.",
-            report["concordance"] * 100, report["confusability"] * 100,
+            report["concordance"] * 100,
+            report["confusability"] * 100,
         )
 
     min_gap = max(1, int(min_slide_duration / window_seconds))
 
     candidates = build_candidates(
-        len(blocks), total_slides, min_gap, blocks, anchors,
+        len(blocks),
+        total_slides,
+        min_gap,
+        blocks,
+        anchors,
     )
     if candidates is None:
         log.warning("   [Semantico] Vincoli di segmentazione insoddisfacibili.")
@@ -509,9 +548,9 @@ def semantic_timeline_from_texts(
 
     if avg_sim < min_avg_similarity:
         log.warning(
-            "   [Semantico] Similarità media troppo bassa (%.3f < %.2f): "
-            "sincronizzazione impossibile.",
-            avg_sim, min_avg_similarity,
+            "   [Semantico] Similarità media troppo bassa (%.3f < %.2f): sincronizzazione impossibile.",
+            avg_sim,
+            min_avg_similarity,
         )
         return None
 
@@ -543,27 +582,22 @@ def semantic_timeline_from_texts(
         return None
 
     log.info(
-        "   [Semantico] Timeline semantica generata (similarità media %.3f, "
-        "blocchi: %d).", avg_sim, len(blocks),
+        "   [Semantico] Timeline semantica generata (similarità media %.3f, blocchi: %d).",
+        avg_sim,
+        len(blocks),
     )
     return timeline
 
 
 # =====================================================================
-# ORCHESTRATORE (da main.py): parole Vosk -> timeline
+# ORCHESTRATORE (da main.py): parole Whisper -> timeline
 # =====================================================================
 def semantic_timeline_from_words(
     slide_texts: list[str],
     words_raw: list[Word],
     total_slides: int,
     total_duration: float,
-    model_name: str | None = None,
-    alternate_model_name: str | None = None,
-    cache_dir: str | None = None,
-    window_seconds: float = 4.0,
-    min_slide_duration: float = 3.0,
-    min_avg_similarity: float = 0.10,
-    temperature: float = DEFAULT_SEMANTIC_TEMPERATURE,
+    options: SemanticOptions | None = None,
     anchors: dict[int, float] | None = None,
 ) -> dict[int, float] | None:
     """
@@ -577,31 +611,34 @@ def semantic_timeline_from_words(
     Se manca fastembed o nessun modello si carica (es. primo avvio senza rete),
     restituisce None senza interrompere: il chiamante interrompe con avviso.
     """
+    opts = options or SemanticOptions()
     log.info("   Sincronizzazione semantica: embedding slide-trascrizione...")
 
-    blocks = build_semantic_blocks(words_raw, total_duration, window_seconds)
+    blocks = build_semantic_blocks(words_raw, total_duration, opts.window_seconds)
     if len(blocks) < total_slides:
         log.warning(
-            "   [Semantico] Blocchi trascrizione insufficienti "
-            "(%d < %d slide).", len(blocks), total_slides,
+            "   [Semantico] Blocchi trascrizione insufficienti (%d < %d slide).",
+            len(blocks),
+            total_slides,
         )
         return None
 
     model = _load_embed_model(
-        model_name or DEFAULT_EMBEDDING_MODEL,
-        cache_dir or DEFAULT_EMBEDDING_CACHE_DIR,
-        alternate_name=alternate_model_name or DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+        opts.model_name or DEFAULT_EMBEDDING_MODEL,
+        opts.cache_dir or DEFAULT_EMBEDDING_CACHE_DIR,
+        alternate_name=opts.alternate_model_name or DEFAULT_EMBEDDING_MODEL_ALTERNATE,
     )
     if model is None:
         return None
 
     embed_fn = _make_embed_fn(model)
     return semantic_timeline_from_texts(
-        slide_texts, blocks, total_slides, total_duration, embed_fn,
-        window_seconds=window_seconds,
-        min_slide_duration=min_slide_duration,
-        min_avg_similarity=min_avg_similarity,
-        temperature=temperature,
+        slide_texts,
+        blocks,
+        total_slides,
+        total_duration,
+        embed_fn,
+        options=opts,
         anchors=anchors,
     )
 
@@ -655,7 +692,7 @@ def _smooth_segments(
             # Il segmento corto viene ASSORBITO dal vicino più lungo: la slide
             # del risultato è quella del vicino (n), non quella corta (i).
             merged = (segs[n][0], segs[lo][1], segs[hi][2])
-            segs = [*segs[:lo], merged, *segs[hi + 1:]]
+            segs = [*segs[:lo], merged, *segs[hi + 1 :]]
             changed = True
             break
 
@@ -677,9 +714,7 @@ def free_order_segments_from_texts(
     total_slides: int,
     total_duration: float,
     embed_fn: EmbedFn,
-    window_seconds: float = 4.0,
-    min_segment_seconds: float = 8.0,
-    min_avg_similarity: float = 0.10,
+    options: SemanticOptions | None = None,
 ) -> list[Segment] | None:
     """
     Selezione libera delle slide: per ogni blocco audio prende la slide
@@ -687,13 +722,14 @@ def free_order_segments_from_texts(
     possono quindi apparire in qualsiasi ordine e ripetersi (es. si parla di
     overt/covert a 280s e di nuovo a 975s -> slide 4 mostrata due volte).
 
-    Anti-flicker: i segmenti più corti di `min_segment_seconds` vengono fusi
-    nel vicino più lungo, così la slide non cambia ogni 4 secondi.
+    Anti-flicker: i segmenti più corti di `options.min_segment_seconds` vengono
+    fusi nel vicino più lungo, così la slide non cambia ogni 4 secondi.
 
     Returns:
         Lista di segmenti {"slide": n (1-based), "start": s, "end": e},
         oppure None se il segnale è insufficiente.
     """
+    opts = options or SemanticOptions()
     if total_slides < 2 or len(blocks) < 2:
         log.warning(
             "   [Libero] Blocchi insufficienti (%d) per la selezione libera.",
@@ -710,14 +746,15 @@ def free_order_segments_from_texts(
             "   [Libero] AVVISO: segnale debole (concordanza picchi %.0f%%, "
             "slide confondibili %.0f%%). La selezione libera segue comunque "
             "il contenuto, ma con slide simili le transizioni restano incerte.",
-            report["concordance"] * 100, report["confusability"] * 100,
+            report["concordance"] * 100,
+            report["confusability"] * 100,
         )
 
     znorm = zscore_matrix(sim)
     best = znorm.argmax(axis=1)  # 0-based slide per blocco
 
     # ceil: rispetta sempre il minimo dichiarato (round può scendere sotto)
-    min_blocks = max(1, int(np.ceil(min_segment_seconds / window_seconds)))
+    min_blocks = max(1, int(np.ceil(opts.min_segment_seconds / opts.window_seconds)))
     segs = _smooth_segments(best, min_blocks)
 
     # Guardia di qualità: similarità media (grezza) dei segmenti scelti
@@ -727,21 +764,20 @@ def free_order_segments_from_texts(
         total_sim += float(sim[a:b, _s].sum())
         total_blocks += max(0, b - a)
     avg_sim = total_sim / total_blocks if total_blocks else 0.0
-    if avg_sim < min_avg_similarity:
+    if avg_sim < opts.min_avg_similarity:
         log.warning(
-            "   [Libero] Similarità media troppo bassa (%.3f < %.2f): "
-            "nessuna slide affidabile da mostrare.",
-            avg_sim, min_avg_similarity,
+            "   [Libero] Similarità media troppo bassa (%.3f < %.2f): nessuna slide affidabile da mostrare.",
+            avg_sim,
+            opts.min_avg_similarity,
         )
         return None
 
     timeline_segments: list[Segment] = []
     for s, a, b in segs:
         start = float(blocks[a].get("first_time", blocks[a]["time"]))
-        end = (float(blocks[b].get("first_time", blocks[b]["time"]))
-               if b < len(blocks) else total_duration)
+        end = float(blocks[b].get("first_time", blocks[b]["time"])) if b < len(blocks) else total_duration
         if end <= start:
-            end = min(total_duration, start + (b - a) * window_seconds)
+            end = min(total_duration, start + (b - a) * opts.window_seconds)
         timeline_segments.append({"slide": int(s) + 1, "start": start, "end": end})
 
     # Il primo segmento parte da 0.0 (come la slide 1 nel flusso classico):
@@ -752,14 +788,15 @@ def free_order_segments_from_texts(
 
     if not timeline_segments:
         log.warning(
-            "   [Libero] Nessun segmento con durata minima: segnale "
-            "insufficiente per la selezione libera.",
+            "   [Libero] Nessun segmento con durata minima: segnale insufficiente per la selezione libera.",
         )
         return None
 
     log.info(
         "   [Libero] %d segmenti generati (similarità media %.3f, %d blocchi).",
-        len(timeline_segments), avg_sim, len(blocks),
+        len(timeline_segments),
+        avg_sim,
+        len(blocks),
     )
     return timeline_segments
 
@@ -769,38 +806,398 @@ def free_order_segments_from_words(
     words_raw: list[Word],
     total_slides: int,
     total_duration: float,
-    model_name: str | None = None,
-    alternate_model_name: str | None = None,
-    cache_dir: str | None = None,
-    window_seconds: float = 4.0,
-    min_segment_seconds: float = 8.0,
-    min_avg_similarity: float = 0.10,
+    options: SemanticOptions | None = None,
 ) -> list[Segment] | None:
     """
     Pipeline completa della selezione libera: blocchi, modello embedding,
     segmenti non monotoni (stesso motore del flusso classico).
     """
+    opts = options or SemanticOptions()
     log.info("   Sincronizzazione semantica (selezione libera, riordino slide)...")
 
-    blocks = build_semantic_blocks(words_raw, total_duration, window_seconds)
+    blocks = build_semantic_blocks(words_raw, total_duration, opts.window_seconds)
     if len(blocks) < 2:
         log.warning(
-            "   [Libero] Blocchi trascrizione insufficienti (%d).", len(blocks),
+            "   [Libero] Blocchi trascrizione insufficienti (%d).",
+            len(blocks),
         )
         return None
 
     model = _load_embed_model(
-        model_name or DEFAULT_EMBEDDING_MODEL,
-        cache_dir or DEFAULT_EMBEDDING_CACHE_DIR,
-        alternate_name=alternate_model_name or DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+        opts.model_name or DEFAULT_EMBEDDING_MODEL,
+        opts.cache_dir or DEFAULT_EMBEDDING_CACHE_DIR,
+        alternate_name=opts.alternate_model_name or DEFAULT_EMBEDDING_MODEL_ALTERNATE,
     )
     if model is None:
         return None
 
     embed_fn = _make_embed_fn(model)
     return free_order_segments_from_texts(
-        slide_texts, blocks, total_slides, total_duration, embed_fn,
+        slide_texts,
+        blocks,
+        total_slides,
+        total_duration,
+        embed_fn,
+        options=opts,
+    )
+
+
+# =====================================================================
+# POST-ELABORAZIONE SEGMENTI LLM (flusso libero)
+# =====================================================================
+# I segmenti LLM sono quantizzati al chunk (30s): l'LLM sceglie la slide per
+# ogni chunk ma non può esprimere confini più fini, quindi i cambi slide
+# possono cadere a metà discorso, e l'ultimo chunk parziale può produrre un
+# segmento finale molto corto. Queste due funzioni sono il refinamento
+# deterministico a valle dell'LLM (nessuna chiamata extra):
+#
+#   - ``refine_llm_segment_boundaries``: sposta ogni confine entro
+#     ``±window_seconds`` al punto di parola in cui la similarità locale "si
+#     inverte" tra slide uscente ed entrante (confini a granularità di parola,
+#     non di chunk);
+#   - ``merge_short_segments``: assorbe i segmenti residui sotto soglia nel
+#     vicino più lungo (stessa filosofia dell'anti-flicker del MiniLM).
+#
+# Vengono applicate SOLO al flusso libero e SOLO ai segmenti LLM (il MiniLM
+# del flusso libero ha già il suo anti-flicker; il flusso ordinato ha ancore
+# esatte che non vanno toccate).
+DEFAULT_LLM_MIN_SEGMENT_SECONDS = 15.0  # soglia sotto cui un segmento LLM va assorbito
+
+
+def merge_short_segments(
+    segments: list[dict[str, Any]],
+    min_seconds: float = DEFAULT_LLM_MIN_SEGMENT_SECONDS,
+) -> list[dict[str, Any]]:
+    """Assorbe i segmenti più corti di ``min_seconds`` nel vicino più lungo.
+
+    Il segmento corto viene FUSO nel vicino più lungo: la slide del risultato
+    è quella del vicino, l'inizio quello del segmento più a sinistra e la fine
+    quello del più a destra. Il segmento finale corto (es. ultimo chunk
+    parziale di pochi secondi) viene assorbito dal precedente. I segmenti
+    adiacenti che finiscono con la stessa slide vengono uniti in un'unica
+    occorrenza.
+
+    Returns:
+        Nuova lista di segmenti (mai più lunga dell'originale).
+    """
+    if not segments:
+        return []
+    out = [dict(s) for s in segments]
+    changed = True
+    while changed and len(out) > 1:
+        changed = False
+        for i, seg in enumerate(out):
+            if float(seg["end"]) - float(seg["start"]) >= min_seconds:
+                continue
+            # Scegli il vicino più lungo; il corto viene ASSORBITO da esso.
+            if i == 0:
+                n = 1
+            elif i == len(out) - 1:
+                n = i - 1
+            else:
+                left_len = float(out[i - 1]["end"]) - float(out[i - 1]["start"])
+                right_len = float(out[i + 1]["end"]) - float(out[i + 1]["start"])
+                n = i - 1 if left_len >= right_len else i + 1
+            lo, hi = min(i, n), max(i, n)
+            merged = {
+                "slide": out[n]["slide"],
+                "start": out[lo]["start"],
+                "end": out[hi]["end"],
+            }
+            log.info(
+                "   [LLM] Segmento corto (%.1fs) assorbito: slide %s -> %s (%.1fs-%.1fs).",
+                float(seg["end"]) - float(seg["start"]),
+                seg["slide"],
+                out[n]["slide"],
+                float(merged["start"]),
+                float(merged["end"]),
+            )
+            out = [*out[:lo], merged, *out[hi + 1 :]]
+            changed = True
+            break
+
+    # Unione finale: segmenti adiacenti con la STESSA slide (dopo gli
+    # assorbimenti possono restarne due consecutivi).
+    final: list[dict[str, Any]] = []
+    for seg in out:
+        if final and final[-1]["slide"] == seg["slide"]:
+            final[-1]["end"] = seg["end"]
+        else:
+            final.append(seg)
+    return final
+
+
+def refine_llm_segment_boundaries(
+    segments: list[dict[str, Any]],
+    words: list[Word],
+    slide_texts: Sequence[str],
+    embed_fn: EmbedFn,
+    window_seconds: float = 30.0,
+    min_segment_seconds: float = 8.0,
+    context_seconds: float = 10.0,
+    margin: float = 0.01,
+    refine_slides: Collection[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Rifinisce i confini dei segmenti LLM a granularità di parola.
+
+    Ogni confine (inizio di un segmento) viene spostato entro
+    ``±window_seconds`` al timestamp di parola che massimizza la coerenza
+    locale: similarità della finestra di parlato appena PRIMA del confine con
+    la slide uscente + similarità della finestra appena DOPO con la slide
+    entrante. Se lo spostamento non migliora di almeno ``margin`` rispetto al
+    confine corrente, il confine resta dov'è.
+
+    ``refine_slides`` (opzionale) limita il raffinamento ai SOLI confini di
+    inizio delle slide indicate (numeri 1-based): i confini delle altre slide
+    restano esattamente dove sono. Serve al flusso ordinato, dove le ancore
+    ``"slide N"`` sono vincoli esatti e inviolabili e solo le slide senza
+    ancora esplicita possono muoversi. Di default (None) tutti i confini sono
+    candidati (flusso libero).
+
+    Vincoli rispettati: monotonicità, durata minima ``min_segment_seconds``
+    per i segmenti adiacenti e confini mai fuori dai limiti del segmento.
+
+    Se l'embedding fallisce (modello iniettabile, errori di rete) i segmenti
+    vengono restituiti invariati.
+
+    Returns:
+        Nuova lista di segmenti (l'originale è intatta).
+    """
+    if len(segments) < 2 or not words:
+        return segments
+    try:
+        slide_emb = np.asarray(embed_fn([_clean_slide_text(t) for t in slide_texts]), dtype=np.float32)
+    except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
+        log.warning("   [LLM/Refine] Embedding slide non disponibile: confini invariati (%s).", e)
+        return segments
+    if slide_emb.ndim != 2 or slide_emb.shape[0] < 1:
+        return segments
+    slide_emb = slide_emb / np.maximum(np.linalg.norm(slide_emb, axis=1, keepdims=True), 1e-9)
+
+    word_times = [float(w["start"]) for w in words]
+    out = [dict(s) for s in segments]
+    moved = 0
+    for i in range(1, len(out)):
+        prev_slide = int(out[i - 1]["slide"]) - 1
+        next_slide = int(out[i]["slide"]) - 1
+        if prev_slide == next_slide:
+            continue
+        # Flusso ordinato: i confini delle slide con ancora esplicita sono
+        # vincoli esatti (timestamp reali del parlato) e non vanno toccati.
+        if refine_slides is not None and int(out[i]["slide"]) not in refine_slides:
+            continue
+        if not (0 <= prev_slide < slide_emb.shape[0]) or not (0 <= next_slide < slide_emb.shape[0]):
+            continue
+        t_current = float(out[i]["start"])
+        lo = max(float(out[i - 1]["start"]) + min_segment_seconds, t_current - window_seconds)
+        hi = min(float(out[i]["end"]) - min_segment_seconds, t_current + window_seconds)
+        if hi <= lo:
+            continue
+        candidates = sorted({t_current, *[t for t in word_times if lo <= t <= hi]})
+        if len(candidates) < 2:
+            continue
+
+        # Finestre locali per ogni candidato. I candidati con una finestra
+        # VUOTA (bordi dell'audio o silenzi) vengono scartati PRIMA
+        # dell'embedding: una stringa "" può far fallire fastembed o produrre
+        # vettori degeneri, e senza confronto col confine attuale il confine
+        # verrebbe saltato del tutto.
+        cand_pairs: list[tuple[float, str, str]] = []
+        for t in candidates:
+            before = _window_words(words, word_times, t - context_seconds, t)
+            after = _window_words(words, word_times, t, t + context_seconds)
+            if not before or not after:
+                continue
+            cand_pairs.append((t, before, after))
+        if len(cand_pairs) < 2:
+            continue
+        cur_pair = next((p for p in cand_pairs if p[0] == t_current), None)
+        if cur_pair is None:
+            continue  # finestre vuote anche sul confine attuale: niente confronto equo
+
+        # Testi deduplicati (un solo batch di embedding).
+        texts: list[str] = []
+        seen: dict[str, int] = {}
+        indexed: list[tuple[float, int, int]] = []
+        for t, before, after in cand_pairs:
+            pair: list[int] = []
+            for txt in (before, after):
+                if txt not in seen:
+                    seen[txt] = len(texts)
+                    texts.append(txt)
+                pair.append(seen[txt])
+            indexed.append((t, pair[0], pair[1]))
+        try:
+            embs = np.asarray(embed_fn(texts), dtype=np.float32)
+            if embs.ndim != 2 or embs.shape[0] != len(texts):
+                continue
+            embs = embs / np.maximum(np.linalg.norm(embs, axis=1, keepdims=True), 1e-9)
+        except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
+            log.warning("   [LLM/Refine] Embedding finestre non disponibile: confini invariati (%s).", e)
+            continue
+
+        scores = [
+            float(embs[pair[1]] @ slide_emb[prev_slide]) + float(embs[pair[2]] @ slide_emb[next_slide])
+            for pair in indexed
+        ]
+        best_idx = int(np.argmax(scores))
+        cur_idx = next(i for i, p in enumerate(indexed) if p[0] == t_current)
+        if best_idx == cur_idx or scores[best_idx] <= scores[cur_idx] + margin:
+            continue
+        best_t = indexed[best_idx][0]
+        out[i]["start"] = best_t
+        out[i - 1]["end"] = best_t
+        moved += 1
+        log.info(
+            "   [LLM/Refine] Confine spostato a %.1fs (era %.1fs): slide %d -> %d (score %.3f vs %.3f).",
+            best_t,
+            t_current,
+            prev_slide + 1,
+            next_slide + 1,
+            scores[best_idx],
+            scores[cur_idx],
+        )
+    if moved:
+        log.info("   [LLM/Refine] %d confine/i raffinato/i a livello di parola.", moved)
+    return out
+
+
+def _window_words(words: Sequence[Word], word_times: Sequence[float], start: float, end: float) -> str:
+    """Testo parlato nell'intervallo [start, end), via bisect (le parole sono ordinate)."""
+    lo_i = bisect.bisect_left(word_times, start)
+    hi_i = bisect.bisect_left(word_times, end)
+    return " ".join(words[k]["word"] for k in range(lo_i, hi_i))
+
+
+def refine_llm_segments_from_words(
+    segments: list[dict[str, Any]],
+    words_raw: list[Word],
+    slide_texts: list[str],
+    options: SemanticOptions | None = None,
+    window_seconds: float = 30.0,
+) -> list[dict[str, Any]]:
+    """Refinamento dei confini LLM con il modello embedding reale (fastembed).
+
+    Come ``semantic_timeline_from_words``: carica il modello (con fallback sul
+    modello alternativo), costruisce la ``EmbedFn`` e delega a
+    ``refine_llm_segment_boundaries``. Se il modello non è disponibile i
+    segmenti vengono restituiti invariati (nessuna interruzione).
+    """
+    opts = options or SemanticOptions()
+    model = _load_embed_model(
+        opts.model_name or DEFAULT_EMBEDDING_MODEL,
+        opts.cache_dir or DEFAULT_EMBEDDING_CACHE_DIR,
+        alternate_name=opts.alternate_model_name or DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+    )
+    if model is None:
+        return segments
+    embed_fn = _make_embed_fn(model)
+    return refine_llm_segment_boundaries(
+        segments,
+        words_raw,
+        slide_texts,
+        embed_fn,
+        window_seconds=window_seconds,
+        min_segment_seconds=max(5.0, opts.min_slide_duration),
+    )
+
+
+# =====================================================================
+# POST-ELABORAZIONE TIMELINE LLM ORDINATA (flusso slide-audio/audio-slide)
+# =====================================================================
+# Nel flusso ordinato l'LLM posiziona SOLO le slide senza ancora esplicita
+# (``llm_ordered_timeline``): i loro confini di inizio restano quantizzati al
+# chunk (es. 30s) e possono cadere a metà parola o nel mezzo di un discorso
+# ancora dedicato alla slide precedente. Queste due funzioni raffinano SOLO
+# quei confini a livello di parola; le ancore esatte (``"slide N"``) non
+# vengono MAI toccate.
+def refine_ordered_llm_timeline(
+    timeline: dict[int, float],
+    anchors: dict[int, float],
+    words: list[Word],
+    slide_texts: Sequence[str],
+    total_duration: float,
+    embed_fn: EmbedFn,
+    window_seconds: float = 30.0,
+    min_segment_seconds: float = 8.0,
+) -> dict[int, float]:
+    """Rifinisce i confini della timeline LLM ordinata a granularità di parola.
+
+    Converte la timeline ``{slide: start}`` in segmenti e delega a
+    ``refine_llm_segment_boundaries`` limitando i candidati alle sole slide
+    SENZA ancora (``refine_slides``): le ancore restano al timestamp esatto
+    pronunciato nel parlato. La timeline in uscita rispetta la monotonicità
+    (garantita dai vincoli del refine) ed è quindi riconciliabile.
+
+    Se il modello embedding fallisce (embed_fn iniettabile/esterno) la
+    timeline viene restituita invariata.
+
+    Returns:
+        Nuova timeline {slide: start}; quella in ingresso è intatta.
+    """
+    total_slides = len(slide_texts)
+    refine_slides = {s for s in range(2, total_slides + 1) if s not in anchors}
+    if not refine_slides or len(timeline) < 2:
+        return timeline
+    ordered = sorted(timeline)
+    segments: list[dict[str, Any]] = []
+    for i, s in enumerate(ordered):
+        nxt = ordered[i + 1] if i + 1 < len(ordered) else None
+        segments.append(
+            {
+                "slide": int(s),
+                "start": float(timeline[s]),
+                "end": float(timeline[nxt]) if nxt is not None else float(total_duration),
+            }
+        )
+    refined = refine_llm_segment_boundaries(
+        segments,
+        words,
+        slide_texts,
+        embed_fn,
         window_seconds=window_seconds,
         min_segment_seconds=min_segment_seconds,
-        min_avg_similarity=min_avg_similarity,
+        refine_slides=refine_slides,
+    )
+    return {int(seg["slide"]): float(seg["start"]) for seg in refined}
+
+
+def refine_llm_timeline_from_words(
+    timeline: dict[int, float],
+    anchors: dict[int, float],
+    words_raw: list[Word],
+    slide_texts: list[str],
+    total_duration: float,
+    options: SemanticOptions | None = None,
+    window_seconds: float = 30.0,
+) -> dict[int, float]:
+    """Refinamento della timeline LLM ordinata con il modello embedding reale.
+
+    Come ``refine_ordered_llm_timeline`` ma carica il modello fastembed (con
+    fallback sul modello alternativo) e delega a essa. Se il modello non è
+    disponibile la timeline viene restituita invariata (nessuna interruzione).
+    """
+    opts = options or SemanticOptions()
+    total_slides = len(slide_texts)
+    # No-op veloce: senza slide da raffinare (tutte ancorate o timeline troppo
+    # corta) la timeline torna invariata senza caricare il modello embedding.
+    if len(timeline) < 2 or not {s for s in range(2, total_slides + 1) if s not in anchors}:
+        return timeline
+    model = _load_embed_model(
+        opts.model_name or DEFAULT_EMBEDDING_MODEL,
+        opts.cache_dir or DEFAULT_EMBEDDING_CACHE_DIR,
+        alternate_name=opts.alternate_model_name or DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+    )
+    if model is None:
+        return timeline
+    embed_fn = _make_embed_fn(model)
+    return refine_ordered_llm_timeline(
+        timeline,
+        anchors,
+        words_raw,
+        slide_texts,
+        total_duration,
+        embed_fn,
+        window_seconds=window_seconds,
+        min_segment_seconds=max(5.0, opts.min_slide_duration),
     )

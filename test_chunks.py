@@ -13,7 +13,7 @@ from chunks import build_windows
 
 
 def _words(items):
-    """Converte [(word, start)] in lista di dict Vosk."""
+    """Converte [(word, start)] in lista di dict Whisper."""
     return [{"word": w, "start": t} for w, t in items]
 
 

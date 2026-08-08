@@ -34,8 +34,7 @@ def _resize_for_video(image_path: str, max_width: int, max_height: int) -> np.nd
         # Thumbnail ridimensiona solo se necessario
         if orig_w > max_width or orig_h > max_height:
             img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
-            log.debug("   Resize %s: %dx%d -> %dx%d",
-                      Path(image_path).name, orig_w, orig_h, *img.size)
+            log.debug("   Resize %s: %dx%d -> %dx%d", Path(image_path).name, orig_w, orig_h, *img.size)
 
         arr = np.array(img.convert("RGB"))
     h, w = arr.shape[:2]
@@ -74,13 +73,10 @@ def build_video(
 
     # Validazione: slide_files e durations devono avere la stessa lunghezza
     if not slide_files or not durations:
-        raise ValueError(
-            "Nessuna slide/durata: impossibile assemblare il video."
-        )
+        raise ValueError("Nessuna slide/durata: impossibile assemblare il video.")
     if len(slide_files) != len(durations):
         raise ValueError(
-            f"slide_files ({len(slide_files)}) != durations ({len(durations)}). "
-            "Impossibile assemblare il video."
+            f"slide_files ({len(slide_files)}) != durations ({len(durations)}). Impossibile assemblare il video."
         )
 
     # Buffer: estendi l'ultima slide per proteggere l'audio finale.
@@ -96,7 +92,9 @@ def build_video(
         transition_compensation = transition_duration * (len(slide_files) - 1)
         log.debug(
             "   Compensazione transizioni: +%.1fs (%.1fs x %d slide).",
-            transition_compensation, transition_duration, len(slide_files) - 1,
+            transition_compensation,
+            transition_duration,
+            len(slide_files) - 1,
         )
 
     total_extra = DEFAULT_VIDEO_BUFFER_SEC + transition_compensation
@@ -104,7 +102,9 @@ def build_video(
     durations[-1] += total_extra
     log.debug(
         "   Ultima slide estesa di +%.1fs (buffer %.1fs + compensazione transizioni %.1fs).",
-        total_extra, DEFAULT_VIDEO_BUFFER_SEC, transition_compensation,
+        total_extra,
+        DEFAULT_VIDEO_BUFFER_SEC,
+        transition_compensation,
     )
 
     clips = [
@@ -115,9 +115,7 @@ def build_video(
     video_clip = None
     try:
         if transition_duration > 0 and len(clips) > 1:
-            video_clip = concatenate_videoclips(
-                clips, method="compose", padding=-transition_duration
-            )
+            video_clip = concatenate_videoclips(clips, method="compose", padding=-transition_duration)
             log.info("   Transizioni applicate (%.1fs crossfade).", transition_duration)
         else:
             video_clip = concatenate_videoclips(clips, method="chain")

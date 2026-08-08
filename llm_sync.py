@@ -79,6 +79,7 @@ from timeline import _complete_from_anchors, _lis_anchors
 
 try:
     import requests
+
     _HAS_REQUESTS = True
 except ImportError:  # pragma: no cover
     _HAS_REQUESTS = False
@@ -92,6 +93,19 @@ except ImportError:  # pragma: no cover
 # Secondi massimi di attesa dopo l'avvio automatico di 9Router prima di
 # considerarlo irraggiungibile (il gateway node impiega qualche secondo).
 _AUTO_LAUNCH_WAIT = 90.0
+
+# Soglia minima di caratteri alfanumerici su una riga di testo OCR: sotto
+# questa frazione la riga è troppo corrotta (diagrammi/immagini) e va scartata.
+MIN_ALNUM_RATIO_PER_LINE = 0.35
+
+# Codici HTTP usati nella gestione dei gateway 9Router.
+HTTP_OK = 200
+HTTP_TOO_MANY_REQUESTS = 429
+# Confine degli errori server 5xx: una risposta con status < 500 indica che il
+# gateway è vivo (successi/redirect/4xx) → health-check positiva.
+HTTP_SERVER_ERROR_BOUNDARY = 500
+
+
 def endpoints_for(provider: str) -> list[dict[str, Any]]:
     """Restituisce gli endpoint da usare per il provider scelto.
 
@@ -128,30 +142,36 @@ def _endpoints() -> list[dict[str, Any]]:
     api_key = os.environ.get("LLM_9ROUTER_API_KEY", "")
 
     # 1) Modello principale: combo `comboact` (tutti i modelli free del router)
-    endpoints.append({
-        "name": "9router",
-        "url": base + "/chat/completions",
-        "model": os.environ.get("LLM_9ROUTER_MODEL", "comboact"),
-        "api_key": api_key,
-        "timeout": 120,
-    })
+    endpoints.append(
+        {
+            "name": "9router",
+            "url": base + "/chat/completions",
+            "model": os.environ.get("LLM_9ROUTER_MODEL", "comboact"),
+            "api_key": api_key,
+            "timeout": 120,
+        }
+    )
     # 2) Backup nello stesso router: Cloudflare Mistral 24B — nessun pool
     #    condiviso (affidabile), veloce (~10s). Usato se la combo non risponde.
-    endpoints.append({
-        "name": "9router",
-        "url": base + "/chat/completions",
-        "model": os.environ.get("LLM_9ROUTER_BACKUP_MODEL", "cf/@cf/mistralai/mistral-small-3.1-24b-instruct"),
-        "api_key": api_key,
-        "timeout": 120,
-    })
+    endpoints.append(
+        {
+            "name": "9router",
+            "url": base + "/chat/completions",
+            "model": os.environ.get("LLM_9ROUTER_BACKUP_MODEL", "cf/@cf/mistralai/mistral-small-3.1-24b-instruct"),
+            "api_key": api_key,
+            "timeout": 120,
+        }
+    )
     # 3) Seconda rete di sicurezza free (via OpenRouter)
-    endpoints.append({
-        "name": "9router",
-        "url": base + "/chat/completions",
-        "model": os.environ.get("LLM_9ROUTER_BACKUP_MODEL_2", "openrouter/google/gemma-4-31b-it:free"),
-        "api_key": api_key,
-        "timeout": 120,
-    })
+    endpoints.append(
+        {
+            "name": "9router",
+            "url": base + "/chat/completions",
+            "model": os.environ.get("LLM_9ROUTER_BACKUP_MODEL_2", "openrouter/google/gemma-4-31b-it:free"),
+            "api_key": api_key,
+            "timeout": 120,
+        }
+    )
 
     return endpoints
 
@@ -173,13 +193,15 @@ def build_llm_chunks(
     """
     chunks: list[dict[str, object]] = []
     for i, w in enumerate(build_windows(words, total_duration, chunk_seconds)):
-        chunks.append({
-            "num": i + 1,
-            "start": w["start"],
-            "end": w["end"],
-            "first_time": w["first_time"],
-            "text": w["text"],
-        })
+        chunks.append(
+            {
+                "num": i + 1,
+                "start": w["start"],
+                "end": w["end"],
+                "first_time": w["first_time"],
+                "text": w["text"],
+            }
+        )
     return chunks
 
 
@@ -205,7 +227,7 @@ def clean_slide_text_for_llm(text: str, max_chars: int = 900) -> str:
         if not s:
             continue
         alnum = sum(c.isalnum() for c in s)
-        if len(s) > 0 and alnum / len(s) < 0.35:
+        if len(s) > 0 and alnum / len(s) < MIN_ALNUM_RATIO_PER_LINE:
             continue  # riga troppo corrotta (diagrammi, immagini)
         kept.append(s)
     t = re.sub(r"\s+", " ", " ".join(kept)).strip()
@@ -217,18 +239,12 @@ def clean_slide_text_for_llm(text: str, max_chars: int = 900) -> str:
 # =====================================================================
 def _slide_block(slide_texts: Sequence[str], max_chars: int = 400) -> str:
     """Blocco prompt "Diapositive:" (testo pulito, una per riga, numerate 1..N)."""
-    return "\n".join(
-        f"{i + 1}. {clean_slide_text_for_llm(t)[:max_chars]}"
-        for i, t in enumerate(slide_texts)
-    )
+    return "\n".join(f"{i + 1}. {clean_slide_text_for_llm(t)[:max_chars]}" for i, t in enumerate(slide_texts))
 
 
 def _chunk_block(chunks: Sequence[dict[str, object]]) -> str:
     """Blocco prompt "Parlato (chunk):" (una riga per chunk con finestra temporale)."""
-    return "\n".join(
-        f"chunk {c['num']} [{c['start']:.0f}s-{c['end']:.0f}s]: {c['text']}"
-        for c in chunks
-    )
+    return "\n".join(f"chunk {c['num']} [{c['start']:.0f}s-{c['end']:.0f}s]: {c['text']}" for c in chunks)
 
 
 def _extract_json_array(content: str) -> Any | None:
@@ -278,11 +294,19 @@ def build_prompt(
         "- Se un chunk è solo una transizione, un'introduzione o una "
         "ricapitolazione senza contenuto tecnico specifico, RIPETI la "
         "diapositiva del chunk precedente (stesso numero) invece di cambiarne.\n"
+        "- Se un chunk contiene SOLO l'introduzione del tema guida o una "
+        "frase di cornice senza contenuto specifico (es. 'la filosofia è una "
+        "cassetta degli attrezzi', 'uno strumento', 'un kit di sopravvivenza'), "
+        "NON anticipare la slide di sintesi/conclusione: RIPETI la diapositiva "
+        "precedente o usa la copertina.\n"
+        "- Se un chunk contiene la fine di un argomento e l'inizio del "
+        "successivo, assegnalo all'argomento che occupa la MAGGIORE parte "
+        "del chunk.\n"
         "Se nessuna diapositiva è adatta, usa null. NIENTE spiegazioni, NIENTE "
         "ragionamento preliminare (niente analisi, niente piano, niente "
         "pensieri): vai DIRETTAMENTE all'array JSON finale. Rispondi SOLO con "
         "un array JSON di oggetti, uno per chunk, in questo "
-        "formato esatto: [{\"chunk\": 1, \"slide\": 3}, {\"chunk\": 2, \"slide\": null}]"
+        'formato esatto: [{"chunk": 1, "slide": 3}, {"chunk": 2, "slide": null}]'
     )
     user = (
         f"Diapositive:\n{_slide_block(slide_texts)}\n\n"
@@ -374,32 +398,40 @@ def _call_endpoint(
     for attempt in range(max_attempts):
         try:
             resp = requests.post(
-                endpoint["url"], headers=headers, json=payload,
+                endpoint["url"],
+                headers=headers,
+                json=payload,
                 timeout=endpoint.get("timeout", 120),
             )
         except (requests.RequestException, OSError) as e:
             if attempt < max_attempts - 1:
                 log.warning(
                     "   [LLM] %s non raggiungibile (tentativo %d/%d): %s",
-                    endpoint["name"], attempt + 1, max_attempts, e,
+                    endpoint["name"],
+                    attempt + 1,
+                    max_attempts,
+                    e,
                 )
                 time.sleep(2 * (attempt + 1))
                 continue
             log.warning("   [LLM] %s non raggiungibile: %s", endpoint["name"], e)
             return None
 
-        if resp.status_code == 429 and attempt < max_attempts - 1:
+        if resp.status_code == HTTP_TOO_MANY_REQUESTS and attempt < max_attempts - 1:
             wait = 5 * (attempt + 1)
             log.warning(
                 "   [LLM] %s rate-limit (HTTP 429): riprovo tra %ds...",
-                endpoint["name"], wait,
+                endpoint["name"],
+                wait,
             )
             time.sleep(wait)
             continue
-        if resp.status_code != 200:
+        if resp.status_code != HTTP_OK:
             log.warning(
-                "   [LLM] %s: HTTP %d (%s)", endpoint["name"],
-                resp.status_code, resp.text[:150],
+                "   [LLM] %s: HTTP %d (%s)",
+                endpoint["name"],
+                resp.status_code,
+                resp.text[:150],
             )
             return None
         try:
@@ -418,7 +450,8 @@ def _call_endpoint(
                     return m.group(1)
             log.warning(
                 "   [LLM] %s: risposta non interpretabile (%.150s...)",
-                endpoint["name"], text,
+                endpoint["name"],
+                text,
             )
             return None
     return None
@@ -442,7 +475,10 @@ def _call_cascade(
         if content is not None:
             log.info(
                 "   %s %s [%s] ha risposto in %.1fs.",
-                prefix, ep["name"], ep["model"], time.time() - t0,
+                prefix,
+                ep["name"],
+                ep["model"],
+                time.time() - t0,
             )
             return content, ep["name"], ep["model"]
     return None, None, None
@@ -468,7 +504,7 @@ def router_alive(endpoints: list[dict[str, Any]], timeout: float = 3.0) -> bool:
             continue
         try:
             resp = requests.get(base + "/models", timeout=timeout)
-            if resp.status_code < 500:
+            if resp.status_code < HTTP_SERVER_ERROR_BOUNDARY:
                 return True
         except (OSError, requests.RequestException):
             continue
@@ -479,6 +515,7 @@ def _skip_key_pressed() -> bool:
     """True se l'utente ha premuto 'S' (Windows: msvcrt, senza bloccare)."""
     try:
         import msvcrt
+
         if msvcrt.kbhit():  # type: ignore[attr-defined]  # solo su Windows (mypy Linux)
             ch = msvcrt.getch()  # type: ignore[attr-defined]
             return ch in (b"s", b"S") if isinstance(ch, bytes) else ch.lower() == "s"
@@ -537,7 +574,8 @@ def _flush_logs() -> None:
 def _router_unavailable_error(context: str) -> RuntimeError:
     """Errore che ARRESTA il processo quando 9Router serve ma non risponde."""
     return RuntimeError(
-        "9Router è necessario per " + (context or "la sincronizzazione LLM")
+        "9Router è necessario per "
+        + (context or "la sincronizzazione LLM")
         + ", ma non risponde su http://localhost:20128/v1 e non c'è un "
         "terminale interattivo per scegliere.\n"
         "Opzioni:\n"
@@ -597,24 +635,21 @@ def wait_for_router(
                 log.warning("   'S' premuto: salto l'LLM e uso il MiniLM locale.")
                 return False
         log.warning(
-            "   [LLM] 9Router non online dopo %d secondi dall'avvio "
-            "automatico.", int(_AUTO_LAUNCH_WAIT),
+            "   [LLM] 9Router non online dopo %d secondi dall'avvio automatico.",
+            int(_AUTO_LAUNCH_WAIT),
         )
     else:
         log.warning(
-            "   [LLM] Comando '9router' non disponibile: avvio manuale "
-            "richiesto (9router --tray).",
+            "   [LLM] Comando '9router' non disponibile: avvio manuale richiesto (9router --tray).",
         )
 
     if not is_interactive():
         if strict:
             raise _router_unavailable_error(context)
-        log.warning("   [LLM] 9Router non raggiungibile e stdin non interattivo: "
-                    "ripiego subito sul MiniLM locale.")
+        log.warning("   [LLM] 9Router non raggiungibile e stdin non interattivo: ripiego subito sul MiniLM locale.")
         return False
     log.warning("\n" + "=" * 70)
-    log.warning(" [ATTENZIONE] 9Router NON è online e serve per: %s",
-                context or "sincronizzazione LLM")
+    log.warning(" [ATTENZIONE] 9Router NON è online e serve per: %s", context or "sincronizzazione LLM")
     log.warning("=" * 70)
     log.warning(" Il processo è in PAUSA in attesa di 9Router.")
     log.warning("")
@@ -697,8 +732,13 @@ def llm_timeline_segments(
         if review:
             slides_cached = _chunk_slides_from_segments(chunks, cached)
             diffs = review_llm_timeline(
-                slide_texts, chunks, slides_cached, total_slides,
-                endpoints=endpoints, wait_timeout=wait_timeout, strict=strict,
+                slide_texts,
+                chunks,
+                slides_cached,
+                total_slides,
+                endpoints=endpoints,
+                wait_timeout=wait_timeout,
+                strict=strict,
             )
             if diffs is not None:
                 _warn_review_diffs(chunks, slides_cached, diffs)
@@ -711,8 +751,7 @@ def llm_timeline_segments(
     # Health-check: se 9Router è spento, PAUSA con avviso e ripresa automatica
     # appena torna online (o 'S' per il fallback MiniLM). In modalità strict
     # (flusso libero) senza terminale: errore chiaro, niente fallback silenzioso.
-    if not wait_for_router(eps, wait_timeout=wait_timeout,
-                           context="la selezione delle slide", strict=strict):
+    if not wait_for_router(eps, wait_timeout=wait_timeout, context="la selezione delle slide", strict=strict):
         return None
 
     system, user = build_prompt(slide_texts[:total_slides], chunks)
@@ -768,14 +807,21 @@ def llm_timeline_segments(
     if review:
         slides_review = _chunk_slides_from_segments(chunks, merged)
         diffs = review_llm_timeline(
-            slide_texts, chunks, slides_review, total_slides, endpoints=eps,
+            slide_texts,
+            chunks,
+            slides_review,
+            total_slides,
+            endpoints=eps,
         )
         if diffs is not None:
             _warn_review_diffs(chunks, slides_review, diffs)
 
     log.info(
         "   [LLM] %d segmenti generati (%d chunk, via %s [%s]).",
-        len(merged), len(chunks), used_endpoint, used_model,
+        len(merged),
+        len(chunks),
+        used_endpoint,
+        used_model,
     )
     _save_llm_cache(cache_key, merged)
     return merged
@@ -810,13 +856,10 @@ def build_ordered_prompt(
     """
     anchor_block = ""
     if anchors:
-        lines = [
-            f"slide {s} a {t:.1f}s" for s, t in sorted(anchors.items()) if s > 1
-        ]
+        lines = [f"slide {s} a {t:.1f}s" for s, t in sorted(anchors.items()) if s > 1]
         if lines:
             anchor_block = (
-                "\nRiferimenti temporali CERTI (lo speaker li ha nominati "
-                "esplicitamente):\n" + ", ".join(lines) + "\n"
+                "\nRiferimenti temporali CERTI (lo speaker li ha nominati esplicitamente):\n" + ", ".join(lines) + "\n"
             )
     system = (
         "Sei un esperto di sincronizzazione audiovisiva. Ti vengono date le "
@@ -840,7 +883,7 @@ def build_ordered_prompt(
         "ragionamento preliminare (niente analisi, niente piano, niente "
         "pensieri): vai DIRETTAMENTE all'array JSON finale. Rispondi SOLO con "
         "un array JSON di oggetti, uno per chunk, in questo "
-        "formato esatto: [{\"chunk\": 1, \"slide\": 3}, {\"chunk\": 2, \"slide\": null}]"
+        'formato esatto: [{"chunk": 1, "slide": 3}, {"chunk": 2, "slide": null}]'
     )
     user = (
         f"Diapositive:\n{_slide_block(slide_texts)}\n\n"
@@ -899,19 +942,22 @@ def llm_ordered_timeline(
     # Cache: chiave dedicata (prefisso "ord") che include le ancore note,
     # così cambiare ancora/trascrizione non riusa il risultato precedente.
     cache_key = _ordered_cache_key(
-        slide_texts, words_raw, total_slides, chunk_seconds, eps, anchors,
+        slide_texts,
+        words_raw,
+        total_slides,
+        chunk_seconds,
+        eps,
+        anchors,
     )
     cached = _load_llm_cache(cache_key)
     if cached is not None:
-        log.info("   [LLM/Ordinato] Timeline recuperata dalla cache (hash %s).",
-                 cache_key[:12])
+        log.info("   [LLM/Ordinato] Timeline recuperata dalla cache (hash %s).", cache_key[:12])
         return _timeline_from_cached(cached, anchors)
 
     # Health-check: se 9Router è spento, avvio automatico + PAUSA con avviso
     # e ripresa automatica appena torna online (o 'S' per il fallback MiniLM).
     # In modalità strict (senza terminale): errore chiaro, niente fallback.
-    if not wait_for_router(eps, wait_timeout=wait_timeout,
-                           context="le slide senza ancora", strict=strict):
+    if not wait_for_router(eps, wait_timeout=wait_timeout, context="le slide senza ancora", strict=strict):
         return None
 
     system, user = build_ordered_prompt(slide_texts[:total_slides], chunks, anchors)
@@ -944,8 +990,7 @@ def llm_ordered_timeline(
     timeline = _complete_from_anchors(refs, total_slides, total_duration)
     if timeline is None:
         log.warning(
-            "   [LLM/Ordinato] Vincoli insoddisfacibili con le posizioni LLM: "
-            "fallback al motore locale.",
+            "   [LLM/Ordinato] Vincoli insoddisfacibili con le posizioni LLM: fallback al motore locale.",
         )
         return None
 
@@ -954,14 +999,15 @@ def llm_ordered_timeline(
         timeline[s] = float(t)
 
     log.info(
-        "   [LLM/Ordinato] Timeline ibrida generata (%d slide, %d ancore "
-        "esatte, via %s [%s]).",
-        total_slides, len(anchors), used_endpoint, used_model,
+        "   [LLM/Ordinato] Timeline ibrida generata (%d slide, %d ancore esatte, via %s [%s]).",
+        total_slides,
+        len(anchors),
+        used_endpoint,
+        used_model,
     )
-    _save_llm_cache(cache_key, [
-        {"slide": s, "start": timeline[s], "end": timeline[s]}
-        for s in range(1, total_slides + 1)
-    ])
+    _save_llm_cache(
+        cache_key, [{"slide": s, "start": timeline[s], "end": timeline[s]} for s in range(1, total_slides + 1)]
+    )
     return timeline
 
 
@@ -1019,10 +1065,7 @@ def build_anchor_verify_prompt(
     basandosi sul contenuto discusso subito dopo il riferimento."""
     lines = []
     for s, t in sorted(anchors.items(), key=lambda kv: kv[1]):
-        excerpt = " ".join(
-            w["word"] for w in words_raw
-            if t <= w["start"] < t + window_seconds
-        ).strip() or "..."
+        excerpt = " ".join(w["word"] for w in words_raw if t <= w["start"] < t + window_seconds).strip() or "..."
         lines.append(f"- a {t:.1f}s (lo speaker dice 'slide {s}'): {excerpt}")
     excerpt_block = "\n".join(lines)
     system = (
@@ -1119,20 +1162,22 @@ def llm_verify_anchor_mapping(
     cache_key = _verify_cache_key(slide_texts, words_raw, anchors, eps)
     cached = _load_llm_cache(cache_key)
     if cached is not None:
-        log.info("   [LLM/Ancore] Verifica ancore dalla cache (hash %s).",
-                 cache_key[:12])
+        log.info("   [LLM/Ancore] Verifica ancore dalla cache (hash %s).", cache_key[:12])
         return _verified_anchors_from_cached(cached)
 
     # Health-check: se 9Router è spento, avvio automatico + PAUSA con avviso
     # e ripresa automatica appena torna online (o 'S' per usare le originali).
     # In modalità strict (senza terminale): errore chiaro, niente fallback.
-    if not wait_for_router(eps, wait_timeout=wait_timeout,
-                           context="la verifica del mapping delle ancore",
-                           strict=strict):
+    if not wait_for_router(
+        eps, wait_timeout=wait_timeout, context="la verifica del mapping delle ancore", strict=strict
+    ):
         return None
 
     system, user = build_anchor_verify_prompt(
-        slide_texts, anchors, words_raw, window_seconds,
+        slide_texts,
+        anchors,
+        words_raw,
+        window_seconds,
     )
     messages = [
         {"role": "system", "content": system},
@@ -1160,13 +1205,18 @@ def llm_verify_anchor_mapping(
                     "   [LLM/Ancore] Conflitto: l'ancora 'slide %d' a %.1fs è "
                     "stata mappata sulla slide %d, già occupata dall'ancora a "
                     "%.1fs: la precedente viene scartata.",
-                    s, t, new_slide, corrected[new_slide],
+                    s,
+                    t,
+                    new_slide,
+                    corrected[new_slide],
                 )
             corrected[new_slide] = t
             if new_slide != s:
                 log.info(
                     "   [LLM/Ancore] Ancora 'slide %d' a %.1fs -> slide %d del PDF.",
-                    s, t, new_slide,
+                    s,
+                    t,
+                    new_slide,
                 )
 
     lis = _lis_anchors(corrected)
@@ -1176,11 +1226,11 @@ def llm_verify_anchor_mapping(
 
     log.info(
         "   [LLM/Ancore] %d ancore corrette (via %s [%s]).",
-        len(lis), used_endpoint, used_model,
+        len(lis),
+        used_endpoint,
+        used_model,
     )
-    _save_llm_cache(cache_key, [
-        {"slide": s, "start": lis[s]} for s in sorted(lis)
-    ])
+    _save_llm_cache(cache_key, [{"slide": s, "start": lis[s]} for s in sorted(lis)])
     return lis
 
 
@@ -1229,8 +1279,7 @@ def build_review_prompt(
 ) -> tuple[str, str]:
     """Prompt del secondo passaggio: ri-verifica la mappa chunk->slide."""
     mapping = "\n".join(
-        f"chunk {c['num']}: slide {s if s is not None else 'null'}"
-        for c, s in zip(chunks, slides, strict=True)
+        f"chunk {c['num']}: slide {s if s is not None else 'null'}" for c, s in zip(chunks, slides, strict=True)
     )
     system = (
         "Sei un revisore di sincronizzazione audiovisiva. Ti vengono date le "
@@ -1244,7 +1293,7 @@ def build_review_prompt(
         "ragionamento preliminare (niente analisi, niente piano, niente "
         "pensieri): vai DIRETTAMENTE all'array JSON finale. Rispondi "
         "SOLO con un array JSON di oggetti, uno per chunk, in questo formato "
-        "esatto: [{\"chunk\": 1, \"slide\": 3}, {\"chunk\": 2, \"slide\": null}]"
+        'esatto: [{"chunk": 1, "slide": 3}, {"chunk": 2, "slide": null}]'
     )
     user = (
         f"Diapositive:\n{_slide_block(slide_texts)}\n\n"
@@ -1305,14 +1354,12 @@ def review_llm_timeline(
     review_key = _review_cache_key(slide_texts, chunks, slides, eps)
     cached = _load_llm_cache(review_key)
     if cached is not None:
-        log.info("   [LLM/Review] Revisione recuperata dalla cache (hash %s).",
-                 review_key[:12])
+        log.info("   [LLM/Review] Revisione recuperata dalla cache (hash %s).", review_key[:12])
         return cached
 
     # Health-check: se 9Router è spento, PAUSA con avviso e ripresa automatica
     # (o 'S' per saltare la revisione e procedere con la timeline già pronta).
-    if not wait_for_router(eps, wait_timeout=wait_timeout,
-                           context="la revisione della timeline", strict=strict):
+    if not wait_for_router(eps, wait_timeout=wait_timeout, context="la revisione della timeline", strict=strict):
         return None
 
     system, user = build_review_prompt(slide_texts[:total_slides], chunks, slides)
@@ -1373,13 +1420,16 @@ def _warn_review_diffs(
             log.warning(
                 "   [LLM/Review] Chunk %d (%.0fs-%.0fs): il secondo passaggio "
                 "propone slide %s invece di %s. Verifica la sincronizzazione.",
-                int(d["chunk"]), float(c["start"]), float(c["end"]),
+                int(d["chunk"]),
+                float(c["start"]),
+                float(c["end"]),
                 new_slide if new_slide is not None else "null",
                 old_slide if old_slide is not None else "null",
             )
     log.warning(
         "   [LLM/Review] %d chunk da verificare (le discrepanze sono solo "
-        "suggerimenti, la timeline non è stata modificata).", len(diffs),
+        "suggerimenti, la timeline non è stata modificata).",
+        len(diffs),
     )
 
 
@@ -1454,5 +1504,6 @@ def _save_llm_cache(key: str, segments: list[dict[str, object]]) -> None:
     path = CACHE_DIR / f"llm_{key}.json"
     with suppress(OSError):
         path.write_text(
-            json.dumps(segments, ensure_ascii=False), encoding="utf-8",
+            json.dumps(segments, ensure_ascii=False),
+            encoding="utf-8",
         )
