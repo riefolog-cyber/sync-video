@@ -972,7 +972,7 @@ def refine_llm_segment_boundaries(
         return segments
     if slide_emb.ndim != 2 or slide_emb.shape[0] < 1:
         return segments
-    slide_emb = slide_emb / np.maximum(np.linalg.norm(slide_emb, axis=1, keepdims=True), 1e-9)
+    slide_emb = (slide_emb / np.maximum(np.linalg.norm(slide_emb, axis=1, keepdims=True), 1e-9)).astype(np.float32)
 
     word_times = [float(w["start"]) for w in words]
     out = [dict(s) for s in segments]
@@ -1031,7 +1031,7 @@ def refine_llm_segment_boundaries(
             embs = np.asarray(embed_fn(texts), dtype=np.float32)
             if embs.ndim != 2 or embs.shape[0] != len(texts):
                 continue
-            embs = embs / np.maximum(np.linalg.norm(embs, axis=1, keepdims=True), 1e-9)
+            embs = (embs / np.maximum(np.linalg.norm(embs, axis=1, keepdims=True), 1e-9)).astype(np.float32)
         except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
             log.warning("   [LLM/Refine] Embedding finestre non disponibile: confini invariati (%s).", e)
             continue
