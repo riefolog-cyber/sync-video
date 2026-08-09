@@ -9,6 +9,8 @@ Da incollare in "Istruzioni / Personalizza" quando generi il podcast:
 TONO E STILE DEL DIBATTITO
 ═══════════════════════════════════════════════════════════
 
+
+
 ▸ TARGET: Classe di scuola secondaria di secondo grado (14-19 anni),
 lezione di IRC (Insegnamento della Religione Cattolica).
 ▸ TONO: Semplifica concetti complessi e tecnicismi. Linguaggio fresco,
@@ -22,6 +24,8 @@ etica, esistenziale o culturale, stimolando riflessione e dibattito in aula.
 ▸ INTRODUZIONE: L'inizio deve essere naturale, senza dire che si seguirà una
 scaletta o una struttura a blocchi. La prima transizione numerata
 ("slide 2") arriva solo alla fine della prima sezione.
+
+
 
 ▸ STRUTTURA E TRANSAZIONI (FONDAMENTALE, OBBLIGATORIO):
 Devi seguire le sezioni/slide della presentazione in ORDINE RIGOROSO e

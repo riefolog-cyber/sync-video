@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sincronizzazione semantica offline (sentence embeddings, MiniLM) — motore
+Sincronizzazione semantica offline (sentence embeddings, e5-large) — motore
 di allineamento del pipeline per il flusso ordinato.
 
 Offline e deterministico: allinea le slide (OCR) con la trascrizione usando
@@ -26,6 +26,7 @@ flusso libero guida la selezione chunk→slide.
 
 import bisect
 import re
+import time
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
@@ -48,6 +49,15 @@ try:
     _HAS_FASTEMBED = True
 except ImportError:  # pragma: no cover
     _HAS_FASTEMBED = False
+
+# Tempo cumulato di caricamento dei modelli embedding (download + ONNX in RAM).
+# Esposto al chiamante per il riepilogo tempi di main.py.
+_MODEL_LOAD_SECONDS = 0.0
+
+
+def model_load_seconds() -> float:
+    """Restituisce i secondi cumulati di caricamento dei modelli embedding."""
+    return _MODEL_LOAD_SECONDS
 
 EmbedFn = Callable[[Sequence[str]], np.ndarray]
 
@@ -130,8 +140,9 @@ def _load_embed_model(
 
     Se il modello principale non si carica (es. download interrotto, modello
     non più disponibile), riprova con `alternate_name` prima di restituire
-    None: il MiniLM è il default (vedi config.py), mpnet è l'alternativa.
+    None: e5-large è il default (vedi config.py), mpnet è l'alternativa.
     """
+    global _MODEL_LOAD_SECONDS
     if not _HAS_FASTEMBED:
         log.warning("   [Semantico] fastembed non installato. Installa con: pip install fastembed")
         return None
@@ -142,7 +153,9 @@ def _load_embed_model(
 
     for candidate, is_alt in candidates:
         try:
+            _t0 = time.perf_counter()
             model = TextEmbedding(model_name=candidate, cache_dir=str(cache_dir))
+            _MODEL_LOAD_SECONDS += time.perf_counter() - _t0
             if is_alt:
                 log.warning(
                     "   [Semantico] Modello principale non disponibile: uso il fallback %s.",

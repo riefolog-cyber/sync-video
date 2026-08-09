@@ -55,9 +55,9 @@ Override manuale: `python main.py --flow audio-slide` oppure `python main.py --f
 > in qualsiasi ordine e anche ripetuta, con anti-flicker (durata minima dei
 > segmenti, ~8s) e avviso sulle slide mai menzionate.
 
-### 🤖 Selezione con LLM (opzionale, supera il tetto del MiniLM)
+### 🤖 Selezione con LLM (opzionale, supera il tetto dell'embedding)
 
-Il MiniLM locale ha un tetto di precisione (~50%) quando le slide sono
+L'embedding locale (e5-large) ha un tetto di precisione quando le slide sono
 semanticamente simili tra loro (stesso tema). Un LLM che legge slide +
 trascrizione INSIEME comprende il significato e può associare meglio la slide
 ai momenti del podcast (es. "covert" → slide Overt/Covert).
@@ -67,14 +67,14 @@ ai momenti del podcast (es. "covert" → slide Overt/Covert).
   `9router-maintenance/update-comboact.ps1`: Gemini, Kimi, DeepSeek, Nemotron,
   GLM, Qwen, ecc.). Inviando `"model": "comboact"` il router instrada il primo
   modello funzionante, con backup espliciti Cloudflare Mistral 24B → Gemma
-  4 31B it (free) → fallback **MiniLM**. Nessuna interruzione. Modelli e URL
+  4 31B it (free) → fallback **embedding locale**. Nessuna interruzione. Modelli e URL
   sovrascrivibili con `LLM_9ROUTER_MODEL`, `LLM_9ROUTER_BACKUP_MODEL`,
   `LLM_9ROUTER_BACKUP_MODEL_2`, `LLM_9ROUTER_URL`, `LLM_9ROUTER_API_KEY`.
 - Due usi, in base al flusso:
   1. **Flusso libero** (`free`): sceglie la slide per ogni chunk audio.
   2. **Flusso ibrido ordinato** (`slide-audio`/`audio-slide`): posiziona SOLO
      le slide **senza ancora esplicita** "slide N", rispettando alla lettera
-     le ancore deterministiche. Risolve il caso in cui il MiniLM inventa
+     le ancore deterministiche. Risolve il caso in cui l'embedding inventa
      durate per slide mai nominate o narrate fuori posizione.
 - Configurabile: `--llm auto|off|9router`, `--llm-model`, `--llm-chunk`.
 - La risposta LLM viene cachata (hash slide+audio+chunk+modelli+ancore): non
@@ -133,7 +133,7 @@ free. Serve a mantenere pulito il router lato server.
 | Pacchetti pip (10) | ~200 MB | `pip install` |
 | Tesseract OCR | ~40 MB | `winget` / `apt-get` / `brew` |
 | ffmpeg | ~80 MB | `winget` / `apt-get` / `brew` |
-| Modello embedding MiniLM | ~240 MB | fastembed (download automatico) |
+| Modello embedding e5-large | ~2.2 GB | fastembed (download automatico) |
 | Modello Whisper `small` | ~460 MB | faster-whisper (download automatico) |
 | Modello Whisper OpenVINO `small` | ~930 MB | `--openvino-download` (una tantum, consigliato) |
 | Lingua Tesseract ITA | inclusa | `tessdata/ita.traineddata` |
@@ -203,14 +203,14 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--transcriber` | `auto` | `auto`/`openvino`/`whisper` (OpenVINO ~1.5x più veloce) |
 | `--openvino-device` | `GPU` | Device OpenVINO (`GPU` iGPU o `CPU`) |
 | `--openvino-download` | — | Scarica modello OpenVINO IR (una tantum) |
-| `--semantic-model` | MiniLM | Modello embedding |
+| `--semantic-model` | e5-large | Modello embedding |
 | `--semantic-window` | `4.0` | Secondi per blocco |
 | `--semantic-min-duration` | `3.0` | Durata minima slide (s) |
 | `--semantic-temperature` | `0.15` | Competizione softmax (più bassa = picchi più netti) |
-| `--llm` | `auto` | Selezione slide con LLM: `auto` (9Router online → MiniLM), `off`, `9router`. Libero: slide per chunk. Ordinato: solo le slide senza ancora esplicita |
+| `--llm` | `auto` | Selezione slide con LLM: `auto` (9Router online → embedding locale), `off`, `9router`. Libero: slide per chunk. Ordinato: solo le slide senza ancora esplicita |
 | `--llm-model` | — | Override modello LLM (es. `comboact`, `cf/@cf/mistralai/mistral-small-3.1-24b-instruct`) |
 | `--llm-chunk` | `30.0` | Secondi per chunk inviato all'LLM |
-| `--llm-wait-timeout` | `0.0` | Se 9Router è necessario ma spento: secondi massimi di attesa prima del fallback MiniLM. `0` = attesa illimitata (pausa + avviso, riprende appena 9Router risponde) |
+| `--llm-wait-timeout` | `0.0` | Se 9Router è necessario ma spento: secondi massimi di attesa prima del fallback embedding. `0` = attesa illimitata (pausa + avviso, riprende appena 9Router risponde) |
 | `--llm-review` | — | Dopo la timeline LLM nel flusso libero, secondo passaggio LLM che ri-verifica la selezione chunk→slide e avvisa (senza modificare la timeline) sui chunk sospetti. Risultato cachato. |
 
 ---
@@ -225,18 +225,18 @@ inutilmente:
 - **9Router necessario ma spento**, in **terminale interattivo** → avviso
   chiaro e **pausa** con verifica ogni 5s; il processo **riprende da solo**
   appena avvii 9Router. Durante la pausa:
-  - premi **`S`** → salta l'LLM e usa subito il MiniLM locale;
-  - oppure imposta `--llm-wait-timeout <secondi>` → fallback MiniLM automatico
+  - premi **`S`** → salta l'LLM e usa subito l'embedding locale;
+  - oppure imposta `--llm-wait-timeout <secondi>` → fallback embedding automatico
     allo scadere (0 = illimitato).
-- **Flusso libero senza terminale** (es. CI, automazione): il fallback MiniLM
-  non basta (tetto ~50% ed è lento su audio lunghi), quindi il programma si
+- **Flusso libero senza terminale** (es. CI, automazione): il fallback embedding
+  non basta (tetto di precisione ed è lento su audio lunghi), quindi il programma si
   **interrompe subito con un errore chiaro** invece di produrre un video
-  scadente in silenzio. Usa `--llm off` per forzare il MiniLM esplicitamente.
+  scadente in silenzio. Usa `--llm off` per forzare l'embedding esplicitamente.
 
 ```bash
 python main.py --llm auto                 # pausa + ripresa automatica (consigliato)
-python main.py --llm auto --llm-wait-timeout 60   # fallback MiniLM dopo 60s
-python main.py --llm off                  # solo MiniLM, nessuna attesa
+python main.py --llm auto --llm-wait-timeout 60   # fallback embedding dopo 60s
+python main.py --llm off                  # solo embedding, nessuna attesa
 ```
 
 ---
@@ -308,7 +308,7 @@ embedding fallito) e non vanno "stretti" senza motivo.
 2. **Trascrizione** — Audio → Whisper (faster-whisper) con timestamp al decimo di secondo. Stopword rimosse, parole di transizione ("passiamo", "slide", "blocco"...) preservate.
 3. **Auto-detection** — Scansione trascrizione per decidere il flusso (`slide-audio` o `audio-slide`).
 4. **Ancore "slide N"** — Riferimenti espliciti → ancore deterministiche ad alta precisione. Riconosce numeri in cifre (*"slide 3"*), cardinali (*"slide tre"*, *"numero due"*), **ordinali** (*"la terza diapositiva"*, *"la quinta slide"*) in entrambi i generi, con articolo o "numero" in mezzo, e varianti fonetiche di trascrizione (*"nonna slide"* → slide 9, *"sla e due"* → slide 2, *"asl cinque"* → slide 5, *"sallay 2"* / *"slaib6"* → slide 2/6 con numero incorporato).
-5. **Sincronizzazione semantica** — Embedding (MiniLM via fastembed, offline ONNX) + programmazione dinamica monotona. Assegna ogni blocco audio alla slide semanticamente più vicina, con competizione softmax (temperatura 0.15).
+5. **Sincronizzazione semantica** — Embedding (e5-large via fastembed, offline ONNX) + programmazione dinamica monotona. Assegna ogni blocco audio alla slide semanticamente più vicina, con competizione softmax (temperatura 0.15).
 6. **Riconciliazione** — Validazione: tempi crescenti, durate positive, ultima slide entro fine audio. Se invalida → interruzione.
 7. **Video** — Slide ridimensionate a 1080p, assemblate con MoviePy (fps=5, buffer 3.0s anti-troncamento).
 8. **Pulizia** — File temporanei e cache orfana rimossi automaticamente.
@@ -320,9 +320,9 @@ pipeline prende una strada diversa a seconda del segnale presente nell'audio.
 
 | Scenario | Segnale | Cosa fa |
 |---|---|---|
-| **A. `slide-audio`** | "Passiamo alla slide 3" | Estratte ancore deterministiche "slide N" (cifre, cardinali o **ordinali**: "la terza diapositiva") → vincoli ad alta precisione. Sincronizzazione semantica (MiniLM offline): ogni blocco audio → slide più vicina, DP monotona. Con `--llm` attivo e slide SENZA ancora → **flusso ibrido**: l'LLM posiziona solo quelle (dove il contenuto è discusso), le ancore restano esatte. Riconciliazione (tempi crescenti, durate positive); se impossibile → **interruzione**. Slide in ordine 1→N. Un log diagnostico distingue riferimenti trovati/usati/scartati e segnala le slide senza ancora esplicita. |
+| **A. `slide-audio`** | "Passiamo alla slide 3" | Estratte ancore deterministiche "slide N" (cifre, cardinali o **ordinali**: "la terza diapositiva") → vincoli ad alta precisione. Sincronizzazione semantica (embedding e5-large offline): ogni blocco audio → slide più vicina, DP monotona. Con `--llm` attivo e slide SENZA ancora → **flusso ibrido**: l'LLM posiziona solo quelle (dove il contenuto è discusso), le ancore restano esatte. Riconciliazione (tempi crescenti, durate positive); se impossibile → **interruzione**. Slide in ordine 1→N. Un log diagnostico distingue riferimenti trovati/usati/scartati e segnala le slide senza ancora esplicita. |
 | **B. `audio-slide`** | "Passiamo al blocco successivo" | Stesse ancore (numeriche o ordinali), stessa pipeline ordinata (+ flusso ibrido LLM come in A); la slide cambia sulle transizioni di blocco non numerate. |
-| **C. `free`** | nessuno | Riordino libero: la slide segue il contenuto del podcast, anche ripetuta, durata minima ~8s (anti-flicker). **Con LLM** (`--llm auto`): chunk 30s inviati a 9Router (combo `comboact` → Mistral 24B → Gemma 31B); se 9Router è spento il processo si mette in pausa con avviso e riprende da solo appena torna online (o premi `S` / `--llm-wait-timeout` per il fallback MiniLM; senza terminale interattivo si interrompe con errore chiaro). **Senza LLM** (`--llm off`): solo MiniLM in modalità libera. `--llm-review` ri-verifica e avvisa senza modificare la timeline. |
+| **C. `free`** | nessuno | Riordino libero: la slide segue il contenuto del podcast, anche ripetuta, durata minima ~8s (anti-flicker). **Con LLM** (`--llm auto`): chunk 30s inviati a 9Router (combo `comboact` → Mistral 24B → Gemma 31B); se 9Router è spento il processo si mette in pausa con avviso e riprende da solo appena torna online (o premi `S` / `--llm-wait-timeout` per il fallback embedding; senza terminale interattivo si interrompe con errore chiaro). **Senza LLM** (`--llm off`): solo embedding locale in modalità libera. `--llm-review` ri-verifica e avvisa senza modificare la timeline. |
 
 Il raggruppamento in finestre temporali è condiviso da `chunks.py`
 (`build_windows`): finestre corte (4s) per la semantica, larghe (30s) per
@@ -335,9 +335,14 @@ mai inventando distribuzioni uniformi.
 
 ### Modello embedding
 
-- **Default**: `paraphrase-multilingual-MiniLM-L12-v2` (384 dim, ~240 MB) — testato A/B su podcast reale, produce transizioni bilanciate e picchi netti.
-- **Fallback**: `paraphrase-multilingual-mpnet-base-v2` (768 dim, ~1.0 GB) — usato automaticamente se MiniLM non disponibile.
-- **Ambiente**: `EMBEDDING_MODEL` e `EMBEDDING_MODEL_ALTERNATE` sovrascrivibili.
+- **Default (definitivo)**: `intfloat/multilingual-e5-large` (1024 dim, ~2.2 GB) — scelto tramite test A/B su podcast reale (10 slide, senza LLM): similarità media 0.791 vs 0.380 (MiniLM) e 0.421 (mpnet), con durate tutte bilanciate (104-188s) e zero slide anomale (gli altri producevano slide da 8-20s e da 332s).
+- **Fallback**: `paraphrase-multilingual-mpnet-base-v2` (768 dim, ~1.0 GB) — usato automaticamente se e5-large non si carica. Tenere in cache: è la rete di sicurezza della pipeline.
+- **Cache**: `.cache/embedding_model/` è condivisa e i modelli si scaricano al primo utilizzo (serve internet una tantum). MiniLM (240 MB) e mpnet (1.0 GB) restano in cache anche se non più default: non disturbano, e per tornare al vecchio comportamento basta un override temporaneo:
+  ```powershell
+  $env:EMBEDDING_MODEL="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+  python main.py
+  ```
+- **Ambiente**: `EMBEDDING_MODEL` e `EMBEDDING_MODEL_ALTERNATE` sovrascrivibili permanentemente.
 
 ### Quale prompt usare: i due workflow
 
@@ -373,7 +378,7 @@ l'LLM — un avviso in console lo segnala).
 
 **Se il podcast non pronuncia le ancore** (dibattito libero): il pipeline
 avvisa e usa il flusso libero (LLM via 9Router). Fallback senza LLM:
-`python main.py --flow slide-audio --llm off` (allineamento monotono MiniLM,
+`python main.py --flow slide-audio --llm off` (allineamento monotono embedding,
 meno preciso senza ancore ma deterministico).
 
 Risultato su test reale (workflow 1): 6 ancore deterministiche, durate

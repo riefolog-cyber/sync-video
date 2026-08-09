@@ -36,6 +36,7 @@ from semantic_sync import (
     SemanticOptions,
     free_order_segments_from_words,
     merge_short_segments,
+    model_load_seconds,
     refine_llm_segments_from_words,
     refine_llm_timeline_from_words,
     semantic_timeline_from_words,
@@ -141,7 +142,9 @@ def _format_time(seconds: float) -> str:
     return f"{m}m{s:02d}s"
 
 
-def _print_timing(t_ocr: float, t_transcribe: float, t_sync: float, t_video: float, t_total: float) -> None:
+def _print_timing(
+    t_ocr: float, t_transcribe: float, t_sync: float, t_embed: float, t_video: float, t_total: float
+) -> None:
     """Stampa il riepilogo dei tempi di ogni fase."""
     log.info("\n" + "─" * 50)
     log.info(" ⏱️  RIEPILOGO TEMPI")
@@ -149,6 +152,8 @@ def _print_timing(t_ocr: float, t_transcribe: float, t_sync: float, t_video: flo
     log.info("   OCR / Slide   │ %s", _format_time(t_ocr))
     log.info("   Trascrizione  │ %s", _format_time(t_transcribe))
     log.info("   Sincronizzaz. │ %s", _format_time(t_sync))
+    if t_embed > 0:
+        log.info("     └ Embedding │ %s", _format_time(t_embed))
     if t_video > 0:
         log.info("   Encoding Video│ %s", _format_time(t_video))
     log.info("   ─────────────────────────")
@@ -421,6 +426,22 @@ def main(argv: list | None = None) -> None:
                     "   Per forzare comunque un allineamento ordinato senza LLM: "
                     "--flow slide-audio --llm off (meno preciso senza ancore)."
                 )
+                if not args.no_free_ordered_fallback:
+                    # Fallback automatico: su podcast senza ancore la selezione
+                    # libera via LLM è lenta (~16 min) e quella con soli
+                    # embeddings spezzetta le slide (micro-segmenti, ordine
+                    # caotico). L'allineamento ordinato con soli embeddings
+                    # produce durate bilanciate in ~1 min senza LLM. Disattivabile
+                    # con --no-free-ordered-fallback.
+                    log.warning(
+                        "\n   [Fallback] Flusso libero senza ancore: passo automaticamente "
+                        "all'allineamento ordinato slide-audio con soli embeddings "
+                        "(verificato: durate bilanciate, ~1 min).\n"
+                        "   Disattiva con --no-free-ordered-fallback o forza "
+                        "--flow free --llm auto per la selezione libera via LLM."
+                    )
+                    flow = "slide-audio"
+                    args.llm = "off"
 
         # --- Fase 3: Sincronizzazione semantica (unico motore) ---
         t_phase_start = time.time()
@@ -724,7 +745,7 @@ def main(argv: list | None = None) -> None:
         # --- Dry-run: fermati qui ---
         if args.dry_run:
             t_total = time.time() - t_total_start
-            _print_timing(t_ocr, t_transcribe, t_sync, 0.0, t_total)
+            _print_timing(t_ocr, t_transcribe, t_sync, model_load_seconds(), 0.0, t_total)
             log.info("\n" + "=" * 70)
             log.info(" [DRY-RUN] Timeline generata con successo.")
             log.info(" Il video NON è stato creato (--dry-run attivo).")
@@ -767,7 +788,7 @@ def main(argv: list | None = None) -> None:
 
         # --- Riepilogo finale ---
         t_total = time.time() - t_total_start
-        _print_timing(t_ocr, t_transcribe, t_sync, t_video, t_total)
+        _print_timing(t_ocr, t_transcribe, t_sync, model_load_seconds(), t_video, t_total)
 
         # Pulizia cache orfana
         cleaned = _clean_orphan_cache(active_cache_keys)

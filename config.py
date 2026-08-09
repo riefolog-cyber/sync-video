@@ -377,12 +377,14 @@ DEFAULT_SLIDES_DIR = "temp_slides"
 # --- Sincronizzazione semantica (sentence embeddings, offline) ---
 # Modelli multilingue ONNX (fastembed). Supportano l'italiano senza prefissi.
 #
-# Default: MiniLM-L12-v2 (384 dim, ~240 MB). Testato A/B contro mpnet-base
-# (768 dim, ~1.0 GB): il MiniLM produce transizioni più bilanciate e picchi
-# più netti sulle slide finali, evitando durate anomale (es. slide da 12s).
+# Default: multilingual-e5-large (1024 dim, ~2.2 GB). Testato A/B su podcast
+# reale (10 slide, flusso ordinato senza LLM): similarità media 0.791 vs
+# 0.380 (MiniLM) e 0.421 (mpnet-base), e durate tutte bilanciate (104-188s)
+# senza anomalie, mentre MiniLM/mpnet producevano slide da 8-20s e 332s.
+# Costo: +2.2 GB di download e ~37s di embedding per 24 min di podcast.
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
     "EMBEDDING_MODEL",
-    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "intfloat/multilingual-e5-large",
 )
 # Fallback automatico: se il modello principale non si carica (es. download
 # interrotto), la sincronizzazione riprova con mpnet prima di arrendersi.
@@ -399,6 +401,13 @@ DEFAULT_SEMANTIC_MIN_SIM = _env_float("SEMANTIC_MIN_SIM", 0.10)  # soglia qualit
 # con similarità uniforme catturi metà dell'audio).
 # 0.15 = bilanciamento ottimale trovato con test A/B su podcast reale.
 DEFAULT_SEMANTIC_TEMPERATURE = _env_float("SEMANTIC_TEMPERATURE", 0.15)
+# Fallback automatico al flusso ordinato quando il flusso auto-rilevato è
+# 'free' (nessuna ancora 'slide N' né 'blocco successivo' pronunciata).
+# Su podcast reali la selezione libera via LLM produce durate bilanciate ma
+# richiede ~16 min (9Router); l'allineamento ordinato con soli embeddings
+# produce durate altrettanto bilanciate (es. 47.8-136.0s) in ~1 min senza
+# dipendenza dall'LLM. Disattivabile con --no-free-ordered-fallback.
+DEFAULT_FREE_ORDERED_FALLBACK = os.environ.get("FREE_ORDERED_FALLBACK", "1") == "1"
 
 # --- Parametri tecnici (sovrascrivibili da .env) ---
 DEFAULT_TRANSCRIPT_WINDOW = 3.0  # secondi per raggruppamento parole
@@ -654,6 +663,16 @@ Esempi:
         "successivo'), altrimenti 'free'.",
     )
     parser.add_argument(
+        "--no-free-ordered-fallback",
+        action="store_true",
+        help="Disattiva il fallback automatico al flusso ordinato "
+        "quando il flusso auto-rilevato è 'free' (nessuna ancora "
+        "'slide N'). Default: attivo (vedi config.py), così un "
+        "podcast senza ancore usa l'allineamento ordinato con soli "
+        "embeddings (~1 min, durate bilanciate) invece della "
+        "selezione libera via LLM (~16 min con 9Router).",
+    )
+    parser.add_argument(
         "--semantic-model",
         default=DEFAULT_EMBEDDING_MODEL,
         help=f"Modello embedding per la sincronizzazione semantica "
@@ -695,20 +714,20 @@ Esempi:
         f"(default: {DEFAULT_SEMANTIC_TEMPERATURE})",
     )
 
-    # Selezione slide via LLM (opzionale, supera il tetto del MiniLM)
+    # Selezione slide via LLM (opzionale, supera il tetto dell'embedding)
     parser.add_argument(
         "--llm",
         default="auto",
         choices=["off", "auto", "9router"],
         help="Selezione slide via LLM. 'auto' (default: "
-        "prova 9Router online, poi fallback MiniLM), 'off' "
-        "(solo MiniLM locale), '9router' (solo 9Router "
+        "prova 9Router online, poi fallback embedding), 'off' "
+        "(solo embedding locale), '9router' (solo 9Router "
         "online). Nel flusso libero (senza segnali 'slide "
         "N') sceglie la slide per ogni chunk; nei flussi "
         "ordinati (slide-audio/audio-slide) posiziona SOLO "
         "le slide senza ancora esplicita, rispettando le "
         "ancore deterministiche. Se nessun servizio "
-        "risponde si ripiega sul MiniLM senza interrompere.",
+        "risponde si ripiega sull'embedding senza interrompere.",
     )
     parser.add_argument(
         "--llm-model",
@@ -736,12 +755,12 @@ Esempi:
         type=float,
         default=0.0,
         help="Secondi massimi di attesa che 9Router sia avviato "
-        "prima di ripiegare sul MiniLM, quando serve l'LLM ma "
+        "prima di ripiegare sull'embedding, quando serve l'LLM ma "
         "il router non risponde. 0 (default) = attesa "
         "illimitata: il processo si mette in pausa con un "
         "avviso e riprende appena 9Router è online; si può "
         "premere 'S' in ogni momento per saltare e usare "
-        "subito il MiniLM locale.",
+        "subito l'embedding locale.",
     )
     parser.add_argument("--log-file", default=None, help="Percorso file di log (salva i log anche su file)")
 
