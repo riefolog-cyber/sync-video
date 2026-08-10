@@ -44,11 +44,6 @@ Per ogni sezione: 1) annuncia "slide N"; 2) cita il titolo della sezione;
 parole chiave così come sono scritte; 4) chiudi con una frase riassuntiva.
 Non anticipare contenuti di sezioni successive e non tornare indietro.
 
-ESEMPIO DI TRANSAZIONE (schema da adattare a ogni sezione, contenuti
-generici come segnaposto):
-"Okay, passiamo alla slide \[NUMERO]. \[Titolo della sezione].
-Il testo dice che \[sintesi del punto centrale]... \[spiega i punti
-chiave]... In sintesi, \[frase riassuntiva della sezione]."
 Il dialogo può rimanere naturale, ma la frase "passiamo alla slide N"
 (o "alla diapositiva N") deve apparire così, all'inizio di OGNI sezione,
 senza eccezioni. NON abbandonarla mai a metà episodio.
@@ -56,6 +51,8 @@ senza eccezioni. NON abbandonarla mai a metà episodio.
 
 
 ## 2\. Prompt PRESENTAZIONE (dopo il podcast e mettilo da solo nelle fonti!!!!) ATTENZIONE!!!!
+
+
 
 Crea una presentazione con UNA slide per ogni sezione del podcast, nello stesso ordine. Per ogni slide usa come titolo le parole chiave della sezione e come contenuto i punti principali discussi. Il numero di slide deve essere esattamente il numero di sezioni. TESTO RIGOROSAMENTE SOLO IN ITALIANO
 

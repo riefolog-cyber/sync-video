@@ -11,10 +11,12 @@ Verifica a 360 gradi la riuscita della sincronizzazione:
   3. Confini: taglio a meta parola (parola a cavallo del confine), pausa
      prima/dopo il confine (taglio naturale vs a meta frase).
   4. Ancore: delta tra timestamp ancora dichiarato e inizio segmento reale.
-  5. Frame estratti: per ogni segmento estrae un frame a meta segmento dal
-     video e lo confronta con le slide renderizzate (temp_slides) tramite
-     similarita di immagine (coseno su grayscale downscaled) per confermare
-     cosa e davvero a schermo in ogni momento.
+   5. Frame estratti: per ogni segmento estrae un frame a meta segmento dal
+      video e lo confronta con le slide renderizzate (temp_slides) tramite
+      similarita di immagine (coseno su grayscale downscaled) per confermare
+      cosa e davvero a schermo in ogni momento.
+   6. Confini: per ogni confine estrae un frame subito dopo il taglio e
+      verifica che a schermo sia apparsa la slide successiva (N+1).
 
 Non modifica nulla: legge solo cache/video e scrive i frame estratti in
 `.analysis_frames/`.
@@ -54,6 +56,21 @@ TRANSCRIPT_FILE = None
 # Auto-rilevamento dei file piu recenti della run corrente.
 # Il file "timeline" ha voci con la chiave "end"; il file "ancore" ha voci
 # con solo "slide" e "start" (senza "end").
+#
+# PREFERENZA timeline: se esiste "llm_timeline_finale.json" e' la timeline
+# FINALE validata da main.py (start/end usati davvero per il video), salvata
+# da ogni run anche nel flusso semantico MiniLM. Va preferita alle cache
+# llm_*.json GREZZE: quelle contengono la timeline LLM pre-raffinamento e, in
+# assenza del flusso LLM (semantico puro), sarebbero stale di una run
+# precedente -> falsi mismatch. Il file "ancore" resta auto-rilevato dai
+# llm_*.json senza chiave "end".
+#
+# NOTA: i file llm_*.json in cache contengono la timeline GREZZA prodotta
+# dall'LLM. main.py però ri-raffina a ogni run i confini delle slide senza
+# ancora esplicita (refine_llm_timeline_from_words), quindi il video finale è
+# stato costruito con la timeline RAFFINATA, che può differire da quella in
+# cache (es. confine spostato di qualche secondo). Le discrepanze segnalate
+# qui possono quindi essere attese e NON indicare un video desincronizzato.
 def _newest(pattern: str) -> Path:
     files = sorted(CACHE.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
@@ -62,7 +79,16 @@ def _newest(pattern: str) -> Path:
     return files[0]
 
 
+# 1) Timeline finale validata da main.py (se presente)
+FINAL_TIMELINE = CACHE / "llm_timeline_finale.json"
+if FINAL_TIMELINE.exists():
+    TIMELINE_FILE = FINAL_TIMELINE
+    print(f"[Verifica] Uso timeline finale validata: {FINAL_TIMELINE.name}")
+
+# 2) Timeline LLM / ancore: auto-rilevamento (solo se non gia' impostata)
 for f in sorted(CACHE.glob("llm_*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+    if f == FINAL_TIMELINE:
+        continue
     try:
         data = json.loads(f.read_text(encoding="utf-8"))
     except Exception:
@@ -332,6 +358,56 @@ for i, seg in enumerate(segs):
 print(f"\nFrame coerenti con la timeline: {frame_ok}/{len(segs)}")
 if mismatches:
     print("DISCREPANZE:", mismatches)
+
+# ----------------------------------------------------------------------
+# 6. Confini: frame subito dopo ogni taglio -> slide successiva
+# ----------------------------------------------------------------------
+print()
+print("=" * 100)
+print("5. CONFINI: frame subito dopo ogni taglio (attesa slide N+1)")
+print("=" * 100)
+# NB: i confini qui provengono dalla timeline in cache (GREZZA); main.py
+# ri-raffina a ogni run i confini delle slide senza ancora esplicita, quindi
+# un confine segnalato come disallineato puo' essere atteso (video corretto).
+boundary_ok = 0
+for i, seg in enumerate(segs[1:], start=1):
+    s = seg["slide"]
+    t = seg["start"] + 1.0  # 1s dopo il taglio
+    if t >= AUDIO_DURATION:
+        continue
+    out = FRAMES_DIR / f"bnd{i:02d}_t{t:07.1f}_slide{s:02d}.png"
+    if not out.exists():
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{t:.3f}",
+                "-i",
+                str(VIDEO),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                str(out),
+            ],
+            check=False,
+        )
+    sims_img = [img_sim(out, sf) for sf in slide_files]
+    best_img = int(np.argmax(sims_img)) + 1
+    best_sim_img = max(sims_img)
+    ok = best_img == s and best_sim_img >= 0.85
+    if ok:
+        boundary_ok += 1
+    flag = "OK" if ok else f"<-- mostra slide {best_img}?"
+    print(
+        f"  confine {i}->{s} a {seg['start']:>7.1f}s: frame @{t:>7.1f}s "
+        f"-> slide {best_img:>2} (sim {best_sim_img:.3f}) {flag}"
+    )
+
+print(f"\nConfini coerenti con la timeline: {boundary_ok}/{len(segs) - 1}")
 
 # ----------------------------------------------------------------------
 # Riepilogo

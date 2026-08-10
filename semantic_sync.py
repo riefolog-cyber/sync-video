@@ -54,6 +54,11 @@ except ImportError:  # pragma: no cover
 # Esposto al chiamante per il riepilogo tempi di main.py.
 _MODEL_LOAD_SECONDS = 0.0
 
+# Cache a livello di modulo dei modelli embedding caricati: evita di ricaricare
+# i pesi ONNX quando la verifica deterministica delle ancore e la sync semantica
+# usano lo stesso modello nello stesso processo.
+_EMBED_MODEL_CACHE: dict[tuple[str, str], TextEmbedding] = {}
+
 
 def model_load_seconds() -> float:
     """Restituisce i secondi cumulati di caricamento dei modelli embedding."""
@@ -153,9 +158,13 @@ def _load_embed_model(
 
     for candidate, is_alt in candidates:
         try:
-            _t0 = time.perf_counter()
-            model = TextEmbedding(model_name=candidate, cache_dir=str(cache_dir))
-            _MODEL_LOAD_SECONDS += time.perf_counter() - _t0
+            key = (candidate, cache_dir)
+            model = _EMBED_MODEL_CACHE.get(key)
+            if model is None:
+                _t0 = time.perf_counter()
+                model = TextEmbedding(model_name=candidate, cache_dir=str(cache_dir))
+                _MODEL_LOAD_SECONDS += time.perf_counter() - _t0
+                _EMBED_MODEL_CACHE[key] = model
             if is_alt:
                 log.warning(
                     "   [Semantico] Modello principale non disponibile: uso il fallback %s.",
@@ -654,6 +663,105 @@ def semantic_timeline_from_words(
         options=opts,
         anchors=anchors,
     )
+
+
+# =====================================================================
+# VERIFICA DETERMINISTICA DEL MAPPING ANCORE (offset numerazione parlata)
+# =====================================================================
+def verify_anchor_mapping_embedding(
+    slide_texts: Sequence[str],
+    words_raw: Sequence[Word],
+    anchors: dict[int, float],
+    total_slides: int,
+    window_seconds: float = 40.0,
+    options: SemanticOptions | None = None,
+    embed_fn: EmbedFn | None = None,
+) -> dict[int, float] | None:
+    """Corregge la numerazione parlata sistematicamente sfasata usando gli
+    embeddings locali (nessuna chiamata LLM).
+
+    Se lo speaker numera le slide escludendo la copertina (dice "slide 1"
+    mostrando la slide 2 del PDF), TUTTI i riferimenti sono sfasati dello
+    stesso offset. Per ogni ancora "slide N" si legge il testo audio nella
+    finestra successiva e si trova la slide del PDF semanticamente più vicina:
+    se lo spostamento ``slide_dx - N`` è lo STESSO per tutte le ancore
+    (offset coerente), lo si applica a tutte e si restituisce il mapping
+    corretto. Se l'offset non è univoco o è zero, restituisce None (il
+    chiamante ripiega sulle ancore originali o sulla verifica LLM).
+
+    ``embed_fn`` è iniettabile (stessa convenzione di ``semantic_timeline_from_texts``):
+    nei test si passa un embedder finto, in produzione viene caricato il
+    modello fastembed locale.
+
+    Returns:
+        Ancora corretta {slide_pdf: tempo} oppure None se non c'è un offset
+        sistematico rilevabile in modo affidabile.
+    """
+    if not words_raw or len(anchors) < 2:
+        return None
+
+    opts = options or SemanticOptions()
+    if embed_fn is None:
+        model = _load_embed_model(
+            opts.model_name or DEFAULT_EMBEDDING_MODEL,
+            opts.cache_dir or DEFAULT_EMBEDDING_CACHE_DIR,
+            alternate_name=opts.alternate_model_name or DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+        )
+        if model is None:
+            return None
+        embed_fn = _make_embed_fn(model)
+
+    slide_clean = [_clean_slide_text(t) for t in slide_texts[:total_slides]]
+    try:
+        slide_emb = embed_fn(slide_clean)
+    except Exception as e:  # noqa: BLE001 - embedding può fallire per molti motivi
+        log.warning("   [Ancore] Embedding slide non riuscito: %s", e)
+        return None
+
+    offsets: list[int] = []
+    for s, t in sorted(anchors.items(), key=lambda kv: kv[1]):
+        excerpt = " ".join(w["word"] for w in words_raw if t <= w["start"] < t + window_seconds).strip()
+        if not excerpt:
+            continue
+        try:
+            excerpt_emb = embed_fn([excerpt])[0]
+        except Exception as e:  # noqa: BLE001
+            log.warning("   [Ancore] Embedding del parlato a %.1fs non riuscito: %s", t, e)
+            continue
+        sims = slide_emb @ excerpt_emb
+        best = int(np.argmax(sims)) + 1  # 1-based: slide del PDF più simile
+        offsets.append(best - s)
+
+    if len(offsets) < 2:
+        return None
+    # L'offset deve essere identico per tutte le ancore valutate: un offset
+    # sistematico (es. +1 per copertina esclusa) è un segnale forte, mentre
+    # spostamenti incoerenti significano che i riferimenti non sono affidabili.
+    if len(set(offsets)) != 1:
+        return None
+    offset = offsets[0]
+    if offset == 0:
+        return None
+
+    # Prudenza massima: l'offset si applica SOLO se porta tutte le ancore a
+    # slide valide del PDF. Un mapping parziale (qualche ancora fuori range)
+    # significherebbe che l'offset non è coerente con l'intero set: niente
+    # correzione, il chiamante ripiega sulle ancore originali.
+    for s in anchors:
+        if not 1 <= s + offset <= total_slides:
+            return None
+
+    corrected = {s + offset: t for s, t in anchors.items()}
+    if not corrected:
+        return None
+
+    log.info(
+        "   [Ancore] Offset sistematico %+d rilevato dagli embeddings: "
+        "correggo la numerazione parlata su %d ancore.",
+        offset,
+        len(corrected),
+    )
+    return corrected
 
 
 # =====================================================================

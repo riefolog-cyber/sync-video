@@ -17,6 +17,7 @@ from semantic_sync import (
     refine_llm_segment_boundaries,
     refine_ordered_llm_timeline,
     semantic_timeline_from_texts,
+    verify_anchor_mapping_embedding,
 )
 from timeline import (
     detect_flow_from_words,
@@ -1256,3 +1257,139 @@ class TestLlmSegmentPostProcessing(unittest.TestCase):
             embed_fn=embed_fn,
         )
         self.assertEqual(out, timeline)
+
+
+class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
+    """Verifica deterministica del mapping ancore (offset numerazione parlata)."""
+
+    @staticmethod
+    def _embed_fn(num_slides):
+        """Embedder finto: vettore one-hot per slide, il parlato e' sempre la
+        slide (s+1) rispetto al numero pronunciato (copertina esclusa)."""
+
+        def _embed(texts):
+            out = []
+            for t in texts:
+                v = np.zeros(num_slides)
+                for k in range(num_slides):
+                    if f"tema{k + 1}" in t:
+                        v[k] = 1.0
+                norm = np.linalg.norm(v)
+                out.append(v / norm if norm else v)
+            return np.array(out)
+
+        return _embed
+
+    def test_systematic_plus_one_offset(self):
+        # 4 slide PDF; lo speaker dice "slide 1..4" ma la finestra dopo ogni
+        # riferimento parla del contenuto della slide successiva (+1: copertina
+        # esclusa). L'euristica deve correggere il mapping a 2..5.
+        slides = [f"tema{i} slide" for i in range(1, 7)]
+        words = []
+        for s in range(1, 5):
+            start = 100.0 * s
+            words += [{"word": f"tema{s + 1}", "start": start + i} for i in range(5)]
+        anchors = {1: 100.0, 2: 200.0, 3: 300.0, 4: 400.0}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=6,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(6),
+        )
+        self.assertEqual(out, {2: 100.0, 3: 200.0, 4: 300.0, 5: 400.0})
+
+    def test_no_offset_returns_none(self):
+        # Numerazione corretta: il parlato dopo "slide N" parla di tema N.
+        slides = [f"tema{i} slide" for i in range(1, 5)]
+        words = []
+        for s in range(1, 5):
+            start = 100.0 * s
+            words += [{"word": f"tema{s}", "start": start + i} for i in range(5)]
+        anchors = {1: 100.0, 2: 200.0, 3: 300.0}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=4,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(4),
+        )
+        self.assertIsNone(out)
+
+    def test_inconsistent_offsets_return_none(self):
+        # Offset non sistematico: la prima ancora punta a +1, le altre a 0.
+        slides = [f"tema{i} slide" for i in range(1, 5)]
+        words = [{"word": "tema2", "start": 100.0}, {"word": "tema2", "start": 102.0}]
+        words += [{"word": "tema2", "start": 200.0}, {"word": "tema3", "start": 202.0}]
+        words += [{"word": "tema3", "start": 300.0}, {"word": "tema4", "start": 302.0}]
+        anchors = {1: 100.0, 2: 200.0, 3: 300.0}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=4,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(4),
+        )
+        self.assertIsNone(out)
+
+    def test_few_anchors_returns_none(self):
+        # Serve almeno 1 ancora valutabile (minimo 2 riferimenti richiesti).
+        slides = [f"tema{i} slide" for i in range(1, 5)]
+        words = [{"word": "tema2", "start": 100.0}, {"word": "tema2", "start": 102.0}]
+        anchors = {1: 100.0}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=4,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(4),
+        )
+        self.assertIsNone(out)
+
+    def test_offset_mapping_partially_shifted(self):
+        # Offset +1 su tutte le ancore: {1,2,3} -> {2,3,4}, tutti validi.
+        slides = [f"tema{i} slide" for i in range(1, 5)]
+        words = []
+        for s in range(1, 4):
+            start = 100.0 * s
+            words += [{"word": f"tema{s + 1}", "start": start + i} for i in range(5)]
+        anchors = {1: 100.0, 2: 200.0, 3: 300.0}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=4,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(4),
+        )
+        # tema4 per ancora 3 -> offset +1 darebbe slide 4 (ok), ma ancora 1 -> tema2
+        # (+1) e ancora 2 -> tema3 (+1): mapping {2,3,4} valido -> restituito.
+        self.assertEqual(out, {2: 100.0, 3: 200.0, 4: 300.0})
+
+    def test_out_of_range_fully_invalid_returns_none(self):
+        # Offset +1 porterebbe la prima ancora a slide 5 > 4 (nessuna valida).
+        slides = [f"tema{i} slide" for i in range(1, 5)]
+        words = []
+        for s in range(4, 6):
+            start = 100.0 * s
+            words += [{"word": f"tema{s + 1}", "start": start + i} for i in range(5)]
+        anchors = {4: 400.0, 5: 500.0}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=4,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(4),
+        )
+        self.assertIsNone(out)

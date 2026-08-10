@@ -8,7 +8,9 @@ numpy>=1.24.0
 tqdm>=4.66.0
 
 # Fallback semantico (sincronizzazione via embeddings, senza LLM)
-fastembed>=0.8.0
+# Pinnata a 0.5.1: le versioni successive usano mean pooling invece di CLS
+# per e5-large, cambiando gli embedding rispetto alla baseline validata (A/B).
+fastembed==0.5.1
 
 # Selezione slide via LLM opzionale (9Router online, endpoint OpenAI-compatibile)
 requests>=2.31.0

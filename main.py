@@ -40,10 +40,12 @@ from semantic_sync import (
     refine_llm_segments_from_words,
     refine_llm_timeline_from_words,
     semantic_timeline_from_words,
+    verify_anchor_mapping_embedding,
 )
 from timeline import (
     detect_flow_from_words,
     extract_slide_anchors,
+    extract_slide_one_references,
     reconcile_timeline,
 )
 from transcription import correct_transcript_names, transcribe_audio
@@ -140,6 +142,37 @@ def _format_time(seconds: float) -> str:
         return f"{seconds:.0f}s"
     m, s = divmod(int(seconds), 60)
     return f"{m}m{s:02d}s"
+
+
+def _save_final_timeline(
+    timeline: dict[int, float],
+    total_slides: int,
+    total_duration: float,
+) -> None:
+    """Persiste la timeline finale validata come ``llm_timeline_finale.json``.
+
+    Gli strumenti di verifica post-run (analysis_sync.py) auto-rilevano la
+    timeline più recente dalla cache cercando i file ``llm_*.json``: il flusso
+    semantico (MiniLM) non salva cache LLM, quindi senza questo file verrebbe
+    riciclata una timeline di una run precedente. Il prefisso ``llm_`` fa sì
+    che il file sopravviva alla pulizia delle cache orfane, e viene
+    sovrascritto a ogni run con gli start/end effettivamente usati per il video.
+    """
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    entries: list[dict[str, float]] = []
+    ordered = sorted(timeline)
+    for s in ordered:
+        end = (
+            timeline[ordered[i + 1]]
+            if (i := ordered.index(s)) + 1 < len(ordered)
+            else total_duration
+        )
+        entries.append({"slide": s, "start": round(float(timeline[s]), 3), "end": round(float(end), 3)})
+    (CACHE_DIR / "llm_timeline_finale.json").write_text(
+        json.dumps(entries, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    log.info("   Timeline finale salvata in cache per la verifica (llm_timeline_finale.json).")
 
 
 def _print_timing(
@@ -570,6 +603,11 @@ def main(argv: list | None = None) -> None:
             # Ancore deterministiche "slide N" dalla trascrizione: riferimenti
             # espliciti ad alta precisione che vincolano l'allineamento semantico.
             semantic_anchors = extract_slide_anchors(words_raw, total_slides, flow)
+            # Riferimento parlato alla "slide 1": la slide 1 reale è sempre 0.0,
+            # ma la numerazione dello speaker può essere sfasata (dice "slide 1"
+            # mostrando la slide 2 del PDF). Viene passato SOLO alla verifica LLM
+            # del mapping, mai usato come ancora vincolante.
+            slide_one_refs = extract_slide_one_references(words_raw, total_slides)
             if semantic_anchors:
                 log.info(
                     "3. [Ancore] %d ancore 'slide N' coerenti usate per vincolare l'allineamento semantico.",
@@ -577,41 +615,97 @@ def main(argv: list | None = None) -> None:
                 )
             else:
                 log.info("3. Nessun riferimento 'slide N': sincronizzazione solo per contenuto.")
+            if slide_one_refs:
+                log.info(
+                    "   [Ancore] Riferimento parlato alla 'slide 1' a %.1fs: "
+                    "passato alla verifica del mapping (numerazione sfasata).",
+                    next(iter(slide_one_refs.values())),
+                )
 
             # --- Verifica mapping ancore: numero parlato -> slide reale del PDF ---
             # Il podcast potrebbe NON seguire le regole del prompt NotebookLM: la
             # numerazione parlata può essere sfasata rispetto al PDF (es. lo speaker
-            # dice "quarta diapositiva" ma mostra la slide 5). L'LLM legge il
-            # contenuto del parlato dopo ogni riferimento "slide N" e corregge il
-            # numero di slide, mantenendo i TEMPI esatti. Fallback: ancore originali.
+            # dice "quarta diapositiva" ma mostra la slide 5). L'euristica
+            # deterministica (embeddings locali) corregge subito gli offset
+            # sistematici; l'LLM legge invece il contenuto del parlato dopo ogni
+            # riferimento "slide N" e corregge il numero di slide, mantenendo i
+            # TEMPI esatti. Fallback: ancore originali.
             # Gira SOLO se serve davvero (slide senza ancora, come il flusso ibrido):
             # con ancore complete l'LLM non aggiunge nulla e 9Router non va toccato.
-            if args.llm != "off" and semantic_anchors and len(semantic_anchors) < total_slides - 1:
-                endpoints = endpoints_for(args.llm)
-                if args.llm_model:
-                    for ep in endpoints:
-                        ep["model"] = args.llm_model
-                log.info("   Verifica mapping ancore con LLM (--llm %s)...", args.llm)
-                try:
-                    verified = llm_verify_anchor_mapping(
-                        slide_texts,
-                        words_raw,
-                        semantic_anchors,
-                        total_slides,
-                        endpoints=endpoints,
-                        wait_timeout=args.llm_wait_timeout,
-                        strict=True,
-                    )
-                except RuntimeError as e:
-                    # 9Router necessario ma non avviabile/non online: niente
-                    # fallback silenzioso, il processo si arresta con l'avviso.
-                    _abort(str(e))
+            verify_anchors = {**semantic_anchors, **slide_one_refs}
+            if verify_anchors and (
+                len(semantic_anchors) < total_slides - 1 or slide_one_refs
+            ):
+                # 1) Euristica DETERMINISTICA (embeddings locali, offline):
+                #    se la numerazione parlata è sistematicamente sfasata (es.
+                #    copertina esclusa: "slide 1" -> slide 2 del PDF) la corregge
+                #    senza chiamare 9Router. Sempre attiva (anche con --llm off).
+                verified = verify_anchor_mapping_embedding(
+                    slide_texts,
+                    words_raw,
+                    verify_anchors,
+                    total_slides,
+                    window_seconds=40.0,
+                    options=SemanticOptions(
+                        model_name=args.semantic_model,
+                        cache_dir=args.semantic_cache_dir,
+                    ),
+                )
                 if verified is not None:
+                    # La slide 1 reale è sempre 0.0: un eventuale mapping a slide 1
+                    # (es. ripasso della prima slide a metà narrazione) non è un
+                    # confine di transizione e non deve vincolare la timeline.
+                    verified = {s: t for s, t in verified.items() if s != 1}
                     log.info(
-                        "   Mapping ancore corretto dall'LLM: %d ancore verificate.",
+                        "   Mapping ancore corretto dall'euristica deterministica: %d ancore.",
                         len(verified),
                     )
                     semantic_anchors = verified
+                elif args.llm != "off":
+                    # 2) Fallback LLM: la numerazione non ha offset sistematico
+                    #    rilevabile, lascio decidere all'LLM (lettura del contenuto).
+                    endpoints = endpoints_for(args.llm)
+                    if args.llm_model:
+                        for ep in endpoints:
+                            ep["model"] = args.llm_model
+                    log.info("   Verifica mapping ancore con LLM (--llm %s)...", args.llm)
+                    try:
+                        verified = llm_verify_anchor_mapping(
+                            slide_texts,
+                            words_raw,
+                            verify_anchors,
+                            total_slides,
+                            endpoints=endpoints,
+                            wait_timeout=args.llm_wait_timeout,
+                            strict=True,
+                        )
+                    except RuntimeError as e:
+                        # 9Router necessario ma non avviabile/non online: niente
+                        # fallback silenzioso, il processo si arresta con l'avviso.
+                        _abort(str(e))
+                    if verified is not None:
+                        # La slide 1 reale è sempre 0.0: un eventuale mapping a slide 1
+                        # (es. ripasso della prima slide a metà narrazione) non è un
+                        # confine di transizione e non deve vincolare la timeline.
+                        verified = {s: t for s, t in verified.items() if s != 1}
+                        log.info(
+                            "   Mapping ancore corretto dall'LLM: %d ancore verificate.",
+                            len(verified),
+                        )
+                        semantic_anchors = verified
+
+            # Log diagnostico condiviso (stato finale ancore, post-verifica):
+            # le slide senza ancora esplicita sono quelle che il flusso ibrido
+            # posizionerà con l'LLM (o che il MiniLM allinea per contenuto).
+            _missing_anchors = sorted(
+                s for s in range(2, total_slides + 1) if s not in semantic_anchors
+            )
+            if _missing_anchors:
+                log.info(
+                    "   [Ancore] Slide senza ancora esplicita dopo la verifica (%d): %s.",
+                    len(_missing_anchors),
+                    ", ".join(str(s) for s in _missing_anchors),
+                )
 
             # --- Flusso IBRIDO (ordinato + LLM) ---
             # Le ancore deterministiche sono vincoli ESATTI e inviolabili. Se
@@ -712,6 +806,17 @@ def main(argv: list | None = None) -> None:
             except ValueError as e:
                 _abort(f"{e} Sincronizzazione impossibile senza distribuzioni inventate.")
             slide_ids = list(range(1, total_slides + 1))
+
+            # --- Persistenza timeline finale (per gli strumenti di verifica) ---
+            # Il flusso semantico (MiniLM) NON salva una cache llm_*.json: senza
+            # questo file, analysis_sync.py riciclerebbe una timeline LLM vecchia
+            # di una run precedente, generando falsi mismatch. Il file usa il
+            # prefisso llm_ per sopravvivere alla pulizia delle cache orfane e
+            # viene sovrascritto a ogni run con gli start/end validati.
+            try:
+                _save_final_timeline(timeline, total_slides, total_duration)
+            except OSError:
+                log.debug("   Impossibile salvare la timeline finale in cache (ignorato).")
 
         # --- Avviso: slide quasi non coperte dalla narrazione ---
         thin = [slide_ids[i] for i, d in enumerate(durations) if d < 2 * args.semantic_min_duration]

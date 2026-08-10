@@ -303,9 +303,17 @@ def _extract_slide_audio_flow(
 def _collect_slide_references(
     words: list[Word],
     total_slides: int,
+    include_slide_one: bool = False,
 ) -> dict[int, float]:
     """Raccoglie TUTTI i riferimenti 'slide N' / 'N ... slide' trovati,
-    incluso quelli fuori ordine cronologico (gestiti dal chiamante)."""
+    incluso quelli fuori ordine cronologico (gestiti dal chiamante).
+
+    Con ``include_slide_one=True`` raccoglie anche la "slide 1" parlata: serve
+    alla verifica LLM del mapping (la numerazione dello speaker può essere
+    sfasata, es. "slide 1" mentre mostra la slide 2 del PDF). La slide 1 reale
+    resta comunque SEMPRE a 0.0 e non viene mai vincolata come ancora.
+    """
+    min_slide = 1 if include_slide_one else 2
     refs: dict[int, float] = {}
     for i, w in enumerate(words):
         w_norm = _normalize(w["word"])
@@ -313,7 +321,7 @@ def _collect_slide_references(
             # Pattern 1: "slide N" con N nelle 8 parole successive
             # (finestra ampia: gestisce "slide, come potete vedere, la numero tre")
             embedded = _number_from_word(w_norm)
-            if embedded is not None and 2 <= embedded <= total_slides and embedded not in refs:
+            if embedded is not None and min_slide <= embedded <= total_slides and embedded not in refs:
                 refs[embedded] = w["start"]
                 log.debug(
                     "   [Deterministico] Trovato '%s' con numero incorporato a %.1fs",
@@ -324,7 +332,7 @@ def _collect_slide_references(
             for j in range(i + 1, min(i + 8, len(words))):
                 slide_num = _number_from_word(_normalize(words[j]["word"]))
                 if slide_num is not None:
-                    if 2 <= slide_num <= total_slides and slide_num not in refs:
+                    if min_slide <= slide_num <= total_slides and slide_num not in refs:
                         refs[slide_num] = w["start"]
                         log.debug(
                             "   [Deterministico] Trovato 'slide %d' a %.1fs",
@@ -335,7 +343,7 @@ def _collect_slide_references(
         else:
             # Pattern 2: numero prima di "slide" (es. "ora nove ... la slide")
             num = _number_from_word(w_norm)
-            if num is not None and 2 <= num <= total_slides and num not in refs:
+            if num is not None and min_slide <= num <= total_slides and num not in refs:
                 for j in range(i + 1, min(i + 7, len(words))):
                     if _is_slide_word(words[j]["word"]):
                         refs[num] = words[j]["start"]
@@ -346,6 +354,23 @@ def _collect_slide_references(
                         )
                         break
     return refs
+
+
+def extract_slide_one_references(
+    words: list[Word],
+    total_slides: int,
+) -> dict[int, float]:
+    """Riferimenti parlati alla 'slide 1' (es. "slide 1", "la prima slide").
+
+    La slide 1 reale è SEMPRE a 0.0 e non viene mai vincolata come ancora:
+    questi riferimenti servono solo alla verifica LLM del mapping, perché la
+    numerazione dello speaker può essere sfasata (es. dice "slide 1" mentre
+    mostra la slide 2 del PDF). Restituisce {1: timestamp} o {}.
+    """
+    if not words:
+        return {}
+    refs = _collect_slide_references(words, total_slides, include_slide_one=True)
+    return {1: refs[1]} if 1 in refs else {}
 
 
 def _lis_anchors(refs: dict[int, float]) -> dict[int, float]:

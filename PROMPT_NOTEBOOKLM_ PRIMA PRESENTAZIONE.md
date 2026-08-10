@@ -11,6 +11,8 @@ TESTO RIGOROSAMENTE E SOLO IN ITALIANO.
 
 ## 1\. Indicazione da incollare in "Personalizza" → "Istruzioni" per generare audio (con TUTTE le fonti selezionate)
 
+
+
 Struttura il podcast come un percorso che segue l'ordine del file
 presentazione.pdf che trovi nelle fonti: procedi per slide/sezioni, e per
 ognuna non limitarti a rileggere o parafrasare la presentazione: per ogni
@@ -29,14 +31,9 @@ transizione, SEMPRE IN CIFRE: es. "passiamo alla slide 2" oppure
 dal numero: il sistema di trascrizione automatica la riconosce meglio.
 * Se ti accorgi di aver saltato un numero, torna indietro e recuperalo subito.
 * Per ogni sezione: 1) annuncia "slide N"; 2) cita il titolo della sezione;
-3) spiega i punti chiave (anche citando le altre fonti); 4) chiudi con una
-frase riassuntiva.
-* Non anticipare contenuti di sezioni successive e non tornare indietro.
 
-ESEMPIO DI TRANSAZIONE (schema da adattare, contenuti generici come segnaposto):
-"Okay, passiamo alla slide 3. \[Titolo della sezione]. Le altre fonti
-aggiungono che \[sintesi del punto centrale]... \[punti chiave]...
-In sintesi, \[frase riassuntiva della sezione]."
+3\) spiega i punti chiave (anche citando le altre fonti); 4) chiudi con una
+frase riassuntiva.
 
 
 
