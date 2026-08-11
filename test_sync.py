@@ -44,7 +44,7 @@ class TestSlideAudioFlow(unittest.TestCase):
             ]
         )
         tl = extract_timeline_from_transcript(words, total_slides=3, total_duration=120.0, flow="slide-audio")
-        self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0})
+        self.assertEqual(tl, {1: 0.0, 2: 30.3, 3: 80.3})
 
     def test_italian_number_words(self):
         words = _words(
@@ -58,7 +58,7 @@ class TestSlideAudioFlow(unittest.TestCase):
             ]
         )
         tl = extract_timeline_from_transcript(words, total_slides=4, total_duration=200.0, flow="slide-audio")
-        self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0, 4: 130.0})
+        self.assertEqual(tl, {1: 0.0, 2: 30.3, 3: 80.3, 4: 130.3})
 
     def test_italian_ordinals(self):
         # Ordinali femminili italiani ("la terza diapositiva", "la sesta slide")
@@ -83,7 +83,7 @@ class TestSlideAudioFlow(unittest.TestCase):
             ]
         )
         tl = extract_timeline_from_transcript(words, total_slides=6, total_duration=300.0, flow="slide-audio")
-        self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0, 4: 130.0, 5: 180.0, 6: 230.0})
+        self.assertEqual(tl, {1: 0.0, 2: 30.6, 3: 80.6, 4: 130.6, 5: 180.6, 6: 230.6})
 
     def test_ordinal_masculine(self):
         words = _words(
@@ -100,7 +100,7 @@ class TestSlideAudioFlow(unittest.TestCase):
             ]
         )
         tl = extract_timeline_from_transcript(words, total_slides=4, total_duration=200.0, flow="slide-audio")
-        self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0, 4: 130.0})
+        self.assertEqual(tl, {1: 0.0, 2: 30.6, 3: 80.6, 4: 130.6})
 
     def test_ordinal_with_article_between(self):
         # "diapositiva la numero due": numero dopo articolo e "numero"
@@ -117,7 +117,7 @@ class TestSlideAudioFlow(unittest.TestCase):
             ]
         )
         tl = extract_timeline_from_transcript(words, total_slides=3, total_duration=120.0, flow="slide-audio")
-        self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0})
+        self.assertEqual(tl, {1: 0.0, 2: 30.9, 3: 80.9})
 
     def test_number_from_word_ordinals(self):
         from timeline import _number_from_word
@@ -185,7 +185,7 @@ class TestSlideAudioFlow(unittest.TestCase):
             ]
         )
         tl = extract_timeline_from_transcript(words, total_slides=3, total_duration=120.0, flow="slide-audio")
-        self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0})
+        self.assertEqual(tl, {1: 0.0, 2: 30.3, 3: 80.3})
 
     def test_misheard_slide_variants_sla(self):
         # Whisper trascrive "slide due" come "sla e due": le varianti fonetiche
@@ -204,7 +204,7 @@ class TestSlideAudioFlow(unittest.TestCase):
             ]
         )
         anchors = extract_slide_anchors(words, total_slides=3, flow="slide-audio")
-        self.assertEqual(anchors, {2: 398.3})
+        self.assertEqual(anchors, {2: 399.0})
 
     def test_misheard_slide_variants_asl(self):
         # "slide cinque" trascritto da Whisper come "asl cinque".
@@ -221,7 +221,7 @@ class TestSlideAudioFlow(unittest.TestCase):
             ]
         )
         anchors = extract_slide_anchors(words, total_slides=6, flow="slide-audio")
-        self.assertEqual(anchors, {5: 1095.7})
+        self.assertEqual(anchors, {5: 1096.6})
 
     def test_misheard_slide_variants_sallay(self):
         # "slide due" trascritto da whisper-small come "sallay 2".
@@ -238,7 +238,7 @@ class TestSlideAudioFlow(unittest.TestCase):
             ]
         )
         anchors = extract_slide_anchors(words, total_slides=6, flow="slide-audio")
-        self.assertEqual(anchors, {2: 397.6})
+        self.assertEqual(anchors, {2: 399.0})
 
     def test_misheard_slide_variant_embedded_digit(self):
         # "slide sei" trascritto come "slaib6" (numero incorporato nella parola).
@@ -254,7 +254,7 @@ class TestSlideAudioFlow(unittest.TestCase):
             ]
         )
         anchors = extract_slide_anchors(words, total_slides=6, flow="slide-audio")
-        self.assertEqual(anchors, {6: 1338.1})
+        self.assertEqual(anchors, {6: 1339.0})
 
     def test_common_words_with_sl_sequence_not_anchors(self):
         # Regressione: "solo", "salvo", "sale" NON devono essere scambiate
@@ -338,7 +338,7 @@ class TestSlideAudioFlow(unittest.TestCase):
             ]
         )
         tl = extract_timeline_from_transcript(words, total_slides=4, total_duration=200.0, flow="slide-audio")
-        self.assertEqual(tl, {1: 0.0, 2: 120.0, 3: 140.0, 4: 160.0})
+        self.assertEqual(tl, {1: 0.0, 2: 120.3, 3: 140.3, 4: 160.3})
 
     def test_valid_timeline_not_affected_by_post_filter(self):
         # Timeline già valida: il post-filtro non deve alterarla.
@@ -353,7 +353,7 @@ class TestSlideAudioFlow(unittest.TestCase):
             ]
         )
         tl = extract_timeline_from_transcript(words, total_slides=4, total_duration=200.0, flow="slide-audio")
-        self.assertEqual(tl, {1: 0.0, 2: 30.0, 3: 80.0, 4: 130.0})
+        self.assertEqual(tl, {1: 0.0, 2: 30.3, 3: 80.3, 4: 130.3})
 
 
 class TestAudioSlideFlow(unittest.TestCase):
@@ -755,6 +755,75 @@ class TestSemanticSync(unittest.TestCase):
             sim[2 * s, s] = 1.0
         report = signal_quality_report(sim, slide_emb)
         self.assertFalse(weak_signal(report))
+
+    def test_weak_signal_flag_after_weak_sync(self):
+        # Il guard-rail semantico espone il flag a main.py: con parlato fuori
+        # ordine il flag deve restare True dopo semantic_timeline_from_texts.
+        from semantic_sync import (
+            reset_weak_signal_flag,
+            semantic_timeline_from_texts,
+            weak_signal_seen,
+        )
+
+        reset_weak_signal_flag()
+        themes = ["alfa", "beta", "gamma", "delta"]
+        blocks = [
+            {"time": i * 5.0, "text": (t + " ") * 4}
+            for i, t in enumerate(["gamma", "gamma", "delta", "delta", "alfa", "alfa", "beta", "beta"])
+        ]
+        semantic_timeline_from_texts(
+            [f"{t} slide" for t in themes],
+            blocks,
+            total_slides=4,
+            total_duration=40.0,
+            embed_fn=self._fake_embed(themes),
+            options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
+        )
+        self.assertTrue(weak_signal_seen())
+
+    def test_weak_signal_flag_clear_after_strong_sync(self):
+        # Con parlato in ordine il flag resta False (nessun falso positivo).
+        from semantic_sync import (
+            reset_weak_signal_flag,
+            semantic_timeline_from_texts,
+            weak_signal_seen,
+        )
+
+        reset_weak_signal_flag()
+        themes = ["alfa", "beta", "gamma", "delta"]
+        tl = semantic_timeline_from_texts(
+            [f"{t} slide" for t in themes],
+            self._blocks_sequential(themes),
+            total_slides=4,
+            total_duration=40.0,
+            embed_fn=self._fake_embed(themes),
+            options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
+        )
+        self.assertIsNotNone(tl)
+        self.assertFalse(weak_signal_seen())
+
+
+class TestAnomalousDurations(unittest.TestCase):
+    """Guard-rail durate anomale del riepilogo finale (main._find_anomalous_durations)."""
+
+    @staticmethod
+    def _find(durations, slide_ids):
+        from main import _find_anomalous_durations
+
+        return _find_anomalous_durations(durations, slide_ids)
+
+    def test_long_slide_flagged(self):
+        self.assertEqual(self._find([100.0, 100.0, 100.0, 400.0], [1, 2, 3, 4]), [(4, 400.0)])
+
+    def test_short_slide_flagged(self):
+        self.assertEqual(self._find([100.0, 100.0, 100.0, 20.0], [1, 2, 3, 4]), [(4, 20.0)])
+
+    def test_balanced_no_warning(self):
+        self.assertEqual(self._find([120.0, 130.0, 110.0, 140.0], [1, 2, 3, 4]), [])
+
+    def test_too_few_slides_ignored(self):
+        self.assertEqual(self._find([100.0, 400.0], [1, 2]), [])
+
 
 
 class TestFreeOrderSelection(unittest.TestCase):

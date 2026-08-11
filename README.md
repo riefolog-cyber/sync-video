@@ -343,6 +343,31 @@ buffer 3s) → `video_finale.mp4`, con pulizia finale della cache orfana.
 Se il segnale è insufficiente il programma **si interrompe con avviso**,
 mai inventando distribuzioni uniformi.
 
+### 🧠 Che cos'è un embedding (in parole semplici)
+
+Un **embedding** è la "traduzione" di un testo in una lista di numeri che
+ne cattura il **significato**. L'idea chiave: **testi che vogliono dire cose
+simili hanno liste di numeri simili**.
+
+- "il ciclo dell'acqua" e "come l'acqua evapora e poi piove" → numeri **vicini**
+- "il ciclo dell'acqua" e "la guerra dei cent'anni" → numeri **lontani**
+
+La pipeline usa questa tecnica per sincronizzare: trasforma ogni slide e ogni
+pezzo di parlato in numeri, poi mostra ogni slide nel momento in cui il parlato
+ha i numeri più simili. È un modello **offline** (gira sul tuo PC, nessuna
+connessione) e **senza IA online**: il "cervello" che decide quando cambiare
+slide è tutto locale.
+
+Esempio: se nella trascrizione a 3 minuti si parla di "riciclaggio della
+plastica" e una slide parla di "riciclo dei rifiuti", il modello riconosce che
+sono simili e mostra quella slide in quel momento.
+
+> **Nota sulla fiducia**: se il parlato non segue chiaramente l'ordine delle
+> slide (es. le slide si somigliano molto tra loro), il programma avvisa nel
+> riepilogo finale che la sincronizzazione è **stimata, non garantita**. Per
+> un allineamento certo, fai pronunciare le ancore esplicite "slide N" (vedi
+> i workflow qui sotto).
+
 ### Modello embedding
 
 - **Default (definitivo)**: `intfloat/multilingual-e5-large` (1024 dim, ~2.2 GB) — scelto tramite test A/B su podcast reale (10 slide, senza LLM): similarità media 0.791 vs 0.380 (MiniLM) e 0.421 (mpnet), con durate tutte bilanciate (104-188s) e zero slide anomale (gli altri producevano slide da 8-20s e da 332s).

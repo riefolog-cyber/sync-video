@@ -9,6 +9,7 @@ import json
 import re
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn
 
@@ -41,6 +42,7 @@ from semantic_sync import (
     refine_llm_timeline_from_words,
     semantic_timeline_from_words,
     verify_anchor_mapping_embedding,
+    weak_signal_seen,
 )
 from timeline import (
     detect_flow_from_words,
@@ -192,6 +194,43 @@ def _print_timing(
     log.info("   ─────────────────────────")
     log.info("   TOTALE         │ %s", _format_time(t_total))
     log.info("─" * 50)
+
+
+def _warn_sync_uncertainty() -> None:
+    """Avviso nel riepilogo finale se l'ultima sync semantica aveva segnale debole."""
+    if not weak_signal_seen():
+        return
+    log.warning(
+        "\n   [Attenzione] Sincronizzazione a bassa fiducia: il segnale "
+        "semantico era debole (slide simili / parlato che non segue "
+        "l'ordine), quindi le durate delle slide sono STIMATE e non "
+        "garantite 1:1. Se il podcast segue davvero l'ordine della "
+        "presentazione il video è corretto; per un allineamento certo "
+        "rigenera la presentazione dal podcast o fai pronunciare le "
+        "ancore 'slide N' alle transizioni."
+    )
+
+
+def _find_anomalous_durations(
+    durations: Sequence[float],
+    slide_ids: Sequence[int],
+    long_ratio: float = 3.0,
+    short_ratio: float = 0.25,
+) -> list[tuple[int, float]]:
+    """Slide con durata molto fuori dalla mediana delle altre (possibile
+    errore di sincronizzazione). Return: lista di (slide, durata)."""
+    if len(durations) < 3:
+        return []
+    ordered = sorted(durations)
+    n = len(ordered)
+    median = ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2
+    if median <= 0:
+        return []
+    return [
+        (int(s), float(d))
+        for s, d in zip(slide_ids, durations, strict=True)
+        if d > long_ratio * median or d < short_ratio * median
+    ]
 
 
 # =====================================================================
@@ -830,6 +869,18 @@ def main(argv: list | None = None) -> None:
                 ", ".join(f"slide {s}" for s in thin),
             )
 
+        # --- Avviso: durate slide molto squilibrate (possibile sync errato) ---
+        anomalous = _find_anomalous_durations(durations, slide_ids)
+        if anomalous:
+            log.warning(
+                "\n   [Avviso] Durate slide molto squilibrate rispetto alla "
+                "mediana (possibile sincronizzazione imprecisa): %s.\n"
+                "   Una slide che dura molto più o molto meno delle altre può "
+                "indicare un allineamento errato: verifica la timeline o "
+                "rigenera la presentazione dal podcast.",
+                ", ".join(f"slide {s} = {d:.0f}s" for s, d in anomalous),
+            )
+
         # --- Anteprima timeline (--preview) ---
         if args.preview:
             log.info("\n" + "=" * 70)
@@ -851,6 +902,7 @@ def main(argv: list | None = None) -> None:
         if args.dry_run:
             t_total = time.time() - t_total_start
             _print_timing(t_ocr, t_transcribe, t_sync, model_load_seconds(), 0.0, t_total)
+            _warn_sync_uncertainty()
             log.info("\n" + "=" * 70)
             log.info(" [DRY-RUN] Timeline generata con successo.")
             log.info(" Il video NON è stato creato (--dry-run attivo).")
@@ -894,6 +946,7 @@ def main(argv: list | None = None) -> None:
         # --- Riepilogo finale ---
         t_total = time.time() - t_total_start
         _print_timing(t_ocr, t_transcribe, t_sync, model_load_seconds(), t_video, t_total)
+        _warn_sync_uncertainty()
 
         # Pulizia cache orfana
         cleaned = _clean_orphan_cache(active_cache_keys)

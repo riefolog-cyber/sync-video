@@ -41,7 +41,7 @@ class TestPipelineIntegration(unittest.TestCase):
 
         # Fase 3a: estrazione deterministica
         timeline = extract_timeline_from_transcript(words, total_slides=4, total_duration=200.0, flow="slide-audio")
-        self.assertEqual(timeline, {1: 0.0, 2: 30.0, 3: 80.0, 4: 130.0})
+        self.assertEqual(timeline, {1: 0.0, 2: 30.3, 3: 80.3, 4: 130.3})
 
         # Fase 3c: riconciliazione
         durations = reconcile_timeline(timeline, 4, 200.0)

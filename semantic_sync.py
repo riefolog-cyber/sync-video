@@ -59,10 +59,26 @@ _MODEL_LOAD_SECONDS = 0.0
 # usano lo stesso modello nello stesso processo.
 _EMBED_MODEL_CACHE: dict[tuple[str, str], TextEmbedding] = {}
 
+# Segnale debole rilevato dall'ULTIMA sincronizzazione semantica (guard-rail).
+# Esposto al chiamante perché il riepilogo finale di main.py avvisi l'utente che
+# la timeline è "probabile, non garantita" (slide simili / parlato fuori ordine).
+_WEAK_SIGNAL_SEEN = False
+
 
 def model_load_seconds() -> float:
     """Restituisce i secondi cumulati di caricamento dei modelli embedding."""
     return _MODEL_LOAD_SECONDS
+
+
+def weak_signal_seen() -> bool:
+    """True se l'ultima sincronizzazione semantica ha rilevato un segnale debole."""
+    return _WEAK_SIGNAL_SEEN
+
+
+def reset_weak_signal_flag() -> None:
+    """Azzera il flag di segnale debole (usato nei test tra chiamate diverse)."""
+    global _WEAK_SIGNAL_SEEN
+    _WEAK_SIGNAL_SEEN = False
 
 EmbedFn = Callable[[Sequence[str]], np.ndarray]
 
@@ -517,6 +533,8 @@ def semantic_timeline_from_texts(
     # dal podcast). Non blocca: avvisa che la sincronizzazione è inaffidabile
     # così l'utente può rigenerare la presentazione dal podcast.
     if weak_signal(report):
+        global _WEAK_SIGNAL_SEEN
+        _WEAK_SIGNAL_SEEN = True
         log.warning(
             "   [Semantico] AVVISO: segnale debole (concordanza picchi %.0f%%, "
             "slide confondibili %.0f%%). Il parlato potrebbe NON seguire "
@@ -863,6 +881,8 @@ def free_order_segments_from_texts(
     sim, report = embedded
 
     if weak_signal(report):
+        global _WEAK_SIGNAL_SEEN
+        _WEAK_SIGNAL_SEEN = True
         log.warning(
             "   [Libero] AVVISO: segnale debole (concordanza picchi %.0f%%, "
             "slide confondibili %.0f%%). La selezione libera segue comunque "

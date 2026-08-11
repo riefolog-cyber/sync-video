@@ -262,10 +262,18 @@ print("=" * 100)
 cuts_word = 0
 cuts_phrase = 0
 cuts_pause = 0
+# Tollera il rounding delle timeline salvate (main.py arrotonda a 3 decimali,
+# le parole Whisper hanno ~16us di precisione): un confine a <50ms dall'inizio
+# di una parola e' di fatto un taglio su confine di parola, non META-PAROLA.
+BOUNDARY_SNAP_TOL = 0.05
 boundaries = starts[1:]
 for b in boundaries:
-    # parola a cavallo del confine?
-    straddle = [w for i, w in enumerate(words) if float(w["start"]) < b < word_end(w, i)]
+    # parola a cavallo del confine? (con tolleranza di snap su confine di parola)
+    straddle = [
+        w
+        for i, w in enumerate(words)
+        if float(w["start"]) + BOUNDARY_SNAP_TOL < b < word_end(w, i) - BOUNDARY_SNAP_TOL
+    ]
     before = [w for i, w in enumerate(words) if word_end(w, i) <= b]
     after = [w for i, w in enumerate(words) if float(w["start"]) >= b]
     gap_before = b - word_end(before[-1], words.index(before[-1])) if before else 999.0

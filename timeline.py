@@ -322,7 +322,7 @@ def _collect_slide_references(
             # (finestra ampia: gestisce "slide, come potete vedere, la numero tre")
             embedded = _number_from_word(w_norm)
             if embedded is not None and min_slide <= embedded <= total_slides and embedded not in refs:
-                refs[embedded] = w["start"]
+                refs[embedded] = _reference_boundary(words, i)
                 log.debug(
                     "   [Deterministico] Trovato '%s' con numero incorporato a %.1fs",
                     w["word"],
@@ -333,7 +333,7 @@ def _collect_slide_references(
                 slide_num = _number_from_word(_normalize(words[j]["word"]))
                 if slide_num is not None:
                     if min_slide <= slide_num <= total_slides and slide_num not in refs:
-                        refs[slide_num] = w["start"]
+                        refs[slide_num] = _reference_boundary(words, j)
                         log.debug(
                             "   [Deterministico] Trovato 'slide %d' a %.1fs",
                             slide_num,
@@ -346,7 +346,7 @@ def _collect_slide_references(
             if num is not None and min_slide <= num <= total_slides and num not in refs:
                 for j in range(i + 1, min(i + 7, len(words))):
                     if _is_slide_word(words[j]["word"]):
-                        refs[num] = words[j]["start"]
+                        refs[num] = _reference_boundary(words, j)
                         log.debug(
                             "   [Deterministico] Trovato '%s ... slide' a %.1fs",
                             w["word"],
@@ -354,6 +354,26 @@ def _collect_slide_references(
                         )
                         break
     return refs
+
+
+def _reference_boundary(words: list[Word], last_word_idx: int, max_gap: float = 2.0) -> float:
+    """Confine naturale della frase 'slide N': inizio della parola successiva.
+
+    L'ancora viene posta ALLA FINE del riferimento (dopo che lo speaker ha
+    finito di pronunciare "slide N"), non all'inizio della parola "slide":
+    così il taglio cade su un confine di parola e non spezza la parola ancora
+    (verificato con analysis_sync.py: tagli 'META-PAROLA' a metà parola).
+
+    Se dopo il numero non c'è una parola vicina (fine trascrizione o pausa
+    lunga), l'ancora resta all'inizio della parola: in quel caso non c'è
+    niente da spezzare dopo il taglio.
+    """
+    start = words[last_word_idx]["start"]
+    if last_word_idx + 1 < len(words):
+        nxt = words[last_word_idx + 1]["start"]
+        if 0.0 <= nxt - start <= max_gap:
+            return nxt
+    return start
 
 
 def extract_slide_one_references(

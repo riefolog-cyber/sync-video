@@ -377,10 +377,24 @@ DEFAULT_SLIDES_DIR = "temp_slides"
 # --- Sincronizzazione semantica (sentence embeddings, offline) ---
 # Modelli multilingue ONNX (fastembed). Supportano l'italiano senza prefissi.
 #
-# Default: multilingual-e5-large (1024 dim, ~2.2 GB). Testato A/B su podcast
-# reale (10 slide, flusso ordinato senza LLM): similarità media 0.791 vs
-# 0.380 (MiniLM) e 0.421 (mpnet-base), e durate tutte bilanciate (104-188s)
-# senza anomalie, mentre MiniLM/mpnet producevano slide da 8-20s e 332s.
+# ⚠️ REGOLA DI SCELTA MODELLO (documentata ad oggi):
+#   e5-large è il modello DA PREFERIRE. Testato A/B su podcast reale
+#   (10 slide, flusso ordinato senza LLM): similarità media 0.791 vs
+#   0.380 (MiniLM) e 0.421 (mpnet-base), e durate tutte bilanciate
+#   (104-188s) senza anomalie, mentre MiniLM/mpnet producevano slide da
+#   8-20s e 332s. Confermato anche sul podcast da 8 slide (0.834 vs 0.612
+#   MiniLM e 0.534 mpnet, stesse ancore esatte a delta 0.00s).
+#
+#   QUANDO VALUTARE UN'ALTERNATIVA: solo se è (1) con accuratezza uguale o
+#   maggiore E (2) più veloce/leggera. La precisione della sincronizzazione
+#   è la priorità assoluta: un modello più veloce che abbassa la similarità
+#   media o il segnale semantico NON va adottato. Prima di cambiare
+#   DEFAULT_EMBEDDING_MODEL, ripetere il test A/B completo (vedi
+#   config.py / README) verificando similarità media, durate bilanciate e
+#   zero slide anomale. Tenere d'occhio i rilasci di intfloat/multilingual-e5
+#   e i nuovi sentence-embedding multilingue ONNX più efficienti.
+#
+# Default: multilingual-e5-large (1024 dim, ~2.2 GB).
 # Costo: +2.2 GB di download e ~37s di embedding per 24 min di podcast.
 DEFAULT_EMBEDDING_MODEL = os.environ.get(
     "EMBEDDING_MODEL",
