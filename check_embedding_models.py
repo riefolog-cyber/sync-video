@@ -195,7 +195,8 @@ def _save_state(data: dict) -> None:
 def _load_state() -> dict | None:
     if STATE_FILE.exists():
         try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            loaded = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            return loaded if isinstance(loaded, dict) else None
         except (json.JSONDecodeError, OSError):
             return None
     return None
