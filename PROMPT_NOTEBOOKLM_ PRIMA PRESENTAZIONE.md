@@ -24,8 +24,8 @@ ANCORE E STRUTTURA (FONDAMENTALE, OBBLIGATORIO):
 
 * Segui le slide della presentazione in ORDINE RIGOROSO e CONSECUTIVO:
 slide 1, 2, 3, … fino all'ultima, senza mai saltarne una.
-* All'inizio di OGNI sezione pronuncia esplicitamente il numero come
-transizione, SEMPRE IN CIFRE: es. "passiamo alla slide 2" oppure
+* All'inizio di OGNI sezione (dalla seconda in poi) pronuncia esplicitamente
+il numero come transizione, SEMPRE IN CIFRE: es. "passiamo alla slide 2" oppure
 "siamo alla slide 2". Mai "la slide successiva" e mai "slide numero due".
 * Pronuncia la parola "slide" (o "diapositiva") in modo CHIARO e separato
 dal numero: il sistema di trascrizione automatica la riconosce meglio.
@@ -50,4 +50,11 @@ etica, esistenziale o culturale, stimolando riflessione e dibattito in aula.
 ▸ INTRODUZIONE: L'inizio deve essere naturale, senza dire che si seguirà una
 scaletta o una struttura a blocchi. La prima transizione numerata
 ("slide 2") arriva solo alla fine della prima sezione.
+
+La frase "passiamo alla slide N" (o "siamo alla slide N") deve apparire
+all'inizio di OGNI sezione a partire dalla seconda, senza eccezioni.
+
+
+
+
 

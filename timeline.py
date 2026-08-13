@@ -9,6 +9,7 @@ citazioni a posteriori), la timeline viene completata usando le ancore reali
 """
 
 import re
+from typing import cast
 
 from chunks import Word
 from config import log
@@ -319,8 +320,11 @@ def _collect_slide_references(
         w_norm = _normalize(w["word"])
         if _is_slide_word(w["word"]):
             # Pattern 1: "slide N" con N nelle 8 parole successive
-            # (finestra ampia: gestisce "slide, come potete vedere, la numero tre")
-            embedded = _number_from_word(w_norm)
+            # (finestra ampia: gestisce "slide, come potete vedere, la numero tre").
+            # `_embedded_slide_number` estrae il numero anche dalle forme FUSE
+            # con cardinali italiani ("slaidotto" -> 8, "slaidue" -> 2): il solo
+            # `_number_from_word` vede le cifre ("slaib6") ma non i numeri fusi.
+            embedded = _embedded_slide_number(w_norm)
             if embedded is not None and min_slide <= embedded <= total_slides and embedded not in refs:
                 refs[embedded] = _reference_boundary(words, i)
                 log.debug(
@@ -679,11 +683,18 @@ def _is_slide_word(word: str) -> bool:
     sottosequenza consonantica "sl" ma non iniziano con essa. Il falso
     positivo residuo è mitigato dal chiamante, che richiede sempre un
     numero di slide adiacente (o incorporato, es. "slaib6").
+
+    Riconosce anche le varianti FUSE con numero italiano: "Slaidotto"
+    ("slide otto"), "Slaidue", "Slaitre", ... (Whisper fonde numero e
+    "slide" nella stessa parola). La digit-check è già coperta da
+    ``_embedded_slide_number`` ("slaib6").
     """
     w = _normalize(word)
     if not w:
         return False
     if w in _SLIDE_WORDS:
+        return True
+    if _embedded_slide_number(w) is not None:
         return True
     if not (3 <= len(w) <= 7):
         return False
@@ -692,6 +703,31 @@ def _is_slide_word(word: str) -> bool:
     cons = re.sub(r"[aeiou]", "", w)
     cons = re.sub(r"(.)\1+", r"\1", cons)
     return cons.startswith("sl") and len(cons) <= 4
+
+
+def _embedded_slide_number(w_norm: str) -> int | None:
+    """Numero di slide incorporato in una variante fusa, o None.
+
+    Estrae il numero da una parola "sl..." senza separatore:
+    - forma digitale: "slaib6" -> 6 (via ``_number_from_word``);
+    - forma fusa italiana: "slaidotto" -> 8, "slaitre" -> 3.
+
+    Lo stem "sl..." deve restare di almeno 3 caratteri e il suffisso deve
+    essere un numero italiano valido >= 2 (evita falsi positivi tipo "una",
+    "sei" dentro parole comuni). Il chiamante verifica comunque che il
+    numero sia nel range delle slide del PDF.
+    """
+    if not w_norm.startswith("sl"):
+        return None
+    n = _number_from_word(w_norm)
+    if n is not None:
+        return n
+    for stem_len in range(3, len(w_norm)):
+        suffix = w_norm[stem_len:]
+        val = _ITALIAN_NUMBERS.get(suffix)
+        if val is not None and val >= 2 and w_norm[:stem_len].startswith("sl"):
+            return cast(int, val)
+    return None
 
 
 # =====================================================================
@@ -718,8 +754,10 @@ def detect_flow_from_words(
     for i, w in enumerate(words):
         w_norm = _normalize(w["word"])
 
-        # slide-audio: "slide N" (cifre o parole)
+        # slide-audio: "slide N" (cifre, parole o forma fusa "slaidotto")
         if _is_slide_word(w["word"]):
+            if _embedded_slide_number(w_norm) is not None:
+                return "slide-audio"
             for j in range(i + 1, min(i + 4, len(words))):
                 if _number_from_word(_normalize(words[j]["word"])) is not None:
                     return "slide-audio"

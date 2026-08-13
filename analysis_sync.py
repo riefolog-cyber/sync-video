@@ -46,7 +46,7 @@ from config import (
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
     STOPWORDS_ITA,
 )
-from semantic_sync import _clean_slide_text, _load_embed_model, _make_embed_fn
+from semantic_sync import _clean_slide_text, _load_embed_model, _make_embed_fn, segment_verdict
 
 TIMELINE_FILE = None
 ANCHORS_FILE = None
@@ -206,46 +206,65 @@ def lex_f1(a: str, b: str) -> float:
 # 1+2. Tabella segmenti: durata, sim, best, F1
 # ----------------------------------------------------------------------
 print("=" * 100)
-print("1. TIMELINE + ALLINEAMENTO AUDIO <-> SLIDE (embedding MiniLM + F1 lessicale)")
+print("1. TIMELINE + ALLINEAMENTO AUDIO <-> SLIDE (embedding + z-score + F1 lessicale)")
 print("=" * 100)
 print(f"{'sl':>3} {'inizio':>8} {'fine':>8} {'dur':>7} | {'sim':>6} {'best':>4} "
-      f"{'b-sim':>6} {'rank':>4} {'F1':>5} | giudizio")
+      f"{'b-z':>6} {'rank':>4} {'F1':>5} | giudizio")
 print("-" * 100)
+# Nota: 'best' e' calcolato con lo z-score per-slide (come il pipeline):
+# la similarita' coseno grezza (colonna 'sim') non e' un giudizio di sync.
 
 n_best = 0
 n_weak = 0
 low_sim: list[tuple[int, float, float]] = []
 shown_sims: list[float] = []
+
+# Cosine grezza per ogni segmento (per le metriche informative), poi giudizio
+# del "best" con la STESSA normalizzazione del pipeline (z-score per-slide):
+# senza z-score la slide-riepilogo (similarita' uniformemente alta) vincerebbe
+# quasi ovunque sulla cosine grezza, producendo falsi disallineamenti.
+raw_rows: list[np.ndarray] = []
+tbl: list[dict] = []
 for seg in segs:
     s = seg["slide"]
     st, en = seg["start"], seg["end"]
-    dur = en - st
     emb = seg_embedding(st, en)
     sims = emb @ slide_emb.T
-    shown = float(sims[s - 1])
-    shown_sims.append(shown)
-    best_slide = int(np.argmax(sims)) + 1
-    best_sim = float(sims.max())
-    order = int((sims > shown).sum()) + 1  # rank della mostrata (1 = migliore)
-    text = seg_text(st, en)
-    f1 = lex_f1(text, slide_texts[s - 1])
+    raw_rows.append(sims)
+    tbl.append(
+        {
+            "slide": s,
+            "start": st,
+            "end": en,
+            "dur": en - st,
+            "shown": float(sims[s - 1]),
+            "f1": lex_f1(seg_text(st, en), slide_texts[s - 1]),
+        }
+    )
+    shown_sims.append(float(sims[s - 1]))
 
+seg_sims = np.stack(raw_rows) if raw_rows else np.zeros((0, len(slide_texts)))
+verdicts = segment_verdict(seg_sims, shown=[t["slide"] for t in tbl]) if len(tbl) else []
+
+for i, (row, v) in enumerate(zip(tbl, verdicts, strict=True)):
+    s, shown = row["slide"], row["shown"]
+    best_slide = int(v["best"])
+    best_z = float(v["best_z"])
+    order = int(v["rank"])
+    if shown < 0.10:
+        n_weak += 1
+        low_sim.append((s, shown, float(seg_sims[i].max() if len(tbl) else 0.0)))
     is_best = best_slide == s
     if is_best:
         n_best += 1
-    if shown < 0.10:
-        n_weak += 1
-        low_sim.append((s, shown, best_sim))
-
-    if is_best:
         verdict = "OK (best)"
     elif order <= 3:
         verdict = f"OK~ (best={best_slide})"
     else:
         verdict = f"<-- slide {s} vs best {best_slide}"
     print(
-        f"{s:>3} {st:>8.1f} {en:>8.1f} {dur:>7.1f} | {shown:>6.3f} {best_slide:>4} "
-        f"{best_sim:>6.3f} {order:>4} {f1:>5.3f} | {verdict}"
+        f"{s:>3} {row['start']:>8.1f} {row['end']:>8.1f} {row['dur']:>7.1f} | "
+        f"{shown:>6.3f} {best_slide:>4} {best_z:>6.3f} {order:>4} {row['f1']:>5.3f} | {verdict}"
     )
 
 print("-" * 100)
@@ -316,6 +335,34 @@ FRAMES_DIR.mkdir(exist_ok=True)
 from PIL import Image
 
 
+def _extract_frame(out: Path, t: float) -> None:
+    """Estrae un frame dal video AL VOLO se assente o se il video e' piu'
+    nuovo del frame (run precedente): la cache dei frame puo' contenere
+    immagini di un video precedente con lo STESSO nome (stesso timestamp
+    di confine e stessa slide), che produrrebbero falsi mismatch.
+    """
+    if out.exists() and out.stat().st_mtime >= VIDEO.stat().st_mtime:
+        return
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{t:.3f}",
+            "-i",
+            str(VIDEO),
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            str(out),
+        ],
+        check=False,
+    )
+
+
 def img_sim(a: Path, b: Path) -> float:
     arr_a = np.asarray(Image.open(a).convert("L").resize(IMAGE_SIZE), dtype=np.float32).ravel()
     arr_b = np.asarray(Image.open(b).convert("L").resize(IMAGE_SIZE), dtype=np.float32).ravel()
@@ -333,25 +380,7 @@ for i, seg in enumerate(segs):
     s = seg["slide"]
     t = (seg["start"] + seg["end"]) / 2
     out = FRAMES_DIR / f"seg{i:02d}_t{t:07.1f}_slide{s:02d}.png"
-    if not out.exists():
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-loglevel",
-                "error",
-                "-ss",
-                f"{t:.3f}",
-                "-i",
-                str(VIDEO),
-                "-frames:v",
-                "1",
-                "-q:v",
-                "2",
-                str(out),
-            ],
-            check=False,
-        )
+    _extract_frame(out, t)
     sims_img = [img_sim(out, sf) for sf in slide_files]
     best_img = int(np.argmax(sims_img)) + 1
     best_sim_img = max(sims_img)
@@ -384,25 +413,7 @@ for i, seg in enumerate(segs[1:], start=1):
     if t >= AUDIO_DURATION:
         continue
     out = FRAMES_DIR / f"bnd{i:02d}_t{t:07.1f}_slide{s:02d}.png"
-    if not out.exists():
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-loglevel",
-                "error",
-                "-ss",
-                f"{t:.3f}",
-                "-i",
-                str(VIDEO),
-                "-frames:v",
-                "1",
-                "-q:v",
-                "2",
-                str(out),
-            ],
-            check=False,
-        )
+    _extract_frame(out, t)
     sims_img = [img_sim(out, sf) for sf in slide_files]
     best_img = int(np.argmax(sims_img)) + 1
     best_sim_img = max(sims_img)

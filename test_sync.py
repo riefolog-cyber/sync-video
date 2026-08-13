@@ -256,6 +256,41 @@ class TestSlideAudioFlow(unittest.TestCase):
         anchors = extract_slide_anchors(words, total_slides=6, flow="slide-audio")
         self.assertEqual(anchors, {6: 1339.0})
 
+    def test_fused_italian_number_embedded_word(self):
+        # "slide otto" fuse in un'unica parola "slaidotto": il numero e' dentro
+        # la parola e deve essere estratto come ancora, non perso (regressione:
+        # _collect_slide_references usava _number_from_word che non vede i
+        # cardinali fusi, quindi l'ancora veniva scartata e la slide affidata
+        # al semantico, perdendo precisione).
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 400.0),
+                ("alla", 407.0),
+                ("slaidotto", 407.6),
+                ("il", 408.3),
+                ("controllo", 408.7),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=9, flow="slide-audio")
+        self.assertEqual(anchors, {8: 408.3})
+
+    def test_fused_italian_number_flow_detection(self):
+        # L'auto-detection deve riconoscere il flusso slide-audio anche quando
+        # il numero e' fuso nella parola (stessa regressione di sopra).
+        from timeline import detect_flow_from_words
+
+        words = _words(
+            [
+                ("passiamo", 400.0),
+                ("alla", 407.0),
+                ("slaidue", 407.6),
+                ("il", 408.3),
+            ]
+        )
+        self.assertEqual(detect_flow_from_words(words, 2.0), "slide-audio")
+
     def test_common_words_with_sl_sequence_not_anchors(self):
         # Regressione: "solo", "salvo", "sale" NON devono essere scambiate
         # per "slide". "in realtà sei solo un passeggero" produceva un falso
@@ -671,6 +706,60 @@ class TestSemanticSync(unittest.TestCase):
         sim = np.array([[0.3, 0.1], [0.3, 0.9]], dtype=np.float64)
         z = zscore_matrix(sim)
         self.assertTrue(np.all(np.abs(z[:, 0]) < 1e-6))
+
+    def test_segment_verdict_uses_zscore_not_raw_cosine(self):
+        # Regressione (verifica analysis_sync): la slide 3 e' un riepilogo con
+        # similarita' coseno uniformemente ALTA (0.65) su TUTTI i segmenti:
+        # sulla cosine grezza risulterebbe "best" ovunque (falso
+        # disallineamento). Lo z-score per-slide la neutralizza (colonna
+        # costante -> z=0) e fanno emergere i picchi veri delle altre slide.
+        from semantic_sync import segment_verdict
+
+        sim = np.array(
+            [
+                [0.5, 0.3, 0.65],  # seg 0: picco slide 1
+                [0.3, 0.5, 0.65],  # seg 1: picco slide 2
+                [0.6, 0.3, 0.65],  # seg 2: picco slide 1
+                [0.3, 0.6, 0.65],  # seg 3: picco slide 2
+            ],
+            dtype=np.float64,
+        )
+        # La cosine grezza si inganna: slide 3 (riepilogo) vince per ogni riga.
+        self.assertTrue(np.all(np.argmax(sim, axis=1) == 2))
+        verdicts = segment_verdict(sim, shown=[1, 2, 1, 2])
+        self.assertEqual([v["best"] for v in verdicts], [1, 2, 1, 2])
+        # La slide mostrata ha rank 1 per ogni segmento (sync corretta) e il
+        # suo z non e' mai sotto il best (subject to rounding).
+        self.assertTrue(all(v["rank"] == 1 for v in verdicts))
+        self.assertTrue(all(v["shown_z"] >= v["best_z"] - 1e-6 for v in verdicts))
+
+    def test_segment_verdict_shown_rank_when_not_best(self):
+        # Nell'ultimo segmento la slide mostrata (2) non e' il picco: il
+        # verdetto deve riportare il rank reale (>1), non forzare "OK".
+        from semantic_sync import segment_verdict
+
+        sim = np.array(
+            [
+                [0.9, 0.3, 0.3],  # seg 0: picco slide 1
+                [0.3, 0.9, 0.3],  # seg 1: picco slide 2
+                [0.4, 0.5, 0.9],  # seg 2: picco slide 3 (mostrata la 2)
+            ],
+            dtype=np.float64,
+        )
+        verdicts = segment_verdict(sim, shown=[1, 2, 2])
+        self.assertEqual([v["best"] for v in verdicts], [1, 2, 3])
+        self.assertEqual(verdicts[2]["rank"], 2)
+        self.assertEqual(verdicts[0]["rank"], 1)
+        self.assertEqual(verdicts[1]["rank"], 1)
+
+    def test_segment_verdict_without_shown_defaults_to_best(self):
+        # ``shown`` opzionale: verdetto della sola lettura (niente slide mostrata).
+        from semantic_sync import segment_verdict
+
+        sim = np.array([[0.9, 0.2], [0.2, 0.9]], dtype=np.float64)
+        verdicts = segment_verdict(sim)
+        self.assertEqual([v["best"] for v in verdicts], [1, 2])
+        self.assertEqual(verdicts[0]["rank"], 1)
 
     def test_competition_neutralizes_uniform_slide(self):
         # Slide 3 "riepilogo" con similarità uniforme su tutti i blocchi:

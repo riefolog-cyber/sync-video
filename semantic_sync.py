@@ -274,6 +274,42 @@ def zscore_matrix(
     return cast(np.ndarray, (m - m.mean(axis=0)) / std)
 
 
+def segment_verdict(
+    sim: np.ndarray,
+    shown: Sequence[int] | None = None,
+) -> list[dict[str, float | int]]:
+    """Giudizio "best slide" per segmento, con la STESSA normalizzazione
+    del pipeline (z-score per-slide), non la cosine grezza.
+
+    Su una slide-riepilogo con similarita' uniformemente alta su tutto
+    l'audio la cosine grezza la dichiarerebbe "best" per quasi ogni
+    segmento (falso disallineamento), mentre lo z-score la rende neutra
+    e lascia emergere i picchi locali delle slide reali.
+
+    Args:
+        sim: matrice (B, N) di similarita' coseno (righe = segmenti).
+        shown: slide mostrata per ogni riga (1-based, opzionale): usata
+            per calcolare `rank` della slide realmente a schermo.
+
+    Returns:
+        Lista (una per segmento) con:
+            best:    slide piu' probabile per z-score
+            best_z:  valore z del best
+            shown_z: valore z della slide mostrata
+            rank:    posizione della slide mostrata nella riga (1 = migliore)
+    """
+    z = zscore_matrix(sim)
+    verdicts: list[dict[str, float | int]] = []
+    for i, row in enumerate(z):
+        best = int(np.argmax(row)) + 1
+        best_z = float(row.max())
+        shown_slide = int(shown[i]) if shown is not None else best
+        shown_z = float(row[shown_slide - 1])
+        rank = int((row > row[shown_slide - 1]).sum()) + 1
+        verdicts.append({"best": best, "best_z": best_z, "shown_z": shown_z, "rank": rank})
+    return verdicts
+
+
 # =====================================================================
 # COMPETIZIONE SOFTMAX TRA SLIDE (per blocco)
 # =====================================================================
