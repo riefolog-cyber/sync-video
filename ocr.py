@@ -4,6 +4,7 @@ FASE 1 — Estrazione slide da PDF + OCR parallelo.
 Il rendering PDF usa multiprocessing (PyMuPDF non è thread-safe).
 """
 
+import hashlib
 import os
 import re
 import shutil
@@ -13,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import Pool
 from pathlib import Path
 
-import fitz  # PyMuPDF
+import pymupdf as fitz  # PyMuPDF (alias deprecato importato come compat)
 import pytesseract
 from PIL import Image
 
@@ -43,11 +44,23 @@ def _find_soffice() -> str | None:
     return None
 
 
-def convert_pptx_to_pdf(pptx_path: Path, out_dir: Path) -> Path:
-    """Converte una presentazione PPTX in PDF usando LibreOffice headless.
+PRESENTATION_SUFFIXES = {".ppt", ".pptx"}
+
+
+def _file_md5(path: Path, chunk: int = 1024 * 1024) -> str:
+    """MD5 del contenuto di un file (streaming, non carica in memoria)."""
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
+    """Converte una presentazione PPT/PPTX in PDF usando LibreOffice headless.
 
     Args:
-        pptx_path: percorso del file .pptx
+        ppt_path: percorso del file .ppt/.pptx
         out_dir: directory dove salvare il PDF risultante
 
     Returns:
@@ -59,21 +72,30 @@ def convert_pptx_to_pdf(pptx_path: Path, out_dir: Path) -> Path:
     soffice = _find_soffice()
     if not soffice:
         raise RuntimeError(
-            "LibreOffice non trovato: necessario per convertire .pptx in PDF.\n"
+            "LibreOffice non trovato: necessario per convertire .ppt/.pptx in PDF.\n"
             "Installa LibreOffice (https://www.libreoffice.org) oppure "
             "converte la presentazione in .pdf manualmente."
         )
     out_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = out_dir / (pptx_path.stem + ".pdf")
+    pdf_path = out_dir / (ppt_path.stem + ".pdf")
 
-    # Riusa il PDF già convertito se più recente del PPTX: evita di riconvertire
-    # a ogni run (LibreOffice cambia l'hash del PDF, invalidando la cache OCR).
-    if pdf_path.exists() and pdf_path.stat().st_mtime >= pptx_path.stat().st_mtime:
-        log.info("   -> PDF già presente (riusato): %s", pdf_path)
-        return pdf_path
+    # Riusa il PDF convertito solo se il file sorgente è INVARIATO (confronto per
+    # contenuto, non per data di modifica): una copia/caricamento del .pptx può
+    # avere un mtime più vecchio del PDF in cache, cosa che faceva riusare un PDF
+    # stantio. Il marker a lato memorizza l'MD5 del sorgente convertito.
+    marker_path = out_dir / (ppt_path.stem + ".src_md5")
+    if pdf_path.exists() and marker_path.exists():
+        try:
+            if marker_path.read_text(encoding="ascii").strip() == _file_md5(ppt_path):
+                log.info("   -> PDF già presente (riusato): %s", pdf_path)
+                return pdf_path
+        except OSError:
+            pass
+        log.info("   -> PDF in cache scaduto (sorgente cambiato), riconverto...")
 
-    cmd = [soffice, "--headless", "--convert-to", "pdf", "--outdir", str(out_dir), str(pptx_path)]
-    log.info("   Conversione PPTX -> PDF (LibreOffice)...")
+    cmd = [soffice, "--headless", "--convert-to", "pdf", "--outdir", str(out_dir), str(ppt_path)]
+    ext_upper = ppt_path.suffix.upper().lstrip(".")
+    log.info("   Conversione %s -> PDF (LibreOffice)...", ext_upper)
     try:
         proc = subprocess.run(
             cmd,
@@ -84,9 +106,10 @@ def convert_pptx_to_pdf(pptx_path: Path, out_dir: Path) -> Path:
             creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
         )
     except subprocess.TimeoutExpired:
-        raise RuntimeError("Conversione PPTX->PDF terminata per timeout (180s).") from None
+        raise RuntimeError(f"Conversione {ext_upper}->PDF terminata per timeout (180s).") from None
     if proc.returncode != 0 or not pdf_path.exists():
-        raise RuntimeError(f"Conversione PPTX->PDF fallita (exit={proc.returncode}):\n{proc.stderr}")
+        raise RuntimeError(f"Conversione {ext_upper}->PDF fallita (exit={proc.returncode}):\n{proc.stderr}")
+    marker_path.write_text(_file_md5(ppt_path), encoding="ascii")
     log.info("   -> PDF convertito: %s", pdf_path)
     return pdf_path
 
@@ -109,7 +132,11 @@ def _ocr_single_slide(image_path: Path, lang: str, max_retries: int = 3) -> str:
     raw = ""
     for attempt in range(max_retries):
         try:
-            raw = pytesseract.image_to_string(Image.open(str(image_path)), lang=lang)
+            # Passiamo il PERCORSO, non l'oggetto Image: Pillow 12.x ha una
+            # regressione quando pytesseract ri-salva il PNG (AttributeError:
+            # 'PngImageFile' object has no attribute '_im'). Col path pytesseract
+            # usa il file direttamente senza duplicarlo.
+            raw = pytesseract.image_to_string(str(image_path), lang=lang)
             break
         except (pytesseract.TesseractError, OSError) as e:
             if attempt < max_retries - 1:
@@ -126,7 +153,7 @@ def _ocr_single_slide(image_path: Path, lang: str, max_retries: int = 3) -> str:
             else:
                 log.debug("   OCR fallito con lang=%s, riprovo senza lingua.", lang)
                 try:
-                    raw = pytesseract.image_to_string(Image.open(str(image_path)))
+                    raw = pytesseract.image_to_string(str(image_path))
                 except (pytesseract.TesseractError, OSError):
                     raw = ""
     clean = re.sub(r"\s+", " ", raw).strip()

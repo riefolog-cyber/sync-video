@@ -32,7 +32,8 @@ from llm_sync import (
     llm_timeline_segments,
     llm_verify_anchor_mapping,
 )
-from ocr import convert_pptx_to_pdf, extract_slides_text_ocr
+from machine_setup import machine_setup
+from ocr import PRESENTATION_SUFFIXES, convert_presentation_to_pdf, extract_slides_text_ocr
 from semantic_sync import (
     SemanticOptions,
     free_order_segments_from_words,
@@ -51,6 +52,7 @@ from timeline import (
     reconcile_timeline,
 )
 from transcription import correct_transcript_names, transcribe_audio
+from updates import run_update_check
 from video import build_video
 
 
@@ -311,6 +313,18 @@ def main(argv: list | None = None) -> None:
     bootstrap()
     args = parse_args(argv)
 
+    # --- Rilevamento hardware automatico al primo avvio ---
+    # Sceglie il motore migliore per il PC (NVIDIA->CUDA, iGPU Intel->OpenVINO,
+    # altrimenti CPU) e installa/scarica ciò che serve. Idempotente.
+    if not args.no_auto_setup:
+        machine_setup(args, force=args.force_setup)
+
+    # --- Controllo aggiornamenti pacchetti ---
+    # Segnala gli aggiornamenti; di default chiede S/N per installare i
+    # non-pinnati. --no-update = solo notifica.
+    if not args.no_update_check:
+        run_update_check(ask_to_update=not args.no_update)
+
     # --- Download modello OpenVINO (una tantum) e uscita ---
     if args.openvino_download:
         from transcription import download_openvino_model
@@ -322,25 +336,26 @@ def main(argv: list | None = None) -> None:
     # --- Validazione input ---
     pdf_path = args.pdf_path
     if not pdf_path.exists():
-        # Il file indicato non esiste: prova il .pptx con lo stesso nome
-        pptx_try = Path(str(pdf_path).rsplit(".", 1)[0] + ".pptx")
-        if pptx_try.exists():
-            pdf_path = pptx_try
+        # Il file indicato non esiste: prova il .ppt/.pptx con lo stesso nome
+        ppt_tries = [Path(str(pdf_path).rsplit(".", 1)[0] + ext) for ext in (".pptx", ".ppt")]
+        found = next((p for p in ppt_tries if p.exists()), None)
+        if found:
+            pdf_path = found
         else:
             log.error(
                 "[ERRORE] File presentazione non trovato: %s\n"
-                "   Cercati anche: %s (conversione automatica PPTX -> PDF).\n"
+                "   Cercati anche: %s (conversione automatica PPT/PPTX -> PDF).\n"
                 "   Specifica con: --pdf presentazione.pdf",
                 pdf_path,
-                pptx_try,
+                "', '".join(str(p) for p in ppt_tries),
             )
             sys.exit(1)
 
-    # Conversione PPTX -> PDF (temporaneo) per il resto della pipeline
-    if pdf_path.suffix.lower() == ".pptx":
+    # Conversione PPT/PPTX -> PDF (temporaneo) per il resto della pipeline
+    if pdf_path.suffix.lower() in PRESENTATION_SUFFIXES:
         try:
-            converted_dir = CACHE_DIR / "pptx_pdf"
-            pdf_path = convert_pptx_to_pdf(pdf_path, converted_dir)
+            converted_dir = CACHE_DIR / "ppt_pdf"
+            pdf_path = convert_presentation_to_pdf(pdf_path, converted_dir)
         except RuntimeError as e:
             log.error("[ERRORE] %s", e)
             sys.exit(1)
@@ -452,6 +467,8 @@ def main(argv: list | None = None) -> None:
                 transcriber=args.transcriber,
                 openvino_model_dir=Path(args.openvino_model_dir),
                 openvino_device=args.openvino_device,
+                whisper_device=args.whisper_device,
+                whisper_compute_type=args.whisper_compute_type,
             )
             if not args.no_cache:
                 # Fix A: salva anche le parole raw per estrazione deterministica

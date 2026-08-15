@@ -158,9 +158,54 @@ free. Serve a mantenere pulito il router lato server.
 > python main.py                       # ora usa OpenVINO in automatico
 > ```
 >
+> **Setup automatico al primo avvio.** Alla prima run `main.py` rileva
+> l'hardware del PC (via `machine_setup.py`), sceglie il motore più adatto e
+> installa/scarica tutto il necessario, senza intervento manuale:
+>
+> - GPU NVIDIA → faster-whisper su **CUDA** (float16)
+> - iGPU Intel (Iris/UHD/Arc) → **OpenVINO GenAI** (installazione `openvino-genai`
+>   + download modello IR inclusi automaticamente)
+> - altrimenti → faster-whisper su CPU
+>
+> La scelta è persistita in `.cache/machine_setup.json` + `.env`; le run
+> successive la riusano senza rifare il rilevamento. Controlla con
+> `--force-setup` (rileva di nuovo) o disabilita con `--no-auto-setup`.
+>
 > Fallback automatico a faster-whisper se OpenVINO non è installato o il
 > modello manca. Seleziona il motore con `--transcriber {auto,openvino,whisper}`
 > e il device con `--openvino-device {GPU,CPU}`.
+>
+> **Controllo aggiornamenti.** All'avvio (`updates.py`) verifica via PyPI se i
+> pacchetti usati hanno versioni più recenti (risultato cachato per default 6h
+> in `.cache/updates_check.json`). Di default chiede S/N per aggiornare
+> automaticamente i pacchetti **non pinnati**; disabilita con `--no-update`
+> (solo notifica) o `--no-update-check` (nessun controllo).
+>
+> **Pacchetti pinnati e test A/B.** Alcuni pacchetti sono bloccati a una
+> versione specifica perché un upgrade cambierebbe il risultato validato.
+> L'unico pin attuale è `fastembed==0.5.1` (le versioni successive passano da
+> pooling CLS a mean pooling per e5-large, alterando gli embedding).
+>
+> Prima di aggiornare un pinnato, `check_fastembed_upgrade.py` esegue un
+> **test A/B isolato**: raccoglie i testi reali del progetto (slide + blocchi
+> trascrizione da `.cache`), calcola gli embedding con la versione installata
+> e con la candidata (in una venv temporanea, senza toccare l'ambiente di
+> lavoro), e confronta coseno-similarità per vettore e stabilità della
+> decisione di sync (argmax z-score per blocco). Verdetto:
+>
+> - **EQUIVALENTE** → il pinnato viene incluso nell'aggiornamento automatico;
+> - **DIVERGENTE** → resta pinnato e si aggiornano solo gli altri pacchetti.
+>
+> Il report è salvato in `.cache/fastembed_ab.json`. Esegui manualmente con
+> `python check_fastembed_upgrade.py`.
+>
+> **Aggiornamento manuale dedicato.** Per fare il check + aggiornamento dei
+> pacchetti senza lanciare l'intera pipeline, usa lo script standalone
+> `aggiornamenti.bat` (o `python aggiornamenti.py`): esegue bootstrap +
+> controllo aggiornamenti con richiesta S/N, come all'avvio di `main.py`.
+> `genera_video.bat` di default salta il controllo (flag `--no-update-check`)
+> per non rallentare la generazione; per riattivarlo al volo aggiungi
+> `--check-updates`.
 
 ---
 

@@ -146,7 +146,7 @@ except ImportError:
 # BOOTSTRAP — Controlla e installa automaticamente le dipendenze
 # =====================================================================
 _REQUIRED_PACKAGES = {
-    "fitz": "pymupdf",
+    "pymupdf": "pymupdf",
     "PIL": "pillow",
     "pytesseract": "pytesseract",
     "pydub": "pydub",
@@ -370,7 +370,7 @@ def bootstrap() -> None:
 # =====================================================================
 # VALORI DI DEFAULT (sovrascrivibili da CLI)
 # =====================================================================
-DEFAULT_PDF = "presentazione.pdf"  # supporta anche .pptx (convertito automaticamente)
+DEFAULT_PDF = "presentazione.pdf"  # supporta anche .ppt/.pptx (convertiti automaticamente)
 DEFAULT_OUTPUT_VIDEO = "video_finale.mp4"
 DEFAULT_SLIDES_DIR = "temp_slides"
 
@@ -446,6 +446,8 @@ DEFAULT_OCR_WORKERS = _env_int("OCR_WORKERS", min(4, os.cpu_count() or 2))
 DEFAULT_TRANSITION_DURATION = 0.0  # secondi (0 = nessuna transizione)
 DEFAULT_TRANSCRIBER = os.environ.get("TRANSCRIBER", "whisper")  # 'whisper'
 DEFAULT_WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")  # tiny/base/small/medium/large
+DEFAULT_WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")  # 'cpu' o 'cuda'
+DEFAULT_WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")  # int8 (cpu) / float16 (cuda)
 # Motore OpenVINO GenAI (più veloce su iGPU Intel). Modello IR pre-convertito,
 # scaricabile da HuggingFace: OpenVINO/whisper-small-fp16-ov
 DEFAULT_OPENVINO_MODEL_DIR = os.environ.get("OPENVINO_MODEL_DIR", str(CACHE_DIR / "whisper_openvino_small"))
@@ -596,7 +598,7 @@ Esempi:
 
     # File I/O
     parser.add_argument(
-        "--pdf", default=DEFAULT_PDF, help=f"Percorso presentazione PDF o PPTX (default: {DEFAULT_PDF})"
+        "--pdf", default=DEFAULT_PDF, help=f"Percorso presentazione PDF, PPT o PPTX (default: {DEFAULT_PDF})"
     )
     parser.add_argument("--audio", default=None, help="Percorso file audio (default: cerca podcast.mp3/m4a/wav)")
     parser.add_argument(
@@ -631,6 +633,36 @@ Esempi:
         "--openvino-device",
         default=DEFAULT_OPENVINO_DEVICE,
         help=f"Device OpenVINO: 'GPU' (iGPU Intel, default) o 'CPU' (default: {DEFAULT_OPENVINO_DEVICE})",
+    )
+    parser.add_argument(
+        "--whisper-device",
+        default=DEFAULT_WHISPER_DEVICE,
+        help=f"Device faster-whisper: 'cpu' o 'cuda' (default: {DEFAULT_WHISPER_DEVICE})",
+    )
+    parser.add_argument(
+        "--whisper-compute-type",
+        default=DEFAULT_WHISPER_COMPUTE_TYPE,
+        help=f"Compute type faster-whisper (default: {DEFAULT_WHISPER_COMPUTE_TYPE})",
+    )
+    parser.add_argument(
+        "--no-auto-setup",
+        action="store_true",
+        help="Disabilita il rilevamento automatico hardware al primo avvio",
+    )
+    parser.add_argument(
+        "--force-setup",
+        action="store_true",
+        help="Rifai il rilevamento hardware anche se già configurato",
+    )
+    parser.add_argument(
+        "--no-update-check",
+        action="store_true",
+        help="Disabilita il controllo aggiornamenti pacchetti all'avvio",
+    )
+    parser.add_argument(
+        "--no-update",
+        action="store_true",
+        help="Controlla gli aggiornamenti ma non chiede di installarli (solo notifica)",
     )
     parser.add_argument(
         "--openvino-download",

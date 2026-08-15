@@ -261,6 +261,8 @@ def transcribe_audio(
     transcriber: str = "auto",
     openvino_model_dir: Path | None = None,
     openvino_device: str = "GPU",
+    whisper_device: str = "cpu",
+    whisper_compute_type: str = "int8",
 ) -> tuple[str, list[Word]]:
     """
     Dispatcher trascrizione: sceglie il motore più veloce disponibile.
@@ -307,6 +309,8 @@ def transcribe_audio(
         audio_path,
         model_size=model_size,
         language=language,
+        device=whisper_device,
+        compute_type=whisper_compute_type,
     )
 
 

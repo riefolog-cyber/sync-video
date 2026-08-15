@@ -36,6 +36,15 @@ ignore = [
 "test_*.py" = ["BLE001"]
 # Script standalone di analisi: sys.path insert e except difensivi sono voluti
 "analysis_sync.py" = ["E402", "BLE001"]
+# Rilevamento hardware: i probe GPU/CUDA falliscono in modi imprevedibili su
+# macchine diverse; gli except difensivi sono il comportamento voluto.
+"machine_setup.py" = ["BLE001"]
+# Check aggiornamenti: la rete fallisce in modi imprevedibili (offline/proxy);
+# il fallback silenzioso a None è il comportamento voluto.
+"updates.py" = ["BLE001"]
+# Test A/B fastembed: venv/rete/modelli falliscono in modi imprevedibili;
+# il fallback difensivo a None è il comportamento voluto.
+"check_fastembed_upgrade.py" = ["BLE001"]
 
 [lint.flake8-bugbear]
 # Tolleranza per i "except Exception" difensivi (fallback robusti),
