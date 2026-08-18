@@ -1,60 +1,45 @@
-# Prompt per NotebookLM — WORKFLOW 2: PRESENTAZIONE → PODCAST
-
-
+# Prompt per NotebookLM — PRESENTAZIONE → PODCAST
 
 ## 0\. Preparazione (obbligatoria)
 
-Prima crea la presentazione e mettila nelle fonti nominata **PRESENTAZIONE**.
-TESTO RIGOROSAMENTE E SOLO IN ITALIANO.
+1. Seleziona TUTTE le fonti che vuoi usare.
+2. Genera la presentazione con NotebookLM (**Studio → Slide Deck**) incollando questo prompt:
+
+"Crea una presentazione strutturata in sezioni/argomenti, una slide per argomento, in ordine logico; ogni slide con titolo chiaro e contenuti distinti dalle altre. NUMERA OGNI SLIDE (1, 2, 3...) in un angolo in basso a sinistra, nell'ordine delle pagine. TESTO RIGOROSAMENTE SOLO IN ITALIANO."
+
+NotebookLM sintetizza le fonti selezionate e sceglie il numero di slide più adatto: ogni slide sarà una sezione annunciata dal podcast.
+3. Scarica la presentazione generata e mettila nelle fonti come **PRESENTAZIONE**.
+
+## 1\. Da incollare in "Personalizza" → "Istruzioni" per generare audio (con TUTTE le fonti selezionate)
 
 
 
-## 1\. Indicazione da incollare in "Personalizza" → "Istruzioni" per generare audio (con TUTTE le fonti selezionate)
+Segui l'ordine del file presentazione.pdf nelle fonti: procedi per slide e per ognuna non limitarti a rileggere o parafrasare: cita le altre fonti, collega le sezioni e aggiungi esempi concreti. La presentazione resta la spina dorsale.
+
+Le altre fonti servono SOLO come approfondimento della slide corrente: non introdurre argomenti di altre slide né cambiare l'ordine.
 
 
 
-Struttura il podcast come un percorso che segue l'ordine del file
-presentazione.pdf che trovi nelle fonti: procedi per slide/sezioni, e per
-ognuna non limitarti a rileggere o parafrasare la presentazione: per ogni
-punto cita riferimenti puntuali alle altre fonti, collega le sezioni tra loro
-e aggiungi esempi concreti. Mantieni la spina dorsale della presentazione ma
-arricchisci ogni sezione con il contenuto delle altre fonti.
+ANCORE E STRUTTURA (OBBLIGATORIO):
 
-ANCORE E STRUTTURA (FONDAMENTALE, OBBLIGATORIO):
+* Una sezione = una slide del PDF. Il numero che pronunci DEV'ESSERE il numero di pagina della slide nel PDF (la prima pagina è la slide 1). Segui tutte le slide in ordine rigoroso, senza saltarne; se ti accorgi di aver saltato una slide, dillo esplicitamente ("ho saltato la slide N, recuperiamola"), descrivila, poi riprendi in ordine dalla successiva.
+* All'inizio di ogni sezione (dalla seconda in poi) formula UNICA "passiamo alla slide N", UNA sola volta: numero secco in cifre subito dopo la parola "slide" (es. "slide 5"), pronunciato chiaramente. Mai "slide di dieci", "la slide numero", parafrasi o preposizioni tra "slide" e il numero. Prima di annunciare, controlla il numero della pagina successiva del PDF.
+* Quando annunci una slide, pronuncia anche il suo titolo o le parole chiave come compaiono nella presentazione.
+* Mai sinonimi ("sezione 3", "capitolo", "punto 2", "diapositiva") né "slide"+numero in altri contesti.
 
-* Segui le slide della presentazione in ORDINE RIGOROSO e CONSECUTIVO:
-slide 1, 2, 3, … fino all'ultima, senza mai saltarne una.
-* All'inizio di OGNI sezione (dalla seconda in poi) pronuncia esplicitamente
-il numero come transizione, SEMPRE IN CIFRE: es. "passiamo alla slide 2" oppure
-"siamo alla slide 2". Mai "la slide successiva" e mai "slide numero due".
-* Pronuncia la parola "slide" (o "diapositiva") in modo CHIARO e separato
-dal numero: il sistema di trascrizione automatica la riconosce meglio.
-* Se ti accorgi di aver saltato un numero, torna indietro e recuperalo subito.
-* Per ogni sezione: 1) annuncia "slide N"; 2) cita il titolo della sezione;
+Per ogni sezione:
 
-3\) spiega i punti chiave (anche citando le altre fonti); 4) chiudi con una
-frase riassuntiva.
+1. annuncia "passiamo alla slide N"
+2. spiega i punti e le parole chiave della slide
+3. chiudi con una domanda aperta e poi con una frase riassuntiva.
 
 
 
-▸ TARGET: Classe di scuola secondaria di secondo grado (14-19 anni),
-lezione di IRC (Insegnamento della Religione Cattolica).
-▸ TONO: Semplifica concetti complessi e tecnicismi. Linguaggio fresco,
-chiaro, immediato, con esempi concreti legati alla quotidianità dei giovani.
-Evita tono accademico, burocratico o noioso.
-▸ DINAMICA: Due conduttori che interagiscono come docenti/divulgatori
-brillanti. Uno può fare la parte di chi solleva dubbi tipici da studente,
-l'altro risponde in modo chiaro e accattivante.
-▸ FOCUS: Concentrati sui nodi centrali del testo con forte valenza educativa,
-etica, esistenziale o culturale, stimolando riflessione e dibattito in aula.
-▸ INTRODUZIONE: L'inizio deve essere naturale, senza dire che si seguirà una
-scaletta o una struttura a blocchi. La prima transizione numerata
-("slide 2") arriva solo alla fine della prima sezione.
-
-La frase "passiamo alla slide N" (o "siamo alla slide N") deve apparire
-all'inizio di OGNI sezione a partire dalla seconda, senza eccezioni.
-
-
-
-
+TONO E STILE DEL DIBATTITO
+═══════════════════════════════════════════════════════════
+▸ TARGET: Classe di scuola secondaria di secondo grado (14-19 anni), lezione di IRC.
+▸ TONO: Frasi corte, linguaggio fresco e immediato, esempi dalla quotidianità dei giovani (scuola, amicizia, famiglia, social); zero tecnicismi e termini stranieri non spiegati.
+▸ DINAMICA: Due conduttori in scambio rapido, senza monologhi; uno solleva dubbi da studente, l'altro chiarisce senza giudicare. Rivolgiti sempre direttamente agli studenti.
+▸ FOCUS: Nodi con valenza educativa, etica, esistenziale o culturale; niente tono moralistico: proponi i concetti come domande, non come verità.
+▸ INTRO: Breve (30-40 s) e già parte della prima sezione, senza annunciare una scaletta.
 

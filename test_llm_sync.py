@@ -9,10 +9,13 @@ mockati (nessuna rete).
 """
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from llm_sync import (
+    _build_ordered_timeline,
     _chunk_slides_from_segments,
+    _conflicts_with_anchors,
     build_anchor_verify_prompt,
     build_llm_chunks,
     build_ordered_prompt,
@@ -948,6 +951,111 @@ class TestOrderedTimeline(unittest.TestCase):
             )
         self.assertIsNone(timeline)
 
+    def test_conflicts_with_anchors(self):
+        # Slide senza ancora collocata in un punto che viola la monotonia
+        # rispetto a un'ancora esatta -> conflitto.
+        anchors = {6: 40.0}
+        # slide 4 a 95s arriva DOPO l'ancora della slide 6 (40s): conflitto.
+        self.assertTrue(_conflicts_with_anchors(4, 95.0, anchors))
+        # slide 8 a 30s arriva PRIMA dell'ancora della slide 6: conflitto.
+        self.assertTrue(_conflicts_with_anchors(8, 30.0, anchors))
+        # slide 2 a 20s e prima della slide 6: nessun conflitto.
+        self.assertFalse(_conflicts_with_anchors(2, 20.0, anchors))
+        # slide 1 a 5s: nessun conflitto.
+        self.assertFalse(_conflicts_with_anchors(1, 5.0, anchors))
+
+    def test_build_ordered_timeline_forces_anchor_chunk(self):
+        # Il chunk che contiene il timestamp dell'ancora deve essere FORZATO
+        # alla slide dell'ancora (l'LLM può averlo assegnato ad altro), e le
+        # posizioni delle slide senza ancora in conflitto vengono scartate.
+        chunks = build_llm_chunks(
+            [
+                {"word": "a", "start": 5.0},
+                {"word": "b", "start": 35.0},
+                {"word": "c", "start": 65.0},
+                {"word": "d", "start": 95.0},
+            ],
+            total_duration=130.0,
+            chunk_seconds=30.0,
+        )
+        # chunk 2 (30-60s) contiene l'ancora slide 6 a 40s ma l'LLM lo assegna
+        # alla slide 2; la slide 4 a 95s arriva dopo l'ancora della 6.
+        slides = [1, 2, 2, 4, None]
+        timeline = _build_ordered_timeline(
+            slides,
+            chunks,
+            anchors={6: 40.0},
+            total_slides=6,
+            total_duration=130.0,
+        )
+        self.assertIsNotNone(timeline)
+        # L'ancora resta esatta (slide 6 a 40s).
+        self.assertAlmostEqual(timeline[6], 40.0)
+        # La slide 2 non è stata accettata come prima discussione nel chunk 2
+        # (forzato a 6): resta interpolata tra slide 1 e slide 6.
+        self.assertGreater(timeline[2], timeline[1])
+        self.assertLess(timeline[2], timeline[6])
+
+    def test_force_anchors_prompt(self):
+        chunks = build_llm_chunks(
+            [{"word": "ciao", "start": 1.0}, {"word": "mondo", "start": 31.0}],
+            total_duration=60.0,
+            chunk_seconds=30.0,
+        )
+        _system, user = build_ordered_prompt(
+            ["Slide uno", "Slide due"],
+            chunks,
+            anchors={2: 25.0},
+            force_anchors=True,
+        )
+        # Il chunk 1 (0-30s) contiene l'ancora della slide 2 a 25s.
+        self.assertIn("VINCOLI ASSOLUTI", user)
+        self.assertIn("chunk 1 = slide 2", user)
+
+    def test_ordered_retry_with_forced_anchors(self):
+        # Primo tentativo: posizioni LLM in conflitto con le ancore -> retry
+        # con le ancore forzate nei chunk. Il secondo tentativo produce una
+        # timeline valida (verifico che venga usata).
+        words = [
+            {"word": "a", "start": 5.0},
+            {"word": "b", "start": 35.0},
+            {"word": "c", "start": 65.0},
+            {"word": "d", "start": 95.0},
+        ]
+        resp1 = (
+            '[{"chunk": 1, "slide": 1}, {"chunk": 2, "slide": 2}, '
+            '{"chunk": 3, "slide": 2}, {"chunk": 4, "slide": 4}, '
+            '{"chunk": 5, "slide": null}]'
+        )
+        resp2 = (
+            '[{"chunk": 1, "slide": 1}, {"chunk": 2, "slide": 6}, '
+            '{"chunk": 3, "slide": 6}, {"chunk": 4, "slide": 6}, '
+            '{"chunk": 5, "slide": null}]'
+        )
+        final = {1: 0.0, 2: 35.0, 3: 50.0, 4: 80.0, 5: 110.0, 6: 130.0}
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_cascade", side_effect=[(resp1, "ep", "m"), (resp2, "ep", "m")]) as cascade,
+            patch("llm_sync._build_ordered_timeline", side_effect=[None, final]),
+        ):
+            timeline = llm_ordered_timeline(
+                ["s1", "s2", "s3", "s4", "s5", "s6"],
+                words,
+                total_slides=6,
+                total_duration=130.0,
+                anchors={6: 40.0},
+                endpoints=[self._ep("9router", "http://x")],
+            )
+        self.assertEqual(cascade.call_count, 2)
+        # Il secondo messaggio deve contenere i vincoli forzati.
+        second_messages = cascade.call_args_list[1].args[1]
+        self.assertIn("VINCOLI ASSOLUTI", " ".join(str(m) for m in second_messages))
+        self.assertIsNotNone(timeline)
+        # L'ancora slide 6 resta esatta anche dopo il retry.
+        self.assertAlmostEqual(timeline[6], 40.0)
+
 
 class TestAnchorVerification(unittest.TestCase):
     """Verifica mapping ancore: numero parlato -> slide reale del PDF.
@@ -1088,6 +1196,142 @@ class TestAnchorVerification(unittest.TestCase):
             total_slides=2,
         )
         self.assertIsNone(verified)
+
+    def test_remap_rejected_by_filter_keeps_spoken_anchor(self):
+        # Il filtro semantico non conferma il rimappo 4 -> 5: l'ancora resta
+        # alla slide parlata 4, anche se l'LLM la propone.
+        words = self._words()
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value='[{"timestamp": 100.0, "slide": 5}]'),
+        ):
+            verified = llm_verify_anchor_mapping(
+                ["s1", "s2", "s3", "s4", "s5"],
+                words,
+                anchors={4: 100.0},
+                total_slides=5,
+                endpoints=[self._ep("9router", "http://x")],
+                remap_filter=lambda _s, _t, _s2: False,
+            )
+        self.assertIsNone(verified)
+
+    def test_remap_accepted_by_filter_when_content_supports(self):
+        # Il filtro conferma il rimappo 4 -> 5: l'ancora corretta viene usata.
+        words = self._words()
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value='[{"timestamp": 100.0, "slide": 5}]'),
+        ):
+            verified = llm_verify_anchor_mapping(
+                ["s1", "s2", "s3", "s4", "s5"],
+                words,
+                anchors={4: 100.0},
+                total_slides=5,
+                endpoints=[self._ep("9router", "http://x")],
+                remap_filter=lambda _s, _t, _s2: True,
+            )
+        self.assertIsNotNone(verified)
+        self.assertEqual(verified, {5: 100.0})
+
+    def test_filter_no_opinion_keeps_llm_remap(self):
+        # Filtro senza opinione (None): comportamento storico, l'LLM fa fede.
+        words = self._words()
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value='[{"timestamp": 100.0, "slide": 5}]'),
+        ):
+            verified = llm_verify_anchor_mapping(
+                ["s1", "s2", "s3", "s4", "s5"],
+                words,
+                anchors={4: 100.0},
+                total_slides=5,
+                endpoints=[self._ep("9router", "http://x")],
+                remap_filter=lambda _s, _t, _s2: None,
+            )
+        self.assertIsNotNone(verified)
+        self.assertEqual(verified, {5: 100.0})
+
+
+class TestCacheCleanup(unittest.TestCase):
+    """Pulizia delle cache LLM/slides/transcript orfane (richiesta: a ogni
+    nuovo avvio rimuovere la cache vecchia che non serve)."""
+
+    def setUp(self):
+        import tempfile
+
+        import main
+
+        self._main = main
+        self._old_cache_dir = main.CACHE_DIR
+        main.CACHE_DIR = self._tmpdir = Path(tempfile.mkdtemp())
+        self.addCleanup(self._restore_cache_dir)
+
+    def _restore_cache_dir(self):
+        self._main.CACHE_DIR = self._old_cache_dir
+
+    def _write(self, name):
+        (self._tmpdir / name).write_text("[]")
+
+    def test_clean_stale_llm_cache_keeps_only_current(self):
+        self._write("llm_timeline_finale.json")
+        for i in range(3):
+            self._write(f"llm_orfano{i}.json")
+        # chiavi della run corrente (alcune non esistono ancora: non devono
+        # essere rimosse in fase di pulizia, devono solo essere conservate)
+        keep = {"llm_timeline_finale", "llm_corrente_a", "llm_corrente_b"}
+        removed = self._main._clean_stale_llm_cache(keep)
+        self.assertEqual(removed, 3)
+        remaining = sorted(p.name for p in self._tmpdir.glob("llm_*.json"))
+        self.assertEqual(remaining, ["llm_timeline_finale.json"])
+
+    def test_clean_stale_llm_cache_keeps_existing_current_files(self):
+        self._write("llm_timeline_finale.json")
+        self._write("llm_corrente.json")
+        self._write("llm_orfano.json")
+        removed = self._main._clean_stale_llm_cache({"llm_timeline_finale", "llm_corrente"})
+        self.assertEqual(removed, 1)
+        remaining = sorted(p.name for p in self._tmpdir.glob("llm_*.json"))
+        self.assertEqual(remaining, ["llm_corrente.json", "llm_timeline_finale.json"])
+
+    def test_clean_orphan_cache_at_startup(self):
+        # cache di slide/trascrizione di PDF/audio precedenti
+        self._write("slides_vecchiohash_300_ita.json")
+        self._write("transcript_vecchiohash_ita_base_whisper.json")
+        self._write("slides_hashattuale_300_ita.json")
+        removed = self._main._clean_orphan_cache(
+            {"slides_hashattuale_300_ita", "transcript_hashattuale_ita_base_whisper"}
+        )
+        self.assertEqual(removed, 2)
+        remaining = sorted(p.name for p in self._tmpdir.glob("*.json"))
+        self.assertEqual(remaining, ["slides_hashattuale_300_ita.json"])
+
+    def test_llm_cache_keys_for_variants(self):
+        from llm_sync import llm_cache_keys_for
+
+        words = [{"word": f"w{i}", "start": i * 5.0} for i in range(20)]
+        slides = ["s1", "s2", "s3", "s4", "s5"]
+        anchors_a = {2: 30.0, 5: 120.0}
+        anchors_b = {3: 60.0}
+        keys = llm_cache_keys_for(
+            slides, words, total_slides=5, chunk_seconds=30.0,
+            endpoints=[{"url": "http://x", "api_key": "k", "model": "m"}],
+            anchors_variants=[anchors_a, anchors_b],
+        )
+        # 2 varianti di ancore x (verifica + ordinata) = 4 chiavi, tutte distinte
+        self.assertEqual(len(keys), 4)
+        self.assertTrue(all(k.startswith("llm_") for k in keys))
+        # nessun anchors vuoto -> nessuna chiave aggiunta
+        empty = llm_cache_keys_for(
+            slides, words, total_slides=5, chunk_seconds=30.0,
+            endpoints=[], anchors_variants=[{}],
+        )
+        self.assertEqual(empty, set())
 
 
 if __name__ == "__main__":

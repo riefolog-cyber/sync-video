@@ -1,0 +1,24 @@
+{
+  "baseUrl": "http://localhost:20128",
+  "timeoutSec": 30,
+  "retries": 2,
+  "maxConsecutiveFails": 3,
+  "logRetentionDays": 30,
+  "addFreeModels": true,
+  "autoReplace": true,
+  "token": "",
+  "notifications": {
+    "enabled": true,
+    "webhookUrl": "https://webhook.site/your-unique-id",
+    "emailRecipient": "admin@example.com",
+    "alertOnFailureThreshold": 5
+  },
+  "reporting": {
+    "enableHtmlReport": true,
+    "enableJsonLogging": true,
+    "enableCsvLogging": true
+  },
+  "parallelization": {
+    "throttleLimit": 8
+  }
+}

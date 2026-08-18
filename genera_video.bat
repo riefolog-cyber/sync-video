@@ -30,9 +30,9 @@ echo ========================================
 echo.
 
 if "%CHECK_UPDATES%"=="0" (
-    python main.py --no-update-check !MAIN_ARGS!
+    python main.py --no-update-check --no-confirm !MAIN_ARGS!
 ) else (
-    python main.py !MAIN_ARGS!
+    python main.py --no-confirm !MAIN_ARGS!
 )
 
 echo.

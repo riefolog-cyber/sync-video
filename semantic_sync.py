@@ -818,6 +818,84 @@ def verify_anchor_mapping_embedding(
     return corrected
 
 
+def make_anchor_remap_filter(
+    slide_texts: Sequence[str],
+    words_raw: Sequence[Word],
+    total_slides: int,
+    window_seconds: float = 40.0,
+    options: SemanticOptions | None = None,
+    embed_fn: EmbedFn | None = None,
+) -> Callable[[int, float, int], bool | None] | None:
+    """Restituisce un validatore dei rimappi ancora proposti dall'LLM.
+
+    La verifica LLM del mapping (``llm_verify_anchor_mapping``) corregge la
+    numerazione parlata sfasata, ma un rimappo non supportato dal contenuto
+    del parlato rischia di rompere la timeline: le ancore esplicite "slide N"
+    sono vincoli ad alta precisione, e un rimappo ``s -> s'`` viene accettato
+    SOLO se il parlato subito dopo il riferimento è semanticamente più vicino
+    alla slide ``s'`` che alla slide parlata ``s`` (stesso modello embedding
+    della verifica deterministica). Così l'LLM non può spostare un'ancora
+    corretta (es. "slide 5" il cui contenuto è davvero la slide 5) e resta
+    utile solo dove il contenuto conferma davvero lo sfasamento.
+
+    La finestra di parlato per ogni ancora è cachata: ogni ancora viene
+    codificata una sola volta per run.
+
+    ``embed_fn`` è iniettabile (stessa convenzione di
+    ``verify_anchor_mapping_embedding``): nei test si passa un embedder finto,
+    in produzione viene caricato il modello fastembed locale.
+
+    Returns:
+        ``None`` se l'embedder non è disponibile (l'LLM fa fede, comportamento
+        storico). Altrimenti una funzione ``(slide_parlata, tempo, slide_mappata)
+        -> bool`` che restituisce ``True`` (rimappo supportato), ``False``
+        (contraddetto dal contenuto) o ``None`` (finestra di parlato vuota o
+        embedding fallito: nessuna opinione).
+    """
+    opts = options or SemanticOptions()
+    if embed_fn is None:
+        try:
+            model = _load_embed_model(
+                opts.model_name or DEFAULT_EMBEDDING_MODEL,
+                opts.cache_dir or DEFAULT_EMBEDDING_CACHE_DIR,
+                alternate_name=opts.alternate_model_name or DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+            )
+            if model is None:
+                return None
+            embed_fn = _make_embed_fn(model)
+        except Exception as e:  # noqa: BLE001
+            log.warning("   [Ancore] Embedder non disponibile per la verifica dei rimappi: %s", e)
+            return None
+
+    slide_clean = [_clean_slide_text(t) for t in slide_texts[:total_slides]]
+    try:
+        slide_emb = embed_fn(slide_clean)
+    except Exception as e:  # noqa: BLE001
+        log.warning("   [Ancore] Embedding slide non riuscito: %s", e)
+        return None
+
+    _excerpt_emb: dict[float, np.ndarray] = {}
+
+    def _validate(spoken_slide: int, t: float, new_slide: int) -> bool | None:
+        exc = _excerpt_emb.get(round(t, 1))
+        if exc is None:
+            excerpt = " ".join(
+                w["word"] for w in words_raw if t <= w["start"] < t + window_seconds
+            ).strip()
+            if not excerpt:
+                return None
+            try:
+                exc = embed_fn([excerpt])[0]
+            except Exception as e:  # noqa: BLE001
+                log.warning("   [Ancore] Embedding del parlato a %.1fs non riuscito: %s", t, e)
+                return None
+            _excerpt_emb[round(t, 1)] = exc
+        sims = slide_emb @ exc
+        return bool(sims[new_slide - 1] > sims[spoken_slide - 1])
+
+    return _validate
+
+
 # =====================================================================
 # SELEZIONE LIBERA (riordino): le slide possono apparire in qualsiasi
 # ordine e ripetersi, seguendo il contenuto del podcast.

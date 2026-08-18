@@ -665,6 +665,12 @@ Esempi:
         help="Controlla gli aggiornamenti ma non chiede di installarli (solo notifica)",
     )
     parser.add_argument(
+        "--no-confirm",
+        action="store_true",
+        help="Non chiedere conferma prima della sincronizzazione stimata "
+        "(procede automaticamente anche con slide non annunciate)",
+    )
+    parser.add_argument(
         "--openvino-download",
         action="store_true",
         help="Scarica una tantum il modello Whisper OpenVINO IR "

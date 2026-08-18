@@ -1,428 +1,573 @@
 param(
     [string]$ComboName = "comboact",
-    [string]$BaseUrl = "http://localhost:20128",
-    [int]$TimeoutSec = 30,
-    [int]$Retries = 2,
     [switch]$DryRun,
-    [string]$Token = "",
-    [switch]$Force,
-    [string]$LogFile = "",
-    [int]$MaxConsecutiveFails = 3,
-    [int]$LogRetentionDays = 30,
+    [switch]$NoReport,
     [switch]$AddFreeModels,
     [switch]$AutoReplace,
-    [string]$StateFile = ""
+    [int]$MaxConsecutiveFails = 0
 )
-
 $ErrorActionPreference = "Stop"
 
-# ============================ Constants ============================
+$LogDir = Join-Path $PSScriptRoot "logs"
+if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory $LogDir -Force | Out-Null }
 
-# Categorical errors = will never work without changing account/credit/model availability
-$CATEGORICAL = @(400, 401, 402, 403, 404, 405, 406, 409, 410, 415, 422)
-# Temporary errors = retry, then keep if still failing
-$RETRYABLE = @(408, 429, 500, 502, 503, 504, 529)
+$LogFile = Join-Path $LogDir "comboact-update-$(Get-Date -Format 'yyyy-MM-dd').log"
+$StateFile = Join-Path $LogDir "comboact-state.json"
+$TrendFile = Join-Path $LogDir "comboact-trend.json"
+$LockFile = Join-Path $LogDir "comboact.lock"
+$ConfigFile = Join-Path $PSScriptRoot "config.json"
 
-# Patterns in error text that indicate a permanent (categorical) failure
-$CATEGORICAL_PATTERNS = @(
-    'model_not_found',
-    'no longer available',
-    'has reached its end of life',
-    'was retired',
-    'is no longer available'
-)
-
-# Free models to add when -AddFreeModels is used (only free, zero-cost providers, already exposed by 9router)
-# NOTE: OpenRouter free models discovered via official API were checked against 9router's model list:
-# gpt-oss-20b:free, nemotron-nano-*:free, nemotron-3.5-content-safety:free are NOT exposed by 9router,
-# so they cannot be used. Only models actually present in 9router's /api/models are candidates.
-$FREE_MODELS_TO_ADD = @(
-    # Google Gemini (free tier via AI Studio)
-    'gemini/gemini-2.0-flash',
-    # Kimchi (free with spend limit/budget - may reset)
-    'kimchi/kimi-k2.6',
-    'kimchi/minimax-m2.7',
-    'kimchi/claude-opus-4-6',
-    'kimchi/claude-sonnet-4-6'
-)
-
-# ============================ Default paths ============================
-
-if (-not $LogFile) {
-    $LogFile = Join-Path $PSScriptRoot "logs\comboact-update-$(Get-Date -Format 'yyyy-MM-dd').log"
-}
-if (-not $StateFile) {
-    $StateFile = Join-Path $PSScriptRoot "logs\comboact-state.json"
+$Config = @{ baseUrl = "http://localhost:20128"; timeoutSec = 30; retries = 2; maxConsecutiveFails = 3 }
+if (Test-Path $ConfigFile) {
+    $Config = Get-Content $ConfigFile -Raw | ConvertFrom-Json
 }
 
-# ============================ Functions ============================
+# === AUTH (9Router CLI token) ===
+# 9Router autorizza via header "x-9r-cli-token" derivato da machine-id + cli-secret
+# (Bearer token resta supportato come fallback se configurato)
+function Get-9RouterCliToken() {
+    $routerHome = if ($Config.routerHome) { $Config.routerHome } else { Join-Path $env:APPDATA "9router" }
+    $machineFile = Join-Path $routerHome "machine-id"
+    $secretFile = Join-Path $routerHome "auth\cli-secret"
+    if (-not (Test-Path $machineFile) -or -not (Test-Path $secretFile)) { return "" }
+    $machineId = (Get-Content $machineFile -Raw).Trim()
+    $cliSecret = (Get-Content $secretFile -Raw).Trim()
+    $raw = "${machineId}9r-cli-auth${cliSecret}"
+    $sha = [Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($raw))
+    return ([BitConverter]::ToString($sha) -replace '-', '').ToLower().Substring(0, 16)
+}
 
-function Write-Log([string]$message) {
-    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $message"
-    Write-Output $line
-    $logDir = Split-Path -Parent $LogFile
-    if ($logDir -and -not (Test-Path -LiteralPath $logDir)) {
-        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+function Get-AuthHeaders() {
+    $headers = @{}
+    if ($Config.token) { $headers["Authorization"] = "Bearer $($Config.token)" }
+    $cliToken = Get-9RouterCliToken
+    if ($cliToken) { $headers["x-9r-cli-token"] = $cliToken }
+    return $headers
+}
+
+# CLI param overrides
+if ($AddFreeModels) { $Config | Add-Member -NotePropertyName addFreeModels -NotePropertyValue $true -Force }
+if ($AutoReplace) { $Config | Add-Member -NotePropertyName autoReplace -NotePropertyValue $true -Force }
+if ($MaxConsecutiveFails -gt 0) { $Config | Add-Member -NotePropertyName maxConsecutiveFails -NotePropertyValue $MaxConsecutiveFails -Force }
+
+# === LOCK PROTECTION ===
+function Acquire-Lock() {
+    if (Test-Path $LockFile) {
+        $lockTime = (Get-Item $LockFile).CreationTime
+        if ((Get-Date) - $lockTime -lt (New-TimeSpan -Minutes 10)) {
+            throw "Maintenance already running. Delete: $LockFile"
+        }
     }
+    @{ acquired = (Get-Date) } | ConvertTo-Json | Set-Content $LockFile -Encoding UTF8
+}
+
+function Release-Lock() {
+    if (Test-Path $LockFile) { Remove-Item $LockFile -Force -ErrorAction SilentlyContinue }
+}
+
+# === LOGGING ===
+function Write-Log([string]$msg) {
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $msg"
+    Write-Output $line
     Add-Content -LiteralPath $LogFile -Value $line
 }
 
-function Clean-LogText([string]$text) {
-    if (-not $text) { return "" }
-    $clean = $text -replace "`r`n|`r|`n", " | "
-    $clean = $clean -replace "`t", " "
-    $clean = $clean -replace '\s+', ' '
-    if ($clean.Length -gt 300) { $clean = $clean.Substring(0, 300) + "..." }
-    return $clean.Trim()
-}
-
-function Rotate-Logs {
-    $logDir = Split-Path -Parent $LogFile
-    if (-not $logDir -or -not (Test-Path -LiteralPath $logDir)) { return }
-    $cutoff = (Get-Date).AddDays(-$LogRetentionDays)
-    Get-ChildItem -Path $logDir -Filter "comboact-update-*.log" -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.LastWriteTime -lt $cutoff } |
-        Remove-Item -Force -ErrorAction SilentlyContinue
-}
-
-function Load-State {
-    if (-not (Test-Path -LiteralPath $StateFile)) { return @{} }
+# === HEALTH CHECK ===
+function Test-9RouterHealth() {
     try {
-        $ht = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json -AsHashtable
-        if ($null -eq $ht) { return @{} }
-        return $ht
-    } catch { return @{} }
-}
-
-function Save-State([hashtable]$state) {
-    $stateDir = Split-Path -Parent $StateFile
-    if ($stateDir -and -not (Test-Path -LiteralPath $stateDir)) {
-        New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+        $response = Invoke-WebRequest -Uri "$($Config.baseUrl)/api/health" -TimeoutSec 5 -ErrorAction Stop -UseBasicParsing
+        Write-Log "[OK] 9Router Health Check: OK"
+        return $true
+    } catch {
+        Write-Log "[ERR] 9Router Health Check FAILED: $($_.Exception.Message)"
+        return $false
     }
-    $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $StateFile -Encoding UTF8
 }
 
-function Get-Combo([string]$name) {
-    $params = @{ Uri = "$BaseUrl/api/combos"; Method = "Get"; TimeoutSec = $TimeoutSec }
-    if ($Token) { $params.Headers = @{ Authorization = "Bearer $Token" } }
-    $resp = Invoke-RestMethod @params
-    return $resp.combos | Where-Object { $_.name -eq $name } | Select-Object -First 1
-}
-
-function Get-AvailableModels {
-    $params = @{ Uri = "$BaseUrl/api/models"; Method = "Get"; TimeoutSec = $TimeoutSec }
-    if ($Token) { $params.Headers = @{ Authorization = "Bearer $Token" } }
-    $resp = Invoke-RestMethod @params
-    return $resp.models
-}
-
-function Find-Replacement([string]$errorText, $availableModels) {
-    if (-not $errorText) { return $null }
-    if ($errorText -match '"replacement"\s*:\s*"([^"]+)"') {
-        $replacementName = $matches[1]
-        $match = $availableModels |
-            Where-Object { $_.model -like "*$replacementName*" -or $_.fullModel -like "*$replacementName*" } |
-            Select-Object -First 1
-        if ($match) { return $match.routedModel }
+# === FETCH MODELS & COMBOS ===
+function Get-CurrentCombo() {
+    try {
+        $headers = Get-AuthHeaders
+        $response = Invoke-WebRequest -Uri "$($Config.baseUrl)/api/combos" -Headers $headers -TimeoutSec $Config.timeoutSec -ErrorAction Stop -UseBasicParsing
+        $parsed = $response.Content | ConvertFrom-Json
+        $combos = if ($parsed.combos) { $parsed.combos } else { $parsed }
+        $combo = @($combos) | Where-Object { $_.name -eq $ComboName } | Select-Object -First 1
+        if ($combo) {
+            $modelCount = if ($combo.models) { @($combo.models).Count } else { 0 }
+            Write-Log "Found combo: $ComboName with $modelCount models"
+            return $combo
+        }
+    } catch {
+        Write-Log "[ERR] Failed to fetch combos: $($_.Exception.Message)"
     }
     return $null
 }
 
-# ============================ Main ============================
-
-Rotate-Logs
-Write-Log "========== Starting combo maintenance =========="
-if ($DryRun) { Write-Log "DRY-RUN mode: no changes will be written" }
-Write-Log "Params: MaxConsecutiveFails=$MaxConsecutiveFails AddFreeModels=$([bool]$AddFreeModels) AutoReplace=$([bool]$AutoReplace)"
-Write-Log "Log: $LogFile | State: $StateFile"
-
-# Load persistent state
-$state = Load-State
-Write-Log "Loaded state for $($state.Count) models"
-
-# Get combo
-$combo = Get-Combo $ComboName
-if (-not $combo) {
-    Write-Log "ERROR: combo '$ComboName' not found"
-    exit 1
-}
-if (-not $combo.models) {
-    Write-Log "ERROR: combo '$ComboName' has no models (id=$($combo.id))"
-    exit 1
-}
-Write-Log "Found combo '$ComboName' with $($combo.models.Count) models (id=$($combo.id))"
-
-# Get available models (for -AddFreeModels and -AutoReplace)
-$availableModels = $null
-if ($AddFreeModels -or $AutoReplace) {
+function Get-AllModels() {
     try {
-        $availableModels = Get-AvailableModels
-        Write-Log "Fetched $($availableModels.Count) available models from 9router"
+        $headers = Get-AuthHeaders
+        $response = Invoke-WebRequest -Uri "$($Config.baseUrl)/api/models" -Headers $headers -TimeoutSec $Config.timeoutSec -ErrorAction Stop -UseBasicParsing
+        $parsed = $response.Content | ConvertFrom-Json
+        $models = if ($parsed.models) { $parsed.models } else { $parsed }
+        Write-Log "Fetched $($models.Count) available models"
+        return $models
     } catch {
-        Write-Log "WARNING: could not fetch available models: $($_.Exception.Message)"
+        Write-Log "[ERR] Failed to fetch models: $($_.Exception.Message)"
+        return @()
     }
-}
-
-# Build model list to test
-$modelsToTest = [System.Collections.Generic.List[string]]::new()
-foreach ($m in $combo.models) { $modelsToTest.Add($m) }
-
-# Add free models
-if ($AddFreeModels -and $availableModels) {
-    $availableFullNames = @($availableModels | ForEach-Object { $_.fullModel; $_.routedModel })
-    $added = @()
-    foreach ($fm in $FREE_MODELS_TO_ADD) {
-        if ($fm -in $availableFullNames -and $fm -notin $modelsToTest) {
-            $modelsToTest.Add($fm)
-            $added += $fm
-        }
     }
-    if ($added.Count -gt 0) {
-        Write-Log "Adding $($added.Count) free model candidates for testing"
-        foreach ($a in $added) { Write-Log "  + FREE  $a" }
-    } else {
-        Write-Log "No new free models to add (all already in combo or not available)"
-    }
-}
 
-# Test all models in parallel
-Write-Log "Testing $($modelsToTest.Count) models (parallel, throttle 8)..."
-$results = @($modelsToTest | ForEach-Object -Parallel {
-    $model = $_
-    $body = @{ model = $model; kind = "llm" } | ConvertTo-Json -Compress
-    $reqParams = @{
-        Uri                = "$using:BaseUrl/api/models/test"
-        Method             = "Post"
-        ContentType        = "application/json"
-        Body               = $body
-        TimeoutSec         = $using:TimeoutSec
-        SkipHttpErrorCheck = $true
-    }
-    if ($using:Token) { $reqParams.Headers = @{ Authorization = "Bearer $using:Token" } }
-
-    $attempt = 0
-    $done = $false
-    while (-not $done) {
-        $status = 0
-        $ok = $false
-        $errorText = ""
+    # === APPLY CHANGES TO ROUTER ===
+    function Update-Combo([string]$comboName, [array]$models) {
         try {
-            $r = Invoke-WebRequest @reqParams
-            $httpStatus = [int]$r.StatusCode
-            $j = $null
-            try { $j = $r.Content | ConvertFrom-Json } catch { $j = $null }
-            if ($j) {
-                $ok = [bool]$j.ok
-                $status = if ($null -ne $j.status) { [int]$j.status } else { $httpStatus }
-                $errorText = [string]$j.error
-            }
-            else {
-                $status = $httpStatus
-                $errorText = "HTTP $httpStatus"
-            }
-        }
-        catch {
-            $errorText = "REQUEST-FAILED: $($_.Exception.Message)"
-        }
-
-        if ($ok) {
-            [PSCustomObject]@{ Model = $model; Ok = $true; Status = $status; Error = "" }
-            $done = $true
-        }
-        elseif ((($using:RETRYABLE -contains $status) -or ($status -eq 0 -and $errorText -like "REQUEST-FAILED*")) -and $attempt -lt $using:Retries) {
-            Start-Sleep -Seconds (2 * ($attempt + 1))
-            $attempt++
-        }
-        else {
-            [PSCustomObject]@{ Model = $model; Ok = $false; Status = $status; Error = $errorText }
-            $done = $true
+            $headers = Get-AuthHeaders
+            $body = @{ name = $comboName; models = $models } | ConvertTo-Json -Depth 3
+            $uri = "$($Config.baseUrl)/api/combos/$comboName"
+            $response = Invoke-WebRequest -Uri $uri -Method Put -Body $body -ContentType 'application/json' -TimeoutSec $Config.timeoutSec -ErrorAction Stop -UseBasicParsing -Headers $headers
+            Write-Log "[OK] Combo updated: $comboName ($($models.Count) models)"
+            return $true
+        } catch {
+            Write-Log "[ERR] Failed to update combo: $($_.Exception.Message)"
+            return $false
         }
     }
-} -ThrottleLimit 8)
 
-# Update persistent state
-# NOTE: 429 (rate-limit) and 503 (temporarily unavailable) are quota/availability errors that
-# reset daily. They must NOT accumulate as chronic failures, otherwise free models that are
-# simply rate-limited (e.g. OpenRouter 50 free req/day) would be wrongly removed after 3 days.
-$today = Get-Date -Format 'yyyy-MM-dd'
-foreach ($r in $results) {
-    $cleanError = Clean-LogText $r.Error
-    if ($r.Ok) {
-        $state[$r.Model] = @{
-            consecutiveFails = 0
-            lastOk           = $today
-            lastError        = ""
-            lastStatus       = [int]$r.Status
+    # === TEST MODEL WITH RETRY ===
+function Test-Model([string]$modelName, [int]$attempt = 1) {
+    try {
+        $headers = Get-AuthHeaders
+        $body = @{ model = $modelName; kind = "llm" } | ConvertTo-Json
+        $uri = "$($Config.baseUrl)/api/models/test"
+        $response = Invoke-WebRequest -Uri $uri -Method Post -Body $body -ContentType 'application/json' -TimeoutSec $Config.timeoutSec -ErrorAction Stop -WarningAction SilentlyContinue -UseBasicParsing -Headers $headers
+        $parsed = $response.Content | ConvertFrom-Json -ErrorAction SilentlyContinue
+        if ($parsed -and $parsed.ok) {
+            return @{ success = $true; statusCode = 200; error = ""; replacement = $null }
         }
-    }
-    else {
-        $prev = $state[$r.Model]
-        $prevFails = if ($prev -and $prev.ContainsKey('consecutiveFails')) { [int]$prev.consecutiveFails } else { 0 }
-        $prevOk = if ($prev -and $prev.ContainsKey('lastOk')) { [string]$prev.lastOk } else { "" }
-        # Rate-limit (429) and temporarily unavailable (503) reset daily - do not count as chronic
-        $isQuotaError = ($r.Status -eq 429) -or ($r.Status -eq 503)
-        $newFails = if ($isQuotaError) { 0 } else { $prevFails + 1 }
-        $state[$r.Model] = @{
-            consecutiveFails = $newFails
-            lastOk           = $prevOk
-            lastError        = $cleanError
-            lastStatus       = [int]$r.Status
+        $statusCode = if ($parsed.status) { $parsed.status } else { $response.StatusCode }
+        return @{ success = $false; statusCode = $statusCode; error = $parsed.error; replacement = $null }
+    } catch {
+        $statusCode = $null
+        $errorMsg = $_.Exception.Message
+        $replacement = $null
+        if ($_.Exception.Response) {
+            $statusCode = $_.Exception.Response.StatusCode.value__
+            try {
+                $body = $_.Exception.Response.Content | ConvertFrom-Json -ErrorAction SilentlyContinue
+                $errorMsg = if ($body.error.message) { $body.error.message } elseif ($body.message) { $body.message } else { $errorMsg }
+                $replacement = if ($body.error.replacement) { $body.error.replacement } elseif ($body.replacement) { $body.replacement } else { $null }
+            } catch { }
         }
+
+        if (-not $statusCode) {
+            $statusCode = 500
+        }
+
+        if (($statusCode -in @(408, 429, 500, 502, 503, 504, 529)) -and $attempt -lt $Config.retries) {
+            Start-Sleep -Seconds (2 * $attempt)
+            return Test-Model $modelName ($attempt + 1)
+        }
+
+        return @{ success = $false; statusCode = $statusCode; error = $errorMsg; replacement = $replacement }
     }
 }
 
-# Classify results
-$classResults = @()
-foreach ($r in $results) {
-    if ($r.Ok) {
-        $classResults += [PSCustomObject]@{
-            Model = $r.Model; Ok = $true; Status = $r.Status; Error = $r.Error
-            Remove = $false; Reason = "OK"; Fails = 0
-        }
-        continue
+# === DECISION LOGIC ===
+function Decide-ModelFate([string]$modelName, [object]$testResult, [hashtable]$state) {
+    $modelState = $state[$modelName]
+    if (-not $modelState) {
+        $modelState = @{ lastOk = (Get-Date -Format 'yyyy-MM-dd'); lastStatus = 200; lastError = ""; consecutiveFails = 0 }
+        $state[$modelName] = $modelState
     }
-    $isCategorical = $CATEGORICAL -contains $r.Status
-    if (-not $isCategorical -and $r.Error) {
-        foreach ($pattern in $CATEGORICAL_PATTERNS) {
-            if ($r.Error -match $pattern) { $isCategorical = $true; break }
-        }
+    
+    if ($testResult.success) {
+        $modelState.lastOk = Get-Date -Format 'yyyy-MM-dd'
+        $modelState.lastStatus = 200
+        $modelState.lastError = ""
+        $modelState.consecutiveFails = 0
+        return @{ action = "KEEP"; reason = "OK (200)" }
     }
-    $consecutiveFails = 1
-    if ($state.ContainsKey($r.Model) -and $state[$r.Model].ContainsKey('consecutiveFails')) {
-        $consecutiveFails = [int]$state[$r.Model].consecutiveFails
-    }
-    $isChronic = $consecutiveFails -ge $MaxConsecutiveFails
-    $remove = $isCategorical -or $isChronic
-    $reason = if ($isCategorical) {
-        "CATEGORICAL"
-    } elseif ($isChronic) {
-        "CHRONIC($consecutiveFails/$MaxConsecutiveFails)"
-    } else {
-        "TEMPORARY($consecutiveFails/$MaxConsecutiveFails)"
-    }
-    $classResults += [PSCustomObject]@{
-        Model = $r.Model; Ok = $false; Status = $r.Status; Error = $r.Error
-        Remove = $remove; Reason = $reason; Fails = $consecutiveFails
-    }
-}
+    
+    $statusCode = $testResult.statusCode
+    $errorMsg = $testResult.error
+    $replacement = if ($testResult.PSObject.Properties['replacement']) { $testResult.replacement } else { $null }
+    $modelState.lastStatus = $statusCode
+    $modelState.lastError = $errorMsg
 
-$working   = @($classResults | Where-Object { $_.Ok })
-$temporary = @($classResults | Where-Object { -not $_.Ok -and -not $_.Remove })
-$toRemove  = @($classResults | Where-Object { -not $_.Ok -and $_.Remove })
+    if ($replacement) {
+        return @{ action = "REPLACE"; reason = "REPLACEMENT ($replacement)"; replacement = $replacement }
+    }
 
-Write-Log "Working: $($working.Count) | Temporary (kept): $($temporary.Count) | To remove: $($toRemove.Count)"
+    # CATEGORICAL ERRORS
+    if ($statusCode -in @(400, 401, 402, 403, 404, 405, 406, 409, 410, 415, 422)) {
+        return @{ action = "REMOVE"; reason = "CATEGORICAL HTTP $statusCode" }
+    }
 
-# Log removals
-foreach ($m in $toRemove) {
-    $cleanErr = Clean-LogText $m.Error
-    Write-Log "  REMOVE  [$($m.Status)] $($m.Model)  $($m.Reason)  $cleanErr"
-}
-# Log temporary (kept)
-foreach ($m in $temporary) {
-    $cleanErr = Clean-LogText $m.Error
-    Write-Log "  KEEP    [$($m.Status)] $($m.Model)  $($m.Reason)  $cleanErr"
-}
-
-# Auto-replace retired models
-$replacements = @()
-if ($AutoReplace -and $availableModels) {
-    foreach ($r in $toRemove) {
-        $rep = Find-Replacement $r.Error $availableModels
-        if ($rep) {
-            $replacements += $rep
-            Write-Log "  REPLACE $($r.Model) -> $rep"
+    # PATTERN MATCHING
+    $patterns = @("not_found", "no longer available", "end of life", "was retired", "reached its end", "not supported", "no active credentials")
+    foreach ($pattern in $patterns) {
+        if ($errorMsg -match $pattern) {
+            return @{ action = "REMOVE"; reason = "CATEGORICAL ($pattern)" }
         }
     }
+
+    # RATE LIMIT (don't count as failure)
+    if ($statusCode -in @(429, 503)) {
+        $modelState.consecutiveFails = 0
+        return @{ action = "KEEP"; reason = "TEMPORARY (rate limit)" }
+    }
+
+    # CHRONIC ERRORS
+    $modelState.consecutiveFails++
+    if ($modelState.consecutiveFails -ge $Config.maxConsecutiveFails) {
+        return @{ action = "REMOVE"; reason = "CHRONIC ($($modelState.consecutiveFails)/$($Config.maxConsecutiveFails))" }
+    }
+
+    return @{ action = "KEEP"; reason = "TEMPORARY ($($modelState.consecutiveFails)/$($Config.maxConsecutiveFails))" }
 }
 
-# Build new model list
-$removeNames = @($toRemove | ForEach-Object { $_.Model })
-$newModels = @($classResults |
-    Where-Object { $_.Model -notin $removeNames } |
-    ForEach-Object { $_.Model })
-if ($replacements.Count -gt 0) {
-    $newModels += $replacements
-}
-$newModels = @($newModels | Select-Object -Unique)
+# === UTILITY FUNCTIONS ===
+function Update-TrendFile([int]$removed, [int]$replaced, [int]$working) {
+    $today = Get-Date -Format 'yyyy-MM-dd'
+    $trend = @{}
 
-# Sort by reliability: 0 consecutiveFails first, then alphabetical
-$newModels = @($newModels | Sort-Object `
-    @{Expression = {
-        $s = $state[$_]
-        if ($s -and $s.ContainsKey('consecutiveFails')) { [int]$s.consecutiveFails } else { 0 }
-    }; Ascending = $true},
-    { $_ }
-)
+    if (Test-Path $TrendFile) {
+        try {
+            $trend = Get-Content $TrendFile -Raw | ConvertFrom-Json | ConvertTo-Hashtable
+        } catch { }
+    }
 
-# Clean up stale state entries (models no longer in combo)
-$newSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$newModels)
-$staleKeys = @($state.Keys | Where-Object { -not $newSet.Contains($_) })
-foreach ($key in $staleKeys) {
-    $state.Remove($key) | Out-Null
-}
-if ($staleKeys.Count -gt 0) {
-    Write-Log "Cleaned $($staleKeys.Count) stale state entries"
+    $trend[$today] = @{ removed = $removed; replaced = $replaced; working = $working }
+    $trend | ConvertTo-Json -Depth 3 | Set-Content $TrendFile -Encoding UTF8
 }
 
-# Check for empty combo
-if ($newModels.Count -eq 0 -and -not $Force) {
-    Write-Log "ERROR: all models would be removed, combo would be empty (use -Force to allow)"
-    Save-State $state
-    exit 1
+function ConvertTo-Hashtable($obj) {
+    $ht = @{}
+    if ($obj) { $obj.PSObject.Properties | ForEach-Object { $ht[$_.Name] = $_.Value } }
+    return $ht
 }
 
-# Check if anything changed
-$comboChanged = ($toRemove.Count -gt 0) -or ($replacements.Count -gt 0)
-if ($AddFreeModels) {
-    $originalSet = [System.Collections.Generic.HashSet[string]]::new([string[]]@($combo.models))
-    foreach ($m in $newModels) {
-        if (-not $originalSet.Contains($m)) { $comboChanged = $true; break }
+function Check-Alerts([int]$removed) {
+    if (-not $Config.alerts) { return }
+    $threshold = if ($Config.alerts.removedPerRunThreshold) { $Config.alerts.removedPerRunThreshold } else { 5 }
+    if ($removed -ge $threshold) {
+        Write-Log "[ALERT] $removed models removed (threshold: $threshold)"
     }
 }
 
-if (-not $comboChanged) {
-    Write-Log "Nothing to change, combo left unchanged"
-    Save-State $state
-    exit 0
+function Clean-OldLogs() {
+    if ($Config.logCleanup -and $Config.logCleanup.enableAutoDelete) {
+        $retentionDays = if ($Config.logCleanup.retentionDays) { $Config.logCleanup.retentionDays } else { 30 }
+        $cutoffDate = (Get-Date).AddDays(-$retentionDays)
+        Get-ChildItem $LogDir -Filter "comboact-update-*.log" -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -lt $cutoffDate } |
+            ForEach-Object { Remove-Item $_ -Force -ErrorAction SilentlyContinue; Write-Log "Deleted: $($_.Name)" }
+    }
 }
 
-# Count added models for logging
-$addedCount = 0
-$origSet = [System.Collections.Generic.HashSet[string]]::new([string[]]@($combo.models))
-foreach ($m in $newModels) {
-    if (-not $origSet.Contains($m)) { $addedCount++ }
+function Send-Notification([string]$subject, [string]$body, [hashtable]$data) {
+    if (-not $Config.notifications -or -not $Config.notifications.enabled) { return }
+    if (-not $Config.notifications.webhookUrl) { return }
+
+    $payload = @{
+        subject = $subject
+        body = $body
+        timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        data = $data
+    } | ConvertTo-Json -Depth 3
+
+    try {
+        Invoke-RestMethod -Uri $Config.notifications.webhookUrl -Method Post -Body $payload -ContentType 'application/json' -ErrorAction Stop
+        Write-Log "[OK] Notification sent: $subject"
+    } catch {
+        Write-Log "[WARN] Notification failed: $($_.Exception.Message)"
+    }
 }
 
-if ($DryRun) {
-    Write-Log "DRY-RUN: would remove $($toRemove.Count), keep $($newModels.Count) (added $addedCount free, replaced $($replacements.Count))"
-    Save-State $state
-    exit 0
+function Write-StructuredLog([hashtable]$record) {
+    if (-not $Config.reporting) { return }
+    if ($Config.reporting.enableJsonLogging) {
+        $jsonLine = $record | ConvertTo-Json -Compress
+        $jsonFile = Join-Path $LogDir "comboact-structured-$(Get-Date -Format 'yyyy-MM-dd').jsonl"
+        Add-Content -LiteralPath $jsonFile -Value $jsonLine -Encoding UTF8
+    }
+    if ($Config.reporting.enableCsvLogging -and $record.level -eq 'MODEL') {
+        $csvFile = Join-Path $LogDir "comboact-models-$(Get-Date -Format 'yyyy-MM-dd').csv"
+        $row = [pscustomobject]@{
+            timestamp = $record.timestamp
+            model = $record.model
+            action = $record.action
+            statusCode = $record.statusCode
+            reason = $record.reason
+        }
+        if (-not (Test-Path $csvFile)) {
+            $row | Export-Csv -Path $csvFile -NoTypeInformation -Encoding UTF8
+        } else {
+            $row | Export-Csv -Path $csvFile -NoTypeInformation -Append -Encoding UTF8
+        }
+    }
 }
 
-# Update combo (set kind="llm" for proper LLM routing)
-$body = @{ name = $combo.name; kind = "llm"; models = $newModels } | ConvertTo-Json -Depth 5
-$updateParams = @{
-    Uri         = "$BaseUrl/api/combos/$($combo.id)"
-    Method      = "Put"
-    ContentType = "application/json"
-    Body        = $body
-    TimeoutSec  = $TimeoutSec
-}
-if ($Token) { $updateParams.Headers = @{ Authorization = "Bearer $Token" } }
-
+# === MAIN EXECUTION ===
 try {
-    $update = Invoke-RestMethod @updateParams
-    Write-Log "Combo updated: $($update.models.Count) models now (removed $($toRemove.Count), added $addedCount free, replaced $($replacements.Count))"
+    Acquire-Lock
+    
+    Write-Host ""
+    Write-Host "9Router ComboAct Maintenance - PRO Edition" -ForegroundColor Cyan
+    Write-Host ""
+    
+    Write-Log "===== Starting combo maintenance (PRO) ====="
+    
+    if (-not (Test-9RouterHealth)) {
+        Write-Log "[ERR] ABORT: 9Router not responding"
+        exit 1
+    }
+    
+    Write-Log "DryRun: $DryRun | AddFreeModels: $($Config.addFreeModels) | AutoReplace: $($Config.autoReplace)"
+    
+    # Load state
+    $state = @{}
+    if (Test-Path $StateFile) {
+        try {
+            $stateJson = Get-Content $StateFile -Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($stateJson) {
+                foreach ($prop in $stateJson.PSObject.Properties) {
+                    if ($prop.Name -ne "lastUpdated") {
+                        $state[$prop.Name] = $prop.Value
+                    }
+                }
+            }
+        } catch { Write-Log "[WARN] Could not parse state file" }
+    }
+    
+    Write-Log "Loaded state for $($state.Count) models"
+    
+    # Get current combo
+    $currentCombo = Get-CurrentCombo
+    if (-not $currentCombo) {
+        Write-Log "[ERR] Could not fetch current combo"
+        exit 1
+    }
+    
+    $currentModels = if ($null -ne $currentCombo.models) { @($currentCombo.models) } else { @() }
+    if ($currentModels -is [string]) { $currentModels = @($currentModels) }
+    Write-Log "Testing $($currentModels.Count) models..."
+    
+    # Test all models
+    $toKeep = @{}
+    $toRemove = @{}
+    $toAdd = @{}
+    $replaced = @{}
+
+    $throttle = if ($Config.parallelization -and $Config.parallelization.throttleLimit) { $Config.parallelization.throttleLimit } else { 1 }
+    $modelNames = @($currentModels | ForEach-Object { if ($_ -is [string]) { $_ } else { $_.ToString() } })
+
+    $useParallel = $throttle -gt 1 -and $modelNames.Count -gt 1 -and ($PSVersionTable.PSVersion.Major -ge 7)
+    $cliToken = Get-9RouterCliToken
+    $results = @{}
+    if ($useParallel) {
+        $rawResults = $modelNames | ForEach-Object -Parallel {
+            $cfg = $using:Config
+            $cliToken = $using:cliToken
+            $modelName = $_
+            function Test-ModelInline([string]$mn, [int]$attempt = 1) {
+                try {
+                    $headers = @{}
+                    if ($cfg.token) { $headers["Authorization"] = "Bearer $($cfg.token)" }
+                    if ($cliToken) { $headers["x-9r-cli-token"] = $cliToken }
+                    $body = @{ model = $mn; kind = "llm" } | ConvertTo-Json
+                    $uri = "$($cfg.baseUrl)/api/models/test"
+                    $response = Invoke-WebRequest -Uri $uri -Method Post -Body $body -ContentType 'application/json' -TimeoutSec $cfg.timeoutSec -ErrorAction Stop -WarningAction SilentlyContinue -UseBasicParsing -Headers $headers
+                    $parsed = $response.Content | ConvertFrom-Json -ErrorAction SilentlyContinue
+                    if ($parsed -and $parsed.ok) {
+                        return @{ success = $true; statusCode = 200; error = ""; replacement = $null }
+                    }
+                    return @{ success = $false; statusCode = if ($parsed.status) { $parsed.status } else { $response.StatusCode }; error = $parsed.error; replacement = $null }
+                } catch {
+                    $statusCode = $null
+                    $errorMsg = $_.Exception.Message
+                    $replacement = $null
+                    if ($_.Exception.Response) {
+                        $statusCode = $_.Exception.Response.StatusCode.value__
+                        try {
+                            $body = $_.Exception.Response.Content | ConvertFrom-Json -ErrorAction SilentlyContinue
+                            $errorMsg = if ($body.error.message) { $body.error.message } elseif ($body.message) { $body.message } else { $errorMsg }
+                            $replacement = if ($body.error.replacement) { $body.error.replacement } elseif ($body.replacement) { $body.replacement } else { $null }
+                        } catch { }
+                    }
+                    if (-not $statusCode) { $statusCode = 500 }
+                    if (($statusCode -in @(408, 429, 500, 502, 503, 504, 529)) -and $attempt -lt $cfg.retries) {
+                        Start-Sleep -Seconds (2 * $attempt)
+                        return Test-ModelInline $mn ($attempt + 1)
+                    }
+                    return @{ success = $false; statusCode = $statusCode; error = $errorMsg; replacement = $replacement }
+                }
+            }
+            @{ model = $modelName; result = (Test-ModelInline $modelName 1) }
+        } -ThrottleLimit $throttle
+        foreach ($r in $rawResults) { $results[$r.model] = $r.result }
+    } else {
+        foreach ($modelName in $modelNames) {
+            $results[$modelName] = Test-Model $modelName 1
+        }
+    }
+
+    foreach ($modelName in $modelNames) {
+        $result = $results[$modelName]
+        $decision = Decide-ModelFate $modelName $result $state
+        $action = $decision.action
+        $reason = $decision.reason
+
+        if ($action -eq "KEEP") {
+            $toKeep[$modelName] = $true
+        } elseif ($action -eq "REMOVE") {
+            $toRemove[$modelName] = $true
+        }
+
+        if ($action -eq "REPLACE" -or $result.replacement) {
+            $replacementName = if ($action -eq "REPLACE") { $decision.replacement } else { $result.replacement }
+            if ($replacementName) {
+                $replaced[$modelName] = $replacementName
+                $toAdd[$replacementName] = $true
+                Write-Log "REPLACE $modelName -> $replacementName | $reason"
+                Write-StructuredLog @{
+                    timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                    level = 'MODEL'
+                    model = $modelName
+                    action = 'REPLACE'
+                    statusCode = $result.statusCode
+                    reason = $reason
+                }
+                continue
+            }
+        }
+
+        Write-Log "$action [$($result.statusCode)] $modelName | $reason"
+        Write-StructuredLog @{
+            timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            level = 'MODEL'
+            model = $modelName
+            action = $action
+            statusCode = $result.statusCode
+            reason = $reason
+        }
+    }
+
+    $keepCount = $toKeep.Count
+    $removeCount = $toRemove.Count
+    $replaceCount = $replaced.Count
+    $addCount = $toAdd.Count
+
+    Write-Log "Result: Keep=$keepCount | Remove=$removeCount | Replace=$replaceCount | Add=$addCount"
+
+    # Auto-replace already handled above via replacement field
+    if ($Config.autoReplace) {
+        foreach ($old in $replaced.Keys) {
+            if (-not $toKeep.ContainsKey($old) -and -not $toRemove.ContainsKey($old)) {
+                $toRemove[$old] = $true
+            }
+        }
+    }
+    
+    # Add free models if enabled
+    if ($Config.addFreeModels) {
+        $freeModels = if ($Config.freeModels) { @($Config.freeModels) } else {
+            @(
+                "gemini/gemini-2.5-flash",
+                "gemini/gemini-2.5-flash-lite",
+                "groq/llama-3.3-70b-versatile",
+                "mistral/mistral-large-latest",
+                "openrouter/openrouter/free",
+                "oc/nemotron-3-ultra-free"
+            )
+        }
+        foreach ($freeModel in $freeModels) {
+            if (-not $toKeep.ContainsKey($freeModel) -and -not $toAdd.ContainsKey($freeModel)) {
+                Write-Log "Adding free model: $freeModel"
+                $toAdd[$freeModel] = $true
+                Write-StructuredLog @{
+                    timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+                    level = 'MODEL'
+                    model = $freeModel
+                    action = 'ADD'
+                    statusCode = ''
+                    reason = 'free model'
+                }
+            }
+        }
+    }
+
+    # Validate proposed additions against available models
+    $availableNames = $null
+    if ($toAdd.Count -gt 0) {
+        $allModels = Get-AllModels
+        if ($allModels -and $allModels.Count -gt 0) {
+            $availableNames = @($allModels | ForEach-Object { if ($_.fullModel) { $_.fullModel } elseif ($_.name) { $_.name } elseif ($_.id) { $_.id } else { $_.ToString() } })
+        }
+    }
+
+    $validatedAdd = @{}
+    foreach ($add in $toAdd.Keys) {
+        if ($availableNames -and $availableNames -notcontains $add) {
+            Write-Log "[WARN] Skipping add of unavailable model: $add"
+            continue
+        }
+        $validatedAdd[$add] = $true
+    }
+
+    $newModels = @()
+    $newModels += $toKeep.Keys
+    $newModels += $validatedAdd.Keys
+
+    if ($DryRun) {
+        Write-Log "[DRYRUN] Would update combo '$ComboName' with $($newModels.Count) models (kept=$keepCount, added=$($validatedAdd.Count), removed=$removeCount, replaced=$replaceCount). No changes applied."
+    } else {
+        # Update state
+        $newState = @{ lastUpdated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss' }
+        $modelsToSave = @()
+        $modelsToSave += $toKeep.Keys
+        $modelsToSave += $validatedAdd.Keys
+
+        foreach ($modelName in $modelsToSave) {
+            if ($state[$modelName]) {
+                $newState[$modelName] = $state[$modelName]
+            } else {
+                $newState[$modelName] = @{ lastOk = (Get-Date -Format 'yyyy-MM-dd'); lastStatus = 200; lastError = ""; consecutiveFails = 0 }
+            }
+        }
+        $newState | ConvertTo-Json -Depth 5 | Set-Content $StateFile -Encoding UTF8
+
+        # Update trend
+        Update-TrendFile $removeCount $replaceCount $keepCount
+        Check-Alerts $removeCount
+        Clean-OldLogs
+
+        # Apply changes to the router
+        $applied = Update-Combo $ComboName $newModels
+        if (-not $applied) {
+            Write-Log "[WARN] Combo update failed; local state/trend were still updated."
+        }
+    }
+
+    if (-not $NoReport) {
+        Write-Log "Generating HTML report..."
+        & (Join-Path $PSScriptRoot "report-html.ps1") -Date (Get-Date -Format 'yyyy-MM-dd') -ErrorAction SilentlyContinue | Out-Null
+    }
+
+    Write-Log "===== Maintenance complete ====="
+    Write-Host ""
+    Write-Host "SUCCESS: Kept=$keepCount | Removed=$removeCount | Replaced=$replaceCount | Added=$($validatedAdd.Count)" -ForegroundColor Green
+    Write-Host ""
+
+    if ($Config.notifications -and $Config.notifications.enabled) {
+        $subject = if ($removeCount -eq 0) { "✅ Maintenance Completed" } else { "⚠️ Maintenance Completed with removals" }
+        $body = "Combo updated: $keepCount kept, $removeCount removed, $replaceCount replaced, $($validatedAdd.Count) added"
+        Send-Notification -subject $subject -body $body -data @{ kept = $keepCount; removed = $removeCount; replaced = $replaceCount; added = $toAdd.Count }
+    }
+    
 } catch {
-    Write-Log "ERROR updating combo: $($_.Exception.Message)"
-    Save-State $state
+    Write-Log "[FATAL] $($_.Exception.Message)"
+    Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
+} finally {
+    Release-Lock
 }
-
-# State summary
-$healthy = @($state.Values | Where-Object { $_.ContainsKey('consecutiveFails') -and [int]$_.consecutiveFails -eq 0 }).Count
-$warning = @($state.Values | Where-Object { $_.ContainsKey('consecutiveFails') -and [int]$_.consecutiveFails -gt 0 -and [int]$_.consecutiveFails -lt $MaxConsecutiveFails }).Count
-Write-Log "State summary: $healthy healthy, $warning warning, $($state.Count) total tracked"
-
-Save-State $state
-Write-Log "========== Maintenance complete =========="

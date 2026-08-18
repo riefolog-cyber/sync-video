@@ -28,6 +28,8 @@ from config import (
 )
 from llm_sync import (
     endpoints_for,
+    is_interactive,
+    llm_cache_keys_for,
     llm_ordered_timeline,
     llm_timeline_segments,
     llm_verify_anchor_mapping,
@@ -37,6 +39,7 @@ from ocr import PRESENTATION_SUFFIXES, convert_presentation_to_pdf, extract_slid
 from semantic_sync import (
     SemanticOptions,
     free_order_segments_from_words,
+    make_anchor_remap_filter,
     merge_short_segments,
     model_load_seconds,
     refine_llm_segments_from_words,
@@ -134,6 +137,26 @@ def _clean_orphan_cache(active_keys: set[str]) -> int:
             cache_file.unlink()
             removed += 1
             log.debug("   🧹 Cache orfana rimossa: %s", cache_file.name)
+    return removed
+
+
+def _clean_stale_llm_cache(keep_stems: set[str]) -> int:
+    """Rimuove i file cache LLM (llm_*.json) che la run corrente non riuserà.
+
+    Le chiavi LLM sono hash del contenuto (slide + parlato + ancore +
+    endpoint): cambiando podcast o presentazione i vecchi file non servono più.
+    Conserva SOLO gli stem in ``keep_stems`` (le chiavi della run corrente e la
+    timeline finale per la verifica post-run) e rimuove il resto.
+    """
+    if not CACHE_DIR.exists():
+        return 0
+    removed = 0
+    for cache_file in CACHE_DIR.glob("llm_*.json"):
+        if cache_file.stem in keep_stems:
+            continue
+        cache_file.unlink()
+        removed += 1
+        log.debug("   🧹 Cache LLM orfana rimossa: %s", cache_file.name)
     return removed
 
 
@@ -387,6 +410,15 @@ def main(argv: list | None = None) -> None:
     cache_key_transcript = f"transcript_{audio_hash[:12]}_{args.lang}_{args.whisper_model}_{args.transcriber}"
     active_cache_keys: set[str] = {cache_key_slides, cache_key_transcript}
 
+    # --- Pulizia cache ALL'AVVIO ---
+    # A ogni nuova run rimuove subito le cache di slide/trascrizione di
+    # PDF/audio precedenti (le chiavi sono hash del contenuto: con input nuovi
+    # le vecchie cache non servono). Le cache LLM vengono ripulite più avanti,
+    # quando i contenuti correnti sono noti.
+    _startup_cleaned = _clean_orphan_cache(active_cache_keys)
+    if _startup_cleaned:
+        log.info("   🧹 Rimosse %d cache orfane di run precedenti (slide/trascrizione).", _startup_cleaned)
+
     # --- Timing ---
     t_total_start = time.time()
     t_ocr = t_transcribe = t_sync = t_video = 0.0
@@ -486,9 +518,14 @@ def main(argv: list | None = None) -> None:
         # Se words_raw non è in cache, prova a leggerlo da transcript_raw.txt
         if not words_raw:
             raw_txt = audio_path.parent / "transcript_raw.txt"
-            if raw_txt.exists():
+            if raw_txt.exists() and raw_txt.stat().st_mtime >= audio_path.stat().st_mtime:
                 log.debug("   Leggo parole raw da %s", raw_txt.name)
                 words_raw = _parse_transcript_raw(raw_txt)
+            elif raw_txt.exists():
+                log.warning(
+                    "   [Avviso] Ignoro transcript_raw.txt obsoleto (più vecchio dell'audio): "
+                    "appartiene a un podcast precedente, non lo uso come fallback."
+                )
 
         # --- Correzione nomi propri (Whisper li storpi sistematicamente: "sigmond
         # freud", "thomas mur", "mark chiuse"...). I nomi corretti sono indizi
@@ -531,6 +568,35 @@ def main(argv: list | None = None) -> None:
                     )
                     flow = "slide-audio"
                     args.llm = "off"
+
+        # --- Check preventivo ancore: avviso PRIMA della sincronizzazione se il
+        # podcast ha annunciato poche slide (probabile deriva del prompt
+        # NotebookLM). Con poche ancore la timeline sarà stimata (9Router o
+        # fallback MiniLM) e le slide non annunciate avranno durate brevi o
+        # micro-segmenti: conviene rigenerare l'audio. ---
+        if flow != "free" and words_raw:
+            early_anchors = extract_slide_anchors(words_raw, total_slides, flow)
+            early_missing = [s for s in range(2, total_slides + 1) if s not in early_anchors]
+            if early_anchors and early_missing:
+                log.warning(
+                    "\n   [Avviso] Solo %d slide su %d annunciate esplicitamente "
+                    "(mancanti: %s).\n"
+                    "   Le slide non annunciate saranno posizionate per contenuto: "
+                    "risultato stimato, con durate possibilmente brevi.\n"
+                    "   Se il podcast doveva annunciare tutte le slide, conviene "
+                    "rigenerare l'audio PRIMA di procedere.",
+                    len(early_anchors),
+                    total_slides - 1,
+                    ", ".join(str(s) for s in early_missing),
+                )
+                if is_interactive() and not args.no_confirm:
+                    try:
+                        input(
+                            "   Premi Invio per continuare con la sincronizzazione stimata, "
+                            "oppure Ctrl+C per fermarti: "
+                        )
+                    except (EOFError, KeyboardInterrupt):
+                        _abort("Interrotto dall'utente prima della sincronizzazione.")
 
         # --- Fase 3: Sincronizzazione semantica (unico motore) ---
         t_phase_start = time.time()
@@ -725,6 +791,20 @@ def main(argv: list | None = None) -> None:
                         for ep in endpoints:
                             ep["model"] = args.llm_model
                     log.info("   Verifica mapping ancore con LLM (--llm %s)...", args.llm)
+                    # Validatore dei rimappi LLM: un rimappo che contraddice il
+                    # contenuto del parlato (embeddings locali) viene scartato,
+                    # perché le ancore esplicite sono vincoli ad alta precisione
+                    # e un rimappo errato rompe la timeline (es. slide 4/5).
+                    remap_filter = make_anchor_remap_filter(
+                        slide_texts,
+                        words_raw,
+                        total_slides,
+                        window_seconds=40.0,
+                        options=SemanticOptions(
+                            model_name=args.semantic_model,
+                            cache_dir=args.semantic_cache_dir,
+                        ),
+                    )
                     try:
                         verified = llm_verify_anchor_mapping(
                             slide_texts,
@@ -734,6 +814,7 @@ def main(argv: list | None = None) -> None:
                             endpoints=endpoints,
                             wait_timeout=args.llm_wait_timeout,
                             strict=True,
+                            remap_filter=remap_filter,
                         )
                     except RuntimeError as e:
                         # 9Router necessario ma non avviabile/non online: niente
@@ -763,6 +844,31 @@ def main(argv: list | None = None) -> None:
                     ", ".join(str(s) for s in _missing_anchors),
                 )
 
+            # --- Pulizia cache LLM orfane ---
+            # Con podcast/presentazione nuovi le chiavi contenuto-specifiche
+            # cambiano: le cache LLM di run precedenti non servono più. Si
+            # conservano SOLO quelle che questa run può riusare (stessi
+            # contenuti, calcolate con gli stessi endpoint) e la timeline finale.
+            if args.llm != "off":
+                _llm_endpoints = endpoints_for(args.llm)
+                if args.llm_model:
+                    for ep in _llm_endpoints:
+                        ep["model"] = args.llm_model
+                _llm_keep = {"llm_timeline_finale"}
+                _llm_keep.update(
+                    llm_cache_keys_for(
+                        slide_texts,
+                        words_raw,
+                        total_slides,
+                        args.llm_chunk,
+                        _llm_endpoints,
+                        [verify_anchors, semantic_anchors],
+                    )
+                )
+                _llm_cleaned = _clean_stale_llm_cache(_llm_keep)
+                if _llm_cleaned:
+                    log.info("   🧹 Rimosse %d cache LLM orfane (contenuti cambiati).", _llm_cleaned)
+
             # --- Flusso IBRIDO (ordinato + LLM) ---
             # Le ancore deterministiche sono vincoli ESATTI e inviolabili. Se
             # restano slide senza ancora esplicita (mai nominate o narrate fuori
@@ -771,7 +877,9 @@ def main(argv: list | None = None) -> None:
             # --llm != off un LLM posiziona SOLO quelle slide, leggendo dove il
             # loro contenuto viene discusso. Fallback automatico: MiniLM.
             timeline: dict[int, float] | None = None
+            llm_hybrid_attempted = False
             if args.llm != "off" and semantic_anchors and len(semantic_anchors) < total_slides - 1:
+                llm_hybrid_attempted = True
                 endpoints = endpoints_for(args.llm)
                 if args.llm_model:
                     for ep in endpoints:
@@ -830,6 +938,15 @@ def main(argv: list | None = None) -> None:
                     )
 
             if timeline is None:
+                if llm_hybrid_attempted:
+                    log.warning(
+                        "\n   [Avviso] L'LLM non ha prodotto una timeline coerente con le "
+                        "ancore (posizioni in conflitto o risposta non interpretabile).\n"
+                        "   Ripiego sul motore locale (embeddings): qualità inferiore, "
+                        "possibili micro-segmenti sulle slide senza ancora.\n"
+                        "   Il problema nasce dal podcast: poche ancore 'slide N' "
+                        "annunciate. Rigenera l'audio se possibile.\n"
+                    )
                 log.info("   Sincronizzazione semantica (embeddings offline)...")
                 timeline = semantic_timeline_from_words(
                     slide_texts,

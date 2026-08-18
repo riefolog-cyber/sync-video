@@ -69,7 +69,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from typing import Any, cast
 
@@ -846,6 +846,7 @@ def build_ordered_prompt(
     slide_texts: Sequence[str],
     chunks: Sequence[dict[str, Any]],
     anchors: dict[int, float] | None = None,
+    force_anchors: bool = False,
 ) -> tuple[str, str]:
     """Prompt per il flusso ordinato (slide-audio / audio-slide).
 
@@ -853,6 +854,11 @@ def build_ordered_prompt(
     segue l'ordine delle slide (può saltarne alcune, ma non torna indietro)
     e gli comunica le ancore temporali già note ("slide N" nominate dallo
     speaker) come riferimenti certi per collocare le slide senza ancora.
+
+    Con ``force_anchors=True`` le ancore vengono espresse anche come vincoli
+    chunk -> slide ASSOLUTI ("il chunk 5 è la slide 6, non cambiarlo"):
+    usato nel retry quando il primo tentativo produce posizioni in conflitto
+    con le ancore.
     """
     anchor_block = ""
     if anchors:
@@ -860,6 +866,19 @@ def build_ordered_prompt(
         if lines:
             anchor_block = (
                 "\nRiferimenti temporali CERTI (lo speaker li ha nominati esplicitamente):\n" + ", ".join(lines) + "\n"
+            )
+    forced_block = ""
+    if force_anchors and anchors:
+        lines = []
+        for s, t in sorted(anchors.items()):
+            for c in chunks:
+                if c["start"] <= t < c["end"]:
+                    lines.append(f"chunk {c['num']} = slide {s}")
+                    break
+        if lines:
+            forced_block = (
+                "\nVINCOLI ASSOLUTI (lo speaker li ha nominati esplicitamente): NON assegnare "
+                "mai altre slide a questi chunk, NON spostarli:\n" + "\n".join(lines) + "\n"
             )
     system = (
         "Sei un esperto di sincronizzazione audiovisiva. Ti vengono date le "
@@ -889,6 +908,7 @@ def build_ordered_prompt(
         f"Diapositive:\n{_slide_block(slide_texts)}\n\n"
         f"Parlato (chunk):\n{_chunk_block(chunks)}\n\n"
         f"{anchor_block}"
+        f"{forced_block}"
         "Rispondi con l'array JSON."
     )
     return system, user
@@ -976,21 +996,39 @@ def llm_ordered_timeline(
         log.warning("   [LLM/Ordinato] Risposta non interpretabile: fallback al motore locale.")
         return None
 
-    # --- Posizione LLM: per ogni slide, il PRIMO chunk in cui viene discussa.
-    # Le ancore esplicite hanno la precedenza assoluta (già LIS-coerenti);
-    # l'LLM riempie solo le slide senza ancora. ---
-    first_discussion: dict[int, float] = {}
-    for c, s in zip(chunks, slides, strict=True):
-        if s is not None and s not in anchors and s not in first_discussion:
-            first_discussion[s] = float(c["first_time"])
+    # Le ancore esplicite sono vincoli ESATTI e inviolabili: nessuna posizione
+    # LLM può contraddirle. La costruzione della timeline forza ogni chunk che
+    # contiene un'ancora alla sua slide e scarta i "first_discussion" in
+    # conflitto monotono con le ancore (slide senza ancora posizionata dopo una
+    # slide successiva già ancorata, o viceversa).
+    timeline = _build_ordered_timeline(slides, chunks, anchors, total_slides, total_duration)
 
-    refs: dict[int, float] = dict(anchors)
-    refs.update(first_discussion)
-
-    timeline = _complete_from_anchors(refs, total_slides, total_duration)
+    # Se il primo tentativo produce vincoli insoddisfacibili, riproviamo UNA
+    # volta con le ancore FORZATE nei chunk: i modelli piccoli (es. comboact)
+    # tendono a ignorare i riferimenti temporali posti in fondo a un prompt
+    # lungo. Un solo retry per non raddoppiare i costi nel caso peggiore.
     if timeline is None:
         log.warning(
-            "   [LLM/Ordinato] Vincoli insoddisfacibili con le posizioni LLM: fallback al motore locale.",
+            "   [LLM/Ordinato] Posizioni LLM in conflitto con le ancore: "
+            "nuovo tentativo con le ancore forzate nei chunk...",
+        )
+        system, user = build_ordered_prompt(
+            slide_texts[:total_slides], chunks, anchors, force_anchors=True
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        content, used_endpoint, used_model = _call_cascade(eps, messages, "[LLM/Ordinato]")
+        if content is not None:
+            slides = parse_llm_response(content, len(chunks), total_slides=total_slides)
+            if slides is not None and not all(s is None for s in slides):
+                timeline = _build_ordered_timeline(slides, chunks, anchors, total_slides, total_duration)
+
+    if timeline is None:
+        log.warning(
+            "   [LLM/Ordinato] Vincoli insoddisfacibili anche dopo il secondo tentativo: "
+            "fallback al motore locale (qualità inferiore).",
         )
         return None
 
@@ -1009,6 +1047,53 @@ def llm_ordered_timeline(
         cache_key, [{"slide": s, "start": timeline[s], "end": timeline[s]} for s in range(1, total_slides + 1)]
     )
     return timeline
+
+
+def _build_ordered_timeline(
+    slides: list[int | None],
+    chunks: list[dict[str, Any]],
+    anchors: dict[int, float],
+    total_slides: int,
+    total_duration: float,
+) -> dict[int, float] | None:
+    """Costruisce la timeline ordinata dalle posizioni LLM rispettando le ancore.
+
+    Le ancore sono vincoli ESATTI: il chunk che contiene il timestamp di
+    un'ancora viene forzato alla sua slide (l'LLM può averlo assegnato ad
+    altro). Le slide senza ancora vengono collocate al PRIMO chunk in cui il
+    modello le discute, solo se la posizione non è in conflitto monotono con
+    un'ancora; quelle in conflitto vengono scartate (l'interpolazione le
+    coprirà comunque).
+    """
+    enforced = list(slides)
+    for s, t in anchors.items():
+        for i, c in enumerate(chunks):
+            if c["start"] <= t < c["end"]:
+                enforced[i] = s
+                break
+
+    first_discussion: dict[int, float] = {}
+    for c, sld in zip(chunks, enforced, strict=True):
+        if sld is None or sld in anchors or sld in first_discussion:
+            continue
+        pos = float(c["first_time"])
+        if _conflicts_with_anchors(sld, pos, anchors):
+            continue
+        first_discussion[sld] = pos
+
+    refs: dict[int, float] = dict(anchors)
+    refs.update(first_discussion)
+    return _complete_from_anchors(refs, total_slides, total_duration)
+
+
+def _conflicts_with_anchors(slide: int, pos: float, anchors: dict[int, float]) -> bool:
+    """True se collocare `slide` a `pos` viola la monotonia con le ancore."""
+    for a, t in anchors.items():
+        if a > slide and t < pos:
+            return True
+        if a < slide and t > pos:
+            return True
+    return False
 
 
 def _timeline_from_cached(
@@ -1130,6 +1215,7 @@ def llm_verify_anchor_mapping(
     endpoints: list[dict[str, Any]] | None = None,
     wait_timeout: float = 0.0,
     strict: bool = False,
+    remap_filter: Callable[[int, float, int], bool | None] | None = None,
 ) -> dict[int, float] | None:
     """Corregge il mapping numero parlato -> slide PDF delle ancore esplicite.
 
@@ -1139,6 +1225,14 @@ def llm_verify_anchor_mapping(
     vera slide del PDF. I TEMPI delle ancore restano invariati: cambia solo il
     numero di slide associato.
 
+    ``remap_filter``: validatore opzionale ``(slide_parlata, tempo, slide_mappata)
+    -> bool | None`` applicato a ogni rimappo ``s -> s'`` proposto dall'LLM.
+    Se restituisce ``False`` il rimappo viene scartato e l'ancora resta alla
+    slide parlata (vincolo ad alta precisione che il contenuto contraddice);
+    se ``None`` (nessuna opinione) il rimappo passa. Così la correzione LLM
+    non può spostare ancore già corrette. Vedere
+    ``semantic_sync.make_anchor_remap_filter``.
+
     ``wait_timeout``: come in ``llm_timeline_segments`` (pausa con avviso se
     9Router è spento, 'S' o scadenza -> None, il chiamante usa le originali).
 
@@ -1146,8 +1240,9 @@ def llm_verify_anchor_mapping(
     necessario ma non risponde senza terminale, solleva ``RuntimeError``).
 
     Returns:
-        Ancore corrette {slide_pdf: tempo} oppure None se l'LLM non risponde o
-        la correzione non è interpretabile (il chiamante usa le originali).
+        Ancore corrette {slide_pdf: tempo} oppure None se l'LLM non risponde,
+        la correzione non è interpretabile o nessun rimappo è sopravvissuto
+        (il chiamante usa le originali).
 
     Raises:
         RuntimeError: con ``strict=True`` e senza terminale interattivo quando
@@ -1195,11 +1290,26 @@ def llm_verify_anchor_mapping(
         return None
 
     corrected: dict[int, float] = {}
+    remaps_applied = 0
     for s, t in anchors.items():
         new_slide = mapping.get(round(t, 1))
         if new_slide is None:
             corrected[s] = t  # l'LLM non ha risposto per questo timestamp
         elif 1 <= new_slide <= total_slides:
+            if new_slide != s and remap_filter is not None:
+                verdict = remap_filter(s, t, new_slide)
+                if verdict is False:
+                    log.warning(
+                        "   [LLM/Ancore] Rimappo 'slide %d' a %.1fs -> slide %d "
+                        "rifiutato: il contenuto del parlato non lo supporta "
+                        "(resta slide %d).",
+                        s,
+                        t,
+                        new_slide,
+                        s,
+                    )
+                    corrected[s] = t
+                    continue
             if new_slide in corrected:
                 log.warning(
                     "   [LLM/Ancore] Conflitto: l'ancora 'slide %d' a %.1fs è "
@@ -1212,6 +1322,7 @@ def llm_verify_anchor_mapping(
                 )
             corrected[new_slide] = t
             if new_slide != s:
+                remaps_applied += 1
                 log.info(
                     "   [LLM/Ancore] Ancora 'slide %d' a %.1fs -> slide %d del PDF.",
                     s,
@@ -1222,6 +1333,13 @@ def llm_verify_anchor_mapping(
     lis = _lis_anchors(corrected)
     if not lis:
         log.warning("   [LLM/Ancore] Nessuna ancora coerente dopo la correzione.")
+        return None
+
+    # Se nessun rimappo è sopravvissuto (tutti rifiutati dal filtro semantico
+    # o nessuno proposto), non c'è una correzione da applicare: None lascia il
+    # chiamante sulle ancore originali, senza messaggi fuorvianti.
+    if remaps_applied == 0 and set(lis.items()) == set(anchors.items()):
+        log.info("   [LLM/Ancore] Nessun rimappo supportato dal contenuto: uso le ancore originali.")
         return None
 
     log.info(
@@ -1261,6 +1379,36 @@ def _verify_cache_key(
         _endpoints_hash(endpoints),
         [repr(sorted(anchors.items()))],
     )
+
+
+def llm_cache_keys_for(
+    slide_texts: Sequence[str],
+    words_raw: Sequence[Word],
+    total_slides: int,
+    chunk_seconds: float,
+    endpoints: Sequence[dict[str, Any]],
+    anchors_variants: Sequence[dict[int, float]],
+) -> set[str]:
+    """Stem delle cache LLM che la run corrente può riusare.
+
+    Le chiavi LLM sono hash del contenuto (slide + parlato + ancore +
+    endpoint): cambiando podcast o presentazione le vecchie cache non servono
+    più. Per ogni variante di ancore (es. pre- e post-verifica del mapping)
+    calcola le chiavi della verifica ancore e della timeline ordinata. Usato
+    da main per ripulire a ogni avvio le cache LLM orfane di run precedenti.
+    """
+    keys: set[str] = set()
+    for anchors in anchors_variants:
+        if not anchors:
+            continue
+        keys.add("llm_" + _verify_cache_key(slide_texts, words_raw, anchors, endpoints))
+        keys.add(
+            "llm_"
+            + _ordered_cache_key(
+                slide_texts, words_raw, total_slides, chunk_seconds, endpoints, anchors
+            )
+        )
+    return keys
 
 
 # =====================================================================

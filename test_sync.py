@@ -13,6 +13,7 @@ import numpy as np
 
 from semantic_sync import (
     SemanticOptions,
+    make_anchor_remap_filter,
     merge_short_segments,
     refine_llm_segment_boundaries,
     refine_ordered_llm_timeline,
@@ -45,6 +46,82 @@ class TestSlideAudioFlow(unittest.TestCase):
         )
         tl = extract_timeline_from_transcript(words, total_slides=3, total_duration=120.0, flow="slide-audio")
         self.assertEqual(tl, {1: 0.0, 2: 30.3, 3: 80.3})
+
+    def test_closing_recap_not_an_anchor(self):
+        # Regressione: "e chiudiamo con la slide 3" a fine episodio è un ripasso
+        # finale, NON una transizione. Prima del filtro diventava l'ancora della
+        # slide 3 (spostata alla fine dell'audio, video troncato). L'ancora deve
+        # restare quella del passaggio reale "passiamo alla slide 3".
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("alla", 30.2),
+                ("slide", 30.3),
+                ("2", 30.6),
+                ("passiamo", 80.0),
+                ("alla", 80.2),
+                ("slide", 80.3),
+                ("3", 80.6),
+                ("e", 120.0),
+                ("chiudiamo", 120.3),
+                ("con", 120.6),
+                ("la", 120.8),
+                ("slide", 120.9),
+                ("3", 121.2),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=3, flow="slide-audio")
+        self.assertEqual(anchors, {2: 30.6, 3: 80.6})
+
+    def test_closing_recap_with_transition_between_kept(self):
+        # "chiudiamo questo argomento e passiamo alla slide 2": il verbo di
+        # transizione più vicino alla slide indica un passaggio reale, non un
+        # ripasso finale: l'ancora deve essere conservata.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("chiudiamo", 30.0),
+                ("questo", 30.4),
+                ("argomento", 30.7),
+                ("e", 31.0),
+                ("passiamo", 31.3),
+                ("alla", 31.5),
+                ("slide", 31.6),
+                ("2", 31.9),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=2, flow="slide-audio")
+        self.assertEqual(anchors, {2: 31.9})
+
+    def test_early_total_slide_count_does_not_poison_real_anchor(self):
+        # Regressione: "le 13 slide di questo documento" a inizio episodio
+        # (numero prima di "slide") è un conteggio, non una transizione.
+        # Prima del fix first-wins occupava la slide 13 e scartava la vera
+        # ancora "passiamo alla slide 13" pronunciata dopo (video con slide 13
+        # anticipata di ~16s). Deve vincere l'occorrenza più recente.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("ordine", 118.3),
+                ("le", 118.8),
+                ("13", 119.3),
+                ("slide", 119.6),
+                ("di", 120.3),
+                ("questo", 120.5),
+                ("documento", 120.8),
+                ("passiamo", 2055.8),
+                ("alla", 2056.4),
+                ("slide", 2056.6),
+                ("13", 2056.8),
+                ("il", 2057.9),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=13, flow="slide-audio")
+        self.assertEqual(anchors, {13: 2057.9})
 
     def test_italian_number_words(self):
         words = _words(
@@ -1551,3 +1628,78 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
             embed_fn=self._embed_fn(4),
         )
         self.assertIsNone(out)
+
+
+class TestAnchorRemapFilter(unittest.TestCase):
+    """Validatore dei rimappi ancore LLM: il contenuto deve confermare il
+    rimappo, altrimenti l'ancora esplicita (vincolo ad alta precisione) resta."""
+
+    @staticmethod
+    def _embed_fn(num_slides):
+        def _embed(texts):
+            out = []
+            for t in texts:
+                v = np.zeros(num_slides)
+                for k in range(num_slides):
+                    if f"tema{k + 1}" in t:
+                        v[k] = 1.0
+                norm = np.linalg.norm(v)
+                out.append(v / norm if norm else v)
+            return np.array(out)
+
+        return _embed
+
+    def test_remap_supported_when_content_matches_target(self):
+        # Speaker dice "slide 4" a 100s ma il parlato dopo parla di tema5:
+        # il rimappo 4 -> 5 è supportato dal contenuto.
+        slides = [f"tema{i} slide" for i in range(1, 6)]
+        words = [{"word": "tema5", "start": 105.0 + i} for i in range(5)]
+        filtro = make_anchor_remap_filter(
+            slides,
+            words,
+            total_slides=5,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(5),
+        )
+        self.assertIsNotNone(filtro)
+        self.assertTrue(filtro(4, 100.0, 5))
+
+    def test_remap_rejected_when_content_matches_spoken(self):
+        # Speaker dice "slide 4" a 100s e il parlato parla davvero di tema4:
+        # il rimappo 4 -> 5 contraddice il contenuto e va rifiutato.
+        slides = [f"tema{i} slide" for i in range(1, 6)]
+        words = [{"word": "tema4", "start": 105.0 + i} for i in range(5)]
+        filtro = make_anchor_remap_filter(
+            slides,
+            words,
+            total_slides=5,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(5),
+        )
+        self.assertIsNotNone(filtro)
+        self.assertFalse(filtro(4, 100.0, 5))
+
+    def test_empty_window_returns_none(self):
+        slides = [f"tema{i} slide" for i in range(1, 6)]
+        filtro = make_anchor_remap_filter(
+            slides,
+            [],
+            total_slides=5,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(5),
+        )
+        self.assertIsNotNone(filtro)
+        self.assertIsNone(filtro(4, 100.0, 5))
+
+    def test_embedder_unavailable_returns_none(self):
+        # Senza embedder il filtro è None: l'LLM fa fede (comportamento storico).
+        from unittest.mock import patch
+
+        with patch("semantic_sync._load_embed_model", return_value=None):
+            filtro = make_anchor_remap_filter(
+                ["tema1 slide", "tema2 slide"],
+                [{"word": "tema1", "start": 105.0}],
+                total_slides=2,
+                window_seconds=40.0,
+            )
+        self.assertIsNone(filtro)

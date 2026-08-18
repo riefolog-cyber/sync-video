@@ -98,7 +98,7 @@ python main.py --llm auto --preview     # valuta senza generare video
 python main.py --llm 9router           # forza 9Router online
 ```
 
-> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto. Prompt ottimali per NotebookLM: [`PROMPT_NOTEBOOKLM PRIMA PODCAST.md`](PROMPT_NOTEBOOKLM%20PRIMA%20PODCAST.md) (podcast → presentazione) e [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE.md) (presentazione → podcast) — vedi "Quale prompt usare".
+> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto. Prompt ottimale per NotebookLM: [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE.md) — vedi "Quale prompt usare".
 
 #### Manutenzione 9Router (`9router-maintenance/`)
 
@@ -315,8 +315,7 @@ genera_video.bat         ← Launcher 1-click
 requirements.txt         ← Dipendenze pip
 ruff.toml                ← Configurazione lint (guardrail di stile)
 mypy.ini                 ← Configurazione type-check
-PROMPT_NOTEBOOKLM PRIMA PODCAST.md ← Workflow 1: prompt per generare podcast ottimizzati (podcast → presentazione)
-PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md ← Workflow 2: prompt multi-fonte (presentazione → podcast)
+PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md ← Prompt NotebookLM: presentazione → podcast (unico workflow)
 tessdata/                ← Modelli lingua Tesseract portatili
 9router-maintenance/     ← Script manutenzione combo `comboact` di 9Router (vedi sotto)
 ```
@@ -424,24 +423,23 @@ sono simili e mostra quella slide in quel momento.
   ```
 - **Ambiente**: `EMBEDDING_MODEL` e `EMBEDDING_MODEL_ALTERNATE` sovrascrivibili permanentemente.
 
-### Quale prompt usare: i due workflow
+### Quale prompt usare
 
-Due processi di input possibili, uno per obiettivo. In ENTRAMBI il podcast deve
+Un solo processo di input: **presentazione → podcast**. Il podcast deve
 pronunciare le ancore "slide N" **in cifre** a ogni sezione: senza ancore il
 pipeline non può sapere dove cambia la slide e passa al flusso libero (che usa
 l'LLM — un avviso in console lo segnala).
 
-| | [`PROMPT_NOTEBOOKLM PRIMA PODCAST.md`](PROMPT_NOTEBOOKLM%20PRIMA%20PODCAST.md) | [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE.md) |
-|---|---|---|
-| **Direzione** | **Podcast → Presentazione** (consigliato) | **Presentazione → Podcast** |
-| **Quando** | Sincronizzazione massima 1:1 | Podcast **multi-fonte** che arricchisce una presentazione già pronta |
-| **Ancore** | Strittissime (cifre, "slide" chiara, mai "la slide successiva", recupero salti) | Stesse regole rinforzate + arricchimento con le altre fonti |
-| **Flusso atteso** | `slide-audio` con ancore → **senza LLM** | `slide-audio` con ancore → **senza LLM** |
+Il prompt [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE.md)
+guida sia la generazione della presentazione (Studio → Slide Deck, dalle tue
+fonti) sia il podcast che la segue nell'ordine, arricchendola con le altre
+fonti. Ancore strette: cifre, "slide" chiara, mai "la slide successiva",
+recupero salti.
 
-**Workflow 1 — Podcast → Presentazione** (precisione massima):
+**Procedura (Presentazione → Podcast):**
 
-1. Genera il **podcast** con [`PROMPT_NOTEBOOKLM PRIMA PODCAST.md`](PROMPT_NOTEBOOKLM%20PRIMA%20PODCAST.md) (ancore "slide N" in cifre a ogni sezione).
-2. Genera la **presentazione** dal podcast: UNA slide per ogni sezione, stesso ordine.
+1. Genera la **presentazione** con NotebookLM (Studio → Slide Deck) usando il prompt dedicato nel file, e mettila nelle fonti come **PRESENTAZIONE**.
+2. Genera il **podcast** con il prompt del file: segue l'ordine della presentazione, con le ancore + riferimenti alle altre fonti.
 3. Verifica le ancore prima di lanciare il pipeline:
    ```bash
    grep -c "slide" transcript_raw.txt   # deve essere ≥ N-1 (una per transizione)
@@ -449,20 +447,13 @@ l'LLM — un avviso in console lo segnala).
    Se è 0 il prompt non è stato seguito: rigenera il podcast.
 4. `python main.py` → auto-detection `slide-audio`, ancore deterministiche, nessuna chiamata a 9Router (o `--llm off` per escluderlo del tutto).
 
-**Workflow 2 — Presentazione → Podcast** (podcast ricco multi-fonte):
-
-1. Crea la **presentazione** e mettila nelle fonti, come da [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE.md).
-2. Genera il **podcast** seguendo l'ordine della presentazione, con le ancore rinforzate + riferimenti alle altre fonti.
-3. Stessa verifica `grep -c "slide" transcript_raw.txt`.
-4. `python main.py` → stesso flusso ordinato deterministico.
-
 **Se il podcast non pronuncia le ancore** (dibattito libero): il pipeline
 avvisa e usa il flusso libero (LLM via 9Router). Fallback senza LLM:
 `python main.py --flow slide-audio --llm off` (allineamento monotono embedding,
 meno preciso senza ancore ma deterministico).
 
-Risultato su test reale (workflow 1): 6 ancore deterministiche, durate
-uniformi ~130s, sincronizzazione perfetta.
+Risultato su test reale: 6 ancore deterministiche, durate uniformi ~130s,
+sincronizzazione perfetta.
 
 ---
 

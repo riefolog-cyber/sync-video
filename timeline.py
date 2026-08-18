@@ -22,6 +22,36 @@ from config import log
 # ``_is_slide_word``.
 _SLIDE_WORDS = frozenset({"slide", "diapositiva", "sla", "asl", "sallay", "slaib"})
 
+# Parole di CHIUSURA/riepilogo finale (es. "e chiudiamo con la slide 14").
+# Un "slide N" preceduto da queste parole non è una transizione di inizio
+# sezione: è un riferimento a posteriori che, usato come ancora, sposterebbe
+# la slide alla fine dell'audio (video che sembra troncarsi). Va scartato.
+_CLOSING_MARKERS = frozenset({
+    "chiudiamo", "chiudendo", "chiudere", "chiude",
+    "concludiamo", "concludendo", "concludere", "conclusione",
+})
+
+# Verbi di transizione che, se più vicini alla slide del marcatore di chiusura,
+# indicano un passaggio reale e non un ripasso finale (es. "chiudiamo questo
+# argomento e passiamo alla slide 5"): in quel caso l'ancora è legittima.
+_TRANSITION_VERBS = frozenset({"passiamo", "procediamo", "andiamo", "ora"})
+
+
+def _is_closing_recap(
+    words: list[Word], slide_word_idx: int, lookback: int = 6
+) -> bool:
+    """True se 'slide N' è preceduto (entro ``lookback`` parole) da un'espressione
+    di chiusura finale (es. "e chiudiamo con la slide 14") senza una transizione
+    intermedia più vicina. In quel caso il riferimento è un ripasso a posteriori,
+    non una transizione di inizio sezione: non deve diventare un'ancora."""
+    for w in reversed(words[max(0, slide_word_idx - lookback):slide_word_idx]):
+        token = _normalize(w["word"])
+        if token in _TRANSITION_VERBS:
+            return False
+        if token in _CLOSING_MARKERS:
+            return True
+    return False
+
 
 # =====================================================================
 # ESTRAZIONE DETERMINISTICA TIMELINE
@@ -309,6 +339,13 @@ def _collect_slide_references(
     """Raccoglie TUTTI i riferimenti 'slide N' / 'N ... slide' trovati,
     incluso quelli fuori ordine cronologico (gestiti dal chiamante).
 
+    Per ogni numero di slide conserva l'occorrenza temporale PIÙ RECENTE
+    (last-wins): una citazione anticipata del numero totale delle slide
+    (es. "le 13 slide di questo documento" a inizio episodio) non deve
+    occupare la slide e far scartare la vera ancora "passiamo alla slide 13"
+    pronunciata dopo. L'ordinamento cronologico resta filtrato dal chiamante
+    (LIS). Le citazioni di chiusura/ripasso finale sono sempre scartate.
+
     Con ``include_slide_one=True`` raccoglie anche la "slide 1" parlata: serve
     alla verifica LLM del mapping (la numerazione dello speaker può essere
     sfasata, es. "slide 1" mentre mostra la slide 2 del PDF). La slide 1 reale
@@ -325,7 +362,14 @@ def _collect_slide_references(
             # con cardinali italiani ("slaidotto" -> 8, "slaidue" -> 2): il solo
             # `_number_from_word` vede le cifre ("slaib6") ma non i numeri fusi.
             embedded = _embedded_slide_number(w_norm)
-            if embedded is not None and min_slide <= embedded <= total_slides and embedded not in refs:
+            if embedded is not None and min_slide <= embedded <= total_slides:
+                if _is_closing_recap(words, i):
+                    log.info(
+                        "   [Ancore] 'slide %d' a %.1fs: citazione di chiusura, scartata.",
+                        embedded,
+                        w["start"],
+                    )
+                    continue
                 refs[embedded] = _reference_boundary(words, i)
                 log.debug(
                     "   [Deterministico] Trovato '%s' con numero incorporato a %.1fs",
@@ -336,26 +380,50 @@ def _collect_slide_references(
             for j in range(i + 1, min(i + 8, len(words))):
                 slide_num = _number_from_word(_normalize(words[j]["word"]))
                 if slide_num is not None:
-                    if min_slide <= slide_num <= total_slides and slide_num not in refs:
-                        refs[slide_num] = _reference_boundary(words, j)
-                        log.debug(
-                            "   [Deterministico] Trovato 'slide %d' a %.1fs",
-                            slide_num,
-                            w["start"],
-                        )
+                    if min_slide <= slide_num <= total_slides:
+                        if _is_closing_recap(words, i):
+                            log.info(
+                                "   [Ancore] 'slide %d' a %.1fs: citazione di chiusura, scartata.",
+                                slide_num,
+                                w["start"],
+                            )
+                        else:
+                            refs[slide_num] = _reference_boundary(words, j)
+                            log.debug(
+                                "   [Deterministico] Trovato 'slide %d' a %.1fs",
+                                slide_num,
+                                w["start"],
+                            )
                     break
         else:
-            # Pattern 2: numero prima di "slide" (es. "ora nove ... la slide")
+            # Pattern 2: numero prima di "slide" (es. "ora nove ... la slide").
+            # Un numero GIA' parte di una frase "slide N" (preceduto da una
+            # parola slide entro la finestra del pattern 1) NON va ri-rilevato
+            # qui: altrimenti, con last-wins, il numero della slide precedente
+            # scansonerebbe in avanti fino al "slide" della frase successiva e
+            # sovrascriverebbe l'ancora con il timestamp sbagliato
+            # (es. "slide 2 ... slide 3" -> refs[2] spostato su "slide 3").
             num = _number_from_word(w_norm)
-            if num is not None and min_slide <= num <= total_slides and num not in refs:
+            if (
+                num is not None
+                and min_slide <= num <= total_slides
+                and not _preceded_by_slide_word(words, i)
+            ):
                 for j in range(i + 1, min(i + 7, len(words))):
                     if _is_slide_word(words[j]["word"]):
-                        refs[num] = _reference_boundary(words, j)
-                        log.debug(
-                            "   [Deterministico] Trovato '%s ... slide' a %.1fs",
-                            w["word"],
-                            words[j]["start"],
-                        )
+                        if _is_closing_recap(words, j):
+                            log.info(
+                                "   [Ancore] 'slide %d' a %.1fs: citazione di chiusura, scartata.",
+                                num,
+                                words[j]["start"],
+                            )
+                        else:
+                            refs[num] = _reference_boundary(words, j)
+                            log.debug(
+                                "   [Deterministico] Trovato '%s ... slide' a %.1fs",
+                                w["word"],
+                                words[j]["start"],
+                            )
                         break
     return refs
 
@@ -668,6 +736,17 @@ def _normalize(word: str) -> str:
     for accented, plain in replacements.items():
         w = w.replace(accented, plain)
     return w
+
+
+def _preceded_by_slide_word(words: list[Word], idx: int, lookback: int = 8) -> bool:
+    """True se una parola slide precede ``words[idx]`` entro ``lookback`` parole.
+
+    La finestra (8 parole) coincide con quella del pattern 1 ("slide N"): se un
+    numero è preceduto da una parola slide entro questa distanza appartiene
+    già a una frase "slide N" e non deve essere rilevato dal pattern 2
+    ("N ... slide"), che guarda solo a numeri PRIMA di una parola slide.
+    """
+    return any(_is_slide_word(w["word"]) for w in words[max(0, idx - lookback):idx])
 
 
 def _is_slide_word(word: str) -> bool:
