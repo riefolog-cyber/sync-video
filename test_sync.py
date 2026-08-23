@@ -1183,7 +1183,7 @@ class TestEmbedModelFallback(unittest.TestCase):
         class FakeModel:
             pass
 
-        def side_effect(model_name, cache_dir):
+        def side_effect(model_name, cache_dir, **_kwargs):
             if "mpnet" in model_name:
                 raise RuntimeError("download interrotto")
             return FakeModel()
@@ -1204,7 +1204,7 @@ class TestEmbedModelFallback(unittest.TestCase):
 
         called = []
 
-        def side_effect(model_name, cache_dir):
+        def side_effect(model_name, cache_dir, **_kwargs):
             called.append(model_name)
             return FakeModel()
 
@@ -1220,7 +1220,7 @@ class TestEmbedModelFallback(unittest.TestCase):
 
         called = []
 
-        def side_effect(model_name, cache_dir):
+        def side_effect(model_name, cache_dir, **_kwargs):
             called.append(model_name)
             return FakeModel()
 
@@ -1229,7 +1229,7 @@ class TestEmbedModelFallback(unittest.TestCase):
         self.assertEqual(called, ["only-model"])
 
     def test_both_fail_returns_none(self):
-        def side_effect(model_name, cache_dir):
+        def side_effect(model_name, cache_dir, **_kwargs):
             raise RuntimeError("rete assente")
 
         with self._patch_text_embedding(side_effect):

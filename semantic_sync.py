@@ -35,6 +35,7 @@ import numpy as np
 
 from chunks import Segment, Word, build_windows
 from config import (
+    DEFAULT_EMBED_THREADS,
     DEFAULT_EMBEDDING_CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
@@ -178,7 +179,15 @@ def _load_embed_model(
             model = _EMBED_MODEL_CACHE.get(key)
             if model is None:
                 _t0 = time.perf_counter()
-                model = TextEmbedding(model_name=candidate, cache_dir=str(cache_dir))
+                # threads: il default di fastembed è conservativo (spesso 1-4
+                # thread ONNX); su CPU multi-core usare ~8 quasi raddoppia la
+                # velocità di calcolo. Configurabile con EMBED_THREADS.
+                model = TextEmbedding(
+                    model_name=candidate,
+                    cache_dir=str(cache_dir),
+                    threads=DEFAULT_EMBED_THREADS,
+                )
+                log.debug("   [Semantico] Thread ONNX embedding: %d", DEFAULT_EMBED_THREADS)
                 _MODEL_LOAD_SECONDS += time.perf_counter() - _t0
                 _EMBED_MODEL_CACHE[key] = model
             if is_alt:

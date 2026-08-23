@@ -407,6 +407,12 @@ DEFAULT_EMBEDDING_MODEL_ALTERNATE = os.environ.get(
     "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
 )
 DEFAULT_EMBEDDING_CACHE_DIR = os.environ.get("EMBEDDING_CACHE_DIR", str(CACHE_DIR / "embedding_model"))
+# Thread ONNX per il calcolo degli embedding: il default di fastembed è
+# conservativo e su CPU multi-core spreca core. Il sweet spot empirico su
+# laptop Intel client è ~8 (a 16+ la banda memoria saturazione e peggiora).
+# Override con EMBED_THREADS.
+DEFAULT_EMBED_THREADS = _env_int("EMBED_THREADS", min(8, os.cpu_count() or 4))
+
 DEFAULT_SEMANTIC_WINDOW = _env_float("SEMANTIC_WINDOW", 4.0)  # secondi per blocco
 DEFAULT_SEMANTIC_MIN_DURATION = _env_float("SEMANTIC_MIN_DURATION", 3.0)  # durata minima slide
 DEFAULT_SEMANTIC_MIN_SIM = _env_float("SEMANTIC_MIN_SIM", 0.10)  # soglia qualità
