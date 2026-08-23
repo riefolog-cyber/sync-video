@@ -55,6 +55,21 @@ Override manuale: `python main.py --flow audio-slide` oppure `python main.py --f
 > in qualsiasi ordine e anche ripetuta, con anti-flicker (durata minima dei
 > segmenti, ~8s) e avviso sulle slide mai menzionate.
 
+### 📝 Prompt NotebookLM (come generare presentazione e podcast)
+
+Due ricette pronte, in base al punto di partenza:
+
+| Prompt | Flusso | Quando usarlo |
+|---|---|---|
+| [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE.md) | **A**: deck → podcast con ancore `slide N` | Default: massima precisione di allineamento (ancore esatte), podcast più strutturato |
+| [`PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PODCAST.md) | **B**: podcast libero → deck derivato dal parlato | Podcast più naturale; anche come piano B quando appare l'avviso "segnale debole" (slide troppo simili tra loro) |
+
+Il flusso A sfrutta le ancore esplicite (flusso ordinato + ibrido LLM); il
+flusso B produce slide che rispecchiano 1:1 il parlato e funziona bene col
+riordino semantico (`free`/ordinato senza ancore), ma i confini sono stimati e
+meno precisi al secondo.
+
+
 ### 🤖 Selezione con LLM (opzionale, supera il tetto dell'embedding)
 
 L'embedding locale (e5-large) ha un tetto di precisione quando le slide sono
