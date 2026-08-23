@@ -688,7 +688,7 @@ def main(argv: list | None = None) -> None:
                         model_name=args.semantic_model,
                         cache_dir=args.semantic_cache_dir,
                     ),
-                    window_seconds=args.llm_chunk,
+                    window_seconds=min(args.llm_chunk, 30.0),
                 )
                 n_segments_before = len(segments)
                 segments = merge_short_segments(segments)
@@ -934,7 +934,7 @@ def main(argv: list | None = None) -> None:
                             model_name=args.semantic_model,
                             cache_dir=args.semantic_cache_dir,
                         ),
-                        window_seconds=args.llm_chunk,
+                        window_seconds=min(args.llm_chunk, 30.0),
                     )
 
             if timeline is None:

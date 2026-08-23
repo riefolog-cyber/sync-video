@@ -1192,6 +1192,8 @@ def refine_llm_segment_boundaries(
     context_seconds: float = 10.0,
     margin: float = 0.01,
     refine_slides: Collection[int] | None = None,
+    anchors: dict[int, float] | None = None,
+    max_candidates: int = 48,
 ) -> list[dict[str, Any]]:
     """Rifinisce i confini dei segmenti LLM a granularità di parola.
 
@@ -1201,6 +1203,13 @@ def refine_llm_segment_boundaries(
     la slide uscente + similarità della finestra appena DOPO con la slide
     entrante. Se lo spostamento non migliora di almeno ``margin`` rispetto al
     confine corrente, il confine resta dov'è.
+
+    ``max_candidates`` limita quanti timestamp-candidato vengono valutati per
+    confine (campionamento uniforme con stride, confine corrente SEMPRE
+    incluso): su finestre ampie evita di embeddere centinaia di finestre per
+    confine, che è il collo principale del raffinamento. La risoluzione resta
+    a livello di parola e la similarità è liscia attorno all'optimum, quindi
+    la perdita di qualità è trascurabile.
 
     ``refine_slides`` (opzionale) limita il raffinamento ai SOLI confini di
     inizio delle slide indicate (numeri 1-based): i confini delle altre slide
@@ -1249,6 +1258,14 @@ def refine_llm_segment_boundaries(
         if hi <= lo:
             continue
         candidates = sorted({t_current, *[t for t in word_times if lo <= t <= hi]})
+        # Campionamento con stride: oltre max_candidates timestamp, valuta un
+        # sottoinsieme uniforme (il confine corrente è sempre mantenuto). Su
+        # finestre ampie questo evita centinaia di embedding per confine.
+        if len(candidates) > max_candidates > 1:
+            step = -(-len(candidates) // (max_candidates - 1))  # ceil-div
+            sampled = set(candidates[::step])
+            sampled.add(t_current)
+            candidates = sorted(sampled)
         if len(candidates) < 2:
             continue
 
@@ -1300,6 +1317,24 @@ def refine_llm_segment_boundaries(
         if best_idx == cur_idx or scores[best_idx] <= scores[cur_idx] + margin:
             continue
         best_t = indexed[best_idx][0]
+        # Vincolo ancore: il nuovo confine non deve violare la monotonia
+        # con le ancore esplicita (es. non posizionare slide 4 prima
+        # dell'ancora slide 3 a 758.4s).
+        if anchors:
+            violates = False
+            for a_slide, a_time in anchors.items():
+                # Il confine (start di next_slide) deve essere DOPO l'ancora
+                # se l'ancora e' la slide che termina o precede questo confine.
+                if a_slide <= prev_slide + 1 and best_t < a_time - 0.1:
+                    violates = True
+                    break
+                # Il confine deve essere PRIMA dell'ancora se l'ancora e' la
+                # slide che inizia o segue questo confine.
+                if a_slide >= next_slide + 1 and best_t > a_time + 0.1:
+                    violates = True
+                    break
+            if violates:
+                continue
         out[i]["start"] = best_t
         out[i - 1]["end"] = best_t
         moved += 1
@@ -1413,6 +1448,7 @@ def refine_ordered_llm_timeline(
         window_seconds=window_seconds,
         min_segment_seconds=min_segment_seconds,
         refine_slides=refine_slides,
+        anchors=anchors,
     )
     return {int(seg["slide"]): float(seg["start"]) for seg in refined}
 
