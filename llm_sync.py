@@ -1148,7 +1148,7 @@ def _timeline_from_cached(
             t = refs[s]
             bucket = round(t, 1)
             seen_times.setdefault(bucket, []).append(s)
-        for bucket, slds in seen_times.items():
+        for _bucket, slds in seen_times.items():
             if len(slds) > 1:
                 for s in slds[1:]:
                     del refs[s]
@@ -1694,7 +1694,7 @@ def _hash_cache(*parts: Sequence[str]) -> str:
     post-processing le cache vecchie non vengono MAI riusate (by design).
     """
     h = hashlib.md5()
-    h.update(f"v{_LLM_CACHE_LOGIC_VERSION}|".encode("utf-8"))
+    h.update(f"v{_LLM_CACHE_LOGIC_VERSION}|".encode())
     for part in parts:
         for s in part:
             h.update(s.encode("utf-8", errors="replace"))
