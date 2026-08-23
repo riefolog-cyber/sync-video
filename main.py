@@ -6,8 +6,11 @@ Gestisce cache/resume, dry-run, e coordina tutte le fasi.
 
 import hashlib
 import json
+import logging
+import os
 import re
 import sys
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -1095,5 +1098,38 @@ def main(argv: list | None = None) -> None:
             log.debug("   audio_clip cleanup eseguito.")
 
 
+# =====================================================================
+# USCITA PULITA (protezione anti-zombie)
+# =====================================================================
+def _force_clean_exit() -> None:
+    """Forza la terminazione del processo se thread residui ne bloccano l'uscita.
+
+    Osservato in produzione: una run è rimasta appesa dopo "[COMPLETATO]",
+    bruciando CPU per decine di minuti. Le librerie usate lungo la pipeline
+    (moviepy, onnxruntime, client HTTP) possono lasciare thread non-daemon
+    vivi: Python attende TUTTI i thread non-daemon prima di terminare, quindi
+    il processo resta appeso anche se main() è già ritornato. Qui logghiamo i
+    colpevoli (per la diagnosi) e, solo in quel caso, forziamo l'uscita dopo
+    il flush dei log. Se non ci sono thread residui, l'uscita normale segue
+    il suo corso (atexit inclusi).
+    """
+    lingering = [
+        t.name
+        for t in threading.enumerate()
+        if t is not threading.current_thread() and not t.daemon and t.is_alive()
+    ]
+    if not lingering:
+        return
+    log.info(
+        "   Thread residui a fine run (%s): forzo l'uscita pulita.",
+        ", ".join(lingering),
+    )
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
+
 if __name__ == "__main__":
     main()
+    _force_clean_exit()
