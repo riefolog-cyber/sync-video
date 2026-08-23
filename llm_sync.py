@@ -75,7 +75,7 @@ from typing import Any, cast
 
 from chunks import Word, build_windows
 from config import CACHE_DIR, log
-from timeline import _complete_from_anchors, _lis_anchors
+from timeline import _complete_from_anchors, _lis_anchors, reconcile_timeline
 
 try:
     import requests
@@ -972,7 +972,7 @@ def llm_ordered_timeline(
     cached = _load_llm_cache(cache_key)
     if cached is not None:
         log.info("   [LLM/Ordinato] Timeline recuperata dalla cache (hash %s).", cache_key[:12])
-        return _timeline_from_cached(cached, anchors)
+        return _timeline_from_cached(cached, anchors, total_slides, total_duration)
 
     # Health-check: se 9Router è spento, avvio automatico + PAUSA con avviso
     # e ripresa automatica appena torna online (o 'S' per il fallback MiniLM).
@@ -1035,6 +1035,18 @@ def llm_ordered_timeline(
     # Le ancore esplicite non devono MAI essere spostate dall'interpolazione.
     for s, t in anchors.items():
         timeline[s] = float(t)
+
+    # Guardia finale: dopo il ripristino delle ancore la timeline deve restare
+    # valida (monotona). Se il clamp dell'interpolazione le ha scalate e il
+    # ripristino ha rotto l'ordine, niente timeline inventata: fallback MiniLM.
+    try:
+        reconcile_timeline(timeline, total_slides, total_duration)
+    except ValueError:
+        log.warning(
+            "   [LLM/Ordinato] Timeline non valida dopo il ripristino delle ancore: "
+            "fallback al motore locale."
+        )
+        return None
 
     log.info(
         "   [LLM/Ordinato] Timeline ibrida generata (%d slide, %d ancore esatte, via %s [%s]).",
@@ -1099,17 +1111,52 @@ def _conflicts_with_anchors(slide: int, pos: float, anchors: dict[int, float]) -
 def _timeline_from_cached(
     cached: list[dict[str, object]],
     anchors: dict[int, float],
-) -> dict[int, float]:
-    """Ricostruisce la timeline ordinata dalla cache LLM (lista {slide, start})."""
-    timeline: dict[int, float] = {}
+    total_slides: int = 0,
+    total_duration: float = 0.0,
+) -> dict[int, float] | None:
+    """Ricostruisce la timeline ordinata dalla cache LLM (lista {slide, start}).
+
+    Filtra le posizioni LLM che violano la monotonia con le ancore (es. slide 4
+    posizionata prima dell'ancora slide 3) o che collidono con altre slide
+    senza ancora (stesso timestamp), poi completa la timeline con lo STESSO
+    motore del percorso live (``_complete_from_anchors``): LIS + interpolazione
+    + validazione ``reconcile_timeline``. Cache e run diretta producono quindi
+    risultati identici e MAI timeline non monotone (il vecchio completamento
+    manuale poteva interpolare una slide filtrata DOPO una posizione LLM
+    mantenuta, rompendo la monotonia e facendo abortire la rigenerazione).
+
+    Returns:
+        Timeline {slide: start} valida, oppure None se le posizioni residue
+        sono insufficienti (il chiamante usa il fallback MiniLM).
+    """
+    refs: dict[int, float] = {}
     for seg in cached:
         s = seg.get("slide")
         st = seg.get("start")
         if isinstance(s, int) and isinstance(st, (int, float)):
-            timeline[s] = float(st)
+            if s not in anchors and _conflicts_with_anchors(s, float(st), anchors):
+                continue
+            refs[s] = float(st)
     for s, t in anchors.items():
-        timeline[s] = float(t)
-    return timeline
+        refs[s] = float(t)
+    # Rimuovi collisioni: slide senza ancora con timestamp uguale a un'altra
+    if total_slides > 0:
+        seen_times: dict[float, list[int]] = {}
+        for s in sorted(refs):
+            if s in anchors:
+                continue
+            t = refs[s]
+            bucket = round(t, 1)
+            seen_times.setdefault(bucket, []).append(s)
+        for bucket, slds in seen_times.items():
+            if len(slds) > 1:
+                for s in slds[1:]:
+                    del refs[s]
+    # Completa le slide mancanti con lo stesso motore del percorso live:
+    # il completamento manuale qui aveva un bug (interpolazione non monotona).
+    if total_slides > 0 and total_duration > 0:
+        return _complete_from_anchors(refs, total_slides, total_duration)
+    return refs if len(refs) == total_slides else None
 
 
 def _ordered_cache_key(
@@ -1258,7 +1305,32 @@ def llm_verify_anchor_mapping(
     cached = _load_llm_cache(cache_key)
     if cached is not None:
         log.info("   [LLM/Ancore] Verifica ancore dalla cache (hash %s).", cache_key[:12])
-        return _verified_anchors_from_cached(cached)
+        verified = _verified_anchors_from_cached(cached)
+        if verified is None:
+            return None
+        # Le ancore cachate devono superare lo STESSO validatore dei rimappi
+        # live: una cache prodotta da una run precedente (o da una verifica
+        # errata) non può bypassare il filtro sul contenuto del parlato. Si
+        # ricostruisce la slide parlata originale per prossimità temporale
+        # (i tempi delle ancore restano invariati dalla verifica).
+        if remap_filter is not None:
+            for pdf_slide, t in list(verified.items()):
+                spoken = _nearest_spoken_anchor(pdf_slide, t, anchors)
+                if spoken is None or spoken == pdf_slide:
+                    continue
+                if remap_filter(spoken, anchors[spoken], pdf_slide) is False:
+                    log.warning(
+                        "   [LLM/Ancore] Rimappo cachato 'slide %d' a %.1fs -> "
+                        "slide %d rifiutato dal contenuto del parlato "
+                        "(resta slide %d).",
+                        spoken,
+                        anchors[spoken],
+                        pdf_slide,
+                        spoken,
+                    )
+                    verified[spoken] = anchors[spoken]
+                    del verified[pdf_slide]
+        return verified
 
     # Health-check: se 9Router è spento, avvio automatico + PAUSA con avviso
     # e ripresa automatica appena torna online (o 'S' per usare le originali).
@@ -1363,6 +1435,25 @@ def _verified_anchors_from_cached(
         if isinstance(s, int) and isinstance(st, (int, float)):
             out[s] = float(st)
     return out or None
+
+
+def _nearest_spoken_anchor(
+    pdf_slide: int, t: float, anchors: dict[int, float], tolerance: float = 3.0
+) -> int | None:
+    """Slide parlata originale la cui ancora è temporalmente più vicina a ``t``.
+
+    La verifica LLM mantiene i TEMPI delle ancore invariati (cambia solo il
+    numero di slide): per applicare il ``remap_filter`` a un risultato cachato
+    serve ricostruire quale 'slide N' parlata ha generato il rimappo, cercando
+    l'ancora originale più vicina entro ``tolerance`` secondi.
+    """
+    best: int | None = None
+    best_d = tolerance
+    for s, at in anchors.items():
+        d = abs(at - t)
+        if d < best_d:
+            best, best_d = s, d
+    return best
 
 
 def _verify_cache_key(
@@ -1584,9 +1675,26 @@ def _warn_review_diffs(
 # =====================================================================
 # CACHE LLM (per hash audio+slide+chunk)
 # =====================================================================
+# Versione logica delle cache LLM: BUMPA questa costante ogni volta che cambi
+# prompt, filtri o logica di post-processing (interpolazione, validazione,
+# refine). La chiave cache dipende dal CONTENUTO (slide + parole + ancore +
+# endpoint) ma NON dal codice: senza questa versione una cache calcolata con
+# logica vecchia viene riusata da codice nuovo, con risultati sbagliati senza
+# alcun segnale (es. il rimappo ancore errato del 20/08 riusato dal video del
+# 21/08). Bumpare rende obsolete TUTTE le cache LLM precedenti: la run
+# successiva le ricalcola da zero (costo una tantum), con le protezioni
+# correnti (filtri, validazioni) applicate ai risultati freschi.
+_LLM_CACHE_LOGIC_VERSION = 2
+
+
 def _hash_cache(*parts: Sequence[str]) -> str:
-    """Hash MD5 stabile di sequenze di stringhe (chiavi di cache LLM)."""
+    """Hash MD5 stabile di sequenze di stringhe (chiavi di cache LLM).
+
+    Include ``_LLM_CACHE_LOGIC_VERSION``: cambiando la logica di prompt o
+    post-processing le cache vecchie non vengono MAI riusate (by design).
+    """
     h = hashlib.md5()
+    h.update(f"v{_LLM_CACHE_LOGIC_VERSION}|".encode("utf-8"))
     for part in parts:
         for s in part:
             h.update(s.encode("utf-8", errors="replace"))

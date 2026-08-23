@@ -1032,7 +1032,9 @@ class TestOrderedTimeline(unittest.TestCase):
             '{"chunk": 3, "slide": 6}, {"chunk": 4, "slide": 6}, '
             '{"chunk": 5, "slide": null}]'
         )
-        final = {1: 0.0, 2: 35.0, 3: 50.0, 4: 80.0, 5: 110.0, 6: 130.0}
+        # Timeline realistica da _build_ordered_timeline: l'ancora slide 6 a
+        # 40s e' gia' esatta e le altre slide sono interpolate tra 0 e 40.
+        final = {1: 0.0, 2: 8.0, 3: 16.0, 4: 24.0, 5: 32.0, 6: 40.0}
         with (
             self._no_cache()[0],
             self._no_cache()[1],
