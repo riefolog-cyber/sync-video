@@ -1048,11 +1048,12 @@ def main(argv: list | None = None) -> None:
         build_video(
             slide_files,
             durations,
-            audio_clip,
+            audio_path,
             args.output_video,
             fps=DEFAULT_VIDEO_FPS,
             threads=DEFAULT_VIDEO_THREADS,
             transition_duration=args.transitions,
+            engine=args.engine,
         )
         t_video = time.time() - t_phase_start
 

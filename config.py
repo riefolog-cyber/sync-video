@@ -440,6 +440,15 @@ if _VIDEO_RES_ENV and "x" in _VIDEO_RES_ENV:
 else:
     DEFAULT_VIDEO_RES = (1920, 1080)
 DEFAULT_VIDEO_THREADS = min(8, os.cpu_count() or 4)
+# Motore di rendering video: 'ffmpeg' (concat demuxer, encoding diretto, veloce)
+# o 'moviepy' (percorso legacy, richiesto per --transitions > 0).
+_VIDEO_ENGINE_ENV = os.environ.get("VIDEO_ENGINE", "").strip().lower()
+if _VIDEO_ENGINE_ENV in {"ffmpeg", "moviepy"}:
+    DEFAULT_VIDEO_ENGINE = _VIDEO_ENGINE_ENV
+else:
+    if _VIDEO_ENGINE_ENV:
+        log.warning("   VIDEO_ENGINE non valido ('%s'), uso 'ffmpeg'.", _VIDEO_ENGINE_ENV)
+    DEFAULT_VIDEO_ENGINE = "ffmpeg"
 DEFAULT_OCR_DPI = _env_int("OCR_DPI", 300)
 DEFAULT_OCR_LANG = os.environ.get("OCR_LANG", "ita")
 DEFAULT_OCR_WORKERS = _env_int("OCR_WORKERS", min(4, os.cpu_count() or 2))
@@ -685,6 +694,15 @@ Esempi:
         type=float,
         default=DEFAULT_TRANSITION_DURATION,
         help="Durata dissolvenza tra slide in secondi (0=nessuna)",
+    )
+    parser.add_argument(
+        "--engine",
+        default=DEFAULT_VIDEO_ENGINE,
+        choices=["ffmpeg", "moviepy"],
+        help="Motore di rendering video: 'ffmpeg' usa il concat demuxer "
+        "(encoding diretto, molto più veloce, nessun crossfade); 'moviepy' "
+        "usa il percorso legacy (più lento, richiesto per --transitions > 0). "
+        f"(default: {DEFAULT_VIDEO_ENGINE})",
     )
     parser.add_argument("--dry-run", action="store_true", help="Ferma dopo la generazione timeline, non produce video")
     parser.add_argument(
