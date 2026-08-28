@@ -370,6 +370,43 @@ def bootstrap() -> None:
         )
         sys.exit(1)
 
+    # --- Lingua italiana per Tesseract (portabile su tutte le piattaforme) ---
+    # ita.traineddata NON è nel repo (cartella tessdata/ gitignored). Su alcune
+    # piattaforme (brew tesseract, apt tesseract-ocr) l'italiano non è incluso:
+    # se manca, viene scaricato in una cartella locale del progetto e usato via
+    # TESSDATA_PREFIX. Nessun intervento manuale.
+    tesseract_exe = pytesseract.pytesseract.tesseract_cmd or "tesseract"
+    _langs_ok = False
+    try:
+        _langs = subprocess.run(
+            [tesseract_exe, "--list-langs"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        _langs_ok = "ita" in (_langs.stdout or "")
+    except (OSError, subprocess.TimeoutExpired):
+        _langs_ok = False
+
+    if not _langs_ok:
+        _local_tessdata.mkdir(parents=True, exist_ok=True)
+        ita_path = _local_tessdata / "ita.traineddata"
+        if not ita_path.exists():
+            log.info("🔧 Lingua italiana Tesseract mancante: scarico ita.traineddata (una tantum)...")
+            try:
+                import urllib.request
+
+                urllib.request.urlretrieve(  # noqa: S310
+                    "https://github.com/tesseract-ocr/tessdata_fast/raw/main/ita.traineddata",
+                    ita_path,
+                )
+                log.info("   ✅ ita.traineddata scaricato in %s", _local_tessdata)
+            except Exception as e:  # noqa: BLE001 - rete: non deve bloccare il bootstrap
+                log.warning("   ⚠️ Scaricamento ita.traineddata fallito: %s", e)
+        if ita_path.exists():
+            os.environ["TESSDATA_PREFIX"] = str(_local_tessdata)
+            log.debug("   TESSDATA_PREFIX impostato su: %s", _local_tessdata)
+
     # --- ffmpeg (verifica rapida) ---
     try:
         subprocess.run(
@@ -378,7 +415,7 @@ def bootstrap() -> None:
         log.debug("   ffmpeg trovato.")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         log.info("🔧 ffmpeg non trovato — tentativo auto-install...")
-        ok =        ok = _try_system_install(
+        ok = _try_system_install(
             "ffmpeg",
             winget_id="Gyan.FFmpeg.Shared",
             apt_pkg="ffmpeg",

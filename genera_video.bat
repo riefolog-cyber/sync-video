@@ -6,7 +6,7 @@ title Sync Video: Slide -> Audio
 
 set "PAUSE_IT=1"
 set "CHECK_UPDATES=0"
-set "MAIN_ARGS=--whisper-model tiny --llm auto --engine ffmpeg"
+set "MAIN_ARGS=--whisper-model tiny --engine ffmpeg"
 :parse
 if "%~1"=="" goto run
 if /i "%~1"=="--no-pause" set "PAUSE_IT=0"& shift & goto parse
@@ -44,6 +44,11 @@ if not %ERRORLEVEL% EQU 0 (
     )
 )
 
+rem --- 9Router: se installato usa --llm auto (posizionamento LLM), altrimenti offline (nessuna pausa) ---
+set "LLM_ARG=--llm off"
+where 9router >NUL 2>&1
+if %ERRORLEVEL% EQU 0 set "LLM_ARG=--llm auto"
+
 rem --- Scelta Python: preferisce una versione 3.11-3.13 funzionante (x64 su ARM), poi il default ---
 set "PY_CMD=python"
 where py >NUL 2>&1
@@ -60,9 +65,9 @@ if %ERRORLEVEL% EQU 0 (
 :python_ok
 echo Python scelto: !PY_CMD!
 if "%CHECK_UPDATES%"=="0" (
-    !PY_CMD! main.py --no-update-check --no-confirm !MAIN_ARGS!
+    !PY_CMD! main.py --no-update-check --no-confirm !MAIN_ARGS! !LLM_ARG!
 ) else (
-    !PY_CMD! main.py --no-confirm !MAIN_ARGS!
+    !PY_CMD! main.py --no-confirm !MAIN_ARGS! !LLM_ARG!
 )
 
 echo.
