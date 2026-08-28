@@ -396,7 +396,8 @@ def bootstrap() -> None:
             try:
                 import urllib.request
 
-                urllib.request.urlretrieve(  # noqa: S310
+                # URL fisso del repo ufficiale tessdata_fast (nessun input utente)
+                urllib.request.urlretrieve(
                     "https://github.com/tesseract-ocr/tessdata_fast/raw/main/ita.traineddata",
                     ita_path,
                 )
