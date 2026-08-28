@@ -154,7 +154,7 @@ _REQUIRED_PACKAGES = {
     "numpy": "numpy",
     "tqdm": "tqdm",
     "fastembed": "fastembed",
-    "faster_whisper": "faster-whisper",
+    "faster_whisper": "faster-whisper>=1.2.1",
 }
 
 _TESSERACT_DOWNLOAD_URL = "https://github.com/UB-Mannheim/tesseract/wiki"
@@ -237,7 +237,20 @@ def bootstrap() -> None:
     for import_name, pip_name in _REQUIRED_PACKAGES.items():
         try:
             __import__(import_name)
-        except ImportError:
+        except (ImportError, RuntimeError) as e:
+            # Alcuni pacchetti possono fallire l'import anche se installati:
+            # MoviePy se manca uno strumento di sistema (FFmpeg), oppure
+            # faster-whisper se Windows blocca una DLL di PyAV. In entrambi
+            # i casi il pacchetto è presente: la verifica dello strumento di
+            # sistema avviene più avanti nel bootstrap e la trascrizione usa
+            # OpenVINO (che non dipende da av).
+            if import_name in ("moviepy", "faster_whisper") and isinstance(e, (ImportError, RuntimeError)):
+                log.debug(
+                    "   %s installato ma import bloccato dall'ambiente (%s): proseguo.",
+                    pip_name,
+                    e,
+                )
+                continue
             missing.append((import_name, pip_name))
 
     if missing:
@@ -309,7 +322,7 @@ def bootstrap() -> None:
         log.info("🔧 Tesseract OCR non trovato — tentativo auto-install...")
         _try_system_install(
             "Tesseract OCR",
-            winget_id="UB-Mannheim.Tesseract",
+            winget_id="UB-Mannheim.TesseractOCR",
             apt_pkg="tesseract-ocr",
             brew_pkg="tesseract",
         )
@@ -335,6 +348,19 @@ def bootstrap() -> None:
                 pass
 
     if not tesseract_found:
+        # Installazioni WinGet possono aggiornare il PATH solo nelle nuove shell.
+        # Cerca comunque l'eseguibile nella posizione standard di Tesseract.
+        for c in (
+            r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+            r"C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe",
+        ):
+            if os.path.exists(c):
+                pytesseract.pytesseract.tesseract_cmd = c
+                tesseract_found = True
+                log.info("   ✅ Tesseract trovato: %s", c)
+                break
+
+    if not tesseract_found:
         log.error(
             "\n❌ TESSERACT OCR NON TROVATO — necessario per estrarre il testo dalle slide.\n"
             "   Auto-install fallita. Scaricalo da: %s\n"
@@ -352,9 +378,9 @@ def bootstrap() -> None:
         log.debug("   ffmpeg trovato.")
     except (FileNotFoundError, subprocess.TimeoutExpired):
         log.info("🔧 ffmpeg non trovato — tentativo auto-install...")
-        ok = _try_system_install(
+        ok =        ok = _try_system_install(
             "ffmpeg",
-            winget_id="ffmpeg",
+            winget_id="Gyan.FFmpeg.Shared",
             apt_pkg="ffmpeg",
             brew_pkg="ffmpeg",
         )
@@ -459,7 +485,7 @@ DEFAULT_OCR_DPI = _env_int("OCR_DPI", 300)
 DEFAULT_OCR_LANG = os.environ.get("OCR_LANG", "ita")
 DEFAULT_OCR_WORKERS = _env_int("OCR_WORKERS", min(4, os.cpu_count() or 2))
 DEFAULT_TRANSITION_DURATION = 0.0  # secondi (0 = nessuna transizione)
-DEFAULT_TRANSCRIBER = os.environ.get("TRANSCRIBER", "whisper")  # 'whisper'
+DEFAULT_TRANSCRIBER = os.environ.get("TRANSCRIBER", "auto")  # 'auto'/'openvino'/'whisper'
 DEFAULT_WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")  # tiny/base/small/medium/large
 DEFAULT_WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")  # 'cpu' o 'cuda'
 DEFAULT_WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")  # int8 (cpu) / float16 (cuda)
@@ -467,7 +493,7 @@ DEFAULT_WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")  #
 # scaricabile da HuggingFace: OpenVINO/whisper-small-fp16-ov
 DEFAULT_OPENVINO_MODEL_DIR = os.environ.get("OPENVINO_MODEL_DIR", str(CACHE_DIR / "whisper_openvino_small"))
 DEFAULT_OPENVINO_DEVICE = os.environ.get("OPENVINO_DEVICE", "GPU")  # 'GPU' (iGPU) o 'CPU'
-DEFAULT_OPENVINO_MODEL_ID = "OpenVINO/whisper-small-fp16-ov"
+DEFAULT_OPENVINO_MODEL_ID = os.environ.get("OPENVINO_MODEL_ID", "OpenVINO/whisper-small-fp16-ov")
 
 # =====================================================================
 # STOPWORDS ITALIANE
@@ -632,7 +658,7 @@ Esempi:
     )
     parser.add_argument(
         "--transcriber",
-        default="auto",
+        default=DEFAULT_TRANSCRIBER,
         choices=["auto", "openvino", "whisper"],
         help="Motore di trascrizione. 'auto' (default): usa OpenVINO GenAI "
         "se il modello IR è presente, altrimenti faster-whisper. "

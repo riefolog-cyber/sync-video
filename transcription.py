@@ -17,6 +17,7 @@ from chunks import Word
 from config import (
     DEFAULT_MIN_WORD_LENGTH,
     DEFAULT_OPENVINO_MODEL_DIR,
+    DEFAULT_OPENVINO_MODEL_ID,
     DEFAULT_TRANSCRIPT_WINDOW,
     TRANSITION_WORDS_ITA,
     get_stopwords,
@@ -156,7 +157,7 @@ def correct_transcript_names(words: list[Word]) -> list[Word]:
 # =====================================================================
 # TRASCRIZIONE CON OPENVINO GENAI (iGPU/CPU, più veloce su Intel)
 # =====================================================================
-def download_openvino_model(model_dir: Path, model_id: str = "OpenVINO/whisper-small-fp16-ov") -> Path:
+def download_openvino_model(model_dir: Path, model_id: str = DEFAULT_OPENVINO_MODEL_ID) -> Path:
     """Scarica il modello Whisper OpenVINO IR da HuggingFace (una tantum)."""
     if model_dir.exists():
         return model_dir

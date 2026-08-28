@@ -24,6 +24,8 @@ posiziona SOLO le slide senza ancora esplicita (vincolate da qui), mentre nel
 flusso libero guida la selezione chunk→slide.
 """
 
+from __future__ import annotations
+
 import bisect
 import re
 import time

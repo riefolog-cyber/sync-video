@@ -19,7 +19,7 @@ fastembed==0.5.1
 requests>=2.31.0
 
 # Trascrizione audio (faster-whisper, fallback CPU)
-faster-whisper>=1.0.0
+faster-whisper>=1.2.1
 
 # Trascrizione veloce su iGPU Intel (opzionale ma raccomandato):
 openvino>=2025.1.0
