@@ -49,20 +49,8 @@ set "LLM_ARG=--llm off"
 where 9router >NUL 2>&1
 if %ERRORLEVEL% EQU 0 set "LLM_ARG=--llm auto"
 
-rem --- Scelta Python: preferisce una versione 3.11-3.13 funzionante (x64 su ARM), poi il default ---
-set "PY_CMD=python"
-where py >NUL 2>&1
-if %ERRORLEVEL% EQU 0 (
-    for %%V in (3.11 3.12 3.13) do (
-        py -%%V -c "import sys" >NUL 2>&1
-        if !ERRORLEVEL! EQU 0 (
-            set "PY_CMD=py -%%V"
-            goto python_ok
-        )
-    )
-    set "PY_CMD=py"
-)
-:python_ok
+rem --- Scelta Python: helper condiviso (preferisce 3.11, vedi _python.bat) ---
+call "%~dp0_python.bat"
 echo Python scelto: !PY_CMD!
 if "%CHECK_UPDATES%"=="0" (
     !PY_CMD! main.py --no-update-check --no-confirm !MAIN_ARGS! !LLM_ARG!

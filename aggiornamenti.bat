@@ -10,21 +10,17 @@ echo    Verifica versioni PyPI e installa
 echo ========================================
 echo.
 
-where py >NUL 2>&1
-if %ERRORLEVEL% EQU 0 (
-    py -3 aggiornamenti.py
-) else (
-    where python >NUL 2>&1
-    if %ERRORLEVEL% EQU 0 (
-        python aggiornamenti.py
-    ) else (
-        echo [ERRORE] Python non e' stato trovato nel PATH.
-        echo Installa Python oppure abilita "Add Python to PATH".
-        set "EXIT=9009"
-        goto after_python
-    )
+rem --- Scelta Python: helper condiviso (preferisce 3.11, vedi _python.bat) ---
+call "%~dp0_python.bat"
+!PY_CMD! --version >NUL 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERRORE] Python non e' stato trovato nel PATH.
+    echo Installa Python oppure abilita "Add Python to PATH".
+    set "EXIT=9009"
+    goto after_python
 )
-
+echo Python scelto: !PY_CMD!
+!PY_CMD! aggiornamenti.py
 set "EXIT=%ERRORLEVEL%"
 :after_python
 echo.
@@ -59,6 +55,6 @@ echo.
 echo ========================================
 echo    Manutenzione 9Router completata.
 echo ========================================
-
-endlocal
+echo.
+pause
 exit /b %EXIT%

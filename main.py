@@ -25,6 +25,7 @@ from config import (
     DEFAULT_VIDEO_BUFFER_SEC,
     DEFAULT_VIDEO_FPS,
     DEFAULT_VIDEO_THREADS,
+    STOPWORDS_ITA,
     bootstrap,
     log,
     parse_args,
@@ -128,13 +129,17 @@ def _clean_orphan_cache(active_keys: set[str]) -> int:
     la loro chiave è un hash del contenuto (slide + audio + chunk), quindi si
     invalidano da soli quando cambia l'input. Cancellarli a fine run farebbe
     ripagare la chiamata LLM a ogni esecuzione.
+
+    Anche ``machine_setup.json`` (scelta del motore rilevata dall'hardware)
+    NON viene rimosso: è un file di configurazione, non una cache, e va
+    riusato nelle run successive senza rifare il rilevamento.
     """
     if not CACHE_DIR.exists():
         return 0
     removed = 0
     for cache_file in CACHE_DIR.glob("*.json"):
         key = cache_file.stem  # nome file senza .json
-        if key.startswith("llm_"):
+        if key.startswith("llm_") or key == "machine_setup":
             continue
         if key not in active_keys:
             cache_file.unlink()
@@ -208,7 +213,7 @@ def _save_final_timeline(
 def _print_timing(
     t_ocr: float, t_transcribe: float, t_sync: float, t_embed: float, t_video: float, t_total: float
 ) -> None:
-    """Stampa il riepilogo dei tempi di ogni fase."""
+    """Stampa il riepilogo dei tempi di ogni fase e lo salva nello storico."""
     log.info("\n" + "─" * 50)
     log.info(" ⏱️  RIEPILOGO TEMPI")
     log.info("─" * 50)
@@ -222,6 +227,33 @@ def _print_timing(
     log.info("   ─────────────────────────")
     log.info("   TOTALE         │ %s", _format_time(t_total))
     log.info("─" * 50)
+    _append_timing_history(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total)
+
+
+def _append_timing_history(
+    t_ocr: float, t_transcribe: float, t_sync: float, t_embed: float, t_video: float, t_total: float
+) -> None:
+    """Persiste lo storico dei tempi per fase in ``.cache/timing_history.jsonl``.
+
+    Serve a monitorare regressioni di velocità tra una run e l'altra (una
+    riga JSON per run, con data/ora). La mancata scrittura non blocca mai
+    la run (solo debug log).
+    """
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "ocr": round(t_ocr, 1),
+            "transcribe": round(t_transcribe, 1),
+            "sync": round(t_sync, 1),
+            "embed": round(t_embed, 1),
+            "video": round(t_video, 1),
+            "total": round(t_total, 1),
+        }
+        with (CACHE_DIR / "timing_history.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        log.debug("   Impossibile salvare lo storico tempi (ignorato).")
 
 
 def _warn_sync_uncertainty() -> None:
@@ -259,6 +291,95 @@ def _find_anomalous_durations(
         for s, d in zip(slide_ids, durations, strict=True)
         if d > long_ratio * median or d < short_ratio * median
     ]
+
+
+def _slide_tokens(text: str) -> list[str]:
+    """Token lessicali puliti di una slide (minuscoli, >=3 char, no stopwords)."""
+    return [
+        t
+        for t in re.findall(r"[a-zà-ù]+", text.lower())
+        if len(t) >= 3 and t not in STOPWORDS_ITA
+    ]
+
+
+def _speech_tokens_in_window(
+    words_raw: Sequence[Word], start: float, end: float
+) -> list[str]:
+    """Token lessicali del parlato nell'intervallo [start, end)."""
+    return [
+        t
+        for w in words_raw
+        if start <= w["start"] < end
+        for t in re.findall(r"[a-zà-ù]+", w["word"].lower())
+        if len(t) >= 3 and t not in STOPWORDS_ITA
+    ]
+
+
+def _token_f1(a: list[str], b: list[str]) -> float:
+    """F1 sull'intersezione degli insiemi di token (0 se disgiunti)."""
+    if not a or not b:
+        return 0.0
+    a_set, b_set = set(a), set(b)
+    inter = len(a_set & b_set)
+    if inter == 0:
+        return 0.0
+    precision = inter / len(a_set)
+    recall = inter / len(b_set)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _segment_content_verdict(
+    speech_tokens: list[str],
+    all_slide_tokens: Sequence[list[str]],
+    displayed_slide: int,
+) -> str:
+    """Verdetto di contenuto per un segmento di durata anomala.
+
+    Confronta il parlato del segmento con TUTTE le slide: se la slide più
+    simile lessicalmente è quella mostrata -> 'coerente' (durata anomala
+    reale: il podcast si è soffermato); se vince una slide DIVERSA ->
+    'disallineata' (probabile errore di sincronizzazione); se il segnale è
+    troppo debole -> 'incerto' (si conserva l'avviso generico).
+    """
+    if not speech_tokens or not all_slide_tokens:
+        return "incerto"
+    scores = [_token_f1(speech_tokens, st) for st in all_slide_tokens]
+    best_idx = max(range(len(scores)), key=lambda i: scores[i])
+    if scores[best_idx] < 0.10:
+        return "incerto"
+    if best_idx + 1 == displayed_slide:
+        return "coerente"
+    return "disallineata"
+
+
+def _validate_anomalous_segments(
+    anomalous: Sequence[tuple[int, float]],
+    slide_texts: Sequence[str],
+    words_raw: Sequence[Word],
+    durations: Sequence[float],
+    slide_ids: Sequence[int],
+) -> dict[int, str]:
+    """Verifica di contenuto dei segmenti anomali (durata molto fuori mediana).
+
+    Per ogni slide anomala estrae il parlato nel suo intervallo temporale e
+    lo confronta con l'OCR di tutte le slide (F1 lessicale). Ritorna
+    ``{slide: 'coerente' | 'disallineata' | 'incerto'}`` così l'avviso può
+    distinguere un segmento realmente lungo/corto da un allineamento errato.
+    """
+    all_slide_tokens = [_slide_tokens(t) for t in slide_texts]
+    verdicts: dict[int, str] = {}
+    offsets = [0.0]
+    for d in durations:
+        offsets.append(offsets[-1] + d)
+    for s, d in anomalous:
+        try:
+            idx = slide_ids.index(s)
+        except ValueError:
+            continue
+        start = offsets[idx]
+        speech = _speech_tokens_in_window(words_raw, start, start + d)
+        verdicts[s] = _segment_content_verdict(speech, all_slide_tokens, s)
+    return verdicts
 
 
 # =====================================================================
@@ -549,9 +670,12 @@ def main(argv: list | None = None) -> None:
                     "\n   [Avviso] Nessun riferimento 'slide N' né 'blocco successivo' "
                     "rilevato nella trascrizione: flusso libero (le slide seguono il "
                     "contenuto, senza ordine fisso).\n"
-                    "   Se il podcast doveva seguire le ancore del prompt NotebookLM, "
-                    "verifica che le ancore siano state pronunciate (es. 'passiamo alla "
-                    "slide 2') e rigenera l'audio se mancano.\n"
+                    "   - Flusso podcast -> slide (podcast generato per primo, prompt "
+                    "'senza riferimenti alle slide'): comportamento ATTESO, nessuna "
+                    "azione necessaria.\n"
+                    "   - Flusso slide -> podcast: se il podcast doveva annunciare le "
+                    "slide (es. 'passiamo alla slide 2'), le ancore mancano: "
+                    "rigenera l'audio.\n"
                     "   Per forzare comunque un allineamento ordinato senza LLM: "
                     "--flow slide-audio --llm off (meno preciso senza ancore)."
                 )
@@ -586,8 +710,9 @@ def main(argv: list | None = None) -> None:
                     "(mancanti: %s).\n"
                     "   Le slide non annunciate saranno posizionate per contenuto: "
                     "risultato stimato, con durate possibilmente brevi.\n"
-                    "   Se il podcast doveva annunciare tutte le slide, conviene "
-                    "rigenerare l'audio PRIMA di procedere.",
+                    "   Flusso slide -> podcast: il podcast doveva annunciare "
+                    "tutte le slide; se le manca, conviene rigenerare l'audio "
+                    "PRIMA di procedere.",
                     len(early_anchors),
                     total_slides - 1,
                     ", ".join(str(s) for s in early_missing),
@@ -997,26 +1122,69 @@ def main(argv: list | None = None) -> None:
         # --- Avviso: slide quasi non coperte dalla narrazione ---
         thin = [slide_ids[i] for i, d in enumerate(durations) if d < 2 * args.semantic_min_duration]
         if thin:
+            # Il consiglio dell'ancora esplicita vale SOLO nel flusso
+            # slide -> podcast: nel flusso podcast -> slide le ancore 'slide N'
+            # sono escluse dal prompt, quindi l'unico rimedio è ampliare l'audio.
+            if flow != "free":
+                advice = (
+                    "amplia l'audio su quei temi oppure fai pronunciare "
+                    "un'ancora esplicita 'slide N' al momento della transizione"
+                )
+            else:
+                advice = (
+                    "amplia l'audio su quei temi (nel flusso podcast -> slide "
+                    "le ancore 'slide N' sono escluse dal prompt)"
+                )
             log.warning(
                 "\n   [Avviso] Slide con durata minima (%s): il loro contenuto "
                 "sembra poco presente nella narrazione audio.\n"
-                "   Per migliorare: amplia l'audio su quei temi oppure fai "
-                "pronunciare un'ancora esplicita 'slide N' al momento della "
-                "transizione.",
+                "   Per migliorare: %s.",
                 ", ".join(f"slide {s}" for s in thin),
+                advice,
             )
 
         # --- Avviso: durate slide molto squilibrate (possibile sync errato) ---
+        # Prima di allarmare, verifica il CONTENUTO dei segmenti anomali
+        # (parlato del segmento vs OCR delle slide): una durata lunga/corta
+        # con parlato coerente è reale (il podcast si è soffermato), non un
+        # errore di sincronizzazione. Solo i segmenti disallineati o incerti
+        # meritano l'avviso.
         anomalous = _find_anomalous_durations(durations, slide_ids)
         if anomalous:
-            log.warning(
-                "\n   [Avviso] Durate slide molto squilibrate rispetto alla "
-                "mediana (possibile sincronizzazione imprecisa): %s.\n"
-                "   Una slide che dura molto più o molto meno delle altre può "
-                "indicare un allineamento errato: verifica la timeline o "
-                "rigenera la presentazione dal podcast.",
-                ", ".join(f"slide {s} = {d:.0f}s" for s, d in anomalous),
+            verdicts = _validate_anomalous_segments(
+                anomalous, slide_texts, words_raw, durations, slide_ids
             )
+            coherent = sorted(s for s, v in verdicts.items() if v == "coerente")
+            misaligned = [
+                (s, d) for s, d in anomalous if verdicts.get(s) == "disallineata"
+            ]
+            uncertain = [
+                (s, d) for s, d in anomalous if verdicts.get(s) in (None, "incerto")
+            ]
+            if coherent:
+                log.info(
+                    "\n   [Verifica] Durate anomale ma contenuto COERENTE col "
+                    "parlato (segmenti realmente lunghi/corti, non errori di "
+                    "sync): %s.",
+                    ", ".join(f"slide {s}" for s in coherent),
+                )
+            if misaligned:
+                log.warning(
+                    "\n   [Avviso] Durate slide molto squilibrate E parlato del "
+                    "segmento più simile a un'altra slide (probabile allineamento "
+                    "errato): %s.\n"
+                    "   Verifica la timeline o rigenera la presentazione dal "
+                    "podcast.",
+                    ", ".join(f"slide {s} = {d:.0f}s" for s, d in misaligned),
+                )
+            if uncertain:
+                log.warning(
+                    "\n   [Avviso] Durate slide molto squilibrate rispetto alla "
+                    "mediana (possibile sincronizzazione imprecisa): %s.\n"
+                    "   Una slide che dura molto più o molto meno delle altre può "
+                    "indicare un allineamento errato: verifica la timeline.",
+                    ", ".join(f"slide {s} = {d:.0f}s" for s, d in uncertain),
+                )
 
         # --- Anteprima timeline (--preview) ---
         if args.preview:

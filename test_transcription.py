@@ -5,9 +5,14 @@ Test unitari per la correzione dei nomi propri nella trascrizione
 Esegui con: python -m unittest test_transcription -v
 """
 
+import json
+import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from transcription import correct_transcript_names
+from transcription import correct_transcript_names, openvino_usable
 
 
 def _words(items):
@@ -54,6 +59,73 @@ class TestCorrectTranscriptNames(unittest.TestCase):
 
     def test_empty_input(self):
         self.assertEqual(correct_transcript_names([]), [])
+
+
+class TestOpenvinoUsable(unittest.TestCase):
+    """openvino_usable: l'avviso OpenVINO va mostrato solo se percorribile."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.config_path = Path(self._tmp.name) / "machine_setup.json"
+        patcher = mock.patch("transcription.MACHINE_CONFIG_PATH", self.config_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _write_config(self, transcriber: str) -> None:
+        self.config_path.write_text(
+            json.dumps({"transcriber": transcriber}), encoding="utf-8"
+        )
+
+    def _patch_runtime(self, genai_ok: bool, devices: list[str] | None = None):
+        """Simula la presenza/assenza del runtime OpenVINO in sys.modules."""
+        modules = {"openvino_genai": mock.MagicMock() if genai_ok else None}
+        if genai_ok:
+            core = mock.MagicMock(return_value=mock.MagicMock(available_devices=devices or []))
+            modules["openvino"] = mock.MagicMock(Core=core)
+        else:
+            modules["openvino"] = None
+        return mock.patch.dict(sys.modules, modules)
+
+    def test_setup_says_openvino(self):
+        self._write_config("openvino")
+        self.assertTrue(openvino_usable())
+
+    def test_setup_says_whisper(self):
+        self._write_config("whisper")
+        self.assertFalse(openvino_usable())
+
+    def test_setup_whisper_wins_over_runtime(self):
+        # Anche col runtime installato, la decisione di machine_setup prevale.
+        self._write_config("whisper")
+        with self._patch_runtime(genai_ok=True, devices=["CPU"]):
+            self.assertFalse(openvino_usable())
+
+    def test_no_setup_and_no_runtime(self):
+        # Nessun machine_setup.json e openvino non installato -> avviso soppresso.
+        with self._patch_runtime(genai_ok=False):
+            self.assertFalse(openvino_usable())
+
+    def test_no_setup_with_igpu(self):
+        # Runtime installato con device GPU (iGPU Intel): consiglio sensato.
+        with self._patch_runtime(genai_ok=True, devices=["GPU"]):
+            self.assertTrue(openvino_usable())
+
+    def test_no_setup_cpu_only(self):
+        # openvino installato ma solo CPU (es. ARM/AMD): senza iGPU non c'è
+        # guadagno di velocità -> avviso soppresso (caso Snapdragon).
+        with self._patch_runtime(genai_ok=True, devices=["CPU"]):
+            self.assertFalse(openvino_usable())
+
+    def test_no_setup_runtime_without_devices(self):
+        # Runtime installato ma nessun device disponibile -> non percorribile.
+        with self._patch_runtime(genai_ok=True, devices=[]):
+            self.assertFalse(openvino_usable())
+
+    def test_corrupt_setup_falls_back_to_runtime(self):
+        self.config_path.write_text("{non-json", encoding="utf-8")
+        with self._patch_runtime(genai_ok=True, devices=["GPU"]):
+            self.assertTrue(openvino_usable())
 
 
 if __name__ == "__main__":

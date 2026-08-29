@@ -16,6 +16,7 @@ from unittest import mock
 from machine_setup import (
     _CPU_FALLBACK,
     _apply,
+    _classify_gpu,
     _read_config,
     machine_setup,
     recommend,
@@ -63,6 +64,34 @@ class TestRecommend(unittest.TestCase):
         rec = recommend([])
         self.assertEqual(rec["transcriber"], "whisper")
         self.assertEqual(rec["whisper_device"], "cpu")
+
+    def test_qualcomm_adreno_falls_back_to_cpu(self):
+        # Windows ARM / Snapdragon X: nessuna accelerazione disponibile.
+        rec = recommend(["Qualcomm(R) Adreno(TM) X1-45 GPU"])
+        self.assertEqual(rec["transcriber"], "whisper")
+        self.assertEqual(rec["whisper_device"], "cpu")
+        self.assertIn("Qualcomm", rec["reason"])
+
+    def test_mixed_qualcomm_and_intel_intel_wins(self):
+        # Macchina con iGPU Intel E Adreno (es. laptop con GPU discreta
+        # Qualcomm): vince la iGPU Intel (OpenVINO), come su x64.
+        rec = recommend(["Qualcomm(R) Adreno(TM) X1-45 GPU", "Intel(R) Iris(R) Xe Graphics"])
+        self.assertEqual(rec["transcriber"], "openvino")
+        self.assertIn(rec["openvino_device"], ("GPU", "CPU"))
+
+
+class TestClassifyGpu(unittest.TestCase):
+    def test_qualcomm_adreno(self):
+        self.assertEqual(_classify_gpu("Qualcomm(R) Adreno(TM) X1-45 GPU"), "qualcomm")
+
+    def test_snapdragon(self):
+        self.assertEqual(_classify_gpu("Snapdragon(R) X Elite GPU"), "qualcomm")
+
+    def test_intel_still_classified(self):
+        self.assertEqual(_classify_gpu("Intel(R) Iris(R) Xe Graphics"), "intel")
+
+    def test_nvidia_still_classified(self):
+        self.assertEqual(_classify_gpu("NVIDIA GeForce RTX 4060"), "nvidia")
 
 
 class TestApply(unittest.TestCase):

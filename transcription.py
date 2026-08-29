@@ -9,6 +9,8 @@ Due motori disponibili:
 - faster-whisper (fallback): CTranslate2 su CPU.
 """
 
+import json
+import os
 import re
 from pathlib import Path
 from typing import Any, cast
@@ -23,6 +25,7 @@ from config import (
     get_stopwords,
     log,
 )
+from machine_setup import MACHINE_CONFIG_PATH, openvino_gpu_available
 
 
 # =====================================================================
@@ -255,6 +258,32 @@ def transcribe_with_openvino(
 # =====================================================================
 # TRASCRIZIONE CON FASTER-WHISPER
 # =====================================================================
+def openvino_usable() -> bool:
+    """True se su questo PC OpenVINO è una via realmente percorribile.
+
+    Il suggerimento "installa openvino-genai per usare la iGPU" ha senso solo
+    se il rilevamento hardware (``machine_setup.json``) ha scelto OpenVINO
+    (iGPU Intel presente), oppure se il runtime OpenVINO è installato ed
+    espone un device GPU reale. La sola CPU non basta: senza iGPU non c'è
+    alcun guadagno di velocità, quindi su macchine AMD/ARM (dove OpenVINO
+    vede al più la CPU) l'avviso viene soppresso.
+    """
+    try:
+        rec = json.loads(MACHINE_CONFIG_PATH.read_text(encoding="utf-8"))
+        transcriber = rec.get("transcriber")
+        if transcriber == "openvino":
+            return True
+        if transcriber == "whisper":
+            return False
+    except Exception:
+        pass  # nessun machine_setup.json: si procede col probe runtime
+
+    # Solo una iGPU Intel (device "GPU") giustifica il consiglio "usa la
+    # iGPU": la CPU OpenVINO non è più veloce di faster-whisper. Il probe
+    # è condiviso con machine_setup.openvino_gpu_available().
+    return openvino_gpu_available()
+
+
 def transcribe_audio(
     audio_path: Path,
     language: str = "ita",
@@ -324,6 +353,8 @@ def transcribe_with_whisper(
     beam_size: int = 5,
     vad_filter: bool = True,
     vad_parameters: dict | None = None,
+    openvino_available: bool | None = None,
+    cpu_threads: int | None = None,
 ) -> tuple[str, list[Word]]:
     """
     Trascrizione audio con faster-whisper.
@@ -338,21 +369,32 @@ def transcribe_with_whisper(
     from faster_whisper import WhisperModel
 
     log.info("2. Trascrizione con faster-whisper (%s, %s)...", model_size, device)
-    log.warning(
-        "   ⚠️  faster-whisper su CPU è LENTO: ~%d min per 28 min di audio. "
-        "Installando openvino-genai + il modello OpenVINO (vedi README) la "
-        "trascrizione usa la iGPU (~1.5x più veloce).",
-        {  # stima empirica (RTF su CPU Intel)
-            "tiny": 2,
-            "base": 4,
-            "small": 8,
-            "medium": 14,
-            "large": 25,
-        }.get(model_size, 8),
-    )
+    if openvino_available is None:
+        openvino_available = openvino_usable()
+    if openvino_available:
+        log.warning(
+            "   ⚠️  faster-whisper su CPU è LENTO: ~%d min per 28 min di audio. "
+            "Installando openvino-genai + il modello OpenVINO (vedi README) la "
+            "trascrizione usa la iGPU (~1.5x più veloce).",
+            {  # stima empirica (RTF su CPU Intel)
+                "tiny": 2,
+                "base": 4,
+                "small": 8,
+                "medium": 14,
+                "large": 25,
+            }.get(model_size, 8),
+        )
 
-    # Carica modello
-    model = WhisperModel(model_size, device=device, compute_type=compute_type)
+    # Carica modello. cpu_threads esplicito: il default di faster-whisper
+    # sottoutilizza CPU con più core (misurato su Snapdragon X Elite: 8
+    # thread ~27% più veloci di 4 su clip da 60s). Cap a 8 per non saturare.
+    n_threads = cpu_threads if cpu_threads else min(os.cpu_count() or 4, 8)
+    model = WhisperModel(
+        model_size,
+        device=device,
+        compute_type=compute_type,
+        cpu_threads=n_threads,
+    )
     log.debug("   Modello Whisper caricato.")
 
     # Parametri VAD

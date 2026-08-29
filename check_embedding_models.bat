@@ -10,8 +10,10 @@ echo    Verifica aggiornamenti HuggingFace
 echo ========================================
 echo.
 
-python check_embedding_models.py
-
+rem --- Scelta Python: helper condiviso (preferisce 3.11, vedi _python.bat) ---
+call "%~dp0_python.bat"
+echo Python scelto: !PY_CMD!
+!PY_CMD! check_embedding_models.py
 set "EXIT=%ERRORLEVEL%"
 echo.
 echo ========================================

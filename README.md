@@ -190,6 +190,12 @@ free. Serve a mantenere pulito il router lato server.
 > modello manca. Seleziona il motore con `--transcriber {auto,openvino,whisper}`
 > e il device con `--openvino-device {GPU,CPU}`.
 >
+> L'avviso "faster-whisper su CPU è LENTO… usa OpenVINO" compare **solo** se
+> su quel PC OpenVINO è realmente utilizzabile: iGPU Intel rilevata da
+> `machine_setup.json`, oppure runtime installato che espone un device GPU.
+> La sola CPU OpenVINO non conta (nessun guadagno di velocità): su macchine
+> AMD/ARM (es. Snapdragon X) il suggerimento viene soppresso.
+>
 > **Controllo aggiornamenti.** All'avvio (`updates.py`) verifica via PyPI se i
 > pacchetti usati hanno versioni più recenti (risultato cachato per default 6h
 > in `.cache/updates_check.json`). Di default chiede S/N per aggiornare
@@ -221,6 +227,49 @@ free. Serve a mantenere pulito il router lato server.
 > `genera_video.bat` di default salta il controllo (flag `--no-update-check`)
 > per non rallentare la generazione; per riattivarlo al volo aggiungi
 > `--check-updates`.
+
+---
+
+## 🔀 Due flussi di lavoro (e i loro avvisi)
+
+Il progetto supporta due modi di lavorare, riconosciuti automaticamente dalla
+trascrizione (override con `--flow`):
+
+### 1. Podcast → Slide (`PRIMA PODCAST.md`)
+
+Il podcast viene generato PER PRIMO, in modo libero, e la presentazione nasce
+DA esso (una slide per sezione). Il prompt **vieta esplicitamente** i
+riferimenti "slide N": l'assenza di ancore è il comportamento atteso.
+
+- Avviso "Nessun riferimento 'slide N'… flusso libero" → **atteso, nessuna
+  azione necessaria** (il messaggio lo dice esplicitamente).
+- Il pipeline ripiega sull'allineamento ordinato con soli embeddings (veloce,
+  senza LLM) e posiziona le slide per contenuto.
+
+> **Modello embedding**: il default è `intfloat/multilingual-e5-large`
+> (più preciso, ~2.2 GB, validato con test A/B). Nel solo flusso libero puoi
+> provare un modello più leggero e veloce con `--semantic-model
+> sentence-transformers/paraphrase-multilingual-mpnet-base-v2` (già usato
+> come fallback automatico): più rapido ma leggermente meno preciso —
+> controlla con `python main.py --dry-run` che la similarità media resti alta
+> e non compaia l'avviso "segnale debole".
+
+### 2. Slide → Podcast (`PRIMA PRESENTAZIONE.md`)
+
+La presentazione esiste prima e il podcast deve **annunciare ogni slide**
+("passiamo alla slide N"): queste ancore vincolano la sincronizzazione.
+
+- Avviso "Solo N slide su M annunciate esplicitamente" → nel flusso
+  slide → podcast il podcast doveva annunciarle tutte: se le manca, conviene
+  rigenerare l'audio PRIMA di procedere.
+- Avviso "Durate slide molto squilibrate" → ora viene **validato sul
+  contenuto**: se il parlato del segmento è coerente con la slide mostrata
+  (F1 lessicale), la durata lunga/corta è reale e l'avviso si riduce a una
+  nota informativa; se il parlato corrisponde a un'altra slide, l'avviso
+  resta (probabile allineamento errato).
+- Riferimenti fuori ordine (es. "come dicevamo nella slide 3" dopo la
+  slide 4) non fanno più perdere l'ancora: viene recuperata la prima
+  menzione in ordine cronologico.
 
 ---
 
@@ -284,6 +333,28 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 
 ---
 
+## 🔍 Verifica post-run (analysis_sync.py)
+
+Dopo una generazione puoi controllare la QUALITÀ della sincronizzazione
+(quanto il video è davvero allineato al parlato) con lo strumento standalone:
+
+```bash
+python analysis_sync.py
+```
+
+Analizza la timeline e il video più recenti in `.cache/` e verifica: durate
+per slide e segmenti anomali, similarità embedding parlato↔slide per
+segmento, confini che tagliano a metà parola, scostamento delle ancore
+"slide N" dichiarate, e confronto frame estratto vs slide renderizzata
+(scrive i frame in `.analysis_frames/`). Non modifica nulla.
+
+> Richiede il file `llm_timeline_finale.json` nella cache (salvato a ogni
+> run) e il video generato. Il percorso base è auto-rilevato dalla cartella
+> dello script: funziona da qualsiasi copia del progetto, senza percorsi
+> hardcoded.
+
+---
+
 ## ⏸️ Gestione on-demand di 9Router
 
 La pipeline usa 9Router **solo quando serve davvero** e non si blocca mai
@@ -340,13 +411,13 @@ tessdata/                ← Modelli lingua Tesseract portatili
 Comandi verificati per chi modifica il codice:
 
 ```bash
-# Test (suite completa, unittest — 147 test)
-python -m unittest test_sync test_integration test_llm_sync test_chunks
+# Test (suite completa, unittest — 280 test)
+python -m unittest discover -s . -p "test_*.py"
 
-# Type-check (mypy, 15 moduli sorgente)
+# Type-check (mypy, 16 moduli sorgente; i test sono esclusi)
 python -m mypy .
 
-# Lint (ruff; 6 warning residui sono gli "except Exception" difensivi intenzionali)
+# Lint (ruff — pulito)
 python -m ruff check .
 
 # Lint + autofix

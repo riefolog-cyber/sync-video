@@ -34,6 +34,7 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent
 CACHE_DIR = BASE_DIR / ".cache"
@@ -90,7 +91,7 @@ def _check_network() -> None:
         sys.exit(4)
 
 
-def _gather(api) -> dict:
+def _gather(api: Any) -> dict:
     """Interroga HF: info modelli tracciati + ricerca nuovi candidati."""
     from huggingface_hub import HfApi
 

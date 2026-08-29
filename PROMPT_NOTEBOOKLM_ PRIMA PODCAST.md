@@ -75,3 +75,11 @@ trascrivere/riassumere l'audio appena generato.
   al flusso A.
 - Se vuoi verificare prima del render: `python main.py --dry-run` e controlla
   similarità media e avvisi ("segnale debole" non dovrebbe apparire).
+
+## Checklist qualità post-generazione
+
+- [ ] Nessuna menzione di "slide", "diapositiva", "capitolo" o numeri di sezione (vietati dal prompt).
+- [ ] Sezioni con titoli e contenuti ben DISTINTI tra loro (per un allineamento 1:1 preciso).
+- [ ] Sezioni di lunghezza ragionevolmente omogenea (durate molto squilibrate generano un avviso nel pipeline).
+- [ ] Prova finale: `python main.py --dry-run` → l'avviso "segnale debole" non deve apparire.
+

@@ -1313,6 +1313,16 @@ class TestCacheCleanup(unittest.TestCase):
         remaining = sorted(p.name for p in self._tmpdir.glob("*.json"))
         self.assertEqual(remaining, ["slides_hashattuale_300_ita.json"])
 
+    def test_clean_orphan_cache_keeps_machine_setup(self):
+        # machine_setup.json è configurazione, non cache: deve sopravvivere
+        # alla pulizia, altrimenti il rilevamento hardware riparte a ogni run
+        # e la scelta del motore non viene mai riusata.
+        self._write("machine_setup.json")
+        self._write("slides_vecchiohash_300_ita.json")
+        removed = self._main._clean_orphan_cache({"slides_hashattuale_300_ita"})
+        self.assertEqual(removed, 1)
+        self.assertTrue((self._tmpdir / "machine_setup.json").exists())
+
     def test_llm_cache_keys_for_variants(self):
         from llm_sync import llm_cache_keys_for
 

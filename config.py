@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 # stdout/stderr in UTF-8 con fallback 'replace': evita UnicodeEncodeError
 # (codice cp1252 di Windows) quando il bootstrap stampa emoji (es. ⏳ 🔧).
@@ -119,7 +120,7 @@ try:
 except ImportError:
     HAS_TQDM = False
 
-    def tqdm(iterable, desc="", **kwargs):  # type: ignore[no-redef]
+    def tqdm(iterable: Any, desc: str = "", **kwargs: Any) -> Any:  # type: ignore[no-redef]
         """Fallback se tqdm non è installato.
         Supporta total/unit/unit_scale per mostrare progresso reale."""
         total = kwargs.get("total")

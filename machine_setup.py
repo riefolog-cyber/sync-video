@@ -9,6 +9,7 @@ Sceglie il motore di trascrizione più adatto alla configurazione del PC:
 - nessuna GPU accelerabile         -> faster-whisper su CPU (int8)
 - Apple Silicon / sconosciuto      -> faster-whisper su CPU (nessuna accelerazione)
 - GPU AMD                          -> faster-whisper su CPU (OpenVINO supporta solo Intel)
+- GPU Qualcomm Adreno (Snapdragon) -> faster-whisper su CPU (niente CUDA/OpenVINO su ARM)
 
 La prima run rileva, installa/scarica ciò che serve e persiste la scelta
 in ``.cache/machine_setup.json`` + ``.env``. Le run successive usano la
@@ -79,6 +80,10 @@ def _classify_gpu(name: str) -> str:
         return "intel"
     if any(k in low for k in ("amd", "radeon", "vega", "ryzen")):
         return "amd"
+    # Snapdragon X (Windows ARM): l'Adreno non è accelerabile da CUDA né da
+    # OpenVINO (nessuna iGPU Intel); il setup deve ripiegare su CPU.
+    if any(k in low for k in ("qualcomm", "adreno", "snapdragon")):
+        return "qualcomm"
     return "unknown"
 
 
@@ -92,7 +97,7 @@ def _cuda_available() -> bool:
         return False
 
 
-def _openvino_gpu_available() -> bool:
+def openvino_gpu_available() -> bool:
     """True se il runtime OpenVINO espone un device 'GPU' (iGPU Intel)."""
     try:
         from openvino import Core
@@ -120,15 +125,22 @@ def recommend(gpus: list[str]) -> dict:
             "transcriber": "openvino",
             "whisper_device": "cpu",
             "whisper_compute_type": "int8",
-            "openvino_device": "GPU" if _openvino_gpu_available() else "CPU",
+            "openvino_device": "GPU" if openvino_gpu_available() else "CPU",
             "reason": "iGPU Intel rilevata: OpenVINO GenAI",
         }
+    has_qualcomm = any(_classify_gpu(g) == "qualcomm" for g in gpus)
+    reason = (
+        "GPU Qualcomm (Adreno/Snapdragon ARM): nessuna accelerazione disponibile, "
+        "faster-whisper su CPU"
+        if has_qualcomm
+        else "Nessuna GPU accelerabile: faster-whisper su CPU"
+    )
     return {
         "transcriber": "whisper",
         "whisper_device": "cpu",
         "whisper_compute_type": "int8",
         "openvino_device": None,
-        "reason": "Nessuna GPU accelerabile: faster-whisper su CPU",
+        "reason": reason,
     }
 
 

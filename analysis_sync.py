@@ -32,7 +32,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-BASE = Path(r"C:/Users/Gianni/Desktop/sync video")
+BASE = Path(__file__).resolve().parent
 CACHE = BASE / ".cache"
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))

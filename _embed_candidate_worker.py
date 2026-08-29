@@ -24,7 +24,7 @@ from typing import Any, cast
 import numpy as np
 
 
-def _normalized_embed(model, texts: list[str], batch_size: int = 64) -> np.ndarray:
+def _normalized_embed(model: Any, texts: list[str], batch_size: int = 64) -> np.ndarray:
     prepared = list(texts)
     if getattr(model, "model_name", "") and "e5" in str(model.model_name).lower():
         prepared = ["passage: " + t for t in prepared]

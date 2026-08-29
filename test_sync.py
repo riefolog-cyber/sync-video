@@ -8,6 +8,7 @@ interruzione con avviso se la sincronizzazione è impossibile.
 
 import unittest
 from itertools import pairwise
+from typing import ClassVar
 
 import numpy as np
 
@@ -122,6 +123,71 @@ class TestSlideAudioFlow(unittest.TestCase):
         )
         anchors = extract_slide_anchors(words, total_slides=13, flow="slide-audio")
         self.assertEqual(anchors, {13: 2057.9})
+
+    def test_recap_out_of_order_recovered_from_first_mention(self):
+        # "come dicevamo nella slide 3" pronunciata DOPO la slide 4: la
+        # citazione a posteriori (last-wins) farebbe scartare la slide 3 dal
+        # LIS, perdendo anche la menzione reale in ordine (80.6s). Con il
+        # recupero della PRIMA menzione la slide 3 resta ancorata a 80.6s.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("alla", 30.2),
+                ("slide", 30.3),
+                ("2", 30.6),
+                ("passiamo", 80.0),
+                ("alla", 80.2),
+                ("slide", 80.3),
+                ("3", 80.6),
+                ("passiamo", 130.0),
+                ("alla", 130.2),
+                ("slide", 130.3),
+                ("4", 130.6),
+                ("passiamo", 180.0),
+                ("alla", 180.2),
+                ("slide", 180.3),
+                ("5", 180.6),
+                ("come", 230.0),
+                ("dicevamo", 230.3),
+                ("nella", 230.6),
+                ("slide", 230.9),
+                ("3", 231.2),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=5, flow="slide-audio")
+        self.assertEqual(anchors, {2: 30.6, 3: 80.6, 4: 130.6, 5: 180.6})
+
+    def test_recap_only_mention_still_discarded(self):
+        # La slide 3 è menzionata SOLO come citazione a posteriori (dopo le
+        # slide 4 e 5): nessuna menzione in ordine da recuperare -> resta
+        # scartata (l'LLM/DP semantico la posizionerà per contenuto).
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("alla", 30.2),
+                ("slide", 30.3),
+                ("2", 30.6),
+                ("passiamo", 130.0),
+                ("alla", 130.2),
+                ("slide", 130.3),
+                ("4", 130.6),
+                ("passiamo", 180.0),
+                ("alla", 180.2),
+                ("slide", 180.3),
+                ("5", 180.6),
+                ("come", 230.0),
+                ("dicevamo", 230.3),
+                ("nella", 230.6),
+                ("slide", 230.9),
+                ("3", 231.2),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=5, flow="slide-audio")
+        self.assertEqual(anchors, {2: 30.6, 4: 130.6, 5: 180.6})
 
     def test_italian_number_words(self):
         words = _words(
@@ -989,6 +1055,77 @@ class TestAnomalousDurations(unittest.TestCase):
 
     def test_too_few_slides_ignored(self):
         self.assertEqual(self._find([100.0, 400.0], [1, 2]), [])
+
+
+class TestAnomalousContentValidation(unittest.TestCase):
+    """Verifica di contenuto dei segmenti anomali (A2): il parlato del
+    segmento viene confrontato con l'OCR delle slide per distinguere una
+    durata anomala REALE da un allineamento errato."""
+
+    SLIDES: ClassVar[list[str]] = [
+        "Introduzione alla fisica quantistica",
+        "Meccanica newtoniana leggi del moto",
+        "Elettromagnetismo campi elettrici e magnetici",
+        "Termodinamica entropia e calore",
+    ]
+
+    @staticmethod
+    def _validate(anomalous, durations, slide_ids, words_raw):
+        from main import _validate_anomalous_segments
+
+        return _validate_anomalous_segments(
+            anomalous, TestAnomalousContentValidation.SLIDES, words_raw, durations, slide_ids
+        )
+
+    def test_long_segment_with_coherent_content_downgraded(self):
+        # Slide 3 dura 400s ma il parlato nel suo segmento parla davvero di
+        # elettromagnetismo: durata reale, nessun allarme.
+        words = _words(
+            [
+                ("parliamo", 10.0),
+                ("della", 11.0),
+                ("fisica", 12.0),
+                ("elettromagnetismo", 210.0),
+                ("campi", 211.0),
+                ("elettrici", 212.0),
+                ("magnetici", 213.0),
+                ("elettromagnetismo", 300.0),
+                ("campi", 301.0),
+                ("elettrici", 302.0),
+                ("magnetici", 303.0),
+            ]
+        )
+        verdicts = self._validate([(3, 400.0)], [100.0, 100.0, 400.0, 100.0], [1, 2, 3, 4], words)
+        self.assertEqual(verdicts[3], "coerente")
+
+    def test_long_segment_matching_other_slide_flagged(self):
+        # Slide 3 dura 400s ma il parlato del segmento parla di termodinamica
+        # (slide 4): probabile allineamento errato.
+        words = _words(
+            [
+                ("entropia", 210.0),
+                ("calore", 211.0),
+                ("termodinamica", 212.0),
+                ("entropia", 300.0),
+                ("calore", 301.0),
+            ]
+        )
+        verdicts = self._validate([(3, 400.0)], [100.0, 100.0, 400.0, 100.0], [1, 2, 3, 4], words)
+        self.assertEqual(verdicts[3], "disallineata")
+
+    def test_no_lexical_overlap_uncertain(self):
+        # Parlato senza alcuna parola in comune con le slide: segnale debole,
+        # si conserva l'avviso generico.
+        words = _words(
+            [
+                ("qualcosa", 210.0),
+                ("altro", 211.0),
+                ("diverso", 212.0),
+                ("completamente", 213.0),
+            ]
+        )
+        verdicts = self._validate([(3, 400.0)], [100.0, 100.0, 400.0, 100.0], [1, 2, 3, 4], words)
+        self.assertEqual(verdicts[3], "incerto")
 
 
 

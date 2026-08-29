@@ -39,6 +39,9 @@ ignore = [
 # Rilevamento hardware: i probe GPU/CUDA falliscono in modi imprevedibili su
 # macchine diverse; gli except difensivi sono il comportamento voluto.
 "machine_setup.py" = ["BLE001"]
+# Probe disponibilità OpenVINO (openvino_usable): stessa natura difensiva dei
+# probe hardware di machine_setup.py (runtime assente/rotto su macchine diverse).
+"transcription.py" = ["BLE001"]
 # Check aggiornamenti: la rete fallisce in modi imprevedibili (offline/proxy);
 # il fallback silenzioso a None è il comportamento voluto.
 "updates.py" = ["BLE001"]

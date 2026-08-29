@@ -53,6 +53,13 @@ RELAZIONE_DIDATTICA_AGGIORNATA.md
 *.swp
 *.swo
 
+# Metadati dello strumento di sviluppo (Freebuff)
+.freebuff/
+
+# Documento specifico di questa macchina (nome utente e percorsi locali):
+# repo pubblico, NON va committato
+SETUP_ARM.md
+
 # OS
 .DS_Store
 Thumbs.db

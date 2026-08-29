@@ -118,13 +118,28 @@ def extract_slide_anchors(
         # numero reale di slide del PDF (ignorate dal DP, ma confondono i log).
         transitions = _collect_transitions(words, window_seconds)
         return {i + 2: t for i, t in enumerate(transitions[: max(0, total_slides - 1)])}
-    refs = _collect_slide_references(words, total_slides)
+    mentions = _collect_slide_mentions(words, total_slides)
+    refs = {s: times[-1] for s, times in mentions.items()}
     anchors = _lis_anchors(refs)
-    if refs:
-        dropped = sorted(s for s in refs if s not in anchors)
+    if mentions:
+        # Recupero delle citazioni a posteriori (recap): se l'ultima menzione
+        # di una slide cade fuori ordine (es. "come dicevamo nella slide 3"
+        # dopo la slide 4) e la sua PRIMA menzione è invece in ordine, quella
+        # prima menzione diventa l'ancora al posto di scartare la slide.
+        recovered = _recover_first_in_order(anchors, mentions)
+        if recovered:
+            log.info(
+                "   [Ancore] %d ancora/e recuperata/e dalla prima menzione "
+                "in ordine: %s.",
+                len(recovered),
+                ", ".join(f"slide {s} a {t:.1f}s" for s, t in sorted(recovered.items())),
+            )
+            anchors = {**anchors, **recovered}
+        dropped = sorted(s for s in mentions if s not in anchors)
         if dropped:
             log.warning(
-                "   [Ancore] Riferimenti scartati (fuori ordine cronologico): %s.",
+                "   [Ancore] Riferimenti scartati (fuori ordine cronologico, "
+                "nessuna menzione in ordine): %s.",
                 ", ".join(f"slide {s}" for s in dropped),
             )
         missing = sorted(s for s in range(2, total_slides + 1) if s not in anchors)
@@ -136,6 +151,36 @@ def extract_slide_anchors(
                 ", ".join(str(s) for s in missing) or "nessuna",
             )
     return anchors
+
+
+def _recover_first_in_order(
+    anchors: dict[int, float],
+    mentions: dict[int, list[float]],
+) -> dict[int, float]:
+    """Recupera le ancore scartate (fuori ordine) usando la PRIMA menzione.
+
+    Una citazione a posteriori (es. "come dicevamo nella slide 3" pronunciata
+    dopo la slide 4) fa sì che l'ultima menzione (last-wins) cada fuori
+    sequenza e il LIS la scarti, perdendo anche la menzione reale in ordine.
+    Per ogni slide non ancorata si prova la menzione più antica che cade
+    STRETTAMENTE tra le ancore vicine (o dopo l'ultima): se esiste, diventa
+    l'ancora. Le ancore recuperate servono da riferimento per le successive.
+
+    Restituisce le sole ancore recuperate ({} se nessuna).
+    """
+    recovered: dict[int, float] = {}
+    current = dict(anchors)
+    for s in sorted(mentions):
+        if s in current:
+            continue
+        prev_t = max((t for k, t in current.items() if k < s), default=0.0)
+        next_t = min((t for k, t in current.items() if k > s), default=float("inf"))
+        for t in mentions[s]:  # già in ordine cronologico crescente
+            if prev_t < t < next_t:
+                recovered[s] = t
+                current[s] = t
+                break
+    return recovered
 
 
 # =====================================================================
@@ -336,15 +381,32 @@ def _collect_slide_references(
     total_slides: int,
     include_slide_one: bool = False,
 ) -> dict[int, float]:
-    """Raccoglie TUTTI i riferimenti 'slide N' / 'N ... slide' trovati,
-    incluso quelli fuori ordine cronologico (gestiti dal chiamante).
+    """Riferimenti 'slide N' con l'occorrenza PIÙ RECENTE (last-wins).
 
-    Per ogni numero di slide conserva l'occorrenza temporale PIÙ RECENTE
-    (last-wins): una citazione anticipata del numero totale delle slide
-    (es. "le 13 slide di questo documento" a inizio episodio) non deve
-    occupare la slide e far scartare la vera ancora "passiamo alla slide 13"
-    pronunciata dopo. L'ordinamento cronologico resta filtrato dal chiamante
-    (LIS). Le citazioni di chiusura/ripasso finale sono sempre scartate.
+    Una citazione anticipata del numero totale delle slide (es. "le 13 slide
+    di questo documento" a inizio episodio) non deve occupare la slide e far
+    scartare la vera ancora "passiamo alla slide 13" pronunciata dopo.
+    L'ordinamento cronologico resta filtrato dal chiamante (LIS).
+
+    Nota: il recupero delle citazioni a posteriori (recap) richiede TUTTE le
+    menzioni: usare ``_collect_slide_mentions`` + ``_recover_first_in_order``.
+    """
+    mentions = _collect_slide_mentions(words, total_slides, include_slide_one)
+    return {s: times[-1] for s, times in mentions.items()}
+
+
+def _collect_slide_mentions(
+    words: list[Word],
+    total_slides: int,
+    include_slide_one: bool = False,
+) -> dict[int, list[float]]:
+    """Raccoglie TUTTE le menzioni 'slide N' / 'N ... slide' trovate,
+    incluso quelle fuori ordine cronologico (gestite dal chiamante).
+
+    Per ogni numero di slide conserva la LISTA delle occorrenze temporali in
+    ordine cronologico (nessun last-wins): il chiamante decide quale usare
+    (l'ultima per l'anticipazione, la prima per il recupero dei recap).
+    Le citazioni di chiusura/ripasso finale sono sempre scartate.
 
     Con ``include_slide_one=True`` raccoglie anche la "slide 1" parlata: serve
     alla verifica LLM del mapping (la numerazione dello speaker può essere
@@ -352,7 +414,7 @@ def _collect_slide_references(
     resta comunque SEMPRE a 0.0 e non viene mai vincolata come ancora.
     """
     min_slide = 1 if include_slide_one else 2
-    refs: dict[int, float] = {}
+    refs: dict[int, list[float]] = {}
     for i, w in enumerate(words):
         w_norm = _normalize(w["word"])
         if _is_slide_word(w["word"]):
@@ -370,7 +432,7 @@ def _collect_slide_references(
                         w["start"],
                     )
                     continue
-                refs[embedded] = _reference_boundary(words, i)
+                refs.setdefault(embedded, []).append(_reference_boundary(words, i))
                 log.debug(
                     "   [Deterministico] Trovato '%s' con numero incorporato a %.1fs",
                     w["word"],
@@ -388,7 +450,7 @@ def _collect_slide_references(
                                 w["start"],
                             )
                         else:
-                            refs[slide_num] = _reference_boundary(words, j)
+                            refs.setdefault(slide_num, []).append(_reference_boundary(words, j))
                             log.debug(
                                 "   [Deterministico] Trovato 'slide %d' a %.1fs",
                                 slide_num,
@@ -418,7 +480,7 @@ def _collect_slide_references(
                                 words[j]["start"],
                             )
                         else:
-                            refs[num] = _reference_boundary(words, j)
+                            refs.setdefault(num, []).append(_reference_boundary(words, j))
                             log.debug(
                                 "   [Deterministico] Trovato '%s ... slide' a %.1fs",
                                 w["word"],
@@ -461,8 +523,9 @@ def extract_slide_one_references(
     """
     if not words:
         return {}
-    refs = _collect_slide_references(words, total_slides, include_slide_one=True)
-    return {1: refs[1]} if 1 in refs else {}
+    mentions = _collect_slide_mentions(words, total_slides, include_slide_one=True)
+    # Prima menzione: è il momento reale della transizione alla slide 1.
+    return {1: mentions[1][0]} if 1 in mentions else {}
 
 
 def _lis_anchors(refs: dict[int, float]) -> dict[int, float]:
