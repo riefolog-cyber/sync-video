@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Sync Video — Architettura",
+    "output": "sync-video-architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "primary-path", "label": "Pipeline principale", "focus": ["user", "launcher", "main", "ocr", "transcriber", "sync", "video", "output"], "note": "Dal PDF + audio al video sincronizzato: OCR, trascrizione, allineamento, encoding." },
+      { "id": "intelligence", "label": "Sincronizzazione e LLM", "focus": ["sync", "hf", "llm", "cache"], "note": "Embeddings, ancore esplicite e verifica LLM via 9Router." },
+      { "id": "system-tools", "label": "Dipendenze di sistema", "focus": ["tesseract", "ffmpeg", "llm", "hf"], "note": "Strumenti installati via winget e servizi esterni." }
+    ]
+  },
+  "components": [
+    { "id": "user", "type": "external", "label": "Utente", "sublabel": "PDF · Audio", "pos": [0, 304], "size": [116, 56] },
+    { "id": "launcher", "type": "frontend", "label": "Batch launcher", "sublabel": "genera_video.bat", "pos": [146, 304], "size": [116, 56] },
+    { "id": "main", "type": "backend", "label": "Orchestratore", "sublabel": "main.py · config.py", "pos": [288, 304], "size": [116, 56], "tag": "bootstrap dipendenze" },
+    { "id": "ocr", "type": "backend", "label": "OCR Slide", "sublabel": "pymupdf · tesseract", "pos": [436, 150], "size": [116, 56] },
+    { "id": "transcriber", "type": "backend", "label": "Trascrizione", "sublabel": "whisper · OpenVINO", "pos": [436, 458], "size": [116, 56] },
+    { "id": "sync", "type": "backend", "label": "Sincronizzazione", "sublabel": "semantic_sync", "pos": [588, 304], "size": [116, 56] },
+    { "id": "video", "type": "backend", "label": "Encoding", "sublabel": "video.py · concat", "pos": [730, 304], "size": [116, 56] },
+    { "id": "output", "type": "external", "label": "Video finale", "sublabel": "video_finale.mp4", "pos": [872, 304], "size": [116, 56] },
+    { "id": "tesseract", "type": "external", "label": "Tesseract OCR", "sublabel": "sistema (winget)", "pos": [436, 44], "size": [116, 56] },
+    { "id": "hf", "type": "cloud", "label": "Modelli AI", "sublabel": "Hugging Face Hub", "pos": [588, 44], "size": [116, 56] },
+    { "id": "llm", "type": "external", "label": "9Router", "sublabel": "LLM locale :20128", "pos": [588, 440], "size": [116, 56] },
+    { "id": "ffmpeg", "type": "external", "label": "FFmpeg", "sublabel": "sistema (winget)", "pos": [724, 440], "size": [116, 56] },
+    { "id": "cache", "type": "database", "label": ".cache", "sublabel": "OCR · trascrizione", "pos": [284, 458], "size": [116, 56] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "PC locale · Windows ARM (Snapdragon X)", "wraps": ["launcher", "main", "ocr", "transcriber", "sync", "video", "output", "tesseract", "llm", "ffmpeg", "cache"] }
+  ],
+  "connections": [
+    { "id": "user-launcher", "from": "user", "to": "launcher", "label": "doppio clic", "variant": "emphasis", "labelDy": 54 },
+    { "id": "launcher-main", "from": "launcher", "to": "main", "label": "py -3.11 main.py", "variant": "emphasis", "labelDy": 54 },
+    { "id": "main-ocr", "from": "main", "to": "ocr", "label": "1 · OCR testi" },
+    { "id": "main-transcriber", "from": "main", "to": "transcriber", "label": "2 · trascrizione" },
+    { "id": "ocr-sync", "from": "ocr", "to": "sync", "label": "testi slide" },
+    { "id": "transcriber-sync", "from": "transcriber", "to": "sync", "label": "parole + timestamp" },
+    { "id": "sync-video", "from": "sync", "to": "video", "label": "timeline confini", "variant": "emphasis", "labelDy": 54 },
+    { "id": "video-output", "from": "video", "to": "output", "label": "mp4", "variant": "emphasis", "labelDy": 54 },
+    { "id": "ocr-tesseract", "from": "ocr", "to": "tesseract", "label": "pytesseract", "fromSide": "top", "toSide": "bottom" },
+    { "id": "sync-hf", "from": "sync", "to": "hf", "label": "embedding e5-large", "fromSide": "top", "toSide": "bottom" },
+    { "id": "sync-llm", "from": "sync", "to": "llm", "label": "verifica ancore", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "labelDy": 24 },
+    { "id": "video-ffmpeg", "from": "video", "to": "ffmpeg", "label": "ffmpeg CLI", "fromSide": "bottom", "toSide": "top", "labelDy": 24 },
+    { "id": "main-cache", "from": "main", "to": "cache", "label": "cache run", "fromSide": "bottom", "toSide": "top", "labelDy": 24 }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Fasi pipeline", "items": ["1 · OCR → 2 · Trascrizione → 3 · Sincronizzazione → 4 · Encoding", "Tempi per fase in .cache/timing_history.jsonl", "Con cache attiva: run successive ~3 min invece di ~5"] },
+    { "dot": "emerald", "title": "Due flussi di lavoro", "items": ["slide → podcast: ancore esplicite 'slide N' → allineamento 1:1 garantito", "podcast → slide: flusso libero, allineamento stimato per contenuto", "Verifica ancore con LLM + raffinamento confini a livello di parola"] },
+    { "dot": "rose", "title": "Scelta motore (hardware-aware)", "items": ["GPU Qualcomm/ARM (Adreno) → faster-whisper su CPU", "iGPU Intel → OpenVINO · GPU NVIDIA → CUDA", "Fallback automatico con motivazione esplicita (machine_setup)"] },
+    { "dot": "amber", "title": "Qualità e anti-flicker", "items": ["Segmenti corti sotto soglia assorbiti dal vicino", "Avvisi durata/squilibrio validati sul contenuto (OCR vs parlato)", "Verifica durata video: audio + 3s buffer"] }
+  ]
+}

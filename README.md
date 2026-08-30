@@ -61,7 +61,7 @@ Due ricette pronte, in base al punto di partenza:
 
 | Prompt | Flusso | Quando usarlo |
 |---|---|---|
-| [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE.md) | **A**: deck → podcast con ancore `slide N` | Default: massima precisione di allineamento (ancore esatte), podcast più strutturato |
+| [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE%20%28DA%20PREFERIRE%29.md) | **A**: deck → podcast con ancore `slide N` | Default: massima precisione di allineamento (ancore esatte), podcast più strutturato |
 | [`PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PODCAST.md) | **B**: podcast libero → deck derivato dal parlato | Podcast più naturale; anche come piano B quando appare l'avviso "segnale debole" (slide troppo simili tra loro) |
 
 Il flusso A sfrutta le ancore esplicite (flusso ordinato + ibrido LLM); il
@@ -113,7 +113,7 @@ python main.py --llm auto --preview     # valuta senza generare video
 python main.py --llm 9router           # forza 9Router online
 ```
 
-> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto. Prompt ottimale per NotebookLM: [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE.md) — vedi "Quale prompt usare".
+> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto. Prompt ottimale per NotebookLM: [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE%20%28DA%20PREFERIRE%29.md) — vedi "Quale prompt usare".
 
 #### Manutenzione 9Router (`9router-maintenance/`)
 
@@ -254,7 +254,7 @@ riferimenti "slide N": l'assenza di ancore è il comportamento atteso.
 > controlla con `python main.py --dry-run` che la similarità media resti alta
 > e non compaia l'avviso "segnale debole".
 
-### 2. Slide → Podcast (`PRIMA PRESENTAZIONE.md`)
+### 2. Slide → Podcast (`PRIMA PRESENTAZIONE (DA PREFERIRE).md`)
 
 La presentazione esiste prima e il podcast deve **annunciare ogni slide**
 ("passiamo alla slide N"): queste ancore vincolano la sincronizzazione.
@@ -355,6 +355,27 @@ segmento, confini che tagliano a metà parola, scostamento delle ancore
 
 ---
 
+## 📊 Diagrammi (archify)
+
+Lo schema interattivo dell'architettura di questa app è generato con
+[Archify](https://github.com/tt-a1i/archify) — renderer/validatore Node.js
+(clonato in `~/archify`, nessuna installazione globale). Il diagramma è un
+HTML autocontenuto (si apre con doppio clic); il JSON è la sorgente tipizzata
+(componenti, relazioni, confini, viste guidate, card).
+
+| File | Descrizione |
+|---|---|
+| `sync-video-architecture.json` / `.html` | Architettura della pipeline |
+
+Rigenera un diagramma dopo aver modificato il JSON (es. architettura):
+
+```bash
+node ~/archify/archify/bin/archify.mjs validate architecture sync-video-architecture.json --quality showcase --json
+node ~/archify/archify/bin/archify.mjs deliver architecture sync-video-architecture.json sync-video-architecture.html --quality showcase --json
+```
+
+---
+
 ## ⏸️ Gestione on-demand di 9Router
 
 La pipeline usa 9Router **solo quando serve davvero** e non si blocca mai
@@ -401,9 +422,10 @@ genera_video.bat         ← Launcher 1-click
 requirements.txt         ← Dipendenze pip
 ruff.toml                ← Configurazione lint (guardrail di stile)
 mypy.ini                 ← Configurazione type-check
-PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md ← Prompt NotebookLM: presentazione → podcast (unico workflow)
+PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md ← Prompt NotebookLM: presentazione → podcast (unico workflow)
 tessdata/                ← Modelli lingua Tesseract portatili
 9router-maintenance/     ← Script manutenzione combo `comboact` di 9Router (vedi sotto)
+sync-video-architecture.json/html ← Diagramma architettura (generato con archify)
 ```
 
 ### 🛠️ Sviluppo
@@ -516,7 +538,7 @@ pronunciare le ancore "slide N" **in cifre** a ogni sezione: senza ancore il
 pipeline non può sapere dove cambia la slide e passa al flusso libero (che usa
 l'LLM — un avviso in console lo segnala).
 
-Il prompt [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE.md)
+Il prompt [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE%20%28DA%20PREFERIRE%29.md)
 guida sia la generazione della presentazione (Studio → Slide Deck, dalle tue
 fonti) sia il podcast che la segue nell'ordine, arricchendola con le altre
 fonti. Ancore strette: cifre, "slide" chiara, mai "la slide successiva",

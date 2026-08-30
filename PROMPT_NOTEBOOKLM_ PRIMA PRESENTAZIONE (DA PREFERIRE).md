@@ -22,8 +22,6 @@ Segui l'ordine del file presentazione.pdf nelle fonti: procedi per slide e per o
 
 Le altre fonti servono SOLO come approfondimento della slide corrente: non introdurre argomenti di altre slide né cambiare l'ordine.
 
-
-
 ANCORE E STRUTTURA (OBBLIGATORIO):
 
 * Una sezione = una slide del PDF. Il numero che pronunci DEV'ESSERE il numero di pagina della slide nel PDF (la prima pagina è la slide 1). Segui tutte le slide in ordine rigoroso, senza saltarne; se ti accorgi di aver saltato una slide, dillo esplicitamente ("ho saltato la slide N, recuperiamola"), descrivila, poi riprendi in ordine dalla successiva.
