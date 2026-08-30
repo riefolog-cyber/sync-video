@@ -57,11 +57,33 @@ trascrivere/riassumere l'audio appena generato.
    "Crea una presentazione che segua ESATTAMENTE le sezioni della
    trascrizione del podcast nell'ordine in cui compaiono: UNA slide per
    sezione, con lo stesso numero di sezioni (niente fusioni, niente slide
-   extra). Ogni slide ha: titolo chiaro (= argomento della sezione) ed elenco
-   puntato con LE PAROLE CHIAVE specifiche usate nel parlato di quella
-   sezione, evitando termini generici ripetuti sulle altre slide. NUMERA OGNI
-   SLIDE (1, 2, 3...) in un piccolo angolo in basso a sinistra, nell'ordine
-   delle pagine. TESTO RIGOROSAMENTE SOLO IN ITALIANO."
+   extra).
+
+   OGNI SLIDE COMUNICA UNA SOLA IDEA CENTRALE, non elenca gli argomenti
+   della sezione: il testo della slide è la 'spalla' del parlato, non il
+   copione. Titolo breve e incisivo (max 8 parole) che contenga il termine
+   chiave della sezione, pronunciato come nel podcast; sotto, al massimo
+   3-4 punti molto brevi (max 6 parole ciascuno) con le parole chiave
+   specifiche del parlato, evitando termini generici ripetuti sulle altre
+   slide.
+
+   VARA IL FORMATO tra le slide, alternando questi tipi (mai due uguali di
+   seguito):
+   - DICHIARAZIONE: titolo-affermazione forte + una frase chiave;
+   - DOMANDA: titolo sotto forma di domanda aperta (quella che chiude la
+     sezione nel podcast);
+   - DATO / CONFRONTO: un numero o un confronto 'prima vs dopo' in evidenza
+     (SOLO se il dato è presente nelle fonti, MAI inventarne);
+   - ESEMPIO: un caso concreto dalla quotidianità degli studenti;
+   - CITAZIONE: una frase breve e memorabile da ricordare;
+   - SCHEMA: 3-4 parole chiave collegate tra loro (mappa concettuale).
+
+   Regole visive: niente frasi lunghe né paragrafi; una slide non deve mai
+   sembrare la fotocopia della precedente; titoli distintivi e specifici
+   (mai 'Introduzione', 'Conclusioni', 'Argomento 2'); stesso tono fresco e
+   diretto del podcast, adatto a studenti 14-19 anni. NUMERA OGNI SLIDE
+   (1, 2, 3...) in un piccolo angolo in basso a sinistra, nell'ordine delle
+   pagine. TESTO RIGOROSAMENTE SOLO IN ITALIANO."
 
 3. Scarica la presentazione e mettila nella cartella del progetto come
    `presentazione.pdf` (dopo aver rinominato quella vecchia).
@@ -79,7 +101,11 @@ trascrivere/riassumere l'audio appena generato.
 ## Checklist qualità post-generazione
 
 - [ ] Nessuna menzione di "slide", "diapositiva", "capitolo" o numeri di sezione (vietati dal prompt).
+- [ ] Ogni slide comunica UNA sola idea (mai elenchi lunghi di argomenti).
+- [ ] Formati visivi variati tra slide consecutive (dichiarazione, domanda, dato, esempio, citazione, schema).
+- [ ] Titoli brevi, specifici e distintivi, con il termine chiave della sezione (come nel podcast).
 - [ ] Sezioni con titoli e contenuti ben DISTINTI tra loro (per un allineamento 1:1 preciso).
+- [ ] Nessun dato o numero inventato: le slide-dato usano SOLO cifre presenti nelle fonti.
 - [ ] Sezioni di lunghezza ragionevolmente omogenea (durate molto squilibrate generano un avviso nel pipeline).
 - [ ] Prova finale: `python main.py --dry-run` → l'avviso "segnale debole" non deve apparire.
 
