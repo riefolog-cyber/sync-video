@@ -6,6 +6,7 @@ Include riconciliazione timeline e supporto per transizioni.
 
 import subprocess
 import tempfile
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from moviepy import (
     ImageClip,
     concatenate_videoclips,
 )
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from config import (
     DEFAULT_VIDEO_BUFFER_SEC,
@@ -63,6 +64,21 @@ def _fitted_size(img: Image.Image) -> tuple[int, int]:
     return w - w % 2, h - h % 2
 
 
+def _open_slide_retry(slide_path: str, attempts: int = 4, delay: float = 0.75) -> Image.Image:
+    """Apre una slide PNG con retry e decodifica forzata."""
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            return Image.open(slide_path).convert("RGB")
+        except (UnidentifiedImageError, OSError) as e:
+            last = e
+            if i < attempts - 1:
+                time.sleep(delay * (i + 1))
+    raise RuntimeError(
+        f"Lettura slide non riuscita dopo {attempts} prove: {slide_path} ({last})."
+    ) from last
+
+
 def _prepare_slides_for_concat(slide_files: Sequence[str], workdir: Path) -> list[Path]:
     """Prepara i PNG delle slide per il concat demuxer di ffmpeg.
 
@@ -75,7 +91,7 @@ def _prepare_slides_for_concat(slide_files: Sequence[str], workdir: Path) -> lis
     images: list[Image.Image] = []
     try:
         for slide_path in slide_files:
-            img = Image.open(slide_path).convert("RGB")
+            img = _open_slide_retry(slide_path)
             images.append(img)
             fitted.append(_fitted_size(img))
         canvas_w = max(w for w, _ in fitted)

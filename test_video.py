@@ -11,9 +11,12 @@ from pathlib import Path
 from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
+from PIL import Image, UnidentifiedImageError
+
 from video import (
     _build_video_ffmpeg,
     _concat_quote,
+    _open_slide_retry,
     _prepare_slides_for_concat,
     _run_ffmpeg,
     _write_concat_file,
@@ -218,6 +221,48 @@ class TestBuildVideoDispatch(unittest.TestCase):
             build_video(self.SLIDES, self.DURATIONS, clip, Path("out.mp4"), engine="ffmpeg")
         mov.assert_called_once()
         ffm.assert_not_called()
+
+
+class TestOpenSlideRetry(unittest.TestCase):
+    def _make_png(self, td: Path) -> Path:
+        p = td / "ok.png"
+        Image.new("RGB", (8, 6), "white").save(p, format="PNG")
+        return p
+
+    def test_valid_png_returns_rgb_image(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._make_png(Path(tmp))
+            img = _open_slide_retry(str(p))
+            self.assertEqual(img.size, (8, 6))
+            self.assertEqual(img.mode, "RGB")
+            img.close()
+
+    def test_transient_failure_then_success(self):
+        real_open = Image.open
+        calls = {"n": 0}
+
+        def flaky(path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise UnidentifiedImageError("first read empty")
+            return real_open(path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._make_png(Path(tmp))
+            with patch("video.Image.open", side_effect=flaky), patch("video.time.sleep") as sleep:
+                img = _open_slide_retry(str(p))
+            self.assertEqual(calls["n"], 2)
+            sleep.assert_called_once()
+            img.close()
+
+    def test_gives_up_after_attempts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._make_png(Path(tmp))
+            with patch("video.Image.open", side_effect=UnidentifiedImageError("bad")), patch(
+                "video.time.sleep"
+            ) as sleep, self.assertRaises(RuntimeError):
+                _open_slide_retry(str(p))
+            self.assertEqual(sleep.call_count, 3)  # 4 tentativi - 1
 
 
 if __name__ == "__main__":
