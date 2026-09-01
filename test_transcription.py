@@ -128,5 +128,27 @@ class TestOpenvinoUsable(unittest.TestCase):
             self.assertTrue(openvino_usable())
 
 
+class TestWhisperBeamConfig(unittest.TestCase):
+    """Beam size di faster-whisper configurabile (env/CLI) e inoltrato al motore."""
+
+    def test_default_beam_matches_config(self):
+        import inspect
+
+        from config import DEFAULT_WHISPER_BEAM
+        from transcription import transcribe_with_whisper
+
+        sig = inspect.signature(transcribe_with_whisper)
+        self.assertEqual(sig.parameters["beam_size"].default, DEFAULT_WHISPER_BEAM)
+        self.assertGreaterEqual(DEFAULT_WHISPER_BEAM, 1)
+
+    def test_transcribe_audio_forwards_beam_size(self):
+        from transcription import transcribe_audio
+
+        with mock.patch("transcription.transcribe_with_whisper", return_value=("", [])) as m:
+            transcribe_audio(Path("audio.mp3"), transcriber="whisper", whisper_beam=2)
+        m.assert_called_once()
+        self.assertEqual(m.call_args.kwargs.get("beam_size"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

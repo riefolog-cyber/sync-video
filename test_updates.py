@@ -232,5 +232,36 @@ class TestRunUpdateCheck(_TempCacheMixin, unittest.TestCase):
         upg.assert_not_called()
 
 
+class TestBootstrapEnvBlocked(unittest.TestCase):
+    """Bootstrap: solo gli errori di ambiente contano come "installato ma
+    bloccato"; un ModuleNotFoundError (pacchetto o dipendenza davvero
+    mancante) deve essere segnalato come mancante e quindi installato."""
+
+    def test_missing_package_is_not_blocked(self):
+        from config import _is_env_blocked_import
+
+        self.assertFalse(
+            _is_env_blocked_import(
+                "faster_whisper", ModuleNotFoundError("No module named 'faster_whisper'")
+            )
+        )
+        self.assertFalse(
+            _is_env_blocked_import("moviepy", ModuleNotFoundError("No module named 'numpy'"))
+        )
+
+    def test_env_blocked_import_is_true(self):
+        from config import _is_env_blocked_import
+
+        # DLL di PyAV bloccata su Windows / ffmpeg di sistema mancante
+        self.assertTrue(_is_env_blocked_import("faster_whisper", ImportError("DLL load failed")))
+        self.assertTrue(_is_env_blocked_import("moviepy", RuntimeError("ffmpeg missing")))
+
+    def test_other_packages_never_blocked(self):
+        from config import _is_env_blocked_import
+
+        self.assertFalse(_is_env_blocked_import("numpy", ImportError("x")))
+        self.assertFalse(_is_env_blocked_import("pymupdf", RuntimeError("x")))
+
+
 if __name__ == "__main__":
     unittest.main()

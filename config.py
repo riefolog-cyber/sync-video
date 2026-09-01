@@ -88,6 +88,19 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Scrive testo in modo atomico (file temporaneo + os.replace).
+
+    Una scrittura interrotta (crash, Ctrl+C, disco pieno) non lascia mai
+    un file di cache corrotto: il .tmp viene ignorato dai lettori e il
+    file definitivo resta nella versione precedente.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding=encoding)
+    os.replace(tmp, path)
+
+
 # =====================================================================
 # PATH DI BASE
 # =====================================================================
@@ -218,6 +231,19 @@ def _try_pip_install(package: str) -> bool:
         return False
 
 
+def _is_env_blocked_import(import_name: str, exc: Exception) -> bool:
+    """True se l'errore d'import di un pacchetto opzionale è "installato ma
+    bloccato dall'ambiente" (es. DLL PyAV bloccata su Windows, ffmpeg di
+    sistema mancante) e NON "pacchetto mancante" (che va installato)."""
+    if import_name not in ("moviepy", "faster_whisper"):
+        return False
+    # ModuleNotFoundError = pacchetto (o dipendenza, es. numpy/av) davvero
+    # mancante: va installato, non ignorato.
+    if isinstance(exc, ModuleNotFoundError):
+        return False
+    return isinstance(exc, (ImportError, RuntimeError))
+
+
 def bootstrap() -> None:
     """
     Verifica e installa automaticamente tutte le dipendenze.
@@ -245,7 +271,9 @@ def bootstrap() -> None:
             # i casi il pacchetto è presente: la verifica dello strumento di
             # sistema avviene più avanti nel bootstrap e la trascrizione usa
             # OpenVINO (che non dipende da av).
-            if import_name in ("moviepy", "faster_whisper") and isinstance(e, (ImportError, RuntimeError)):
+            # Un ModuleNotFoundError invece significa pacchetto (o dipendenza)
+            # davvero mancante: va installato, non ignorato.
+            if _is_env_blocked_import(import_name, e):
                 log.debug(
                     "   %s installato ma import bloccato dall'ambiente (%s): proseguo.",
                     pip_name,
@@ -528,6 +556,11 @@ DEFAULT_TRANSCRIBER = os.environ.get("TRANSCRIBER", "auto")  # 'auto'/'openvino'
 DEFAULT_WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")  # tiny/base/small/medium/large
 DEFAULT_WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")  # 'cpu' o 'cuda'
 DEFAULT_WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")  # int8 (cpu) / float16 (cuda)
+
+# Beam size faster-whisper: 5 = massima precisione (default); 1-2 accelera
+# la trascrizione del 30-50% con perdita minima su modelli piccoli.
+# Override con WHISPER_BEAM.
+DEFAULT_WHISPER_BEAM = _env_int("WHISPER_BEAM", 5)
 # Motore OpenVINO GenAI (più veloce su iGPU Intel). Modello IR pre-convertito,
 # scaricabile da HuggingFace: OpenVINO/whisper-small-fp16-ov
 DEFAULT_OPENVINO_MODEL_DIR = os.environ.get("OPENVINO_MODEL_DIR", str(CACHE_DIR / "whisper_openvino_small"))
@@ -723,6 +756,13 @@ Esempi:
         "--whisper-compute-type",
         default=DEFAULT_WHISPER_COMPUTE_TYPE,
         help=f"Compute type faster-whisper (default: {DEFAULT_WHISPER_COMPUTE_TYPE})",
+    )
+    parser.add_argument(
+        "--whisper-beam",
+        type=int,
+        default=DEFAULT_WHISPER_BEAM,
+        help=f"Beam size faster-whisper (default: {DEFAULT_WHISPER_BEAM}). "
+        f"1-2 = più veloce, 5 = più preciso",
     )
     parser.add_argument(
         "--no-auto-setup",

@@ -1346,5 +1346,41 @@ class TestCacheCleanup(unittest.TestCase):
         self.assertEqual(empty, set())
 
 
+    def test_clean_orphan_cache_keeps_housekeeping_keys(self):
+        # updates_check (TTL del check PyPI) e fastembed_ab (report del test
+        # A/B) sono metadati di stato, non cache di contenuto: devono
+        # sopravvivere alla pulizia, altrimenti il check di rete (o il test
+        # A/B) ripartirebbe a ogni run.
+        for name in ("updates_check.json", "fastembed_ab.json"):
+            self._write(name)
+        self._write("slides_vecchiohash_300_ita.json")
+        self._write("slides_hashattuale_300_ita.json")
+        removed = self._main._clean_orphan_cache({"slides_hashattuale_300_ita"})
+        self.assertEqual(removed, 1)
+        remaining = sorted(p.name for p in self._tmpdir.glob("*.json"))
+        self.assertEqual(
+            remaining,
+            ["fastembed_ab.json", "slides_hashattuale_300_ita.json", "updates_check.json"],
+        )
+
+    def test_save_cache_atomic_no_tmp_left(self):
+        from config import atomic_write_text
+
+        target = self._tmpdir / "prova_atomica.json"
+        atomic_write_text(target, '{"k": 1}')
+        self.assertIn('"k": 1', target.read_text(encoding="utf-8"))
+        # nessun file temporaneo residuo dopo la scrittura
+        self.assertEqual(list(self._tmpdir.glob("*.tmp")), [])
+
+    def test_save_cache_write_then_load(self):
+        self._main._save_cache(
+            "slides_hashattuale_300_ita", {"slide_files": ["a.png"], "slide_texts": ["t"]}
+        )
+        data = self._main._load_cache("slides_hashattuale_300_ita")
+        self.assertEqual(data["slide_texts"], ["t"])
+        # scrittura atomica: nessun .tmp residuo
+        self.assertEqual(list(self._tmpdir.glob("*.tmp")), [])
+
+
 if __name__ == "__main__":
     unittest.main()

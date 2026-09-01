@@ -74,7 +74,7 @@ from contextlib import suppress
 from typing import Any, cast
 
 from chunks import Word, build_windows
-from config import CACHE_DIR, log
+from config import CACHE_DIR, atomic_write_text, log
 from timeline import _complete_from_anchors, _lis_anchors, reconcile_timeline
 
 try:
@@ -1759,7 +1759,7 @@ def _save_llm_cache(key: str, segments: list[dict[str, object]]) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = CACHE_DIR / f"llm_{key}.json"
     with suppress(OSError):
-        path.write_text(
+        atomic_write_text(
+            path,
             json.dumps(segments, ensure_ascii=False),
-            encoding="utf-8",
         )

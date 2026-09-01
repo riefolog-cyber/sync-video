@@ -318,7 +318,9 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--transitions` | `0.0` | Dissolvenza tra slide (s) |
 | `--lang` | `ita` | Lingua OCR |
 | `--whisper-model` | `small` | tiny/base/small/medium/large/large-v3 |
+| `WHISPER_MODEL` (env) | `tiny` | Modello usato da `genera_video.bat` (es. `set WHISPER_MODEL=small`) |
 | `--transcriber` | `auto` | `auto`/`openvino`/`whisper` (OpenVINO ~1.5x più veloce) |
+| `--whisper-beam` | `5` | Beam size faster-whisper (1-2 = più veloce, 5 = più preciso) |
 | `--openvino-device` | `GPU` | Device OpenVINO (`GPU` iGPU o `CPU`) |
 | `--openvino-download` | — | Scarica modello OpenVINO IR (una tantum) |
 | `--semantic-model` | e5-large | Modello embedding |

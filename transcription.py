@@ -21,6 +21,7 @@ from config import (
     DEFAULT_OPENVINO_MODEL_DIR,
     DEFAULT_OPENVINO_MODEL_ID,
     DEFAULT_TRANSCRIPT_WINDOW,
+    DEFAULT_WHISPER_BEAM,
     TRANSITION_WORDS_ITA,
     get_stopwords,
     log,
@@ -293,6 +294,7 @@ def transcribe_audio(
     openvino_device: str = "GPU",
     whisper_device: str = "cpu",
     whisper_compute_type: str = "int8",
+    whisper_beam: int = DEFAULT_WHISPER_BEAM,
 ) -> tuple[str, list[Word]]:
     """
     Dispatcher trascrizione: sceglie il motore più veloce disponibile.
@@ -341,6 +343,7 @@ def transcribe_audio(
         language=language,
         device=whisper_device,
         compute_type=whisper_compute_type,
+        beam_size=whisper_beam,
     )
 
 
@@ -350,7 +353,7 @@ def transcribe_with_whisper(
     device: str = "cpu",
     compute_type: str = "int8",
     language: str = "ita",
-    beam_size: int = 5,
+    beam_size: int = DEFAULT_WHISPER_BEAM,
     vad_filter: bool = True,
     vad_parameters: dict | None = None,
     openvino_available: bool | None = None,

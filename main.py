@@ -26,6 +26,7 @@ from config import (
     DEFAULT_VIDEO_FPS,
     DEFAULT_VIDEO_THREADS,
     STOPWORDS_ITA,
+    atomic_write_text,
     bootstrap,
     log,
     parse_args,
@@ -121,6 +122,10 @@ def _abort(message: str) -> NoReturn:
     sys.exit(1)
 
 
+# Chiavi "housekeeping" che NON sono cache di contenuto: vanno conservate
+# (updates_check = TTL del controllo PyPI, fastembed_ab = report test A/B).
+_KEEP_CACHE_STEMS = frozenset({"machine_setup", "updates_check", "fastembed_ab"})
+
 def _clean_orphan_cache(active_keys: set[str]) -> int:
     """Rimuove i file .json nella cache che non corrispondono ai
     file PDF/audio correnti (chiavi attive). Restituisce il numero rimossi.
@@ -132,14 +137,17 @@ def _clean_orphan_cache(active_keys: set[str]) -> int:
 
     Anche ``machine_setup.json`` (scelta del motore rilevata dall'hardware)
     NON viene rimosso: è un file di configurazione, non una cache, e va
-    riusato nelle run successive senza rifare il rilevamento.
+    riusato nelle run successive senza rifare il rilevamento. Le chiavi
+    housekeeping (``updates_check`` = TTL del check PyPI, ``fastembed_ab`` =
+    report del test A/B) vengono conservate per lo stesso motivo: cancellarle
+    farebbe ripetere il check di rete (o il test A/B) a ogni run.
     """
     if not CACHE_DIR.exists():
         return 0
     removed = 0
     for cache_file in CACHE_DIR.glob("*.json"):
         key = cache_file.stem  # nome file senza .json
-        if key.startswith("llm_") or key == "machine_setup":
+        if key.startswith("llm_") or key in _KEEP_CACHE_STEMS:
             continue
         if key not in active_keys:
             cache_file.unlink()
@@ -203,9 +211,9 @@ def _save_final_timeline(
             else total_duration
         )
         entries.append({"slide": s, "start": round(float(timeline[s]), 3), "end": round(float(end), 3)})
-    (CACHE_DIR / "llm_timeline_finale.json").write_text(
+    atomic_write_text(
+        CACHE_DIR / "llm_timeline_finale.json",
         json.dumps(entries, ensure_ascii=False),
-        encoding="utf-8",
     )
     log.info("   Timeline finale salvata in cache per la verifica (llm_timeline_finale.json).")
 
@@ -415,7 +423,7 @@ def _load_cache(key: str) -> dict | None:
 
 def _save_cache(key: str, data: dict) -> None:
     """Salva dati nella cache."""
-    _cache_path(key).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(_cache_path(key), json.dumps(data, ensure_ascii=False, indent=2))
     log.debug("   Cache salvata: %s", key)
 
 
@@ -625,6 +633,7 @@ def main(argv: list | None = None) -> None:
                 openvino_device=args.openvino_device,
                 whisper_device=args.whisper_device,
                 whisper_compute_type=args.whisper_compute_type,
+                whisper_beam=args.whisper_beam,
             )
             if not args.no_cache:
                 # Fix A: salva anche le parole raw per estrazione deterministica

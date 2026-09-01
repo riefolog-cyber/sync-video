@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from typing import Any
 
-from config import BASE_DIR, CACHE_DIR, log
+from config import BASE_DIR, CACHE_DIR, atomic_write_text, log
 
 UPDATES_CACHE = CACHE_DIR / "updates_check.json"
 DEFAULT_UPDATE_TTL_HOURS = 6.0  # ri-check di rete ogni N ore
@@ -368,4 +368,4 @@ def _read_cache() -> dict:
 
 def _write_cache(data: dict) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    UPDATES_CACHE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(UPDATES_CACHE, json.dumps(data, ensure_ascii=False, indent=2))

@@ -6,7 +6,9 @@ title Sync Video: Slide -> Audio
 
 set "PAUSE_IT=1"
 set "CHECK_UPDATES=0"
-set "MAIN_ARGS=--whisper-model tiny --engine ffmpeg"
+rem --- Modello whisper: sovrascrivibile con set WHISPER_MODEL=small (default tiny) ---
+if not defined WHISPER_MODEL set "WHISPER_MODEL=tiny"
+set "MAIN_ARGS=--whisper-model %WHISPER_MODEL% --engine ffmpeg"
 :parse
 if "%~1"=="" goto run
 if /i "%~1"=="--no-pause" set "PAUSE_IT=0"& shift & goto parse
