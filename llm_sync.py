@@ -106,6 +106,21 @@ HTTP_TOO_MANY_REQUESTS = 429
 HTTP_SERVER_ERROR_BOUNDARY = 500
 
 
+def _env_int(name: str, default: int) -> int:
+    """Legge una var d'ambiente numerica (`name`) con fallback su `default`.
+
+    Antifragile: se il valore manca o non è un intero usa il default, così una
+    env mal configurata non rompe la pipeline.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def endpoints_for(provider: str) -> list[dict[str, Any]]:
     """Restituisce gli endpoint da usare per il provider scelto.
 
@@ -133,6 +148,10 @@ def _endpoints() -> list[dict[str, Any]]:
          free nel caso i primi due non siano disponibili.
     """
     endpoints: list[dict[str, Any]] = []
+    # Timeout di richiesta configurabile: default 120s. Abbassalo (es. 60) per
+    # run più reattive quando 9Router è lento; alzalo se i modelli reasoning
+    # della combo faticano a finire in tempo (LLM_9ROUTER_TIMEOUT).
+    timeout = _env_int("LLM_9ROUTER_TIMEOUT", 120)
 
     # 9Router (gateway multi-provider, es. http://localhost:20128/v1)
     r_url = os.environ.get("LLM_9ROUTER_URL", "http://localhost:20128/v1")
@@ -148,7 +167,7 @@ def _endpoints() -> list[dict[str, Any]]:
             "url": base + "/chat/completions",
             "model": os.environ.get("LLM_9ROUTER_MODEL", "comboact"),
             "api_key": api_key,
-            "timeout": 120,
+            "timeout": timeout,
         }
     )
     # 2) Backup nello stesso router: Cloudflare Mistral 24B — nessun pool
@@ -159,7 +178,7 @@ def _endpoints() -> list[dict[str, Any]]:
             "url": base + "/chat/completions",
             "model": os.environ.get("LLM_9ROUTER_BACKUP_MODEL", "cf/@cf/mistralai/mistral-small-3.1-24b-instruct"),
             "api_key": api_key,
-            "timeout": 120,
+            "timeout": timeout,
         }
     )
     # 3) Seconda rete di sicurezza free (via OpenRouter)
@@ -169,7 +188,7 @@ def _endpoints() -> list[dict[str, Any]]:
             "url": base + "/chat/completions",
             "model": os.environ.get("LLM_9ROUTER_BACKUP_MODEL_2", "openrouter/google/gemma-4-31b-it:free"),
             "api_key": api_key,
-            "timeout": 120,
+            "timeout": timeout,
         }
     )
 
@@ -394,24 +413,33 @@ def _call_endpoint(
         # "length" senza content interpretabile. 8192 copre anche quelli.
         "max_tokens": 8192,
     }
-    max_attempts = 3  # retry su rate-limit (pool free condiviso) con backoff
+    # Retry di rete (timeout/connessione) LIMITATI: un Read timed out dopo ~120s
+    # è quasi sempre sistemico (modello lento o router in errore), non transitorio.
+    # Un solo retry col timeout DIMEZZATO, poi si passa subito al fallback: prima
+    # 3 tentativi da 120s = fino a ~6 minuti sprecati prima del backup esplicito.
+    max_attempts = 3  # solo il rate-limit HTTP 429 beneficia del backoff completo
+    network_max = 2  # tentativi totali concessi agli errori di rete
+    timeout = float(endpoint.get("timeout", 120))
     for attempt in range(max_attempts):
         try:
             resp = requests.post(
                 endpoint["url"],
                 headers=headers,
                 json=payload,
-                timeout=endpoint.get("timeout", 120),
+                timeout=timeout,
             )
         except (requests.RequestException, OSError) as e:
-            if attempt < max_attempts - 1:
+            if attempt < network_max - 1:
                 log.warning(
                     "   [LLM] %s non raggiungibile (tentativo %d/%d): %s",
                     endpoint["name"],
                     attempt + 1,
-                    max_attempts,
+                    network_max,
                     e,
                 )
+                # Il retry dopo un timeout intero raramente riesce: dimezza il
+                # timeout così il fallback al backup arriva prima (120+60=180s max).
+                timeout = max(20.0, timeout / 2)
                 time.sleep(2 * (attempt + 1))
                 continue
             log.warning("   [LLM] %s non raggiungibile: %s", endpoint["name"], e)

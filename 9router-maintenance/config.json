@@ -11,10 +11,11 @@
   "freeModels": [
     "gemini/gemini-2.5-flash",
     "gemini/gemini-2.5-flash-lite",
-    "groq/llama-3.3-70b-versatile",
     "mistral/mistral-large-latest",
     "openrouter/openrouter/free",
-    "oc/nemotron-3-ultra-free"
+    "oc/laguna-s-2.1-free",
+    "openrouter/google/gemma-4-26b-a4b-it:free",
+    "groq/openai/gpt-oss-120b"
   ],
   "notifications": {
     "enabled": true,
@@ -30,6 +31,13 @@
   "parallelization": {
     "throttleLimit": 8
   },
+  "orderByLatency": true,
+  "preferredOrder": [
+    "cf/@cf/meta/llama-3.1-8b-instruct-fp8-fast",
+    "cf/@cf/mistralai/mistral-small-3.1-24b-instruct",
+    "gemini/gemini-2.5-flash-lite",
+    "cf/@cf/zai-org/glm-4.7-flash"
+  ],
   "alerts": {
     "removedPerRunThreshold": 5,
     "criticalDayThreshold": 15,

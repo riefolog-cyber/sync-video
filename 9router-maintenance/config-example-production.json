@@ -20,5 +20,12 @@
   },
   "parallelization": {
     "throttleLimit": 8
-  }
+  },
+  "orderByLatency": true,
+  "preferredOrder": [
+    "cf/@cf/meta/llama-3.1-8b-instruct-fp8-fast",
+    "cf/@cf/mistralai/mistral-small-3.1-24b-instruct",
+    "gemini/gemini-2.5-flash-lite",
+    "cf/@cf/zai-org/glm-4.7-flash"
+  ],
 }

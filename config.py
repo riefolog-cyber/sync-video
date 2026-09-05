@@ -943,6 +943,16 @@ Esempi:
         "premere 'S' in ogni momento per saltare e usare "
         "subito l'embedding locale.",
     )
+    parser.add_argument(
+        "--llm-local-threshold",
+        type=int,
+        default=2,
+        help="Nel flusso ordinato (slide-audio/audio-slide), numero "
+        "massimo di slide senza ancora gestite dal raffinamento "
+        "locale (embeddings) al posto di 9Router. Oltre questa "
+        "soglia l'LLM cloud viene usato come prima (default: 2). "
+        "Imposta 0 per usare sempre 9Router nel flusso ibrido.",
+    )
     parser.add_argument("--log-file", default=None, help="Percorso file di log (salva i log anche su file)")
 
     args = parser.parse_args(argv)

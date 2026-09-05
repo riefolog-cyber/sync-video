@@ -78,9 +78,10 @@ trascrizione INSIEME comprende il significato e può associare meglio la slide
 ai momenti del podcast (es. "covert" → slide Overt/Covert).
 
 - Unico provider: **9Router** online (localhost:20128). Modello principale:
-  la **combo `comboact`** (46 modelli free mantenuti dallo script
+  la **combo `comboact`** (dozzine di modelli liberi mantenuti dallo script
   `9router-maintenance/update-comboact.ps1`: Gemini, Kimi, DeepSeek, Nemotron,
-  GLM, Qwen, ecc.). Inviando `"model": "comboact"` il router instrada il primo
+  GLM, Qwen, ecc.; lo script misura la latenza di ognuno e mette i più veloci
+  in testa). Inviando `"model": "comboact"` il router instrada il primo
   modello funzionante, con backup espliciti Cloudflare Mistral 24B → Gemma
   4 31B it (free) → fallback **embedding locale**. Nessuna interruzione. Modelli e URL
   sovrascrivibili con `LLM_9ROUTER_MODEL`, `LLM_9ROUTER_BACKUP_MODEL`,
@@ -119,8 +120,9 @@ python main.py --llm 9router           # forza 9Router online
 
 La cartella `9router-maintenance/` contiene uno script PowerShell
 (`update-comboact.ps1`) che mantiene la **combo `comboact`** esposta da 9Router:
-testa in parallelo i modelli, rimuove quelli guasti/morti e aggiunge modelli
-free. Serve a mantenere pulito il router lato server.
+testa in parallelo i modelli, rimuove quelli guasti/morti, aggiunge modelli
+free e riordina per latenza (i più veloci in testa). Serve a mantenere pulito
+e veloce il router lato server.
 
 > **La combo `comboact` è il modello principale della pipeline**: `llm_sync.py`
 > invia `"model": "comboact"` a `/v1/chat/completions`, così il router instrada
@@ -332,6 +334,7 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--llm-chunk` | `30.0` | Secondi per chunk inviato all'LLM |
 | `--llm-wait-timeout` | `0.0` | Se 9Router è necessario ma spento: secondi massimi di attesa prima del fallback embedding. `0` = attesa illimitata (pausa + avviso, riprende appena 9Router risponde) |
 | `--llm-review` | — | Dopo la timeline LLM nel flusso libero, secondo passaggio LLM che ri-verifica la selezione chunk→slide e avvisa (senza modificare la timeline) sui chunk sospetti. Risultato cachato. |
+| `--llm-local-threshold` | `2` | Nel flusso ordinato, numero massimo di slide senza ancora gestite dal raffinamento locale (embeddings, ~secondi, nessun 9Router) al posto dell'LLM cloud. Oltre questa soglia si usa 9Router (che si avvia da solo se spento). `0` = usa sempre 9Router |
 
 ---
 
@@ -484,7 +487,7 @@ pipeline prende una strada diversa a seconda del segnale presente nell'audio.
 
 | Scenario | Segnale | Cosa fa |
 |---|---|---|
-| **A. `slide-audio`** | "Passiamo alla slide 3" | Estratte ancore deterministiche "slide N" (cifre, cardinali o **ordinali**: "la terza diapositiva") → vincoli ad alta precisione. Verifica mapping ancore: se la numerazione parlata è sfasata rispetto al PDF, l'**euristica deterministica** (embeddings locali, offline) corregge gli offset sistematici subito, senza 9Router; fallback LLM se l'offset non è sistematico. Sincronizzazione semantica (embedding e5-large offline): ogni blocco audio → slide più vicina, DP monotona. Con `--llm` attivo e slide SENZA ancora → **flusso ibrido**: l'LLM posiziona solo quelle (dove il contenuto è discusso), le ancore restano esatte. Riconciliazione (tempi crescenti, durate positive); se impossibile → **interruzione**. Slide in ordine 1→N. Un log diagnostico distingue riferimenti trovati/usati/scartati e segnala le slide senza ancora esplicita. |
+| **A. `slide-audio`** | "Passiamo alla slide 3" | Estratte ancore deterministiche "slide N" (cifre, cardinali o **ordinali**: "la terza diapositiva") → vincoli ad alta precisione. Verifica mapping ancore: se la numerazione parlata è sfasata rispetto al PDF, l'**euristica deterministica** (embeddings locali, offline) corregge gli offset sistematici subito, senza 9Router; fallback LLM se l'offset non è sistematico. Sincronizzazione semantica (embedding e5-large offline): ogni blocco audio → slide più vicina, DP monotona. Con `--llm` attivo e slide SENZA ancora → **flusso ibrido**: fino a `--llm-local-threshold` slide mancanti (default 2) usa il **raffinamento locale** (embeddings, ~secondi, nessun 9Router); oltre la soglia l'**LLM** (9Router, che si avvia da solo se spento) le posiziona leggendo dove il contenuto è discusso; le ancore restano esatte. Riconciliazione (tempi crescenti, durate positive); se impossibile → **interruzione**. Slide in ordine 1→N. Un log diagnostico distingue riferimenti trovati/usati/scartati e segnala le slide senza ancora esplicita. |
 | **B. `audio-slide`** | "Passiamo al blocco successivo" | Stesse ancore (numeriche o ordinali), stessa pipeline ordinata (+ flusso ibrido LLM come in A); la slide cambia sulle transizioni di blocco non numerate. |
 | **C. `free`** | nessuno | Riordino libero: la slide segue il contenuto del podcast, anche ripetuta, durata minima ~8s (anti-flicker). **Con LLM** (`--llm auto`): chunk 30s inviati a 9Router (combo `comboact` → Mistral 24B → Gemma 31B); se 9Router è spento il processo si mette in pausa con avviso e riprende da solo appena torna online (o premi `S` / `--llm-wait-timeout` per il fallback embedding; senza terminale interattivo si interrompe con errore chiaro). **Senza LLM** (`--llm off`): solo embedding locale in modalità libera. `--llm-review` ri-verifica e avvisa senza modificare la timeline. |
 

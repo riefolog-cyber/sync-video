@@ -87,6 +87,19 @@ Esempio:
 - Throttle limit configurabile in config.json
 - Default: 8 modelli contemporaneamente
 
+### 9️⃣ **Ordinamento per Latenza (modelli veloci PRIMA)**
+- Ogni test misura il tempo di risposta (`latencyMs`) e lo persiste in `logs/comboact-state.json`
+- Al termine della manutenzione la combo viene **riordinata**: i modelli più veloci e stabili finiscono in testa, così il router 9Router instrada subito su di loro a ogni chiamata `comboact`
+- **Configurazione**:
+  - `orderByLatency`: `true` per attivare il riordino (default `false` = mantiene l'ordine del router)
+  - `preferredOrder`: lista di modelli da mettere IN TESTA assoluta (es. i più affidabili/veloci noti)
+- Conta solo la latenza dei test **RIUSCITI**: un modello che fallisce in fretta (503/429) non finisce in testa
+- I modelli senza misurazione finiscono in coda (ordinati per nome)
+
+### 🔟 **Fix API Combinata (UUID)**
+- La combo è aggiornata via `PUT /api/combos/<id>` usando l'**UUID** della combo (il server 9Router rifiuta il nome con HTTP 400 "name already exists")
+- Lo script legge `id` da `/api/combos` e usa quello nel path
+
 ---
 
 ## 🚀 Come Usare

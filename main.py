@@ -921,52 +921,65 @@ def main(argv: list | None = None) -> None:
                     )
                     semantic_anchors = verified
                 elif args.llm != "off":
-                    # 2) Fallback LLM: la numerazione non ha offset sistematico
-                    #    rilevabile, lascio decidere all'LLM (lettura del contenuto).
-                    endpoints = endpoints_for(args.llm)
-                    if args.llm_model:
-                        for ep in endpoints:
-                            ep["model"] = args.llm_model
-                    log.info("   Verifica mapping ancore con LLM (--llm %s)...", args.llm)
-                    # Validatore dei rimappi LLM: un rimappo che contraddice il
-                    # contenuto del parlato (embeddings locali) viene scartato,
-                    # perché le ancore esplicite sono vincoli ad alta precisione
-                    # e un rimappo errato rompe la timeline (es. slide 4/5).
-                    remap_filter = make_anchor_remap_filter(
-                        slide_texts,
-                        words_raw,
-                        total_slides,
-                        window_seconds=40.0,
-                        options=SemanticOptions(
-                            model_name=args.semantic_model,
-                            cache_dir=args.semantic_cache_dir,
-                        ),
-                    )
-                    try:
-                        verified = llm_verify_anchor_mapping(
+                    # Salto la verifica LLM quando c'è UNA SOLA slide senza ancora
+                    # (caso più comune: 13/14 annunciate) e l'euristica deterministica
+                    # qui sopra non ha rilevato offset sistematico: la chiamata LLM
+                    # (~1 min) non cambierebbe la mapping già coerente. La verifica
+                    # resta per i casi in cui la numerazione parlata è davvero
+                    # sospetta: recap della slide 1 o ≥2 slide senza ancora.
+                    if slide_one_refs or (total_slides - 1 - len(semantic_anchors) >= 2):
+                        # 2) Fallback LLM: la numerazione non ha offset sistematico
+                        #    rilevabile, lascio decidere all'LLM (lettura del contenuto).
+                        endpoints = endpoints_for(args.llm)
+                        if args.llm_model:
+                            for ep in endpoints:
+                                ep["model"] = args.llm_model
+                        log.info("   Verifica mapping ancore con LLM (--llm %s)...", args.llm)
+                        # Validatore dei rimappi LLM: un rimappo che contraddice il
+                        # contenuto del parlato (embeddings locali) viene scartato,
+                        # perché le ancore esplicite sono vincoli ad alta precisione
+                        # e un rimappo errato rompe la timeline (es. slide 4/5).
+                        remap_filter = make_anchor_remap_filter(
                             slide_texts,
                             words_raw,
-                            verify_anchors,
                             total_slides,
-                            endpoints=endpoints,
-                            wait_timeout=args.llm_wait_timeout,
-                            strict=True,
-                            remap_filter=remap_filter,
+                            window_seconds=40.0,
+                            options=SemanticOptions(
+                                model_name=args.semantic_model,
+                                cache_dir=args.semantic_cache_dir,
+                            ),
                         )
-                    except RuntimeError as e:
-                        # 9Router necessario ma non avviabile/non online: niente
-                        # fallback silenzioso, il processo si arresta con l'avviso.
-                        _abort(str(e))
-                    if verified is not None:
-                        # La slide 1 reale è sempre 0.0: un eventuale mapping a slide 1
-                        # (es. ripasso della prima slide a metà narrazione) non è un
-                        # confine di transizione e non deve vincolare la timeline.
-                        verified = {s: t for s, t in verified.items() if s != 1}
+                        try:
+                            verified = llm_verify_anchor_mapping(
+                                slide_texts,
+                                words_raw,
+                                verify_anchors,
+                                total_slides,
+                                endpoints=endpoints,
+                                wait_timeout=args.llm_wait_timeout,
+                                strict=True,
+                                remap_filter=remap_filter,
+                            )
+                        except RuntimeError as e:
+                            # 9Router necessario ma non avviabile/non online: niente
+                            # fallback silenzioso, il processo si arresta con l'avviso.
+                            _abort(str(e))
+                        if verified is not None:
+                            # La slide 1 reale è sempre 0.0: un eventuale mapping a slide 1
+                            # (es. ripasso della prima slide a metà narrazione) non è un
+                            # confine di transizione e non deve vincolare la timeline.
+                            verified = {s: t for s, t in verified.items() if s != 1}
+                            log.info(
+                                "   Mapping ancore corretto dall'LLM: %d ancore verificate.",
+                                len(verified),
+                            )
+                            semantic_anchors = verified
+                    else:
                         log.info(
-                            "   Mapping ancore corretto dall'LLM: %d ancore verificate.",
-                            len(verified),
+                            "   [Ancore] Una sola slide senza ancora e nessun offset "
+                            "sistematico: salto la verifica LLM del mapping (le ancore "
+                            "restano quelle deterministiche) e risparmio ~1 min."
                         )
-                        semantic_anchors = verified
 
             # Log diagnostico condiviso (stato finale ancore, post-verifica):
             # le slide senza ancora esplicita sono quelle che il flusso ibrido
@@ -1006,73 +1019,127 @@ def main(argv: list | None = None) -> None:
                 if _llm_cleaned:
                     log.info("   🧹 Rimosse %d cache LLM orfane (contenuti cambiati).", _llm_cleaned)
 
-            # --- Flusso IBRIDO (ordinato + LLM) ---
+            # --- Flusso IBRIDO (ordinato + LLM, con fallback locale) ---
             # Le ancore deterministiche sono vincoli ESATTI e inviolabili. Se
             # restano slide senza ancora esplicita (mai nominate o narrate fuori
-            # posizione), il MiniLM le allinea per similarità e può inventare
-            # durate (es. contenuto slide 3 a 100s ma slide 2 mai narrata). Con
-            # --llm != off un LLM posiziona SOLO quelle slide, leggendo dove il
-            # loro contenuto viene discusso. Fallback automatico: MiniLM.
+            # posizione), serve posizionarle dove il loro contenuto è discusso.
+            # Con POCHE slide mancanti basta il raffinamento locale (embeddings)
+            # -- percorso A, veloce e senza 9Router --; solo oltre
+            # `--llm-local-threshold` si usa l'LLM cloud, e in tal caso
+            # 9Router viene AVVIATO automaticamente se spento (wait_for_router)
+            # e la pipeline riprende da sola appena è online. Fallback MiniLM.
             timeline: dict[int, float] | None = None
             llm_hybrid_attempted = False
             if args.llm != "off" and semantic_anchors and len(semantic_anchors) < total_slides - 1:
-                llm_hybrid_attempted = True
-                endpoints = endpoints_for(args.llm)
-                if args.llm_model:
-                    for ep in endpoints:
-                        ep["model"] = args.llm_model
-                log.info(
-                    "   Flusso ibrido: ancore esatte + LLM per le %d slide senza ancora (--llm %s)...",
-                    (total_slides - 1) - len(semantic_anchors),
-                    args.llm,
-                )
-                try:
-                    timeline = llm_ordered_timeline(
+                missing_count = (total_slides - 1) - len(semantic_anchors)
+                if missing_count <= args.llm_local_threshold:
+                    # PERCORSO A: il raffinamento locale basta per poche slide
+                    # senza ancora. Nessuna chiamata LLM, nessun 9Router, nessuna
+                    # attesa di rete: la sincronizzazione passa da ~minuti a
+                    # secondi per queste slide.
+                    log.info(
+                        "   Flusso ibrido: %d slide senza ancora (<= soglia %d): uso il "
+                        "motore embedding locale (semantic + refine) al posto di 9Router.",
+                        missing_count,
+                        args.llm_local_threshold,
+                    )
+                    timeline = semantic_timeline_from_words(
                         slide_texts,
                         words_raw,
                         total_slides,
                         total_duration,
-                        anchors=semantic_anchors,
-                        chunk_seconds=args.llm_chunk,
-                        endpoints=endpoints,
-                        wait_timeout=args.llm_wait_timeout,
-                        strict=True,
-                    )
-                except RuntimeError as e:
-                    # 9Router necessario ma non avviabile/non online: niente
-                    # fallback silenzioso, il processo si arresta con l'avviso.
-                    _abort(str(e))
-                if timeline is not None:
-                    log.info("   Timeline ibrida generata dall'LLM (ancore esatte preservate).")
-                    # Post-elaborazione dei SOLI confini LLM del flusso ordinato:
-                    # l'LLM lavora su chunk da `llm_chunk` secondi, quindi i
-                    # confini delle slide SENZA ancora esplicita possono cadere a
-                    # metà parola o nel mezzo di un discorso ancora dedicato alla
-                    # slide precedente. Il refine sposta SOLO quei confini al
-                    # punto di parola in cui la similarità locale si inverte; le
-                    # ancore esatte restano intoccate (stesso modello embedding
-                    # in cache, zero chiamate LLM). Il MiniLM del fallback non ha
-                    # bisogno del refine: i suoi confini sono già allineati alle
-                    # parole (first_time dei blocchi da `semantic_window`s).
-                    # Nota: la cache llm_*.json conserva la timeline GREZZA
-                    # dell'LLM; il raffinamento è deterministico e viene
-                    # riapplicato a ogni run sopra il risultato cachato.
-                    log.info(
-                        "   Post-elaborazione timeline LLM: raffinamento confini a livello di parola "
-                        "(solo slide senza ancora)..."
-                    )
-                    timeline = refine_llm_timeline_from_words(
-                        timeline,
-                        semantic_anchors,
-                        words_raw,
-                        slide_texts,
-                        total_duration,
                         options=SemanticOptions(
                             model_name=args.semantic_model,
                             cache_dir=args.semantic_cache_dir,
+                            window_seconds=args.semantic_window,
+                            min_slide_duration=args.semantic_min_duration,
+                            min_avg_similarity=args.semantic_min_sim,
+                            temperature=args.semantic_temperature,
                         ),
-                        window_seconds=min(args.llm_chunk, 30.0),
+                        anchors=semantic_anchors,
                     )
+                    if timeline is not None:
+                        # Raffinamento a livello di parola SOLO delle slide senza
+                        # ancora (stesso refine usato dopo l'LLM: deterministico,
+                        # zero chiamate di rete). Le ancore esatte restano ai loro
+                        # timestamp pronunciati.
+                        log.info(
+                            "   Post-elaborazione locale: raffinamento confini a "
+                            "livello di parola (solo slide senza ancora)..."
+                        )
+                        timeline = refine_llm_timeline_from_words(
+                            timeline,
+                            semantic_anchors,
+                            words_raw,
+                            slide_texts,
+                            total_duration,
+                            options=SemanticOptions(
+                                model_name=args.semantic_model,
+                                cache_dir=args.semantic_cache_dir,
+                            ),
+                            window_seconds=min(args.llm_chunk, 30.0),
+                        )
+                else:
+                    # Molte slide senza ancora: serve l'LLM per capire dove viene
+                    # discusso il contenuto. 9Router parte in automatico se spento
+                    # (wait_for_router in llm_ordered_timeline).
+                    llm_hybrid_attempted = True
+                    endpoints = endpoints_for(args.llm)
+                    if args.llm_model:
+                        for ep in endpoints:
+                            ep["model"] = args.llm_model
+                    log.info(
+                        "   Flusso ibrido: ancore esatte + LLM per le %d slide senza ancora (--llm %s)...",
+                        missing_count,
+                        args.llm,
+                    )
+                    try:
+                        timeline = llm_ordered_timeline(
+                            slide_texts,
+                            words_raw,
+                            total_slides,
+                            total_duration,
+                            anchors=semantic_anchors,
+                            chunk_seconds=args.llm_chunk,
+                            endpoints=endpoints,
+                            wait_timeout=args.llm_wait_timeout,
+                            strict=True,
+                        )
+                    except RuntimeError as e:
+                        # 9Router necessario ma non avviabile/non online: niente
+                        # fallback silenzioso, il processo si arresta con l'avviso.
+                        _abort(str(e))
+                    if timeline is not None:
+                        log.info("   Timeline ibrida generata dall'LLM (ancore esatte preservate).")
+                        # Post-elaborazione dei SOLI confini LLM del flusso ordinato:
+                        # l'LLM lavora su chunk da `llm_chunk` secondi, quindi i
+                        # confini delle slide SENZA ancora esplicita possono cadere a
+                        # metà parola o nel mezzo di un discorso ancora dedicato alla
+                        # slide precedente. Il refine sposta SOLO quei confini al
+                        # punto di parola in cui la similarità locale si inverte; le
+                        # ancore esatte restano intoccate (stesso modello embedding
+                        # in cache, zero chiamate LLM). Il MiniLM del fallback non ha
+                        # bisogno del refine: i suoi confini sono già allineati alle
+                        # parole (first_time dei blocchi da `semantic_window`s).
+                        # Nota: la cache llm_*.json conserva la timeline GREZZA
+                        # dell'LLM; il raffinamento è deterministico e viene
+                        # riapplicato a ogni run sopra il risultato cachato.
+                        log.info(
+                            "   Post-elaborazione timeline LLM: raffinamento confini a livello di parola "
+                            "(solo slide senza ancora)..."
+                        )
+                        timeline = refine_llm_timeline_from_words(
+                            timeline,
+                            semantic_anchors,
+                            words_raw,
+                            slide_texts,
+                            total_duration,
+                            options=SemanticOptions(
+                                model_name=args.semantic_model,
+                                cache_dir=args.semantic_cache_dir,
+                            ),
+                            window_seconds=min(args.llm_chunk, 30.0),
+                        )
 
             if timeline is None:
                 if llm_hybrid_attempted:

@@ -118,13 +118,15 @@ function Get-AllModels() {
     }
 
     # === APPLY CHANGES TO ROUTER ===
-    function Update-Combo([string]$comboName, [array]$models) {
+    function Update-Combo([string]$comboId, [array]$models) {
         try {
             $headers = Get-AuthHeaders
-            $body = @{ name = $comboName; models = $models } | ConvertTo-Json -Depth 3
-            $uri = "$($Config.baseUrl)/api/combos/$comboName"
+            $body = @{ name = $ComboName; models = $models } | ConvertTo-Json -Depth 3
+            # L'API di 9Router usa l'UUID della combo nel path (GET/PUT /api/combos/[id]),
+            # non il nome: con il nome il server risponde 400 "name already exists".
+            $uri = "$($Config.baseUrl)/api/combos/$comboId"
             $response = Invoke-WebRequest -Uri $uri -Method Put -Body $body -ContentType 'application/json' -TimeoutSec $Config.timeoutSec -ErrorAction Stop -UseBasicParsing -Headers $headers
-            Write-Log "[OK] Combo updated: $comboName ($($models.Count) models)"
+            Write-Log "[OK] Combo updated: $ComboName ($($models.Count) models)"
             return $true
         } catch {
             Write-Log "[ERR] Failed to update combo: $($_.Exception.Message)"
@@ -132,19 +134,68 @@ function Get-AllModels() {
         }
     }
 
+    # === ORDINAMENTO PER LATENZA (modelli veloci PRIMA nel PUT della combo) ===
+    # Il routing di 9Router segue l'ordine dei model nella combo: mettere i modelli
+    # più veloci e stabili in testa accelera ogni chiamata "comboact" della pipeline.
+function Get-ModelLatencyMs([string]$Name, $Results, $State) {
+    foreach ($pool in @($Results, $State)) {
+        if (-not $pool) { continue }
+        if ($pool.Contains($Name)) {
+            $entry = $pool[$Name]
+            if ($null -ne $entry) {
+                # Conta solo la latenza di test RIUSCITI: un modello che fallisce
+                # in fretta (503/429/errore) misura poche decine di ms ma è INUTILE
+                # in testa alla combo (il router lo salta subito e passa avanti).
+                $ok = [bool]$entry.success
+                if (-not $ok -and $null -ne $entry.lastStatus) {
+                    $ok = ([int]$entry.lastStatus -eq 200)
+                }
+                if ($ok) {
+                    $lm = $entry.latencyMs
+                    if ($null -ne $lm) {
+                        $n = 0
+                        if ([int]::TryParse([string]$lm, [ref]$n) -and $n -gt 0) { return $n }
+                    }
+                }
+            }
+        }
+    }
+    return $null
+}
+
+function Order-ComboModels([string[]]$models, $Results, $State) {
+    # Senza orderByLatency la combo mantiene l'ordine attuale del router (default).
+    if (-not $Config.orderByLatency) { return @($models) }
+
+    $ordered = @()
+    if ($Config.preferredOrder) {
+        foreach ($m in @($Config.preferredOrder)) {
+            if (@($models) -contains $m -and $ordered -notcontains $m) { $ordered += $m }
+        }
+    }
+    $rest = @($models | Where-Object { $ordered -notcontains $_ })
+    $sorted = $rest | Sort-Object -Property `
+        @{ Expression = { $l = Get-ModelLatencyMs $_ $Results $State; if ($null -eq $l) { 1 } else { 0 } } },
+        @{ Expression = { $l = Get-ModelLatencyMs $_ $Results $State; if ($null -eq $l) { [long]::MaxValue } else { $l } } },
+        @{ Expression = { $_ } }
+    return @($ordered + $sorted)
+}
+
     # === TEST MODEL WITH RETRY ===
 function Test-Model([string]$modelName, [int]$attempt = 1) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         $headers = Get-AuthHeaders
         $body = @{ model = $modelName; kind = "llm" } | ConvertTo-Json
         $uri = "$($Config.baseUrl)/api/models/test"
         $response = Invoke-WebRequest -Uri $uri -Method Post -Body $body -ContentType 'application/json' -TimeoutSec $Config.timeoutSec -ErrorAction Stop -WarningAction SilentlyContinue -UseBasicParsing -Headers $headers
         $parsed = $response.Content | ConvertFrom-Json -ErrorAction SilentlyContinue
+        $sw.Stop()
         if ($parsed -and $parsed.ok) {
-            return @{ success = $true; statusCode = 200; error = ""; replacement = $null }
+            return @{ success = $true; statusCode = 200; error = ""; replacement = $null; latencyMs = [int]$sw.ElapsedMilliseconds }
         }
         $statusCode = if ($parsed.status) { $parsed.status } else { $response.StatusCode }
-        return @{ success = $false; statusCode = $statusCode; error = $parsed.error; replacement = $null }
+        return @{ success = $false; statusCode = $statusCode; error = $parsed.error; replacement = $null; latencyMs = [int]$sw.ElapsedMilliseconds }
     } catch {
         $statusCode = $null
         $errorMsg = $_.Exception.Message
@@ -167,7 +218,8 @@ function Test-Model([string]$modelName, [int]$attempt = 1) {
             return Test-Model $modelName ($attempt + 1)
         }
 
-        return @{ success = $false; statusCode = $statusCode; error = $errorMsg; replacement = $replacement }
+        $sw.Stop()
+        return @{ success = $false; statusCode = $statusCode; error = $errorMsg; replacement = $replacement; latencyMs = [int]$sw.ElapsedMilliseconds }
     }
 }
 
@@ -370,6 +422,7 @@ try {
             $cliToken = $using:cliToken
             $modelName = $_
             function Test-ModelInline([string]$mn, [int]$attempt = 1) {
+                $sw = [System.Diagnostics.Stopwatch]::StartNew()
                 try {
                     $headers = @{}
                     if ($cfg.token) { $headers["Authorization"] = "Bearer $($cfg.token)" }
@@ -378,10 +431,11 @@ try {
                     $uri = "$($cfg.baseUrl)/api/models/test"
                     $response = Invoke-WebRequest -Uri $uri -Method Post -Body $body -ContentType 'application/json' -TimeoutSec $cfg.timeoutSec -ErrorAction Stop -WarningAction SilentlyContinue -UseBasicParsing -Headers $headers
                     $parsed = $response.Content | ConvertFrom-Json -ErrorAction SilentlyContinue
+                    $sw.Stop()
                     if ($parsed -and $parsed.ok) {
-                        return @{ success = $true; statusCode = 200; error = ""; replacement = $null }
+                        return @{ success = $true; statusCode = 200; error = ""; replacement = $null; latencyMs = [int]$sw.ElapsedMilliseconds }
                     }
-                    return @{ success = $false; statusCode = if ($parsed.status) { $parsed.status } else { $response.StatusCode }; error = $parsed.error; replacement = $null }
+                    return @{ success = $false; statusCode = if ($parsed.status) { $parsed.status } else { $response.StatusCode }; error = $parsed.error; replacement = $null; latencyMs = [int]$sw.ElapsedMilliseconds }
                 } catch {
                     $statusCode = $null
                     $errorMsg = $_.Exception.Message
@@ -399,7 +453,8 @@ try {
                         Start-Sleep -Seconds (2 * $attempt)
                         return Test-ModelInline $mn ($attempt + 1)
                     }
-                    return @{ success = $false; statusCode = $statusCode; error = $errorMsg; replacement = $replacement }
+                    $sw.Stop()
+                    return @{ success = $false; statusCode = $statusCode; error = $errorMsg; replacement = $replacement; latencyMs = [int]$sw.ElapsedMilliseconds }
                 }
             }
             @{ model = $modelName; result = (Test-ModelInline $modelName 1) }
@@ -518,8 +573,20 @@ try {
     $newModels += $toKeep.Keys
     $newModels += $validatedAdd.Keys
 
+    # Riorganizza la combo per latenza: modelli veloci/stabili PRIMA, così il
+    # router 9Router instrada subito su di loro. Senza misurazioni utili (prima
+    # run o modelli nuovi) l'ordine è: preferredOrder (config) -> misurati per
+    # latenza crescente -> non misurati in coda.
+    $newModels = Order-ComboModels $newModels $results $state
+
+    $orderedPreview = ""
+    if ($newModels.Count -gt 0) {
+        $n = [Math]::Min(10, $newModels.Count)
+        $orderedPreview = ($newModels[0..($n - 1)] -join ', ')
+    }
+
     if ($DryRun) {
-        Write-Log "[DRYRUN] Would update combo '$ComboName' with $($newModels.Count) models (kept=$keepCount, added=$($validatedAdd.Count), removed=$removeCount, replaced=$replaceCount). No changes applied."
+        Write-Log "[DRYRUN] Would update combo '$ComboName' with $($newModels.Count) models (kept=$keepCount, added=$($validatedAdd.Count), removed=$removeCount, replaced=$replaceCount). No changes applied. Prime 10 in ordine: $orderedPreview"
     } else {
         # Update state
         $newState = @{ lastUpdated = Get-Date -Format 'yyyy-MM-dd HH:mm:ss' }
@@ -533,6 +600,17 @@ try {
             } else {
                 $newState[$modelName] = @{ lastOk = (Get-Date -Format 'yyyy-MM-dd'); lastStatus = 200; lastError = ""; consecutiveFails = 0 }
             }
+            # Persisti la latenza misurata in QUESTO run: serve all'ordinamento
+            # per latenza dei run successivi (l'ordine viene ri-ottimizzato a ogni
+            # manutenzione). Il valore resta anche se il modello fallisce dopo.
+            $latMs = Get-ModelLatencyMs $modelName $results $state
+            if ($null -ne $latMs) {
+                if ($newState[$modelName] -is [hashtable]) {
+                    $newState[$modelName].latencyMs = $latMs
+                } else {
+                    $newState[$modelName] | Add-Member -NotePropertyName latencyMs -NotePropertyValue $latMs -Force
+                }
+            }
         }
         $newState | ConvertTo-Json -Depth 5 | Set-Content $StateFile -Encoding UTF8
 
@@ -542,7 +620,7 @@ try {
         Clean-OldLogs
 
         # Apply changes to the router
-        $applied = Update-Combo $ComboName $newModels
+        $applied = Update-Combo $currentCombo.id $newModels
         if (-not $applied) {
             Write-Log "[WARN] Combo update failed; local state/trend were still updated."
         }
