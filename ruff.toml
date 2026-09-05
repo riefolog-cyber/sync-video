@@ -48,6 +48,10 @@ ignore = [
 # Test A/B fastembed: venv/rete/modelli falliscono in modi imprevedibili;
 # il fallback difensivo a None è il comportamento voluto.
 "check_fastembed_upgrade.py" = ["BLE001"]
+# Conversione presentazioni (soffice/x2t/python-pptx): file corrotti o complessi
+# falliscono con eccezioni arbitrarie (zipfile/XML/PIL); gli except difensivi
+# del fallback Python in ocr.py sono il comportamento voluto.
+"ocr.py" = ["BLE001"]
 
 [lint.flake8-bugbear]
 # Tolleranza per i "except Exception" difensivi (fallback robusti),

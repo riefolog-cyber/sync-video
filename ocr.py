@@ -4,11 +4,14 @@ FASE 1 — Estrazione slide da PDF + OCR parallelo.
 Il rendering PDF usa multiprocessing (PyMuPDF non è thread-safe).
 """
 
+import contextlib
 import hashlib
+import io
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import Pool
@@ -29,6 +32,14 @@ _SOFFICE_CANDIDATES = [
     "/opt/libreoffice/program/soffice",
 ]
 
+# Candidati percorsi ONLYOFFICE (x2t converter)
+_ONLYOFFICE_CANDIDATES = [
+    r"C:\Program Files\ONLYOFFICE\DesktopEditors\converter\x2t.exe",
+    r"C:\Program Files (x86)\ONLYOFFICE\DesktopEditors\converter\x2t.exe",
+    "/usr/bin/x2t",
+    "/opt/onlyoffice/desktopeditors/converter/x2t",
+]
+
 
 def _find_soffice() -> str | None:
     """Cerca un eseguibile LibreOffice soffice utilizzabile per la conversione."""
@@ -39,6 +50,20 @@ def _find_soffice() -> str | None:
     if found:
         return found
     for cand in _SOFFICE_CANDIDATES:
+        if Path(cand).exists():
+            return cand
+    return None
+
+
+def _find_onlyoffice() -> str | None:
+    """Cerca il converter ONLYOFFICE x2t utilizzabile per la conversione."""
+    env = os.environ.get("ONLYOFFICE_X2T_PATH")
+    if env and Path(env).exists():
+        return env
+    found = shutil.which("x2t")
+    if found:
+        return found
+    for cand in _ONLYOFFICE_CANDIDATES:
         if Path(cand).exists():
             return cand
     return None
@@ -56,26 +81,128 @@ def _file_md5(path: Path, chunk: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+def _pptx_fallback_to_pdf(ppt_path: Path, pdf_path: Path) -> bool:
+    """Fallback puro Python: PPTX -> PDF via python-pptx + PyMuPDF.
+
+    Estrae testo e immagini dalle slide e genera un PDF 16:9 (1280x720).
+    Non è fedele al 100% come LibreOffice/ONLYOFFICE, ma sblocca la pipeline
+    quando il converter nativo fallisce (es. x2t TypeError su file complessi).
+    Ritorna True se il PDF è stato creato con successo.
+    """
+    try:
+        from pptx import Presentation  # type: ignore
+    except ImportError:
+        return False
+    try:
+        prs = Presentation(str(ppt_path))
+    except Exception as e:
+        log.debug("   Fallback PPTX->PDF: apertura fallita: %s", e)
+        return False
+    try:
+        doc = fitz.open()
+        for idx, slide in enumerate(prs.slides):
+            # Pagina 16:9 come il video finale (1280x720)
+            page = doc.new_page(width=1280, height=720)
+            # Raccogli testo
+            texts: list[str] = []
+            images_to_draw: list[tuple[bytes, str]] = []
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    t = shape.text.strip()
+                    if t:
+                        texts.append(t)
+                if shape.has_table:
+                    for row in shape.table.rows:
+                        for cell in row.cells:
+                            if cell.text.strip():
+                                texts.append(cell.text.strip())
+                # Immagini
+                if shape.shape_type == 13:  # picture
+                    try:
+                        img_bytes = shape.image.blob
+                        ext = shape.image.ext or "png"
+                        images_to_draw.append((img_bytes, ext))
+                    except Exception:
+                        pass
+            # Se ci sono immagini, prova a disegnarne la prima a tutta pagina
+            if images_to_draw:
+                try:
+                    img_bytes, ext = images_to_draw[0]
+
+                    # Fix RGBA -> RGB (fitz/x2t non gestisce alpha correttamente: rendeva bianco)
+                    try:
+                        pil_img = Image.open(io.BytesIO(img_bytes))
+                        if pil_img.mode in ("RGBA", "LA", "PA"):
+                            bg = Image.new("RGB", pil_img.size, (255, 255, 255))
+                            if pil_img.mode == "RGBA":
+                                bg.paste(pil_img, mask=pil_img.split()[3])
+                            else:
+                                bg.paste(pil_img)
+                            buf = io.BytesIO()
+                            bg.save(buf, format="PNG")
+                            img_bytes = buf.getvalue()
+                            ext = "png"
+                    except Exception:
+                        pass
+
+                    with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tf:
+                        tf.write(img_bytes)
+                        tmp_img = tf.name
+                    try:
+                        page.insert_image(page.rect, filename=tmp_img, keep_proportion=True, overlay=False)
+                    finally:
+                        Path(tmp_img).unlink(missing_ok=True)
+                    # Se c'era testo oltre l'immagine, aggiungilo in basso
+                    if texts:
+                        text = " | ".join(texts)[:300]
+                        page.insert_textbox(
+                            fitz.Rect(20, 680, 1260, 710),
+                            text,
+                            fontsize=8,
+                            color=(0.3, 0.3, 0.3),
+                            align=1,
+                        )
+                except Exception as e:
+                    log.debug("   Fallback immagine slide %d fallita: %s", idx + 1, e)
+            # Nessuna immagine: renderizza il testo centrato
+            if not images_to_draw:
+                full_text = "\n".join(texts).strip() or f"[Slide {idx+1} - contenuto visivo]"
+                # Titolo slide
+                rect = fitz.Rect(40, 40, 1240, 680)
+                page.insert_textbox(
+                    rect,
+                    full_text[:2000],
+                    fontsize=18,
+                    color=(0.1, 0.1, 0.1),
+                    align=0,
+                    fontname="helv",
+                )
+            # Numero slide in basso a destra
+            page.insert_text(fitz.Point(1220, 710), f"{idx+1}/{len(prs.slides)}", fontsize=8, color=(0.5, 0.5, 0.5))
+        doc.save(str(pdf_path))
+        doc.close()
+        return pdf_path.exists() and pdf_path.stat().st_size > 0
+    except Exception as e:
+        log.debug("   Fallback PPTX->PDF eccezione: %s", e)
+        with contextlib.suppress(Exception):
+            doc.close()
+        return False
+
+
 def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
-    """Converte una presentazione PPT/PPTX in PDF usando LibreOffice headless.
+    """Converte una presentazione PPT/PPTX in PDF usando LibreOffice o ONLYOFFICE.
 
-    Args:
-        ppt_path: percorso del file .ppt/.pptx
-        out_dir: directory dove salvare il PDF risultante
-
-    Returns:
-        Percorso del PDF convertito (stesso nome, estensione .pdf)
-
-    Raises:
-        RuntimeError: se LibreOffice non è disponibile o la conversione fallisce
+    Ordine di preferenza:
+      1. LibreOffice ``soffice`` (se installato)
+      2. ONLYOFFICE ``x2t`` (se installato) — alternativa senza LibreOffice
+      3. Fallback Python puro (python-pptx + PyMuPDF) se i converter falliscono
     """
     soffice = _find_soffice()
-    if not soffice:
-        raise RuntimeError(
-            "LibreOffice non trovato: necessario per convertire .ppt/.pptx in PDF.\n"
-            "Installa LibreOffice (https://www.libreoffice.org) oppure "
-            "converte la presentazione in .pdf manualmente."
-        )
+    onlyoffice = _find_onlyoffice()
+    has_converter = soffice or onlyoffice
+    # Anche senza converter proviamo il fallback Python puro
+    if not has_converter:
+        log.warning("   Nessun converter nativo (LibreOffice/ONLYOFFICE) trovato: provo fallback Python puro...")
     out_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / (ppt_path.stem + ".pdf")
 
@@ -93,25 +220,75 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
             pass
         log.info("   -> PDF in cache scaduto (sorgente cambiato), riconverto...")
 
-    cmd = [soffice, "--headless", "--convert-to", "pdf", "--outdir", str(out_dir), str(ppt_path)]
     ext_upper = ppt_path.suffix.upper().lstrip(".")
-    log.info("   Conversione %s -> PDF (LibreOffice)...", ext_upper)
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=180,
-            check=False,
-            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+    # Prova converter nativo se disponibile
+    if has_converter:
+        converter: str
+        cmd: list[str]
+        if soffice:
+            converter = "LibreOffice"
+            cmd = [soffice, "--headless", "--convert-to", "pdf", "--outdir", str(out_dir), str(ppt_path)]
+        else:
+            converter = "ONLYOFFICE"
+            cmd = [onlyoffice, str(ppt_path), str(pdf_path)]  # type: ignore[list-item]
+        log.info("   Conversione %s -> PDF (%s)...", ext_upper, converter)
+        proc = None
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+            )
+        except subprocess.TimeoutExpired:
+            log.warning("   Conversione %s->PDF timeout (180s), provo fallback...", ext_upper)
+        if proc is not None:
+            # x2t ritorna exit !=0 anche quando produce il PDF con warning:
+            # il successo si valuta dalla presenza del file, non dall'exit code.
+            if pdf_path.exists() and pdf_path.stat().st_size > 0:
+                if proc.returncode != 0:
+                    log.debug(
+                        "   %s warning (exit=%d): %s",
+                        converter,
+                        proc.returncode,
+                        (proc.stderr or proc.stdout)[:500],
+                    )
+                marker_path.write_text(_file_md5(ppt_path), encoding="ascii")
+                log.info("   -> PDF convertito: %s", pdf_path)
+                return pdf_path
+            log.warning(
+                "   %s fallito (exit=%d): %s",
+                converter,
+                proc.returncode,
+                (proc.stderr or proc.stdout or "")[:600],
+            )
+            log.warning("   Provo fallback Python puro...")
+
+    # Fallback puro Python (non richiede LibreOffice/ONLYOFFICE)
+    log.info("   Conversione %s -> PDF (fallback Python python-pptx+PyMuPDF)...", ext_upper)
+    if _pptx_fallback_to_pdf(ppt_path, pdf_path):
+        marker_path.write_text(_file_md5(ppt_path), encoding="ascii")
+        log.info("   -> PDF convertito (fallback): %s", pdf_path)
+        log.warning(
+            "   Nota: il fallback preserva testo/immagini ma non il layout esatto. "
+            "Per fedeltà massima apri il PPTX in ONLYOFFICE e salva manualmente come PDF."
         )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Conversione {ext_upper}->PDF terminata per timeout (180s).") from None
-    if proc.returncode != 0 or not pdf_path.exists():
-        raise RuntimeError(f"Conversione {ext_upper}->PDF fallita (exit={proc.returncode}):\n{proc.stderr}")
-    marker_path.write_text(_file_md5(ppt_path), encoding="ascii")
-    log.info("   -> PDF convertito: %s", pdf_path)
-    return pdf_path
+        return pdf_path
+
+    raise RuntimeError(
+        f"Conversione {ext_upper}->PDF fallita con tutti i metodi.\n"
+        f" - LibreOffice: {'non trovato' if not soffice else 'errore'}\n"
+        f" - ONLYOFFICE x2t: {'non trovato' if not onlyoffice else 'errore (TypeError su questo file)'}\n"
+        f" - Fallback Python: fallito\n"
+        "Soluzioni immediate (senza installare LibreOffice):\n"
+        " 1) Apri presentazione.pptx in ONLYOFFICE DesktopEditors > "
+        "File > Scarica come > PDF e salva come presentazione.pdf\n"
+        " 2) Oppure carica su Google Slides > File > Scarica > PDF\n"
+        " 3) Poi lancia: "
+        f"py -3.11 main.py --pdf \"{pdf_path}\""
+    )
 
 
 def _render_page(args: tuple[str, int, str, int]) -> str:
