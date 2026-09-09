@@ -741,9 +741,17 @@ def verify_anchor_mapping_embedding(
     window_seconds: float = 40.0,
     options: SemanticOptions | None = None,
     embed_fn: EmbedFn | None = None,
+    report: dict[str, Any] | None = None,
 ) -> dict[int, float] | None:
     """Corregge la numerazione parlata sistematicamente sfasata usando gli
     embeddings locali (nessuna chiamata LLM).
+
+    ``report`` (opzionale): se fornito, riceve ``{"suspicious": bool}`` —
+    True quando l'euristica ha visto almeno un'ancora il cui contenuto NON
+    conferma il numero parlato ma non può correggere in modo affidabile
+    (offset misti senza run correggibile, offset uniforme fuori range, ...).
+    Il chiamante usa il segnale per decidere se vale la pena la verifica LLM
+    anche quando di solito la salterebbe (una sola slide senza ancora).
 
     Se lo speaker numera le slide escludendo la copertina (dice "slide 1"
     mostrando la slide 2 del PDF), TUTTI i riferimenti sono sfasati dello
@@ -754,6 +762,14 @@ def verify_anchor_mapping_embedding(
     corretto. Se l'offset non è univoco o è zero, restituisce None (il
     chiamante ripiega sulle ancore originali o sulla verifica LLM).
 
+    Gestisce anche l'offset PARZIALE (a gradino): se la numerazione è
+    allineata per le prime ancore e poi slitta di una costante per le
+    successive (es. il podcast salta una slide del PDF a metà narrazione e
+    dice "slide 7" mostrando la slide 8), gli offset misti farebbero fallire
+    la verifica uniforme: si corregge allora SOLO il tratto sfasato (run
+    contigua di ancore con lo stesso offset non-zero, almeno 2 ancore),
+    mantenendo intatte le ancore già allineate.
+
     ``embed_fn`` è iniettabile (stessa convenzione di ``semantic_timeline_from_texts``):
     nei test si passa un embedder finto, in produzione viene caricato il
     modello fastembed locale.
@@ -762,8 +778,14 @@ def verify_anchor_mapping_embedding(
         Ancora corretta {slide_pdf: tempo} oppure None se non c'è un offset
         sistematico rilevabile in modo affidabile.
     """
+    def _done(value: dict[int, float] | None, suspicious: bool) -> dict[int, float] | None:
+        """Imposta il report (se richiesto) e restituisce il valore."""
+        if report is not None:
+            report["suspicious"] = suspicious
+        return value
+
     if not words_raw or len(anchors) < 2:
-        return None
+        return _done(None, False)
 
     opts = options or SemanticOptions()
     if embed_fn is None:
@@ -773,7 +795,7 @@ def verify_anchor_mapping_embedding(
             alternate_name=opts.alternate_model_name or DEFAULT_EMBEDDING_MODEL_ALTERNATE,
         )
         if model is None:
-            return None
+            return _done(None, False)
         embed_fn = _make_embed_fn(model)
 
     slide_clean = [_clean_slide_text(t) for t in slide_texts[:total_slides]]
@@ -781,9 +803,9 @@ def verify_anchor_mapping_embedding(
         slide_emb = embed_fn(slide_clean)
     except Exception as e:  # noqa: BLE001 - embedding può fallire per molti motivi
         log.warning("   [Ancore] Embedding slide non riuscito: %s", e)
-        return None
+        return _done(None, False)
 
-    offsets: list[int] = []
+    pairs: list[tuple[int, float, int]] = []  # (slide parlata, tempo, offset)
     for s, t in sorted(anchors.items(), key=lambda kv: kv[1]):
         excerpt = " ".join(w["word"] for w in words_raw if t <= w["start"] < t + window_seconds).strip()
         if not excerpt:
@@ -795,38 +817,92 @@ def verify_anchor_mapping_embedding(
             continue
         sims = slide_emb @ excerpt_emb
         best = int(np.argmax(sims)) + 1  # 1-based: slide del PDF più simile
-        offsets.append(best - s)
+        pairs.append((s, t, best - s))
 
+    offsets = [off for _, _, off in pairs]
     if len(offsets) < 2:
-        return None
-    # L'offset deve essere identico per tutte le ancore valutate: un offset
-    # sistematico (es. +1 per copertina esclusa) è un segnale forte, mentre
-    # spostamenti incoerenti significano che i riferimenti non sono affidabili.
-    if len(set(offsets)) != 1:
-        return None
-    offset = offsets[0]
-    if offset == 0:
-        return None
+        # Troppo poco segnale per un giudizio: non sospetto (evita chiamate
+        # LLM spurie quando la verifica non può valutare nulla).
+        return _done(None, False)
 
-    # Prudenza massima: l'offset si applica SOLO se porta tutte le ancore a
-    # slide valide del PDF. Un mapping parziale (qualche ancora fuori range)
-    # significherebbe che l'offset non è coerente con l'intero set: niente
-    # correzione, il chiamante ripiega sulle ancore originali.
-    for s in anchors:
-        if not 1 <= s + offset <= total_slides:
-            return None
+    # 1) Offset UNIFORME su tutte le ancore (es. copertina esclusa): un
+    #    segnale forte, correzione globale.
+    if len(set(offsets)) == 1:
+        offset = offsets[0]
+        if offset == 0:
+            # Tutte le ancore confermate dal contenuto: mapping coerente.
+            return _done(None, False)
 
-    corrected = {s + offset: t for s, t in anchors.items()}
-    if not corrected:
-        return None
+        # Prudenza massima: l'offset si applica SOLO se porta tutte le ancore a
+        # slide valide del PDF. Un mapping parziale (qualche ancora fuori range)
+        # significherebbe che l'offset non è coerente con l'intero set: niente
+        # correzione, il chiamante ripiega sulle ancore originali. Il contenuto
+        # però NON conferma la numerazione: resta sospetto.
+        for s in anchors:
+            if not 1 <= s + offset <= total_slides:
+                return _done(None, True)
+
+        corrected = {s + offset: t for s, t in anchors.items()}
+        if not corrected:
+            return _done(None, True)
+
+        log.info(
+            "   [Ancore] Offset sistematico %+d rilevato dagli embeddings: "
+            "correggo la numerazione parlata su %d ancore.",
+            offset,
+            len(corrected),
+        )
+        return _done(corrected, False)
+
+    # 2) Offset PARZIALE (a gradino): le ancore sono valutate in ordine
+    #    temporale; si raggruppano le run contigue con lo stesso offset
+    #    non-zero (le ancore allineate, offset 0, spezzano le run). Se esiste
+    #    UN'UNICA run sfasata con almeno 2 ancore, lo sfasamento è sistematico
+    #    nel suo tratto: si corregge solo quello, lasciando intatta la parte
+    #    già allineata (es. "slide 7" che mostra la slide 8 perché il podcast
+    #    salta una slide del PDF a metà narrazione).
+    #
+    #    Offsets misti = almeno un'ancora NON confermata dal contenuto: se non
+    #    c'è una run correggibile (una sola ancora sfasata, drift a
+    #    intermittenza) il mapping è AMBIGUO ma SOSPETTO: il chiamante può
+    #    chiedere all'LLM di decidere leggendo il contenuto.
+    runs: list[tuple[int, list[tuple[int, float]]]] = []  # (offset, ancore)
+    for s, t, off in pairs:
+        if off != 0 and runs and runs[-1][0] == off:
+            runs[-1][1].append((s, t))
+        elif off != 0:
+            runs.append((off, [(s, t)]))
+    shifted_runs = [r for r in runs if len(r[1]) >= 2]
+    if len(shifted_runs) != 1:
+        return _done(None, True)
+    offset, run = shifted_runs[0]
+
+    # Validità del rimappo: tutte le slide corrette dentro 1..total_slides,
+    # nessuna collisione con le ancore non corrette e ordine temporale
+    # crescente preservato (le ancore esplicite restano vincoli esatti).
+    run_slides = {s for s, _ in run}
+    corrected = {}
+    for s, t in anchors.items():
+        if s in run_slides:
+            if not 1 <= s + offset <= total_slides:
+                return _done(None, True)
+            corrected[s + offset] = t
+        else:
+            corrected[s] = t
+    if len(corrected) != len(anchors):
+        return _done(None, True)
+    seq = sorted(corrected.items(), key=lambda kv: kv[1])
+    if any(seq[i][0] >= seq[i + 1][0] for i in range(len(seq) - 1)):
+        return _done(None, True)
 
     log.info(
-        "   [Ancore] Offset sistematico %+d rilevato dagli embeddings: "
-        "correggo la numerazione parlata su %d ancore.",
+        "   [Ancore] Offset parziale %+d rilevato dagli embeddings su %d ancore "
+        "(%s): correggo solo il tratto sfasato.",
         offset,
-        len(corrected),
+        len(run),
+        ", ".join(str(s) for s, _ in run),
     )
-    return corrected
+    return _done(corrected, False)
 
 
 def make_anchor_remap_filter(

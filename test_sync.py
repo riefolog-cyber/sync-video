@@ -1766,6 +1766,180 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
         )
         self.assertIsNone(out)
 
+    def test_step_offset_midway_returns_partial_mapping(self):
+        # La numerazione e' corretta per le prime ancore e slitta di +1 dopo
+        # (es. il podcast salta una slide del PDF in mezzo: dice "slide 4"
+        # mostrando la slide 5). Gli offset misti farebbero fallire la verifica
+        # uniforme; la correzione parziale deve rimappare SOLO il tratto
+        # sfasato e lasciare intatte le ancore gia' allineate.
+        slides = [f"tema{i} slide" for i in range(1, 7)]
+        words = []
+        for s, tema in [(2, 2), (3, 3), (4, 5), (5, 6)]:
+            start = 100.0 * s
+            words += [{"word": f"tema{tema}", "start": start + i} for i in range(5)]
+        anchors = {2: 200.0, 3: 300.0, 4: 400.0, 5: 500.0}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=6,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(6),
+        )
+        self.assertEqual(out, {2: 200.0, 3: 300.0, 5: 400.0, 6: 500.0})
+
+    def test_step_offset_single_shifted_anchor_returns_none(self):
+        # Una sola ancora sfasata in coda (run di 1) non basta per dichiarare
+        # uno slittamento sistematico: niente correzione (troppo rumoroso).
+        slides = [f"tema{i} slide" for i in range(1, 5)]
+        words = []
+        for s, tema in [(2, 2), (3, 3)]:
+            start = 100.0 * s
+            words += [{"word": f"tema{tema}", "start": start + i} for i in range(5)]
+        # l'ultima ancora parla della slide successiva: offset +1 isolato
+        words += [{"word": "tema5", "start": 401.0}, {"word": "tema5", "start": 403.0}]
+        anchors = {2: 200.0, 3: 300.0, 4: 400.0}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=5,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(5),
+        )
+        self.assertIsNone(out)
+
+    def test_step_offset_multiple_runs_returns_none(self):
+        # Due tratti sfasati separati da ancore allineate non sono un segnale
+        # affidabile: niente correzione (troppo ambiguo).
+        slides = [f"tema{i} slide" for i in range(1, 9)]
+        words = []
+        for s, tema in [(2, 3), (3, 4), (4, 4), (5, 5), (6, 7), (7, 8)]:
+            start = 100.0 * s
+            words += [{"word": f"tema{tema}", "start": start + i} for i in range(5)]
+        anchors = {2: 200.0, 3: 300.0, 4: 400.0, 5: 500.0, 6: 600.0, 7: 700.0}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=8,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(8),
+        )
+        self.assertIsNone(out)
+
+    def test_report_suspicious_when_single_shifted_anchor(self):
+        # Una sola ancora sfasata: niente correzione (run di 1), ma il mapping
+        # è SOSPETTO: il chiamante deve poter chiedere la verifica LLM.
+        slides = [f"tema{i} slide" for i in range(1, 5)]
+        words = [
+            {"word": "tema2", "start": 200.0},
+            {"word": "tema3", "start": 300.0},
+            {"word": "tema5", "start": 401.0},
+        ]
+        anchors = {2: 200.0, 3: 300.0, 4: 400.0}
+        report: dict[str, bool] = {}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=5,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(5),
+            report=report,
+        )
+        self.assertIsNone(out)
+        self.assertTrue(report["suspicious"])
+
+    def test_report_suspicious_when_multiple_runs(self):
+        # Due tratti sfasati separati: ambiguo e sospetto -> segnale True.
+        slides = [f"tema{i} slide" for i in range(1, 9)]
+        words = []
+        for s, tema in [(2, 3), (3, 4), (4, 4), (5, 5), (6, 7), (7, 8)]:
+            start = 100.0 * s
+            words += [{"word": f"tema{tema}", "start": start + i} for i in range(5)]
+        anchors = {2: 200.0, 3: 300.0, 4: 400.0, 5: 500.0, 6: 600.0, 7: 700.0}
+        report: dict[str, bool] = {}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=8,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(8),
+            report=report,
+        )
+        self.assertIsNone(out)
+        self.assertTrue(report["suspicious"])
+
+    def test_report_clean_when_mapping_coherent(self):
+        # Numerazione confermata dal contenuto (offset 0): nessun sospetto.
+        slides = [f"tema{i} slide" for i in range(1, 5)]
+        words = []
+        for s in range(2, 5):
+            start = 100.0 * s
+            words += [{"word": f"tema{s}", "start": start + i} for i in range(5)]
+        anchors = {2: 200.0, 3: 300.0, 4: 400.0}
+        report: dict[str, bool] = {}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=4,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(4),
+            report=report,
+        )
+        self.assertIsNone(out)
+        self.assertFalse(report["suspicious"])
+
+    def test_report_clean_when_corrected(self):
+        # Corretto deterministicamente: non serve l'LLM, nessun sospetto.
+        slides = [f"tema{i} slide" for i in range(1, 7)]
+        words = []
+        for s, tema in [(2, 2), (3, 3), (4, 5), (5, 6)]:
+            start = 100.0 * s
+            words += [{"word": f"tema{tema}", "start": start + i} for i in range(5)]
+        anchors = {2: 200.0, 3: 300.0, 4: 400.0, 5: 500.0}
+        report: dict[str, bool] = {}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=6,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(6),
+            report=report,
+        )
+        self.assertEqual(out, {2: 200.0, 3: 300.0, 5: 400.0, 6: 500.0})
+        self.assertFalse(report["suspicious"])
+
+    def test_report_not_suspicious_when_too_few_anchors(self):
+        # Segnale insufficiente: non sospetto (niente chiamate LLM spurie).
+        slides = [f"tema{i} slide" for i in range(1, 5)]
+        words = [{"word": "tema2", "start": 100.0}]
+        anchors = {1: 100.0}
+        report: dict[str, bool] = {}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=4,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(4),
+            report=report,
+        )
+        self.assertIsNone(out)
+        self.assertFalse(report["suspicious"])
+
 
 class TestAnchorRemapFilter(unittest.TestCase):
     """Validatore dei rimappi ancore LLM: il contenuto deve confermare il

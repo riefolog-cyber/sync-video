@@ -899,6 +899,7 @@ def main(argv: list | None = None) -> None:
                 #    se la numerazione parlata è sistematicamente sfasata (es.
                 #    copertina esclusa: "slide 1" -> slide 2 del PDF) la corregge
                 #    senza chiamare 9Router. Sempre attiva (anche con --llm off).
+                _anchor_report: dict[str, bool] = {}
                 verified = verify_anchor_mapping_embedding(
                     slide_texts,
                     words_raw,
@@ -909,6 +910,7 @@ def main(argv: list | None = None) -> None:
                         model_name=args.semantic_model,
                         cache_dir=args.semantic_cache_dir,
                     ),
+                    report=_anchor_report,
                 )
                 if verified is not None:
                     # La slide 1 reale è sempre 0.0: un eventuale mapping a slide 1
@@ -921,13 +923,23 @@ def main(argv: list | None = None) -> None:
                     )
                     semantic_anchors = verified
                 elif args.llm != "off":
-                    # Salto la verifica LLM quando c'è UNA SOLA slide senza ancora
-                    # (caso più comune: 13/14 annunciate) e l'euristica deterministica
-                    # qui sopra non ha rilevato offset sistematico: la chiamata LLM
-                    # (~1 min) non cambierebbe la mapping già coerente. La verifica
-                    # resta per i casi in cui la numerazione parlata è davvero
-                    # sospetta: recap della slide 1 o ≥2 slide senza ancora.
-                    if slide_one_refs or (total_slides - 1 - len(semantic_anchors) >= 2):
+                    # Salto la verifica LLM SOLO quando il mapping è coerente: una
+                    # sola slide senza ancora (caso più comune: 13/14 annunciate) e
+                    # nessun offset sospetto dall'euristica deterministica. Se
+                    # l'euristica ha visto almeno un'ancora il cui contenuto NON
+                    # conferma il numero parlato ma non può correggere in modo
+                    # affidabile (una sola slide sfasata, drift a intermittenza),
+                    # la verifica LLM parte comunque: è proprio il caso in cui la
+                    # scorciatoia nasconderebbe un disallineamento (es. una slide
+                    # mai nominata a metà deck che sfasa tutte le successive).
+                    # La verifica resta inoltre per i casi già coperti: recap della
+                    # slide 1 o ≥2 slide senza ancora.
+                    anchor_mapping_suspicious = _anchor_report.get("suspicious", False)
+                    if (
+                        slide_one_refs
+                        or (total_slides - 1 - len(semantic_anchors) >= 2)
+                        or anchor_mapping_suspicious
+                    ):
                         # 2) Fallback LLM: la numerazione non ha offset sistematico
                         #    rilevabile, lascio decidere all'LLM (lettura del contenuto).
                         endpoints = endpoints_for(args.llm)
@@ -976,9 +988,9 @@ def main(argv: list | None = None) -> None:
                             semantic_anchors = verified
                     else:
                         log.info(
-                            "   [Ancore] Una sola slide senza ancora e nessun offset "
-                            "sistematico: salto la verifica LLM del mapping (le ancore "
-                            "restano quelle deterministiche) e risparmio ~1 min."
+                            "   [Ancore] Una sola slide senza ancora e mapping coerente "
+                            "(nessun offset sospetto): salto la verifica LLM del mapping "
+                            "(le ancore restano quelle deterministiche) e risparmio ~1 min."
                         )
 
             # Log diagnostico condiviso (stato finale ancore, post-verifica):

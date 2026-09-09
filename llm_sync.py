@@ -267,26 +267,33 @@ def _chunk_block(chunks: Sequence[dict[str, object]]) -> str:
 
 
 def _extract_json_array(content: str) -> Any | None:
-    """Trova e decodifica il PRIMO array JSON nel testo, in modo tollerante.
+    """Trova e decodifica l'ULTIMO array JSON valido nel testo, in modo tollerante.
 
     Gestisce codice fenced, testo extra attorno all'array e apostrofi singoli
-    al posto delle virgolette. Con ``.*?`` (non-greedy) prende il primo array
-    valido: un modello che emette due array (es. spiegazione + array finale)
-    non fa fallire il parse sul secondo.
+    al posto delle virgolette. Scansiona TUTTI gli array candidati e
+    restituisce l'ultimo che decodifica correttamente: un modello che spiega
+    prima di rispondere (es. "Ecco un esempio: [...] ... la risposta reale:
+    [...]") mette la risposta vera IN FONDO, non nel primo ``[...]``
+    incontrato. Prendere il primo array restituirebbe l'esempio e scarterebbe
+    silenziosamente la risposta reale.
     """
     if not content:
         return None
-    m = re.search(r"\[.*?\]", content, re.DOTALL)
-    if not m:
-        return None
-    try:
-        return json.loads(m.group(0))
-    except (json.JSONDecodeError, TypeError):
-        # Prova a riparare: apostrofi singoli al posto di virgolette
+    best: Any = None
+    for m in re.finditer(r"\[.*?\]", content, re.DOTALL):
+        raw = m.group(0)
         try:
-            return json.loads(re.sub(r"'", '"', m.group(0)))
+            best = json.loads(raw)
+            continue
         except (json.JSONDecodeError, TypeError):
-            return None
+            # Prova a riparare: apostrofi singoli al posto di virgolette
+            # (solo se il JSON con virgolette doppie non decodifica: così un
+            # apostrofo legittimo dentro una stringa non corrompe il parse).
+            try:
+                best = json.loads(re.sub(r"'", '"', raw))
+            except (json.JSONDecodeError, TypeError):
+                continue
+    return best
 
 
 def build_prompt(
@@ -1183,7 +1190,27 @@ def _timeline_from_cached(
     # Completa le slide mancanti con lo stesso motore del percorso live:
     # il completamento manuale qui aveva un bug (interpolazione non monotona).
     if total_slides > 0 and total_duration > 0:
-        return _complete_from_anchors(refs, total_slides, total_duration)
+        timeline = _complete_from_anchors(refs, total_slides, total_duration)
+        if timeline is None:
+            return None
+        # Come nel percorso live (``llm_ordered_timeline``): le ancore
+        # esplicite non devono MAI essere spostate dall'interpolazione. Il
+        # clamp di ``_complete_from_anchors`` può scalare TUTTI i tempi
+        # (ancore incluse) quando l'estrapolazione dell'ultima slide supera la
+        # durata audio: le ancore vengono ripristinate ai loro timestamp esatti
+        # e la timeline riconciliata, così cache e run diretta producono
+        # risultati identici.
+        for s, t in anchors.items():
+            timeline[s] = float(t)
+        try:
+            reconcile_timeline(timeline, total_slides, total_duration)
+        except ValueError:
+            log.warning(
+                "   [LLM/Ordinato] Timeline cachata non valida dopo il ripristino "
+                "delle ancore: fallback al motore locale."
+            )
+            return None
+        return timeline
     return refs if len(refs) == total_slides else None
 
 
@@ -1712,7 +1739,7 @@ def _warn_review_diffs(
 # 21/08). Bumpare rende obsolete TUTTE le cache LLM precedenti: la run
 # successiva le ricalcola da zero (costo una tantum), con le protezioni
 # correnti (filtri, validazioni) applicate ai risultati freschi.
-_LLM_CACHE_LOGIC_VERSION = 2
+_LLM_CACHE_LOGIC_VERSION = 3
 
 
 def _hash_cache(*parts: Sequence[str]) -> str:

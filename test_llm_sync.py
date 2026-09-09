@@ -16,6 +16,7 @@ from llm_sync import (
     _build_ordered_timeline,
     _chunk_slides_from_segments,
     _conflicts_with_anchors,
+    _timeline_from_cached,
     build_anchor_verify_prompt,
     build_llm_chunks,
     build_ordered_prompt,
@@ -420,6 +421,76 @@ class TestParseResponse(unittest.TestCase):
             2,
         )
         self.assertEqual(slides, [4, 6])
+
+    def test_last_array_wins_when_model_explains_first(self):
+        # Modello "chiacchierone": spiega con un esempio e poi dà la risposta
+        # reale. Il parse deve usare l'ULTIMO array (la risposta), non il primo
+        # (l'esempio): prima di questa correzione l'esempio vinceva e la
+        # timeline veniva costruita dai dati sbagliati in silenzio.
+        content = (
+            'Ecco un esempio del formato: [{"chunk": 1, "slide": 3}]\n'
+            'Ora la risposta reale:\n'
+            '[{"chunk": 1, "slide": 5}, {"chunk": 2, "slide": 6}]'
+        )
+        slides = parse_llm_response(content, 2)
+        self.assertEqual(slides, [5, 6])
+
+    def test_multiple_arrays_last_valid_used(self):
+        # Due array validi in sequenza: vince l'ultimo (la risposta finale).
+        slides = parse_llm_response(
+            '[{"chunk": 1, "slide": 1}] poi [{"chunk": 1, "slide": 4}]',
+            1,
+        )
+        self.assertEqual(slides, [4])
+
+    def test_apostrophe_in_string_does_not_break_parse(self):
+        # Un apostrofo legittimo dentro un valore con virgolette doppie non
+        # deve corrompere il parse: il repair delle virgolette singole gira
+        # SOLO se il JSON doppio-quote non decodifica.
+        content = '[{"chunk": 1, "slide": 2, "note": "l\'ambiente"}]'
+        slides = parse_llm_response(content, 1)
+        self.assertEqual(slides, [2])
+
+
+class TestTimelineFromCached(unittest.TestCase):
+    """Ricostruzione timeline dalla cache LLM ordinata."""
+
+    def test_anchors_restored_after_completion_clamp(self):
+        # L'estrapolazione dell'ultima slide senza ancora supera la durata
+        # audio: il clamp di ``_complete_from_anchors`` scalerebbe TUTTI i
+        # tempi (ancore incluse), spostando la slide 4 dal suo timestamp
+        # parlato (95s) a ~74s. Il percorso cache deve ripristinare le ancore
+        # come il percorso live: la slide 4 resta a 95.0s.
+        cached = [{"slide": 2, "start": 30.0}, {"slide": 3, "start": 40.0}]
+        anchors = {1: 0.0, 4: 95.0}
+        out = _timeline_from_cached(cached, anchors, total_slides=5, total_duration=100.0)
+        self.assertIsNotNone(out)
+        assert out is not None
+        self.assertEqual(out[4], 95.0)
+        # La timeline resta valida (monotona, durate positive)
+        self.assertLess(out[3], out[4])
+        self.assertLess(out[4], out[5])
+        self.assertGreater(100.0 - out[5], 0.0)
+
+    def test_conflicting_llm_positions_filtered(self):
+        # Una posizione LLM che viola la monotonia con le ancore viene
+        # scartata e la slide viene interpolata tra le ancore.
+        cached = [
+            {"slide": 2, "start": 80.0},  # dopo l'ancora slide 3: conflitto
+            {"slide": 3, "start": 40.0},
+        ]
+        anchors = {1: 0.0, 3: 40.0, 5: 100.0}
+        out = _timeline_from_cached(cached, anchors, total_slides=5, total_duration=110.0)
+        self.assertIsNotNone(out)
+        assert out is not None
+        self.assertEqual(out[3], 40.0)
+        self.assertEqual(out[5], 100.0)
+        # slide 2 senza posizione valida: interpolata tra 1 e 3
+        self.assertGreater(out[2], 0.0)
+        self.assertLess(out[2], 40.0)
+        # slide 4 interpolata tra 3 e 5
+        self.assertGreater(out[4], 40.0)
+        self.assertLess(out[4], 100.0)
 
 
 class TestEndpointConfig(unittest.TestCase):
