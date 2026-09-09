@@ -1274,6 +1274,43 @@ def main(argv: list | None = None) -> None:
                     ", ".join(f"slide {s} = {d:.0f}s" for s, d in uncertain),
                 )
 
+        # --- Filtro slide da non mostrare (--skip-slides) ---
+        # Le slide saltate dal podcast (mai annunciate né discusse) restano
+        # nel PDF (le ancore 'slide N' del parlato non si spostano), ma nei
+        # loro segmenti il video mostra la slide precedente valida: l'audio
+        # resta sincronizzato e il video mostra solo le slide coperte.
+        # Nel flusso libero le slide non coperte non vengono mostrate
+        # comunque, quindi il filtro è solo per i flussi ordinati.
+        if flow != "free" and args.skip_slides:
+            skip_set = {
+                int(x) for x in args.skip_slides.split(",") if x.strip().isdigit()
+            }
+            skip_set &= set(range(1, total_slides + 1))
+            if skip_set:
+                replaced: dict[int, int] = {}
+                for i, s in enumerate(slide_ids):
+                    if s not in skip_set:
+                        continue
+                    # Slide precedente valida (non saltata): l'ultima mostrata
+                    # prima di questa. Se non esiste (slide 1 saltata), la
+                    # successiva valida.
+                    prev = next((j for j in range(s - 1, 0, -1) if j not in skip_set), None)
+                    if prev is None:
+                        prev = next(
+                            (j for j in range(s + 1, total_slides + 1) if j not in skip_set),
+                            s,
+                        )
+                    slide_ids[i] = prev
+                    replaced[s] = prev
+                if replaced:
+                    # Riallinea i file immagine alla nuova sequenza (nel flusso
+                    # ordinato slide_files è ancora la lista completa 1..N).
+                    slide_files = [slide_files[s - 1] for s in slide_ids]
+                    log.info(
+                        "   [Skip] Slide non mostrate: %s (segmenti mostrano la slide precedente valida).",
+                        ", ".join(f"{s}->{p}" for s, p in sorted(replaced.items())),
+                    )
+
         # --- Anteprima timeline (--preview) ---
         if args.preview:
             log.info("\n" + "=" * 70)

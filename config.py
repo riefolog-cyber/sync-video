@@ -854,6 +854,17 @@ Esempi:
         "selezione libera via LLM (~16 min con 9Router).",
     )
     parser.add_argument(
+        "--skip-slides",
+        default="",
+        help="Slide da NON mostrare nel video (lista separata da "
+        "virgole, es. 4,9,11). Le slide saltate dal podcast vengono "
+        "escluse: i loro segmenti mostrano la slide precedente valida, "
+        "così l'audio resta sincronizzato e il video mostra solo le "
+        "slide effettivamente coperte. Il PDF resta intatto (le ancore "
+        "'slide N' del parlato non si spostano). Solo flusso ordinato "
+        "(slide-audio/audio-slide); nel flusso libero è ignorato.",
+    )
+    parser.add_argument(
         "--semantic-model",
         default=DEFAULT_EMBEDDING_MODEL,
         help=f"Modello embedding per la sincronizzazione semantica "
