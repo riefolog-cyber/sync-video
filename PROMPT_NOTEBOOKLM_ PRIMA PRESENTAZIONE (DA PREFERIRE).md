@@ -24,17 +24,16 @@ Le altre fonti servono SOLO come approfondimento della slide corrente: non intro
 
 ANCORE E STRUTTURA (OBBLIGATORIO):
 
-* Una sezione = una slide del PDF. Il numero che pronunci DEV'ESSERE il numero di pagina della slide nel PDF (la prima pagina è la slide 1). Segui tutte le slide in ordine rigoroso, senza saltarne; se ti accorgi di aver saltato una slide, dillo esplicitamente ("ho saltato la slide N, recuperiamola"), descrivila, poi riprendi in ordine dalla successiva.
+* Una sezione = una slide del PDF. Il numero che pronunci DEV'ESSERE il numero di pagina della slide nel PDF (la prima pagina è la slide 1). Segui tutte le slide in ordine rigoroso, senza saltarne.
 * All'inizio di ogni sezione (dalla seconda in poi) formula UNICA "passiamo alla slide N", UNA sola volta: numero secco in cifre subito dopo la parola "slide" (es. "slide 5"), pronunciato chiaramente. Mai "slide di dieci", "la slide numero", parafrasi o preposizioni tra "slide" e il numero. Prima di annunciare, controlla il numero della pagina successiva del PDF.
 * Quando annunci una slide, pronuncia anche il suo titolo o le parole chiave come compaiono nella presentazione.
-* Mai sinonimi ("sezione 3", "capitolo", "punto 2", "diapositiva") né "slide"+numero in altri contesti.
+* Mai sinonimi ("sezione 3", "capitolo", "punto 2", "diapositiva") né "slide"+ numero in altri contesti.
 
 Per ogni sezione:
 
 1. annuncia "passiamo alla slide N"
 2. spiega i punti e le parole chiave della slide
 3. chiudi con una domanda aperta e poi con una frase riassuntiva. (non ripetere ogni volta "in sintesi")
-
 
 
 TONO E STILE DEL DIBATTITO
