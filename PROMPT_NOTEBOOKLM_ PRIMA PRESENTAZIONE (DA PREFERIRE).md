@@ -26,7 +26,7 @@ ANCORE E STRUTTURA (OBBLIGATORIO):
 * Una sezione = una slide del PDF. Il numero che pronunci DEV'ESSERE il numero di pagina della slide nel PDF (la prima pagina è la slide 1). Segui tutte le slide in ordine rigoroso, senza saltarne.
 * PRIMA di scrivere: elenca TUTTE le slide del PDF (numero di pagina + titolo). Quel piano è lo scheletro del podcast: segui ogni voce in ordine, senza unirne due in un'unica sezione.
 * Anche se una slide ti sembra breve o simile alla precedente, annunciala comunque con "passiamo alla slide N" e dedicale almeno 2-3 frasi che spiegano cosa aggiunge rispetto alla precedente. Non inglobarla nella sezione precedente.
-* All'inizio di ogni sezione (dalla seconda in poi) formula UNICA "passiamo alla slide N", UNA sola volta: numero secco in cifre subito dopo la parola "slide" (es. "slide 5"), pronunciato chiaramente. Mai "slide di dieci", "la slide numero", parafrasi o preposizioni tra "slide" e il numero. Prima di annunciare, controlla il numero della pagina successiva del PDF.
+* All'inizio di ogni sezione (dalla seconda in poi) pronuncia UNA sola volta "passiamo alla slide N": il numero va detto per esteso e chiaramente, subito dopo la parola "slide" (es. "slide cinque"), senza altre parole in mezzo. Mai "slide di dieci", "la slide numero", parafrasi o preposizioni tra "slide" e il numero (l'audio non ha "cifre": conta solo la pronuncia chiara). Prima di annunciare, controlla il numero della pagina successiva del PDF.
 * Quando annunci una slide, pronuncia anche il suo titolo o le parole chiave come compaiono nella presentazione.
 * Mai sinonimi ("sezione 3", "capitolo", "punto 2", "diapositiva") né "slide"+ numero in altri contesti.
 
@@ -37,7 +37,7 @@ Per ogni sezione:
 3. chiudi con una domanda aperta e poi con una frase riassuntiva. (non ripetere ogni volta "in sintesi")
 
 VERIFICA FINALE (OBBLIGATORIO):
-A fine audio, ripercorri mentalmente le sezioni: devi aver annunciato TUTTE le slide 1..M del PDF in ordine, nessuna esclusa e nessuna unita a un'altra.
+Ripercorri il piano voce per voce: ogni voce deve corrispondere a ESATTAMENTE una sezione, nessuna fusa con la precedente o la successiva (nemmeno se breve o simile alla precedente). A fine audio devi aver annunciato TUTTE le slide 2..M del PDF in ordine (la slide 1 inizia a 0.0 senza annuncio), ciascuna con la sua ancora "passiamo alla slide N" seguita dal titolo della slide.
 
 
 TONO E STILE DEL DIBATTITO
@@ -51,9 +51,9 @@ TONO E STILE DEL DIBATTITO
 
 ## Checklist qualità post-generazione
 
-- [ ] Ogni sezione (dalla seconda in poi) inizia con "passiamo alla slide N", numero in CIFRE subito dopo "slide", una sola volta.
-- [ ] Tutte le slide annunciate in ordine rigoroso, nessuna saltata; nessun sinonimo ("sezione 3", "diapositiva", "punto 2").
-- [ ] Conteggio finale: numero di "passiamo alla slide N" = numero di slide del PDF.
+- [ ] Ogni sezione (dalla seconda in poi) inizia con "passiamo alla slide N", numero pronunciato per esteso e chiaramente subito dopo "slide", una sola volta, seguito dal titolo della slide.
+- [ ] Tutte le slide annunciate in ordine rigoroso, nessuna saltata né fusa con un'altra; nessun sinonimo ("sezione 3", "diapositiva", "punto 2").
+- [ ] Conteggio finale: numero di "passiamo alla slide N" = numero di slide del PDF meno 1 (la slide 1 non si annuncia).
 - [ ] Nessun numero prima di "slide" né parafrasi ("la slide numero 5", "slide di dieci").
 - [ ] Prova finale: `python main.py --dry-run` → l'avviso "Solo N slide su M annunciate" non deve apparire.
 
