@@ -1036,6 +1036,444 @@ class TestSemanticSync(unittest.TestCase):
         self.assertFalse(weak_signal_seen())
 
 
+class TestNormalizedQualityGuard(unittest.TestCase):
+    """Guard-rail di qualità sulla scala normalizzata (z-score per slide).
+
+    La cosine grezza di e5 ha una baseline altissima tra due testi italiani
+    qualsiasi: sui dati reali vale 0.80-0.88 sia con le slide nell'ordine
+    giusto sia mescolate, quindi il valore assoluto non contiene informazione
+    sull'allineamento. Questi test fissano la misura che discrimina davvero
+    (picco medio normalizzato) e il fatto che un valore basso è un SEGNALE
+    (escalation al LLM, --strict-sync, report) e non un verdetto che scarta la
+    timeline già costruita.
+    """
+
+    def setUp(self):
+        from semantic_sync import reset_weak_signal_flag
+
+        reset_weak_signal_flag()
+
+    def test_raw_similarity_does_not_discriminate_zscore_does(self):
+        from semantic_sync import _mean_pair_scores, zscore_matrix
+
+        # Matrice realistica: baseline alta (0.89 tra qualunque testo) e picchi
+        # sull'allineamento giusto (0.90). È il caso misurato sui dati reali,
+        # dove la cosine vale 0.84 con le slide giuste e 0.84 con quelle
+        # mescolate: la differenza assoluta è di pochi millesimi.
+        sim = np.full((4, 4), 0.89)
+        np.fill_diagonal(sim, 0.90)
+        norm = zscore_matrix(sim)
+        correct = [(i, i) for i in range(4)]
+        shuffled = [(0, 1), (1, 0), (2, 3), (3, 2)]
+
+        raw_ok, z_ok = _mean_pair_scores(sim, norm, correct)
+        raw_bad, z_bad = _mean_pair_scores(sim, norm, shuffled)
+
+        # La cosine grezza dice quasi la stessa cosa nei due casi (sui dati
+        # reali 0.842 vs 0.840) e sta comunque sopra la vecchia soglia (0.10):
+        # non può mai scattare.
+        self.assertLess(abs(raw_ok - raw_bad), 0.05)
+        self.assertGreater(raw_bad, 0.10)
+        # Lo z-score separa senza ambiguità: picco netto vs valore negativo.
+        self.assertGreater(z_ok, 1.0)
+        self.assertLess(z_bad, 0.0)
+        self.assertGreater(z_ok - z_bad, 2.0)
+
+    def test_no_pairs_scores_zero(self):
+        from semantic_sync import _mean_pair_scores
+
+        sim = np.zeros((2, 2))
+        self.assertEqual(_mean_pair_scores(sim, sim, []), (0.0, 0.0))
+
+    def test_default_threshold_shared_with_options(self):
+        from config import DEFAULT_SEMANTIC_MIN_Z
+        from semantic_sync import SemanticOptions
+
+        # La soglia tarata sui dati reali non deve divergere dal default delle
+        # opzioni: una divergenza cambierebbe in silenzio quali run avvisano.
+        self.assertEqual(DEFAULT_SEMANTIC_MIN_Z, 0.45)
+        self.assertEqual(SemanticOptions().min_avg_z, DEFAULT_SEMANTIC_MIN_Z)
+
+    def test_low_quality_is_a_signal_not_a_verdict(self):
+        # Slide tutte diverse, parlato che nomina tutti i temi allo stesso modo:
+        # nessuna colonna ha un picco (z = 0) mentre la cosine resta ~0.5, sopra
+        # la vecchia soglia. La timeline NON va scartata (era il comportamento
+        # precedente): va segnalata, perché ancore ed LLM possono ancora
+        # correggerla.
+        themes = ["alfa", "beta", "gamma", "delta"]
+        blocks = [{"time": i * 5.0, "text": "alfa beta gamma delta"} for i in range(8)]
+
+        with self.assertLogs("slide2video", level="WARNING") as logs:
+            tl = semantic_timeline_from_texts(
+                [f"{t} slide" for t in themes],
+                blocks,
+                total_slides=4,
+                total_duration=40.0,
+                embed_fn=TestSemanticSync._fake_embed(themes),
+                options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
+            )
+
+        from semantic_sync import last_quality, weak_signal_seen
+
+        self.assertIsNotNone(tl)
+        self.assertTrue(weak_signal_seen())
+        self.assertTrue(any("bassa fiducia" in m for m in logs.output))
+        quality = last_quality()
+        self.assertLess(quality["avg_z"], quality["min_avg_z"])
+        # La vecchia guardia sulla scala grezza tace: è il motivo del cambio.
+        self.assertGreater(quality["avg_sim"], 0.10)
+
+    def test_coherent_deck_reports_high_quality(self):
+        themes = ["alfa", "beta", "gamma", "delta"]
+        # Un blocco ogni 5s, due per tema, nell'ordine delle slide.
+        blocks = [
+            {"time": i * 5.0, "text": (themes[i // 2] + " ") * 4}
+            for i in range(len(themes) * 2)
+        ]
+        tl = semantic_timeline_from_texts(
+            [f"{t} slide" for t in themes],
+            blocks,
+            total_slides=4,
+            total_duration=40.0,
+            embed_fn=TestSemanticSync._fake_embed(themes),
+            options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
+        )
+
+        from config import DEFAULT_SEMANTIC_MIN_Z
+        from semantic_sync import last_quality, weak_signal_seen
+
+        self.assertIsNotNone(tl)
+        self.assertFalse(weak_signal_seen())
+        quality = last_quality()
+        self.assertGreater(quality["avg_z"], quality["min_avg_z"])
+        self.assertEqual(quality["min_avg_z"], DEFAULT_SEMANTIC_MIN_Z)
+        self.assertEqual(sorted(quality), ["avg_sim", "avg_z", "min_avg_z"])
+
+
+class TestFrameGuidedRepair(unittest.TestCase):
+    """Riparazione dei confini guidata dal controllo del video.
+
+    Il mismatch dice quale slide è DAVVERO a schermo in un istante preciso: se
+    è quella di un segmento adiacente, il confine è fuori posto e la direzione
+    dell'errore è nota. Questi test fissano che il nuovo confine venga cercato
+    dal motore embedding (non indovinato), solo nella direzione dell'evidenza, e
+    che un mismatch NON interpretabile (slide non adiacente, frame di
+    transizione) non produca correzioni inventate.
+    """
+
+    THEMES: ClassVar[list[str]] = ["alfa", "beta"]
+
+    @staticmethod
+    def _words(split: float, end: float, step: float = 2.0):
+        """Parlato di 'alfa' fino a ``split``, poi di 'beta' (parole ogni 2s)."""
+        out = []
+        t = 0.0
+        while t < end:
+            out.append({"word": "alfa" if t < split else "beta", "start": t})
+            t += step
+        return out
+
+    def _repair(self, segments, mismatches, words, **kwargs):
+        from semantic_sync import repair_segments_from_frame_mismatches
+
+        params = {"min_segment_seconds": 5.0, "context_seconds": 12.0, "max_shift_seconds": 180.0}
+        params.update(kwargs)
+        return repair_segments_from_frame_mismatches(
+            segments,
+            mismatches,
+            words,
+            [f"{t} slide" for t in self.THEMES],
+            total_duration=120.0,
+            embed_fn=TestSemanticSync._fake_embed(self.THEMES),
+            **params,
+        )
+
+    def test_next_neighbour_mismatch_anticipates_the_boundary(self):
+        # Il video a 40s mostra la slide 2 dentro il segmento della slide 1:
+        # il confine è in ritardo e deve tornare dove il parlato cambia tema (30s).
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 60.0},
+            {"slide": 2, "start": 60.0, "end": 120.0},
+        ]
+        mismatches = [{"slide": 1, "shown": 2, "similarity": 1.0, "time": 40.0}]
+
+        refined, applied = self._repair(segments, mismatches, self._words(split=30.0, end=120.0))
+
+        self.assertEqual(len(applied), 1)
+        self.assertEqual(applied[0]["slide"], 2)
+        self.assertEqual(applied[0]["shown"], 2)
+        self.assertAlmostEqual(applied[0]["new_start"], 30.0, delta=2.0)
+        self.assertEqual(refined[0]["start"], 0.0)  # la prima slide non si muove
+        self.assertAlmostEqual(float(refined[1]["start"]), float(applied[0]["new_start"]))
+
+    def test_previous_neighbour_mismatch_postpones_the_boundary(self):
+        # Il video a 90s mostra ancora la slide 1 dentro il segmento della 2:
+        # il confine è in anticipo e il tema cambia a 90s.
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 60.0},
+            {"slide": 2, "start": 60.0, "end": 120.0},
+        ]
+        mismatches = [{"slide": 2, "shown": 1, "similarity": 1.0, "time": 90.0}]
+
+        refined, applied = self._repair(segments, mismatches, self._words(split=90.0, end=120.0))
+
+        self.assertEqual(len(applied), 1)
+        self.assertAlmostEqual(applied[0]["new_start"], 90.0, delta=2.0)
+        self.assertGreater(float(refined[1]["start"]), 60.0)
+
+    def test_non_adjacent_shown_slide_is_not_repaired(self):
+        # Slide 3 a schermo nel segmento della slide 1: non è un confine
+        # spostato ma un problema di rendering. Meglio nessuna correzione.
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 40.0},
+            {"slide": 2, "start": 40.0, "end": 80.0},
+            {"slide": 3, "start": 80.0, "end": 120.0},
+        ]
+        mismatches = [{"slide": 1, "shown": 3, "similarity": 1.0, "time": 20.0}]
+
+        with self.assertLogs("slide2video", level="WARNING") as logs:
+            refined, applied = self._repair(segments, mismatches, self._words(split=30.0, end=120.0))
+
+        self.assertEqual(applied, [])
+        self.assertEqual(refined, segments)
+        self.assertTrue(any("non è un confine adiacente" in m for m in logs.output))
+
+    def test_low_similarity_on_the_declared_slide_is_not_repaired(self):
+        # shown == slide (frame di transizione poco riconoscibile): il confine
+        # non c'entra, nessuno spostamento.
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 60.0},
+            {"slide": 2, "start": 60.0, "end": 120.0},
+        ]
+        mismatches = [{"slide": 1, "shown": 1, "similarity": 0.55, "time": 30.0}]
+
+        with self.assertLogs("slide2video", level="WARNING") as logs:
+            refined, applied = self._repair(segments, mismatches, self._words(split=30.0, end=120.0))
+
+        self.assertEqual(applied, [])
+        self.assertEqual(refined, segments)
+        self.assertTrue(any("frame non è riconoscibile" in m for m in logs.output))
+
+    def test_no_better_position_leaves_timeline_untouched(self):
+        # Il parlato è tutto sullo stesso tema: nessuna posizione è migliore
+        # dell'attuale, quindi la timeline resta com'era (nessun re-render).
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 60.0},
+            {"slide": 2, "start": 60.0, "end": 120.0},
+        ]
+        mismatches = [{"slide": 2, "shown": 1, "similarity": 1.0, "time": 90.0}]
+        words = [{"word": "alfa", "start": t * 2.0} for t in range(60)]
+
+        with self.assertLogs("slide2video", level="WARNING") as logs:
+            refined, applied = self._repair(segments, mismatches, words)
+
+        self.assertEqual(applied, [])
+        self.assertEqual(refined, segments)
+        self.assertTrue(any("timeline invariata" in m for m in logs.output))
+
+    def test_repaired_timeline_stays_valid(self):
+        # Monotonicità e durata minima restano garantite: il video riparato
+        # deve poter essere ricostruito senza buchi né sovrapposizioni.
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 60.0},
+            {"slide": 2, "start": 60.0, "end": 120.0},
+        ]
+        mismatches = [{"slide": 1, "shown": 2, "similarity": 1.0, "time": 40.0}]
+
+        refined, applied = self._repair(segments, mismatches, self._words(split=30.0, end=120.0))
+
+        self.assertTrue(applied)
+        starts = [float(s["start"]) for s in refined]
+        self.assertTrue(all(b > a for a, b in pairwise(starts)))
+        self.assertTrue(
+            all(
+                float(seg["end"]) - float(seg["start"]) >= 5.0
+                for seg in refined
+            )
+        )
+        # La sequenza delle slide mostrate non cambia: solo i tempi.
+        self.assertEqual([s["slide"] for s in refined], [1, 2])
+
+    def test_search_window_reaches_beyond_the_default_window(self):
+        # La finestra simmetrica di default limita lo spostamento: con la
+        # ricerca guidata dall'evidenza il confine raggiunge il punto reale.
+        from semantic_sync import refine_llm_segment_boundaries
+
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 60.0},
+            {"slide": 2, "start": 60.0, "end": 120.0},
+        ]
+        words = self._words(split=30.0, end=120.0)
+        slide_texts = [f"{t} slide" for t in self.THEMES]
+        embed = TestSemanticSync._fake_embed(self.THEMES)
+
+        default = refine_llm_segment_boundaries(
+            segments, words, slide_texts, embed,
+            window_seconds=20.0, min_segment_seconds=5.0, refine_slides={2},
+        )
+        guided = refine_llm_segment_boundaries(
+            segments, words, slide_texts, embed,
+            window_seconds=20.0, min_segment_seconds=5.0, refine_slides={2},
+            search_window={2: (0.0, 60.0)},
+        )
+
+        # Senza ricerca guidata il confine non può andare oltre la finestra.
+        self.assertGreater(float(default[1]["start"]), 30.0 + 5.0)
+        # Con la ricerca guidata trova il cambio di tema reale (30s).
+        self.assertAlmostEqual(float(guided[1]["start"]), 30.0, delta=2.0)
+
+
+class TestRepairGlue(unittest.TestCase):
+    """Il collegamento tra riparazione e rigenerazione non deve mai peggiorare
+    il video: se le nuove durate non sono valide o la durata totale cambierebbe
+    (audio disallineato), la riparazione viene annullata e resta il video già
+    generato."""
+
+    @staticmethod
+    def _call(repaired, applied, durations=(60.0, 60.0)):
+        from unittest.mock import patch
+
+        from main import _repair_durations_from_frames
+        from semantic_sync import SemanticOptions
+
+        with patch("main.repair_segments_from_frames_from_words") as patched:
+            patched.return_value = (repaired, applied)
+            return _repair_durations_from_frames(
+                list(durations),
+                [1, 2],
+                [{"slide": 1, "shown": 2, "time": 40.0, "similarity": 1.0}],
+                [],
+                ["alfa slide", "beta slide"],
+                120.0,
+                SemanticOptions(),
+            )
+
+    def test_valid_repair_returns_new_durations(self):
+        out = self._call(
+            [{"slide": 1, "start": 0.0, "end": 30.0}, {"slide": 2, "start": 30.0, "end": 120.0}],
+            [{"slide": 2, "old_start": 60.0, "new_start": 30.0}],
+        )
+        self.assertIsNotNone(out)
+        durations, applied = out
+        self.assertEqual(durations, [30.0, 90.0])
+        self.assertEqual(applied[0]["slide"], 2)
+
+    def test_repair_that_changes_total_duration_is_rejected(self):
+        # Total diverso = audio disallineato rispetto al video: si annulla.
+        self.assertIsNone(
+            self._call(
+                [{"slide": 1, "start": 0.0, "end": 60.0}, {"slide": 2, "start": 60.0, "end": 200.0}],
+                [{"slide": 2}],
+            )
+        )
+
+    def test_repair_with_invalid_durations_is_rejected(self):
+        self.assertIsNone(
+            self._call(
+                [{"slide": 1, "start": 0.0, "end": 120.0}, {"slide": 2, "start": 120.0, "end": 120.0}],
+                [{"slide": 2}],
+            )
+        )
+
+    def test_no_applied_change_means_no_render(self):
+        self.assertIsNone(
+            self._call(
+                [{"slide": 1, "start": 0.0, "end": 60.0}, {"slide": 2, "start": 60.0, "end": 120.0}],
+                [],
+            )
+        )
+
+
+class TestAutoRepairFlag(unittest.TestCase):
+    """La riparazione automatica è attiva di default, disattivabile esplicitamente."""
+
+    def test_default_on_and_disabled_with_flag(self):
+        from config import parse_args
+
+        self.assertTrue(parse_args([]).auto_repair)
+        self.assertFalse(parse_args(["--no-auto-repair"]).auto_repair)
+
+
+class TestPlainSummary(unittest.TestCase):
+    """Riepilogo finale in parole semplici: cosa c'è nel video e cosa dubitare."""
+
+    def setUp(self):
+        from semantic_sync import reset_weak_signal_flag
+
+        reset_weak_signal_flag()
+
+    def _render(self, **kwargs):
+        """Testo del riepilogo, catturato dal logger reale della pipeline."""
+        from main import _log_plain_summary
+
+        with self.assertLogs("slide2video", level="INFO") as logs:
+            _log_plain_summary(
+                kwargs.pop("durations", [60.0, 60.0, 60.0]),
+                kwargs.pop("slide_ids", [1, 2, 3]),
+                kwargs.pop("total_duration", 180.0),
+                **kwargs,
+            )
+        return "\n".join(logs.output)
+
+    def test_lists_slides_and_ok_check(self):
+        out = self._render(
+            frame_check={"checked": 3, "coherent": 3, "mismatches": []},
+            quality={"avg_sim": 0.84, "avg_z": 0.69, "min_avg_z": 0.45},
+        )
+        self.assertIn("IL VIDEO È PRONTO", out)
+        self.assertIn("3 slide", out)
+        self.assertIn("slide  1", out)
+        self.assertIn("1m00s", out)
+        self.assertIn("tutte le 3 slide sono", out)
+        self.assertIn("nessuno, la sincronizzazione è", out)
+        self.assertIn("alta (picco medio 0.69", out)
+
+    def test_frame_mismatch_is_reported_as_problem_and_doubt(self):
+        out = self._render(
+            frame_check={
+                "checked": 3,
+                "coherent": 2,
+                "mismatches": [{"slide": 2, "shown": 3, "similarity": 1.0, "time": 90.0}],
+            }
+        )
+        self.assertIn("PROBLEMA", out)
+        self.assertIn("slide sbagliata nei segmenti 2", out)
+
+    def test_content_verdicts_become_doubts(self):
+        out = self._render(verdicts={2: "disallineata", 3: "incerto"})
+        self.assertIn("slide 2 somiglia di più", out)
+        self.assertIn("slide 3 la durata è anomala", out)
+        self.assertIn("Da controllare a mano", out)
+
+    def test_weak_signal_and_review_diffs_are_doubts(self):
+        from semantic_sync import _set_weak_signal
+
+        _set_weak_signal()
+        out = self._render(
+            quality={"avg_sim": 0.83, "avg_z": 0.20, "min_avg_z": 0.45},
+            review_diffs=2,
+        )
+        self.assertIn("somiglianza tra parlato e slide è risultata debole", out)
+        self.assertIn("contesta 2 scelte di slide", out)
+        self.assertIn("bassa (picco medio 0.20", out)
+
+    def test_missing_check_is_stated(self):
+        out = self._render()
+        self.assertIn("Controllo del video finito: non eseguito", out)
+
+    def test_automatic_repairs_are_shown(self):
+        # Una correzione automatica deve essere visibile in chiaro: l'utente ha
+        # in mano un video diverso da quello che la timeline dichiarava.
+        out = self._render(
+            frame_check={"checked": 3, "coherent": 3, "mismatches": []},
+            repairs=[{"slide": 2, "old_start": 120.0, "new_start": 90.0}],
+        )
+        self.assertIn(
+            "Correzione automatica: la slide 2 entrava a 2m00s, ora entra a 1m30s",
+            out,
+        )
+
+
 class TestAnomalousDurations(unittest.TestCase):
     """Guard-rail durate anomale del riepilogo finale (main._find_anomalous_durations)."""
 

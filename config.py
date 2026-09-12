@@ -508,7 +508,20 @@ DEFAULT_EMBED_THREADS = _env_int("EMBED_THREADS", min(8, os.cpu_count() or 4))
 
 DEFAULT_SEMANTIC_WINDOW = _env_float("SEMANTIC_WINDOW", 4.0)  # secondi per blocco
 DEFAULT_SEMANTIC_MIN_DURATION = _env_float("SEMANTIC_MIN_DURATION", 3.0)  # durata minima slide
-DEFAULT_SEMANTIC_MIN_SIM = _env_float("SEMANTIC_MIN_SIM", 0.10)  # soglia qualità
+DEFAULT_SEMANTIC_MIN_SIM = _env_float("SEMANTIC_MIN_SIM", 0.10)  # soglia qualità (scala grezza)
+# Guard-rail sulla scala NORMALIZZATA (z-score per slide, la stessa usata dal
+# posizionamento): è l'unica delle due che discrimina davvero.
+# Misurato su podcast reale (120 allineamenti plausibili per variante):
+#   allineamento giusto        0.61-0.75
+#   slide mescolate            0.30-0.43
+#   ordine invertito           0.18
+#   slide non correlate        0.07-0.09
+#   slide quasi-duplicate      0.006
+#   deck senza firma per slide 0.15  <- caso limite: non deve decidere il guard
+# 0.45 = nessuna variante sbagliata accettata, nessun deck con contenuto
+# per-slide rifiutato. Sotto questa soglia NON si scarta la timeline: si segnala
+# (escalation al LLM, --strict-sync, riepilogo finale).
+DEFAULT_SEMANTIC_MIN_Z = _env_float("SEMANTIC_MIN_Z", 0.45)
 # Temperatura della "competizione softmax" tra slide per blocco: più è bassa,
 # più il posizionamento privilegia i picchi locali (evita che una slide-riepilogo
 # con similarità uniforme catturi metà dell'audio).
@@ -918,6 +931,23 @@ Esempi:
         default=DEFAULT_SEMANTIC_MIN_SIM,
         help=f"Soglia di similarità media sotto cui la sincronizzazione "
         f"semantica viene scartata (default: {DEFAULT_SEMANTIC_MIN_SIM})",
+    )
+    parser.add_argument(
+        "--no-auto-repair",
+        dest="auto_repair",
+        action="store_false",
+        help="Disattiva la riparazione automatica: quando la verifica del video "
+        "(--verify-video) trova un segmento con la slide sbagliata, la pipeline "
+        "sposta da sola quel confine con il motore embedding e rigenera il video. "
+        "Con questo flag l'esito resta un avviso (il video non viene rifatto)",
+    )
+    parser.add_argument(
+        "--semantic-min-z",
+        type=float,
+        default=DEFAULT_SEMANTIC_MIN_Z,
+        help=f"Soglia sul picco medio NORMALIZZATO (z-score per slide) sotto cui "
+        f"la sincronizzazione è a bassa fiducia: segnala, alimenta l'escalation "
+        f"al LLM e il gate --strict-sync (default: {DEFAULT_SEMANTIC_MIN_Z})",
     )
     parser.add_argument(
         "--semantic-temperature",

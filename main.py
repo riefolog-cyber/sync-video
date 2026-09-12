@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import NoReturn, cast
 
@@ -46,11 +47,13 @@ from ocr import PRESENTATION_SUFFIXES, convert_presentation_to_pdf, extract_slid
 from semantic_sync import (
     SemanticOptions,
     free_order_segments_from_words,
+    last_quality,
     make_anchor_remap_filter,
     merge_short_segments,
     model_load_seconds,
     refine_llm_segments_from_words,
     refine_llm_timeline_from_words,
+    repair_segments_from_frames_from_words,
     reset_weak_signal_flag,
     semantic_timeline_from_words,
     verify_anchor_mapping_embedding,
@@ -286,6 +289,245 @@ def _warn_sync_uncertainty() -> None:
         "rigenera la presentazione dal podcast o fai pronunciare le "
         "ancore 'slide N' alle transizioni."
     )
+
+
+def _log_plain_summary(
+    durations: Sequence[float],
+    slide_ids: Sequence[int],
+    total_duration: float,
+    *,
+    verdicts: dict[int, str] | None = None,
+    frame_check: dict[str, object] | None = None,
+    quality: dict[str, float] | None = None,
+    review_diffs: int = 0,
+    repairs: Sequence[dict[str, object]] = (),
+    title: str = "IL VIDEO È PRONTO — COSA C'È DENTRO",
+) -> None:
+    """Riepilogo finale in parole semplici (quello che l'utente vuole sapere).
+
+    Non sostituisce i log tecnici: li traduce in domande concrete — quante
+    slide e quanto durano, se il video finito mostra la slide giusta, cosa è
+    stato corretto da solo, cosa conviene controllare a mano. I dubbi sono
+    raccolti da TUTTI i segnali della run (verdetto di contenuto, verifica
+    frame, fiducia del motore embedding, revisione LLM) invece che da uno solo.
+    """
+    verdicts = verdicts or {}
+    log.info("\n" + "=" * 70)
+    log.info(" %s", title)
+    log.info("=" * 70)
+    log.info(
+        "   %d slide, %s di parlato (%.1fs).",
+        len(durations),
+        _format_time(total_duration),
+        total_duration,
+    )
+    log.info("")
+    start = 0.0
+    for s, d in zip(slide_ids, durations, strict=True):
+        log.info(
+            "   slide %2d   da %7s   a %7s   (%s)",
+            s,
+            _format_time(start),
+            _format_time(start + float(d)),
+            _format_time(float(d)),
+        )
+        start += float(d)
+
+    # --- Verifica del video finito (l'unico controllo sull'artefatto) ---
+    log.info("")
+    if frame_check is None:
+        log.info(
+            "   Controllo del video finito: non eseguito (si attiva con "
+            "--verify-video, o da solo con --strict-sync)."
+        )
+    else:
+        checked = int(cast("int", frame_check.get("checked") or 0))
+        coherent = int(cast("int", frame_check.get("coherent") or 0))
+        if checked and coherent == checked:
+            log.info(
+                "   Controllo del video finito: OK, tutte le %d slide sono "
+                "comparse quando previsto.",
+                checked,
+            )
+        else:
+            log.warning(
+                "   Controllo del video finito: PROBLEMA, %d slide su %d non "
+                "compaiono quando previsto.",
+                checked - coherent,
+                checked,
+            )
+
+    # --- Correzioni automatiche (riparazione dei confini) ---
+    for r in repairs:
+        log.info(
+            "   Correzione automatica: la slide %s entrava a %s, ora entra a %s "
+            "(il video la mostrava nel momento sbagliato).",
+            r.get("slide"),
+            _format_time(float(cast("float", r.get("old_start")) or 0.0)),
+            _format_time(float(cast("float", r.get("new_start")) or 0.0)),
+        )
+
+    # --- Dubbi da verificare a mano ---
+    doubts: list[str] = []
+    misaligned = sorted(s for s, v in verdicts.items() if v == "disallineata")
+    uncertain = sorted(s for s, v in verdicts.items() if v == "incerto")
+    if misaligned:
+        slides_txt = ", ".join(str(s) for s in misaligned)
+        doubts.append(
+            f"il parlato delle slide {slides_txt} somiglia di più a un'altra "
+            "slide: guarda dove iniziano nel video"
+        )
+    if uncertain:
+        slides_txt = ", ".join(str(s) for s in uncertain)
+        doubts.append(
+            f"per le slide {slides_txt} la durata è anomala e il contenuto non "
+            "conferma: controlla a mano"
+        )
+    if frame_check is not None:
+        mismatches = cast("Sequence[dict[str, object]]", frame_check.get("mismatches") or [])
+        if mismatches:
+            doubted = ", ".join(str(m.get("slide")) for m in mismatches)
+            doubts.append(
+                f"il video finito mostra la slide sbagliata nei segmenti "
+                f"{doubted} (frame in .cache/verify_frames/)"
+            )
+    if weak_signal_seen():
+        doubts.append(
+            "la somiglianza tra parlato e slide è risultata debole: le durate "
+            "sono stimate, non garantite (1:1 solo con le ancore 'slide N')"
+        )
+    if review_diffs:
+        doubts.append(
+            f"la revisione automatica contesta {review_diffs} scelte di slide: "
+            "dettagli in .cache/sync_report.json (review_diffs)"
+        )
+
+    log.info("")
+    if not doubts:
+        log.info(
+            "   Dubbi da controllare a mano: nessuno, la sincronizzazione è "
+            "risultata solida."
+        )
+    else:
+        log.info("   Da controllare a mano:")
+        for doubt in doubts:
+            log.info("     - %s", doubt)
+    log.info(
+        "   Fiducia del motore: %s.",
+        _quality_phrase(quality, weak_signal_seen()),
+    )
+    log.info("=" * 70)
+
+
+def _quality_phrase(quality: dict[str, float] | None, weak: bool) -> str:
+    """Traduce la misura di qualità del motore in una frase breve."""
+    if not quality:
+        return "non misurata"
+    avg_z = float(quality.get("avg_z") or 0.0)
+    min_z = float(quality.get("min_avg_z") or 0.0)
+    avg_sim = float(quality.get("avg_sim") or 0.0)
+    if weak:
+        return (
+            f"bassa (picco medio {avg_z:.2f}, soglia {min_z:.2f}): la scaletta è "
+            "stimata dal contenuto"
+        )
+    return f"alta (picco medio {avg_z:.2f} su soglia {min_z:.2f}, cosine {avg_sim:.2f})"
+
+
+def _frame_check_video(
+    video_path: Path,
+    slide_ids: Sequence[int],
+    durations: Sequence[float],
+    slide_files: Sequence[str],
+) -> dict[str, object]:
+    """Verifica cosa è DAVVERO a schermo: un frame a metà di ogni segmento.
+
+    Estratto in una funzione perché dopo una riparazione il video viene
+    rigenerato e il controllo va ripetuto: primo e secondo controllo devono
+    usare esattamente lo stesso codice, altrimenti gli esiti non sarebbero
+    confrontabili.
+    """
+    offsets = [0.0]
+    for d in durations:
+        offsets.append(offsets[-1] + float(d))
+    frame_check = frame_consistency_check(
+        video_path,
+        [(int(slide_ids[i]), offsets[i], offsets[i + 1]) for i in range(len(durations))],
+        slide_files,
+        CACHE_DIR / "verify_frames",
+    )
+    if frame_check["checked"]:
+        log.info(
+            "   Verifica frame vs slide: %s/%s segmenti mostrano la slide "
+            "attesa (frame in .cache/verify_frames/).",
+            frame_check["coherent"],
+            frame_check["checked"],
+        )
+    for m in cast("list[dict[str, object]]", frame_check["mismatches"]):
+        log.warning(
+            "   ⚠️ Verifica frame: a %.1fs il video mostra la slide %s ma "
+            "la timeline dice %s (similarità %.3f).",
+            m["time"],
+            m["shown"],
+            m["slide"],
+            m["similarity"],
+        )
+    return frame_check
+
+
+def _repair_durations_from_frames(
+    durations: Sequence[float],
+    slide_ids: Sequence[int],
+    mismatches: Sequence[dict[str, object]],
+    words_raw: Sequence[Word],
+    slide_texts: Sequence[str],
+    total_duration: float,
+    options: SemanticOptions,
+) -> tuple[list[float], list[dict[str, object]]] | None:
+    """Riposiziona i confini segnalati dal controllo del video.
+
+    Il mismatch dice quale slide è davvero a schermo in un istante preciso: il
+    nuovo confine viene cercato dal motore embedding nella sola direzione
+    indicata dall'evidenza (vedi
+    ``semantic_sync.repair_segments_from_frame_mismatches``). La sequenza delle
+    slide mostrate NON cambia: cambiano solo le durate, quindi il video si
+    rigenera dagli stessi file immagine e l'audio resta allineato.
+
+    Returns:
+        ``(durate, spostamenti applicati)``, oppure None se non c'è nulla da
+        spostare (in quel caso resta valido il video già generato).
+    """
+    start = 0.0
+    segments: list[dict[str, float | int]] = []
+    for slide, d in zip(slide_ids, durations, strict=True):
+        segments.append({"slide": int(slide), "start": start, "end": start + float(d)})
+        start += float(d)
+    repaired, applied = repair_segments_from_frames_from_words(
+        segments,
+        mismatches,
+        list(words_raw),
+        list(slide_texts),
+        total_duration,
+        options,
+    )
+    if not applied or len(repaired) != len(segments):
+        return None
+    new_durations = [float(seg["end"]) - float(seg["start"]) for seg in repaired]
+    if any(d <= 0.0 for d in new_durations):
+        log.warning(
+            "   [Riparazione] Durate non valide dopo lo spostamento: "
+            "riparazione annullata (resta il video già generato)."
+        )
+        return None
+    delta_total = sum(new_durations) - sum(float(d) for d in durations)
+    if abs(delta_total) > 1.0:
+        log.warning(
+            "   [Riparazione] La durata totale cambierebbe di %.1fs: "
+            "riparazione annullata.",
+            delta_total,
+        )
+        return None
+    return new_durations, applied
 
 
 def _find_anomalous_durations(
@@ -889,6 +1131,7 @@ def main(argv: list | None = None) -> None:
                         window_seconds=args.semantic_window,
                         min_segment_seconds=max(8.0, 2 * args.semantic_min_duration),
                         min_avg_similarity=args.semantic_min_sim,
+                        min_avg_z=args.semantic_min_z,
                     ),
                 )
                 # I segmenti MiniLM sono "Segment" (TypedDict): convertiti in
@@ -1165,6 +1408,7 @@ def main(argv: list | None = None) -> None:
                             window_seconds=args.semantic_window,
                             min_slide_duration=args.semantic_min_duration,
                             min_avg_similarity=args.semantic_min_sim,
+                            min_avg_z=args.semantic_min_z,
                             temperature=args.semantic_temperature,
                         ),
                         anchors=semantic_anchors,
@@ -1292,6 +1536,7 @@ def main(argv: list | None = None) -> None:
                         window_seconds=args.semantic_window,
                         min_slide_duration=args.semantic_min_duration,
                         min_avg_similarity=args.semantic_min_sim,
+                        min_avg_z=args.semantic_min_z,
                         temperature=args.semantic_temperature,
                     ),
                     anchors=semantic_anchors,
@@ -1363,6 +1608,13 @@ def main(argv: list | None = None) -> None:
             else {}
         )
         review_diffs = review_diffs_seen()
+        # Misura di qualità del motore embedding (picco medio normalizzato +
+        # cosine grezza) e verdetto di fiducia: nel report, così una run può
+        # essere riesaminata a posteriori senza rifare l'embedding.
+        quality = last_quality()
+        if quality:
+            sync_notes["quality"] = quality
+            sync_notes["weak_signal"] = weak_signal_seen()
         # Il report dei segmenti va salvato SEMPRE, anche senza anomalie: è
         # l'artefatto che rende verificabile a posteriori cosa è stato mostrato,
         # con quale verdetto di contenuto, quale motore è stato scelto e cosa ha
@@ -1505,6 +1757,15 @@ def main(argv: list | None = None) -> None:
             t_total = time.time() - t_total_start
             _print_timing(t_ocr, t_transcribe, t_sync, model_load_seconds(), 0.0, t_total)
             _warn_sync_uncertainty()
+            _log_plain_summary(
+                durations,
+                slide_ids,
+                total_duration,
+                verdicts=verdicts,
+                quality=quality,
+                review_diffs=len(review_diffs),
+                title="TIMELINE PRONTA — COSA CONTERRÀ IL VIDEO",
+            )
             log.info("\n" + "=" * 70)
             log.info(" [DRY-RUN] Timeline generata con successo.")
             log.info(" Il video NON è stato creato (--dry-run attivo).")
@@ -1551,37 +1812,76 @@ def main(argv: list | None = None) -> None:
         # coerente e il video comunque sbagliato (filtro slide, riallineamenti,
         # immagine non registrata). Ogni segmento viene confrontato con la slide
         # che la timeline dichiara, non con una stima.
+        #
+        # Se il controllo trova un confine sbagliato la pipeline PROVA a
+        # ripararlo da sola (--no-auto-repair per disattivare) e rigenera il
+        # video: un controllo che scopre il problema ma non fa nulla lascia
+        # l'utente con un video sbagliato in mano.
+        repairs: list[dict[str, object]] = []
         if args.verify_video:
-            offsets = [0.0]
-            for d in durations:
-                offsets.append(offsets[-1] + d)
-            frame_check = frame_consistency_check(
-                args.output_video,
-                [
-                    (slide_ids[i], offsets[i], offsets[i + 1])
-                    for i in range(len(durations))
-                ],
-                all_slide_files,
-                CACHE_DIR / "verify_frames",
+            frame_check = _frame_check_video(
+                args.output_video, slide_ids, durations, all_slide_files
             )
             mismatches = cast("list[dict[str, object]]", frame_check["mismatches"])
-            if frame_check["checked"]:
-                log.info(
-                    "   Verifica frame vs slide: %s/%s segmenti mostrano la slide "
-                    "attesa (frame in .cache/verify_frames/).",
-                    frame_check["coherent"],
-                    frame_check["checked"],
+            if mismatches and args.auto_repair:
+                repaired = _repair_durations_from_frames(
+                    durations,
+                    slide_ids,
+                    mismatches,
+                    words_raw,
+                    slide_texts,
+                    total_duration,
+                    SemanticOptions(
+                        model_name=args.semantic_model,
+                        cache_dir=args.semantic_cache_dir,
+                        min_slide_duration=args.semantic_min_duration,
+                    ),
                 )
-            for m in mismatches:
-                log.warning(
-                    "   ⚠️ Verifica frame: a %.1fs il video mostra la slide %s ma "
-                    "la timeline dice %s (similarità %.3f).",
-                    m["time"],
-                    m["shown"],
-                    m["slide"],
-                    m["similarity"],
-                )
+                if repaired is not None:
+                    durations, repairs = repaired
+                    log.info(
+                        "\n   [Riparazione] Rigenero il video con i confini corretti "
+                        "(nuovi inizi: %s)...",
+                        ", ".join(
+                            f"slide {r['slide']} -> {float(cast('float', r['new_start'])):.1f}s"
+                            for r in repairs
+                        ),
+                    )
+                    build_video(
+                        slide_files,
+                        durations,
+                        audio_path,
+                        args.output_video,
+                        fps=DEFAULT_VIDEO_FPS,
+                        threads=DEFAULT_VIDEO_THREADS,
+                        transition_duration=args.transitions,
+                        engine=args.engine,
+                    )
+                    t_video = time.time() - t_phase_start
+                    # I frame vecchi descrivono il video precedente: la cartella
+                    # citata nei log e nel riepilogo deve contenere solo quelli
+                    # dell'artefatto attuale.
+                    for stale in (CACHE_DIR / "verify_frames").glob("seg*.png"):
+                        with suppress(OSError):
+                            stale.unlink()
+                    # L'artefatto di verifica (letto da analysis_sync.py) deve
+                    # descrivere il video NUOVO, non la timeline pre-riparazione.
+                    # Con slide ripetute (flusso libero) la mappa slide->start
+                    # non è rappresentabile: lì resta la timeline originale.
+                    if len(set(slide_ids)) == len(slide_ids):
+                        repaired_timeline: dict[int, float] = {}
+                        t_cursor = 0.0
+                        for slide, d in zip(slide_ids, durations, strict=True):
+                            repaired_timeline[int(slide)] = t_cursor
+                            t_cursor += float(d)
+                        _save_final_timeline(repaired_timeline, total_slides, total_duration)
+                    frame_check = _frame_check_video(
+                        args.output_video, slide_ids, durations, all_slide_files
+                    )
+                    mismatches = cast("list[dict[str, object]]", frame_check["mismatches"])
             sync_report["frame_check"] = frame_check
+            if repairs:
+                sync_report["repairs"] = repairs
             _save_sync_report(sync_report)
             if mismatches and args.strict_sync:
                 _abort(
@@ -1600,6 +1900,22 @@ def main(argv: list | None = None) -> None:
         cleaned = _clean_orphan_cache(active_cache_keys)
         if cleaned:
             log.info("🧹 Puliti %d file cache orfani.", cleaned)
+
+        # Riepilogo in parole semplici: è l'ULTIMA cosa che l'utente legge,
+        # così le informazioni pratiche (cosa c'è nel video, cosa dubitare) non
+        # vanno cercate dentro i log tecnici.
+        _log_plain_summary(
+            durations,
+            slide_ids,
+            total_duration,
+            verdicts=verdicts,
+            frame_check=cast(
+                "dict[str, object] | None", sync_report.get("frame_check")
+            ),
+            quality=quality,
+            review_diffs=len(review_diffs),
+            repairs=repairs,
+        )
 
     finally:
         # Cleanup garantito dell'audio_clip

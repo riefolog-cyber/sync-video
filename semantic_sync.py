@@ -29,7 +29,7 @@ from __future__ import annotations
 import bisect
 import re
 import time
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -41,6 +41,7 @@ from config import (
     DEFAULT_EMBEDDING_CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+    DEFAULT_SEMANTIC_MIN_Z,
     DEFAULT_SEMANTIC_TEMPERATURE,
     log,
 )
@@ -67,6 +68,10 @@ _EMBED_MODEL_CACHE: dict[tuple[str, str], TextEmbedding] = {}
 # la timeline è "probabile, non garantita" (slide simili / parlato fuori ordine).
 _WEAK_SIGNAL_SEEN = False
 
+# Qualità dell'ULTIMO allineamento (guard-rail): media grezza e normalizzata
+# dei blocchi assegnati, per il report e il riepilogo finale di main.py.
+_LAST_QUALITY: dict[str, float] = {}
+
 
 def model_load_seconds() -> float:
     """Restituisce i secondi cumulati di caricamento dei modelli embedding."""
@@ -78,10 +83,27 @@ def weak_signal_seen() -> bool:
     return _WEAK_SIGNAL_SEEN
 
 
+def last_quality() -> dict[str, float]:
+    """Qualità dell'ultimo allineamento: ``avg_sim`` (cosine grezza), ``avg_z``
+    (picco medio normalizzato) e la soglia usata ``min_avg_z``.
+
+    Esposta al chiamante per il report (``sync_report.json``) e il riepilogo
+    finale: così una run può essere riesaminata senza rifare l'embedding.
+    """
+    return dict(_LAST_QUALITY)
+
+
 def reset_weak_signal_flag() -> None:
     """Azzera il flag di segnale debole (usato nei test tra chiamate diverse)."""
     global _WEAK_SIGNAL_SEEN
     _WEAK_SIGNAL_SEEN = False
+    _LAST_QUALITY.clear()
+
+
+def _set_weak_signal() -> None:
+    """Segnala che l'ultima sincronizzazione ha prodotto un segnale debole."""
+    global _WEAK_SIGNAL_SEEN
+    _WEAK_SIGNAL_SEEN = True
 
 EmbedFn = Callable[[Sequence[str]], np.ndarray]
 
@@ -103,6 +125,9 @@ class SemanticOptions:
     window_seconds: float = 4.0
     min_slide_duration: float = 3.0
     min_avg_similarity: float = 0.10
+    # Guard-rail sulla scala normalizzata (z-score per slide): un picco medio
+    # sotto questa soglia significa allineamento dubbio (vedi _mean_pair_scores).
+    min_avg_z: float = DEFAULT_SEMANTIC_MIN_Z
     temperature: float = DEFAULT_SEMANTIC_TEMPERATURE
     min_segment_seconds: float = 8.0
     model_name: str | None = None
@@ -283,6 +308,34 @@ def zscore_matrix(
     std = m.std(axis=0)
     std[std < eps] = eps
     return cast(np.ndarray, (m - m.mean(axis=0)) / std)
+
+
+def _mean_pair_scores(
+    sim: np.ndarray,
+    sim_norm: np.ndarray,
+    pairs: Sequence[tuple[int, int]],
+) -> tuple[float, float]:
+    """Media dei punteggi (cosine grezza, z-score) sui blocchi assegnati.
+
+    Le due scale misurano cose diverse:
+
+    - cosine grezza: ha una baseline altissima (~0.84 tra due testi italiani
+      qualsiasi) e NON distingue un allineamento giusto da slide mescolate
+      (misurato: 0.80-0.88 in entrambi i casi). Il valore assoluto non contiene
+      informazione sull'allineamento.
+    - z-score per-slide (la stessa matrice usata dal posizionamento): quanto
+      ogni blocco è un PICCO per la slide a cui è stato assegnato. Sui dati
+      reali separa 0.61-0.75 (ordine giusto) da <=0.43 (mescolate, invertite,
+      non correlate) e 0.006 (slide quasi-duplicate).
+
+    Returns:
+        ``(avg_sim, avg_z)``; ``(0.0, 0.0)`` se non c'è alcuna coppia.
+    """
+    if not pairs:
+        return 0.0, 0.0
+    raw = sum(float(sim[blk, sld]) for blk, sld in pairs) / len(pairs)
+    z = sum(float(sim_norm[blk, sld]) for blk, sld in pairs) / len(pairs)
+    return raw, z
 
 
 def segment_verdict(
@@ -571,6 +624,7 @@ def semantic_timeline_from_texts(
     window_seconds = opts.window_seconds
     min_slide_duration = opts.min_slide_duration
     min_avg_similarity = opts.min_avg_similarity
+    min_avg_z = opts.min_avg_z
     temperature = opts.temperature
 
     if total_slides < 2 or len(blocks) < total_slides:
@@ -590,8 +644,7 @@ def semantic_timeline_from_texts(
     # dal podcast). Non blocca: avvisa che la sincronizzazione è inaffidabile
     # così l'utente può rigenerare la presentazione dal podcast.
     if weak_signal(report):
-        global _WEAK_SIGNAL_SEEN
-        _WEAK_SIGNAL_SEEN = True
+        _set_weak_signal()
         log.warning(
             "   [Semantico] AVVISO: segnale debole (concordanza picchi %.0f%%, "
             "slide confondibili %.0f%%). Il parlato potrebbe NON seguire "
@@ -633,15 +686,17 @@ def semantic_timeline_from_texts(
         )
         return None
 
-    # --- Guardia di qualità: similarità media dei segmenti assegnati ---
-    total_sim = 0.0
-    total_blocks = 0
-    for s in range(1, total_slides):
-        b_start = starts[s - 1]
-        b_end = starts[s]
-        total_sim += float(sim[b_start:b_end, s - 1].sum())
-        total_blocks += max(0, b_end - b_start)
-    avg_sim = total_sim / total_blocks if total_blocks else 0.0
+    # --- Guardia di qualità: quanto i segmenti assegnati sono "picchi" ---
+    # La cosine grezza non discrimina nulla (vedi _mean_pair_scores): si misura
+    # la STESSA matrice normalizzata usata dal posizionamento. La vecchia
+    # soglia sulla scala grezza resta nella sua semantica documentata, ma coi
+    # valori reali (0.80+) non può mai scattare: è lo z-score a decidere.
+    pairs = [
+        (blk, s - 1) for s in range(1, total_slides) for blk in range(starts[s - 1], starts[s])
+    ]
+    avg_sim, avg_z = _mean_pair_scores(sim, sim_norm, pairs)
+    _LAST_QUALITY.clear()
+    _LAST_QUALITY.update({"avg_sim": avg_sim, "avg_z": avg_z, "min_avg_z": min_avg_z})
 
     if avg_sim < min_avg_similarity:
         log.warning(
@@ -650,6 +705,24 @@ def semantic_timeline_from_texts(
             min_avg_similarity,
         )
         return None
+
+    if avg_z < min_avg_z:
+        # Segnale, NON verdetto: un picco medio basso dice "allineamento
+        # dubbio", non "allineamento assente". Fermarsi qui (come faceva la
+        # guardia sulla scala grezza) scarterebbe timeline che ancore e LLM
+        # possono ancora correggere; il valore alimenta invece l'escalation al
+        # LLM (main._should_escalate_weak_signal), il gate --strict-sync e il
+        # riepilogo finale.
+        _set_weak_signal()
+        log.warning(
+            "   [Semantico] AVVISO: allineamento a bassa fiducia (picco medio "
+            "normalizzato %.2f < %.2f). Il parlato di alcuni segmenti somiglia "
+            "poco alla propria slide: la timeline viene usata comunque, ma va "
+            "verificata (con l'LLM attivo le slide non ancorate vengono "
+            "riposizionate).",
+            avg_z,
+            min_avg_z,
+        )
 
     timeline: dict[int, float] = {1: 0.0}
     for s in range(2, total_slides + 1):
@@ -695,7 +768,9 @@ def semantic_timeline_from_texts(
         return None
 
     log.info(
-        "   [Semantico] Timeline semantica generata (similarità media %.3f, blocchi: %d).",
+        "   [Semantico] Timeline semantica generata (picco medio normalizzato "
+        "%.3f, cosine media %.3f, blocchi: %d).",
+        avg_z,
         avg_sim,
         len(blocks),
     )
@@ -1188,8 +1263,7 @@ def free_order_segments_from_texts(
     sim, report = embedded
 
     if weak_signal(report):
-        global _WEAK_SIGNAL_SEEN
-        _WEAK_SIGNAL_SEEN = True
+        _set_weak_signal()
         log.warning(
             "   [Libero] AVVISO: segnale debole (concordanza picchi %.0f%%, "
             "slide confondibili %.0f%%). La selezione libera segue comunque "
@@ -1205,13 +1279,14 @@ def free_order_segments_from_texts(
     min_blocks = max(1, int(np.ceil(opts.min_segment_seconds / opts.window_seconds)))
     segs = _smooth_segments(best, min_blocks)
 
-    # Guardia di qualità: similarità media (grezza) dei segmenti scelti
-    total_sim = 0.0
-    total_blocks = 0
-    for _s, a, b in segs:
-        total_sim += float(sim[a:b, _s].sum())
-        total_blocks += max(0, b - a)
-    avg_sim = total_sim / total_blocks if total_blocks else 0.0
+    # Guardia di qualità: picco medio (normalizzato) dei segmenti scelti.
+    # Come nel flusso ordinato la cosine grezza non discrimina: vale lo
+    # z-score della matrice già usata per scegliere la slide di ogni blocco.
+    pairs = [(blk, sld) for sld, a, b in segs for blk in range(a, b)]
+    avg_sim, avg_z = _mean_pair_scores(sim, znorm, pairs)
+    _LAST_QUALITY.clear()
+    _LAST_QUALITY.update({"avg_sim": avg_sim, "avg_z": avg_z, "min_avg_z": opts.min_avg_z})
+
     if avg_sim < opts.min_avg_similarity:
         log.warning(
             "   [Libero] Similarità media troppo bassa (%.3f < %.2f): nessuna slide affidabile da mostrare.",
@@ -1219,6 +1294,19 @@ def free_order_segments_from_texts(
             opts.min_avg_similarity,
         )
         return None
+
+    if avg_z < opts.min_avg_z:
+        # Segnale, non verdetto (vedi il flusso ordinato): la selezione libera
+        # segue il contenuto blocco per blocco, quindi una bassa fiducia non la
+        # rende inutilizzabile, ma l'utente deve saperlo.
+        _set_weak_signal()
+        log.warning(
+            "   [Libero] AVVISO: selezione a bassa fiducia (picco medio "
+            "normalizzato %.2f < %.2f): le slide scelte possono non essere "
+            "quelle giuste, verifica la timeline.",
+            avg_z,
+            opts.min_avg_z,
+        )
 
     timeline_segments: list[Segment] = []
     for s, a, b in segs:
@@ -1241,8 +1329,10 @@ def free_order_segments_from_texts(
         return None
 
     log.info(
-        "   [Libero] %d segmenti generati (similarità media %.3f, %d blocchi).",
+        "   [Libero] %d segmenti generati (picco medio normalizzato %.3f, "
+        "cosine media %.3f, %d blocchi).",
         len(timeline_segments),
+        avg_z,
         avg_sim,
         len(blocks),
     )
@@ -1387,6 +1477,7 @@ def refine_llm_segment_boundaries(
     refine_slides: Collection[int] | None = None,
     anchors: dict[int, float] | None = None,
     max_candidates: int = 48,
+    search_window: Mapping[int, tuple[float, float]] | None = None,
 ) -> list[dict[str, Any]]:
     """Rifinisce i confini dei segmenti LLM a granularità di parola.
 
@@ -1403,6 +1494,14 @@ def refine_llm_segment_boundaries(
     confine, che è il collo principale del raffinamento. La risoluzione resta
     a livello di parola e la similarità è liscia attorno all'optimum, quindi
     la perdita di qualità è trascurabile.
+
+    ``search_window`` (opzionale, ``{slide: (lo, hi)}``) SOSTITUISCE la
+    finestra simmetrica ``±window_seconds`` per i confini indicati: serve alla
+    riparazione guidata dalla verifica del video, dove la direzione dello
+    spostamento è nota dall'evidenza (il video mostra la slide del segmento
+    adiacente) e il confine può essere lontano più di ``window_seconds``. Il
+    confine attuale è sempre incluso nella ricerca (base di confronto equa) e
+    restano i limiti dei segmenti adiacenti.
 
     ``refine_slides`` (opzionale) limita il raffinamento ai SOLI confini di
     inizio delle slide indicate (numeri 1-based): i confini delle altre slide
@@ -1448,6 +1547,14 @@ def refine_llm_segment_boundaries(
         t_current = float(out[i]["start"])
         lo = max(float(out[i - 1]["start"]) + min_segment_seconds, t_current - window_seconds)
         hi = min(float(out[i]["end"]) - min_segment_seconds, t_current + window_seconds)
+        if search_window is not None and int(out[i]["slide"]) in search_window:
+            # Finestra imposta dall'esterno (verifica del video): il confine
+            # può uscire dalla finestra simmetrica di default, ma mai dai
+            # limiti dei segmenti adiacenti né dall'inclusione del confine
+            # attuale (serve come termine di confronto).
+            wlo, whi = search_window[int(out[i]["slide"])]
+            lo = max(float(out[i - 1]["start"]) + min_segment_seconds, min(float(wlo), t_current))
+            hi = min(float(out[i]["end"]) - min_segment_seconds, max(float(whi), t_current))
         if hi <= lo:
             continue
         candidates = sorted({t_current, *[t for t in word_times if lo <= t <= hi]})
@@ -1684,4 +1791,213 @@ def refine_llm_timeline_from_words(
         embed_fn,
         window_seconds=window_seconds,
         min_segment_seconds=max(5.0, opts.min_slide_duration),
+    )
+
+
+# =====================================================================
+# RIPARAZIONE GUIDATA DALLA VERIFICA DEL VIDEO
+# =====================================================================
+def _segment_index_at(segments: Sequence[Mapping[str, Any]], time: float) -> int | None:
+    """Indice del segmento che contiene ``time``, o None se fuori da tutti."""
+    for idx, seg in enumerate(segments):
+        if float(seg["start"]) <= time < float(seg["end"]):
+            return idx
+    return None
+
+
+def repair_segments_from_frame_mismatches(
+    segments: Sequence[Mapping[str, Any]],
+    mismatches: Sequence[Mapping[str, Any]],
+    words: Sequence[Word],
+    slide_texts: Sequence[str],
+    total_duration: float,
+    embed_fn: EmbedFn,
+    min_segment_seconds: float = 8.0,
+    context_seconds: float = 12.0,
+    max_shift_seconds: float = 180.0,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Sposta i confini che la verifica del video ha trovato sbagliati.
+
+    Ogni mismatch dice DOVE il video mostra una slide diversa da quella
+    dichiarata dalla timeline. Se la slide mostrata è quella di un segmento
+    ADIACENTE, il confine tra i due è fuori posto e la direzione dell'errore è
+    nota: il video mostra la slide successiva → il confine è in ritardo e va
+    anticipato (e viceversa). Il nuovo confine non viene indovinato: viene
+    cercato dal motore embedding nella SOLA direzione indicata dall'evidenza,
+    massimizzando la coerenza tra parlato prima/dopo e le due slide (stessa
+    logica del raffinamento dei confini).
+
+    Non cambia la sequenza delle slide mostrate, solo QUANDO ognuna entra in
+    scena: la riparazione è quindi sempre applicabile a un video già montato,
+    basta rigenerarlo con le nuove durate.
+
+    Un mismatch NON riparabile (slide mostrata non adiacente = probabile
+    problema di rendering, o frame poco riconoscibile perché la slide è quella
+    dichiarata) viene segnalato e ignorato: meglio nessuna correzione che una
+    inventata.
+
+    Returns:
+        ``(segmenti, spostamenti)``: i segmenti aggiornati (l'input è intatto)
+        e l'elenco degli spostamenti applicati, ognuno con ``slide``, ``shown``,
+        ``frame_time``, ``old_start``, ``new_start``. Senza nulla da spostare
+        torna la lista originale con spostamenti vuoti (nessun re-render).
+    """
+    out = [dict(s) for s in segments]
+    if len(out) < 2 or not words or not mismatches:
+        return [dict(s) for s in segments], []
+
+    ranges: dict[int, tuple[float, float]] = {}
+    evidence: dict[int, dict[str, Any]] = {}
+    for m in mismatches:
+        try:
+            time = float(m["time"])
+            shown = int(m["shown"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        idx = _segment_index_at(out, time)
+        if idx is None:
+            continue
+        declared = int(out[idx]["slide"])
+        if shown == declared:
+            log.warning(
+                "   [Riparazione] A %.1fs la slide %s è quella dichiarata ma il "
+                "frame non è riconoscibile (similarità %.2f): probabile frame "
+                "di transizione, nessuno spostamento.",
+                time,
+                declared,
+                float(m.get("similarity") or 0.0),
+            )
+            continue
+        target: int | None = None
+        if idx + 1 < len(out) and int(out[idx + 1]["slide"]) == shown:
+            target = idx + 1  # confine in ritardo: va anticipato
+        elif idx - 1 >= 0 and int(out[idx - 1]["slide"]) == shown:
+            target = idx  # confine in anticipo: va posticipato
+        if target is None:
+            log.warning(
+                "   [Riparazione] A %.1fs il video mostra la slide %s nel "
+                "segmento della slide %s: non è un confine adiacente spostato "
+                "(probabile problema di rendering). Nessuna correzione "
+                "automatica: verifica le slide renderizzate.",
+                time,
+                shown,
+                declared,
+            )
+            continue
+
+        current = float(out[target]["start"])
+        if target == idx + 1:
+            # La slide `shown` è già a schermo a `time`: il confine deve stare
+            # a `time` o prima, mai oltre (l'evidenza è più forte del modello).
+            lo = max(
+                float(out[idx]["start"]) + min_segment_seconds,
+                current - max_shift_seconds,
+            )
+            hi = min(time, current)
+        else:
+            # La slide precedente è ancora a schermo a `time`: il confine deve
+            # stare a `time` o dopo.
+            lo = max(time, current)
+            hi = min(float(out[idx]["end"]) - min_segment_seconds, current + max_shift_seconds)
+        slide_key = int(out[target]["slide"])
+        if slide_key in ranges:
+            rlo, rhi = ranges[slide_key]
+            ranges[slide_key] = (min(rlo, lo), max(rhi, hi))
+        else:
+            ranges[slide_key] = (lo, hi)
+            evidence[slide_key] = {"shown": shown, "frame_time": round(time, 1)}
+
+    if not ranges:
+        return [dict(s) for s in segments], []
+
+    refined = refine_llm_segment_boundaries(
+        out,
+        list(words),
+        slide_texts,
+        embed_fn,
+        window_seconds=max_shift_seconds,
+        min_segment_seconds=min_segment_seconds,
+        context_seconds=context_seconds,
+        refine_slides=set(ranges),
+        search_window=ranges,
+    )
+
+    applied: list[dict[str, Any]] = []
+    for i, seg in enumerate(refined):
+        slide = int(seg["slide"])
+        if i >= len(out) or slide not in ranges:
+            continue
+        old = float(out[i]["start"])
+        new = float(seg["start"])
+        if abs(new - old) < 0.5:
+            continue
+        applied.append(
+            {
+                "slide": slide,
+                "shown": evidence.get(slide, {}).get("shown"),
+                "frame_time": evidence.get(slide, {}).get("frame_time"),
+                "old_start": round(old, 3),
+                "new_start": round(new, 3),
+            }
+        )
+    if not applied:
+        log.warning(
+            "   [Riparazione] Il controllo del video ha segnalato %d segmenti ma "
+            "il parlato non offre una posizione migliore per i confini: "
+            "timeline invariata.",
+            len(mismatches),
+        )
+        return [dict(s) for s in segments], []
+
+    for rep in applied:
+        log.info(
+            "   [Riparazione] Slide %s: inizio spostato da %.1fs a %.1fs (%+.1fs).",
+            rep["slide"],
+            float(rep["old_start"]),
+            float(rep["new_start"]),
+            float(rep["new_start"]) - float(rep["old_start"]),
+        )
+    return refined, applied
+
+
+def repair_segments_from_frames_from_words(
+    segments: Sequence[Mapping[str, Any]],
+    mismatches: Sequence[Mapping[str, Any]],
+    words_raw: list[Word],
+    slide_texts: list[str],
+    total_duration: float,
+    options: SemanticOptions | None = None,
+    context_seconds: float = 12.0,
+    max_shift_seconds: float = 180.0,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Come ``repair_segments_from_frame_mismatches`` col modello embedding reale.
+
+    Carica fastembed (con fallback sul modello alternativo) esattamente come
+    ``refine_llm_timeline_from_words``. Se il modello non è disponibile i
+    segmenti tornano invariati: la riparazione è un'opportunità, non un
+    requisito della pipeline (nessuna interruzione).
+    """
+    opts = options or SemanticOptions()
+    if len(segments) < 2 or not words_raw:
+        return [dict(s) for s in segments], []
+    model = _load_embed_model(
+        opts.model_name or DEFAULT_EMBEDDING_MODEL,
+        opts.cache_dir or DEFAULT_EMBEDDING_CACHE_DIR,
+        alternate_name=opts.alternate_model_name or DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+    )
+    if model is None:
+        log.warning(
+            "   [Riparazione] Modello embedding non disponibile: nessuna correzione automatica."
+        )
+        return [dict(s) for s in segments], []
+    return repair_segments_from_frame_mismatches(
+        segments,
+        mismatches,
+        words_raw,
+        slide_texts,
+        total_duration,
+        _make_embed_fn(model),
+        min_segment_seconds=max(5.0, opts.min_slide_duration),
+        context_seconds=context_seconds,
+        max_shift_seconds=max_shift_seconds,
     )

@@ -150,7 +150,11 @@ e veloce il router lato server.
    cd sync-video
    ```
 4. **Aggiungi i tuoi file**: `presentazione.pdf` e `podcast.m4a` nella stessa cartella.
-5. **Lancia `genera_video.bat`** — tutto il resto è automatico.
+5. **Lancia `genera_video.bat`** — tutto il resto è automatico. A fine run il
+   programma controlla da solo il video prodotto (un fotogramma a metà di ogni
+   slide), **corregge da sé** i confini che non tornano e rigenera il video, poi
+   stampa un riepilogo in parole semplici: quante slide, quanto durano, cosa è
+   stato corretto e cosa conviene controllare a mano.
 
 ### Cosa viene installato automaticamente al primo avvio
 
@@ -253,8 +257,9 @@ riferimenti "slide N": l'assenza di ancore è il comportamento atteso.
 > provare un modello più leggero e veloce con `--semantic-model
 > sentence-transformers/paraphrase-multilingual-mpnet-base-v2` (già usato
 > come fallback automatico): più rapido ma leggermente meno preciso —
-> controlla con `python main.py --dry-run` che la similarità media resti alta
-> e non compaia l'avviso "segnale debole".
+> controlla con `python main.py --dry-run` che nel riepilogo la fiducia del
+> motore resti **alta** (picco medio normalizzato sopra la soglia) e non
+> compaia l'avviso "segnale debole".
 
 ### 2. Slide → Podcast (`PRIMA PRESENTAZIONE (DA PREFERIRE).md`)
 
@@ -321,6 +326,7 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--lang` | `ita` | Lingua OCR |
 | `--whisper-model` | `small` | tiny/base/small/medium/large/large-v3 |
 | `WHISPER_MODEL` (env) | `small` | Modello usato da `genera_video.bat` (es. `set WHISPER_MODEL=tiny` per la bozza veloce) |
+| `VERIFY_VIDEO` (env) | `1` | Controllo del video finito attivato da `genera_video.bat` (pochi secondi): `set VERIFY_VIDEO=0` per disattivarlo |
 | `--transcriber` | `auto` | `auto`/`openvino`/`whisper` (OpenVINO ~1.5x più veloce) |
 | `--whisper-beam` | `5` | Beam size faster-whisper (1-2 = più veloce, 5 = più preciso) |
 | `--openvino-device` | `GPU` | Device OpenVINO (`GPU` iGPU o `CPU`) |
@@ -329,6 +335,8 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--semantic-window` | `4.0` | Secondi per blocco |
 | `--semantic-min-duration` | `3.0` | Durata minima slide (s) |
 | `--semantic-temperature` | `0.15` | Competizione softmax (più bassa = picchi più netti) |
+| `--semantic-min-z` | `0.45` | Soglia sul **picco medio normalizzato** (z-score per slide, la stessa matrice usata dal posizionamento): è la misura che distingue un allineamento giusto da slide mescolate. Sotto soglia la timeline **non** viene scartata: viene segnalata (escalation al LLM, gate `--strict-sync`, report e riepilogo finale). Tarata su dati reali: ordine giusto 0.61-0.75, slide mescolate 0.30-0.43, invertite 0.18, non correlate ≤0.09, quasi-duplicate 0.006 |
+| `--semantic-min-sim` | `0.10` | Soglia storica sulla similarità media **grezza**. Coi valori reali (0.80+) non può mai scattare: e5 dà ~0.84 tra due testi italiani qualsiasi, quindi il valore assoluto non dice nulla sull'allineamento. Resta solo per compatibilità; la decisione è su `--semantic-min-z` |
 | `--llm` | `auto` | Selezione slide con LLM: `off` (solo embedding locale), `auto` e `9router` (**oggi equivalenti**: l'unico provider è 9Router, quindi entrambi usano la stessa cascata e ripiegano sull'embedding locale). Libero: slide per chunk. Ordinato: solo le slide senza ancora esplicita |
 | `--llm-model` | — | Override modello LLM (es. `comboact`, `cf/@cf/mistralai/mistral-small-3.1-24b-instruct`) |
 | `--llm-chunk` | `30.0` | Secondi per chunk inviato all'LLM |
@@ -336,7 +344,8 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--llm-review` | — | Dopo la timeline LLM nel flusso libero, secondo passaggio LLM che ri-verifica la selezione chunk→slide e avvisa (senza modificare la timeline) sui chunk sospetti. Risultato cachato. |
 | `--llm-local-threshold` | `2` | Nel flusso ordinato, numero massimo di slide senza ancora gestite dal raffinamento locale (embeddings, ~secondi, nessun 9Router) al posto dell'LLM cloud. Oltre questa soglia si usa 9Router (che si avvia da solo se spento). `0` = usa sempre 9Router |
 | `--strict-sync` | — | Modalità "non consegnare un video sospetto". Blocca PRIMA della generazione se un segmento di durata anomala risulta disallineato dal contenuto (il parlato somiglia a un'altra slide) o se la revisione LLM (`--llm-review`) contesta la mappa chunk→slide; blocca DOPO la generazione (il video resta su disco, ma l'esito è un errore) se la verifica frame vs slide trova segmenti con la slide sbagliata. Attiva automaticamente `--verify-video`. Default: avviso soltanto. Il report dei segmenti è salvato comunque in `.cache/sync_report.json` |
-| `--verify-video` | — | Dopo la generazione estrae un frame a metà di ogni segmento e lo confronta con la slide attesa: è l'unico controllo sull'ARTEFATTO (la timeline può essere coerente e il video comunque sbagliato). I frame restano in `.cache/verify_frames/` e l'esito finisce in `sync_report.json` |
+| `--verify-video` | — | Dopo la generazione estrae un frame a metà di ogni segmento e lo confronta con la slide attesa: è l'unico controllo sull'ARTEFATTO (la timeline può essere coerente e il video comunque sbagliato). I frame restano in `.cache/verify_frames/` e l'esito finisce in `sync_report.json`. `genera_video.bat` lo attiva di default (pochi secondi in più) |
+| `--no-auto-repair` | — | Disattiva la **riparazione automatica**. Quando la verifica del video trova un segmento con la slide sbagliata, la pipeline sposta da sola quel confine (motore embedding, solo nella direzione indicata dall'evidenza) e rigenera il video, poi lo ricontrolla. Con questo flag l'esito resta un avviso e il video non viene rifatto |
 
 ---
 
@@ -359,10 +368,30 @@ Ogni run salva inoltre `.cache/sync_report.json`: la tabella dei segmenti
 effettivamente mostrati (slide, inizio, fine, durata) con il verdetto di
 contenuto dei segmenti anomali (`coerente` / `disallineata` / `incerto`),
 le scelte fatte dalla run (es. `engine: llm_escalated_weak_signal` quando il
-motore embedding dichiara segnale debole e si passa all'LLM), le discrepanze
-della revisione LLM e — con `--verify-video` — l'esito del confronto frame vs
-slide. Così la sincronizzazione resta verificabile a posteriori senza
-rigenerare il video.
+motore embedding dichiara segnale debole e si passa all'LLM), la **qualità
+misurata** dal motore (`quality`: `avg_sim` grezza, `avg_z` normalizzata,
+soglia usata) e il verdetto `weak_signal`, le discrepanze della revisione LLM
+e — con `--verify-video` — l'esito del confronto frame vs slide. Così la
+sincronizzazione resta verificabile a posteriori senza rigenerare il video.
+
+### Riparazione automatica (verifica del video → nuovo confine)
+
+Il controllo del video non si limita a segnalare: se un segmento mostra una
+slide diversa da quella dichiarata e la slide mostrata è quella di un segmento
+**adiacente**, il confine tra i due è fuori posto e la direzione dell'errore è
+nota (il video mostra la slide successiva → il confine è in ritardo). La
+pipeline sposta quel confine con il motore embedding, cercandolo solo nella
+direzione indicata dall'evidenza (mai oltre l'istante in cui il frame è stato
+estratto) e solo se il parlato offre una posizione migliore di quella attuale;
+poi **rigenera il video** e ripete il controllo una volta. La sequenza delle
+slide non cambia mai, quindi l'audio resta allineato.
+
+Due casi non vengono "riparati" di proposito: la slide mostrata non è adiacente
+(probabile problema di rendering, non di allineamento: l'avviso lo dice) e il
+parlato non offre nessuna posizione migliore. In entrambi i casi la timeline
+resta intatta, gli spostamenti applicati finiscono in `sync_report.json`
+(`repairs`) e restano visibili nel riepilogo finale. Con `--no-auto-repair` la
+riparazione è disattivata e l'esito resta un semplice avviso.
 
 > Richiede il file `llm_timeline_finale.json` nella cache (salvato a ogni
 > run) e il video generato. Il percorso base è auto-rilevato dalla cartella
@@ -530,11 +559,14 @@ Esempio: se nella trascrizione a 3 minuti si parla di "riciclaggio della
 plastica" e una slide parla di "riciclo dei rifiuti", il modello riconosce che
 sono simili e mostra quella slide in quel momento.
 
-> **Nota sulla fiducia**: se il parlato non segue chiaramente l'ordine delle
-> slide (es. le slide si somigliano molto tra loro), il programma avvisa nel
-> riepilogo finale che la sincronizzazione è **stimata, non garantita**. Per
-> un allineamento certo, fai pronunciare le ancore esplicite "slide N" (vedi
-> i workflow qui sotto).
+> **Nota sulla fiducia**: il riepilogo finale chiude sempre con la fiducia
+> misurata del motore, es. `Fiducia del motore: alta (picco medio 0.73 su
+> soglia 0.45, cosine 0.83)`. Se il parlato non segue chiaramente l'ordine
+> delle slide (es. le slide si somigliano molto tra loro) il valore scende
+> sotto la soglia e il riepilogo avvisa che la sincronizzazione è **stimata,
+> non garantita**, elencando cosa controllare a mano. Per un allineamento
+> certo, fai pronunciare le ancore esplicite "slide N" (vedi i workflow qui
+> sotto).
 
 ### Modello embedding
 

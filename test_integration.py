@@ -99,6 +99,19 @@ def _words(items):
 
 
 
+class TestVideoBatchScript(unittest.TestCase):
+    """Il controllo del video finito è una scelta dell'utente, non un dettaglio:
+    deve restare attivo nel bat con cui si genera il video, disattivabile solo
+    esplicitamente (set VERIFY_VIDEO=0)."""
+
+    def test_verify_video_enabled_by_default(self):
+        script = (Path(__file__).parent / "genera_video.bat").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        self.assertIn('if not defined VERIFY_VIDEO set "VERIFY_VIDEO=1"', script)
+        self.assertIn("--verify-video", script)
+
+
 class TestPipelineIntegration(unittest.TestCase):
     """Test che le fasi del pipeline funzionino insieme."""
 

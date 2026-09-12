@@ -9,6 +9,15 @@ set "CHECK_UPDATES=0"
 rem --- Modello whisper: sovrascrivibile con set WHISPER_MODEL=tiny (default small, piu' preciso) ---
 if not defined WHISPER_MODEL set "WHISPER_MODEL=small"
 set "MAIN_ARGS=--whisper-model %WHISPER_MODEL% --engine ffmpeg"
+
+rem --- Controllo del video finito: attivo di default (pochi secondi in piu').
+rem Estrae un fotogramma a meta' di ogni slide e verifica che il video mostri
+rem davvero quella slide: e' l'unico controllo sull'artefatto (la timeline puo'
+rem essere coerente e il video sbagliato). Non blocca mai la generazione:
+rem avvisa e riporta l'esito nel riepilogo. Disattivabile con:
+rem   set VERIFY_VIDEO=0
+if not defined VERIFY_VIDEO set "VERIFY_VIDEO=1"
+if "%VERIFY_VIDEO%"=="1" set "MAIN_ARGS=!MAIN_ARGS! --verify-video"
 :parse
 if "%~1"=="" goto run
 if /i "%~1"=="--no-pause" set "PAUSE_IT=0"& shift & goto parse
@@ -25,6 +34,7 @@ echo ========================================
 echo.
 
 echo Avvio pipeline: OCR -^> Trascrizione -^> Sincronizzazione semantica -^> Video
+echo Controllo del video finito: VERIFY_VIDEO=!VERIFY_VIDEO! (0 per disattivarlo)
 echo ========================================
 echo.
 echo  Nota: il controllo aggiornamenti si fa con aggiornamenti.bat
