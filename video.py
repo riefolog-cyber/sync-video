@@ -380,3 +380,122 @@ def _build_video_moviepy(
             video_clip.close()
         if own_audio:
             audio_clip.close()
+
+
+# =====================================================================
+# VERIFICA FRAME vs SLIDE (post-render)
+# =====================================================================
+# Lato del ridimensionamento per il confronto frame vs slide: 64x64 in
+# grayscale basta a discriminare slide diverse (anche con testo) senza costo
+# apprezzabile.
+IMAGE_CHECK_SIZE = (64, 64)
+
+
+def _gray_vector(path: Path) -> np.ndarray:
+    """Vettore grayscale ridotto e centrato di un'immagine (per il confronto)."""
+    with Image.open(path) as img:
+        arr = np.asarray(img.convert("L").resize(IMAGE_CHECK_SIZE), dtype=np.float32)
+    flat: np.ndarray = arr.ravel()
+    centered: np.ndarray = flat - flat.mean()
+    return centered
+
+
+def image_similarity(a: Path, b: Path) -> float:
+    """Similarità coseno tra due immagini (0.0 se una non è leggibile)."""
+    try:
+        va, vb = _gray_vector(a), _gray_vector(b)
+    except (UnidentifiedImageError, OSError):
+        return 0.0
+    na, nb = float(np.linalg.norm(va)), float(np.linalg.norm(vb))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(va @ vb / (na * nb))
+
+
+def _extract_frame(video_path: Path, t: float, out: Path) -> bool:
+    """Estrae un frame al tempo ``t``. True se il file è stato scritto.
+
+    Un fallimento (ffmpeg assente, tempo oltre la durata) non interrompe la
+    pipeline: il segmento viene semplicemente saltato dalla verifica.
+    """
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{t:.3f}",
+                "-i",
+                str(video_path),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                str(out),
+            ],
+            check=False,
+        )
+    except OSError as e:  # ffmpeg non installato
+        log.debug("   [Verifica] ffmpeg non eseguibile: %s", e)
+        return False
+    return out.exists() and out.stat().st_size > 0
+
+
+def frame_consistency_check(
+    video_path: str | Path,
+    segments: Sequence[tuple[int, float, float]],
+    slide_files: Sequence[str],
+    frames_dir: Path,
+    min_similarity: float = 0.85,
+) -> dict[str, object]:
+    """Verifica cosa è DAVVERO a schermo: un frame a metà di ogni segmento.
+
+    È l'unico controllo che certifica l'ARTEFATTO: la timeline può essere
+    internamente coerente e il video comunque sbagliato (filtri, riallineamenti
+    successivi, slide non registrata). Per ogni segmento estrae un frame dal
+    video renderizzato e lo confronta con TUTTE le slide attese: se la più
+    simile non è quella dichiarata dalla timeline (o la similarità è sotto
+    ``min_similarity``), il segmento finisce nei ``mismatches``.
+
+    Args:
+        video_path: video renderizzato da verificare.
+        segments: sequenza di ``(slide, start, end)`` effettivamente usati.
+        slide_files: percorsi delle slide (indice 0 = slide 1).
+        frames_dir: dove salvare i frame estratti (per la diagnosi manuale).
+        min_similarity: soglia sotto cui il match non è considerato affidabile.
+
+    Returns:
+        ``{"checked": n, "coherent": k, "mismatches": [...]}``.
+    """
+    video = Path(video_path)
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    checked = 0
+    coherent = 0
+    mismatches: list[dict[str, object]] = []
+    slide_paths = [Path(sf) for sf in slide_files]
+    for i, (slide, start, end) in enumerate(segments):
+        if not 1 <= int(slide) <= len(slide_paths):
+            continue
+        t = (float(start) + float(end)) / 2
+        frame = frames_dir / f"seg{i:02d}_t{t:07.1f}_slide{int(slide):02d}.png"
+        if not _extract_frame(video, t, frame):
+            log.debug("   [Verifica] Frame non estratto a %.1fs (segmento %d).", t, i)
+            continue
+        checked += 1
+        sims = [image_similarity(frame, sp) for sp in slide_paths]
+        shown = int(np.argmax(sims)) + 1
+        best = float(max(sims))
+        if shown == int(slide) and best >= min_similarity:
+            coherent += 1
+        else:
+            mismatches.append(
+                {
+                    "slide": int(slide),
+                    "shown": shown,
+                    "similarity": round(best, 3),
+                    "time": round(t, 1),
+                }
+            )
+    return {"checked": checked, "coherent": coherent, "mismatches": mismatches}

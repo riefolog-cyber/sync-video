@@ -865,6 +865,29 @@ Esempi:
         "(slide-audio/audio-slide); nel flusso libero è ignorato.",
     )
     parser.add_argument(
+        "--strict-sync",
+        action="store_true",
+        help="Interrompe la pipeline se un controllo di sincronizzazione "
+        "fallisce: prima di generare il video se un segmento di durata "
+        "anomala risulta disallineato dal contenuto (il parlato somiglia a "
+        "un'altra slide) o se la revisione LLM (--llm-review) segnala "
+        "discrepanze; dopo la generazione se la verifica frame vs slide "
+        "(--verify-video, attivata automaticamente da questo flag) trova "
+        "segmenti che mostrano una slide diversa. Il report completo dei "
+        "segmenti è sempre salvato in .cache/sync_report.json. "
+        "Default: disattivato (avviso soltanto).",
+    )
+    parser.add_argument(
+        "--verify-video",
+        action="store_true",
+        help="Dopo la generazione estrae un frame a metà di ogni segmento e "
+        "lo confronta con la slide attesa, per certificare cosa è davvero a "
+        "schermo (non solo che la timeline sia coerente). I frame estratti "
+        "restano in .cache/verify_frames/ e l'esito finisce in "
+        "sync_report.json. Attivata automaticamente da --strict-sync. "
+        "Costo: una decina di secondi su un video di 15 minuti.",
+    )
+    parser.add_argument(
         "--semantic-model",
         default=DEFAULT_EMBEDDING_MODEL,
         help=f"Modello embedding per la sincronizzazione semantica "
@@ -911,10 +934,13 @@ Esempi:
         "--llm",
         default="auto",
         choices=["off", "auto", "9router"],
-        help="Selezione slide via LLM. 'auto' (default: "
-        "prova 9Router online, poi fallback embedding), 'off' "
-        "(solo embedding locale), '9router' (solo 9Router "
-        "online). Nel flusso libero (senza segnali 'slide "
+        help="Selezione slide via LLM. 'off' = solo embedding "
+        "locale (nessuna rete). 'auto' e '9router' sono oggi "
+        "EQUIVALENTI: l'unico provider è 9Router, quindi entrambi "
+        "usano la stessa cascata di tre modelli (comboact → "
+        "Mistral 24B → Gemma 31B) e, se il router non risponde, "
+        "ripiegano sull'embedding locale (flusso libero: "
+        "interruzione esplicita). Nel flusso libero (senza segnali 'slide "
         "N') sceglie la slide per ogni chunk; nei flussi "
         "ordinati (slide-audio/audio-slide) posiziona SOLO "
         "le slide senza ancora esplicita, rispettando le "
@@ -969,6 +995,10 @@ Esempi:
     args = parser.parse_args(argv)
 
     # Post-processing
+    # --strict-sync è la modalità "non consegnare un video sospetto": attiva
+    # anche la verifica frame vs slide, che è l'unico controllo sull'artefatto.
+    if args.strict_sync:
+        args.verify_video = True
     if args.debug:
         setup_debug_logging()
 

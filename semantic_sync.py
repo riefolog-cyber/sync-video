@@ -431,8 +431,18 @@ def build_candidates(
             times = np.array([float(b["time"]) for b in blocks], dtype=np.float64)
             k = int(np.argmin(np.abs(times - anchors[s])))
             constrained = [i for i in (k - 1, k, k + 1) if lo <= i <= hi]
-            if constrained:
-                chosen = sorted(set(constrained))
+            # Se nessuno dei tre blocchi è fattibile (l'ancora cade fuori dalla
+            # finestra [lo, hi] imposta da `min_gap`) si usa il blocco fattibile
+            # PIÙ VICINO all'ancora. Prima si rinunciava al vincolo
+            # (`chosen = free`) e la DP poteva piazzare la slide ovunque, salvo
+            # poi essere scavalcata dalla riga `timeline[s] = anchors[s]`:
+            # ancora "rispettata" nel tempo ma segmento non monotono, cioè
+            # violazione silenziosa.
+            chosen = (
+                sorted(set(constrained))
+                if constrained
+                else [min(max(k, lo), hi)]
+            )
         cands.append(chosen)
     if cands:
         cands[0] = [0]
@@ -657,10 +667,26 @@ def semantic_timeline_from_texts(
         for s in anchors:
             if s > 1:
                 timeline[s] = float(anchors[s])
+    anchor_slides = set(anchors) if anchors else set()
     prev_t = 0.0
+    displaced: list[int] = []
     for s in range(2, total_slides + 1):
-        timeline[s] = max(timeline[s], prev_t + 0.5)
+        clamped = max(timeline[s], prev_t + 0.5)
+        # Un'ancora spostata in avanti dal clamp di monotonicità significa che
+        # la sua posizione è incompatibile con quella delle slide precedenti:
+        # il video non mostrerà la slide al timestamp pronunciato. Non è
+        # silenzioso: va segnalato (analysis_sync.py ricontrolla la timeline).
+        if s in anchor_slides and clamped > timeline[s] + 1e-6:
+            displaced.append(s)
+        timeline[s] = clamped
         prev_t = timeline[s]
+    if displaced:
+        log.warning(
+            "   [Semantico] Ancora/e spostata/e dal vincolo di monotonicità "
+            "(la slide non compare al timestamp pronunciato): %s. "
+            "Verifica la timeline.",
+            ", ".join(f"slide {s}" for s in displaced),
+        )
 
     try:
         reconcile_timeline(timeline, total_slides, total_duration)
@@ -733,6 +759,39 @@ def semantic_timeline_from_words(
 # =====================================================================
 # VERIFICA DETERMINISTICA DEL MAPPING ANCORE (offset numerazione parlata)
 # =====================================================================
+def _lis_positions(values: Sequence[int]) -> list[int]:
+    """Indici di una sotto-sequenza STRETTAMENTE crescente di ``values``
+    (Longest Increasing Subsequence), in ordine di indice crescente.
+
+    Usata per scartare gli outlier da una mappa "slide parlata -> slide del PDF"
+    dedotta dal contenuto: un valore fuori sequenza (es. un'ancora di chiusura
+    il cui parlato somiglia a più slide) rompe la monotonia e va escluso.
+    """
+    n = len(values)
+    if n == 0:
+        return []
+    tails: list[int] = []
+    tails_idx: list[int] = []
+    prev = [-1] * n
+    for i, v in enumerate(values):
+        pos = bisect.bisect_left(tails, v)
+        if pos > 0:
+            prev[i] = tails_idx[pos - 1]
+        if pos == len(tails):
+            tails.append(v)
+            tails_idx.append(i)
+        else:
+            tails[pos] = v
+            tails_idx[pos] = i
+    order: list[int] = []
+    k = tails_idx[-1]
+    while k != -1:
+        order.append(k)
+        k = prev[k]
+    order.reverse()
+    return order
+
+
 def verify_anchor_mapping_embedding(
     slide_texts: Sequence[str],
     words_raw: Sequence[Word],
@@ -769,6 +828,16 @@ def verify_anchor_mapping_embedding(
     la verifica uniforme: si corregge allora SOLO il tratto sfasato (run
     contigua di ancore con lo stesso offset non-zero, almeno 2 ancore),
     mantenendo intatte le ancore già allineate.
+
+    Gestisce infine il DRIFT PROGRESSIVO: quando la numerazione parlata si
+    allontana via via dal PDF (es. il podcast ha meno slide del PDF: "slide 3"
+    mostra la 4, più avanti "slide 6" mostra la 9), gli offset non costanti
+    formano più run e le regole precedenti rinunciano. Se ALMENO 2 ancore sono
+    contraddette dal parlato si adotta allora la slide del PDF più simile
+    ("best") di ogni ancora, tenendo la sola sotto-sequenza monotona crescente
+    (LIS) per scartare gli outlier: correzione deterministica, senza LLM. Due
+    ancore che il contenuto manda sulla STESSA slide senza salti all'indietro
+    sono invece ambiguità reale, non drift: niente correzione.
 
     ``embed_fn`` è iniettabile (stessa convenzione di ``semantic_timeline_from_texts``):
     nei test si passa un embedder finto, in produzione viene caricato il
@@ -874,6 +943,43 @@ def verify_anchor_mapping_embedding(
             runs.append((off, [(s, t)]))
     shifted_runs = [r for r in runs if len(r[1]) >= 2]
     if len(shifted_runs) != 1:
+        # 3) Mapping per CONTENUTO (drift progressivo): la numerazione parlata
+        #    può allontanarsi via via dal PDF (es. il podcast ha meno slide del
+        #    PDF: "slide 3" mostra la 4 e più avanti "slide 6" mostra la 9), per
+        #    cui gli offset NON sono costanti e formano più run: le regole
+        #    precedenti (offset uniforme / singola run) rinunciano e delegano la
+        #    correzione all'LLM. Il contenuto però è spesso già univoco: se
+        #    ALMENO 2 ancore sono contraddette dal parlato, si adotta la slide
+        #    "best" di ogni ancora tenendo la sola sotto-sequenza monotona
+        #    crescente (LIS), che scarta gli outlier (es. l'ancora di chiusura
+        #    il cui parlato somiglia a più slide).
+        #    Due ancore che il contenuto manda sulla STESSA slide senza alcun
+        #    salto all'indietro sono invece ambiguità reale, non drift: niente
+        #    correzione (resta il sospetto per la verifica LLM).
+        ordered = sorted(pairs, key=lambda p: p[1])
+        if sum(1 for _, _, off in ordered if off != 0) >= 2:
+            best_seq = [s + off for s, _, off in ordered]
+            descends = any(best_seq[i] < best_seq[i - 1] for i in range(1, len(best_seq)))
+            has_duplicates = len(set(best_seq)) != len(best_seq)
+            if not (has_duplicates and not descends):
+                kept = _lis_positions(best_seq)
+                kept_pairs = [ordered[i] for i in kept]
+                remaps = [
+                    (spoken, spoken + off) for spoken, _, off in kept_pairs if off != 0
+                ]
+                corrected = {spoken + off: time for spoken, time, off in kept_pairs}
+                if (
+                    len(remaps) >= 2
+                    and len(corrected) == len(kept)
+                    and set(corrected) != set(anchors)
+                ):
+                    log.info(
+                        "   [Ancore] Drift progressivo corretto dagli embeddings: "
+                        "%d ancore rimappate sul contenuto (%s).",
+                        len(remaps),
+                        ", ".join(f"slide {a} -> {b}" for a, b in remaps),
+                    )
+                    return _done(corrected, False)
         return _done(None, True)
     offset, run = shifted_runs[0]
 

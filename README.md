@@ -329,12 +329,14 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--semantic-window` | `4.0` | Secondi per blocco |
 | `--semantic-min-duration` | `3.0` | Durata minima slide (s) |
 | `--semantic-temperature` | `0.15` | Competizione softmax (più bassa = picchi più netti) |
-| `--llm` | `auto` | Selezione slide con LLM: `auto` (9Router online → embedding locale), `off`, `9router`. Libero: slide per chunk. Ordinato: solo le slide senza ancora esplicita |
+| `--llm` | `auto` | Selezione slide con LLM: `off` (solo embedding locale), `auto` e `9router` (**oggi equivalenti**: l'unico provider è 9Router, quindi entrambi usano la stessa cascata e ripiegano sull'embedding locale). Libero: slide per chunk. Ordinato: solo le slide senza ancora esplicita |
 | `--llm-model` | — | Override modello LLM (es. `comboact`, `cf/@cf/mistralai/mistral-small-3.1-24b-instruct`) |
 | `--llm-chunk` | `30.0` | Secondi per chunk inviato all'LLM |
 | `--llm-wait-timeout` | `0.0` | Se 9Router è necessario ma spento: secondi massimi di attesa prima del fallback embedding. `0` = attesa illimitata (pausa + avviso, riprende appena 9Router risponde) |
 | `--llm-review` | — | Dopo la timeline LLM nel flusso libero, secondo passaggio LLM che ri-verifica la selezione chunk→slide e avvisa (senza modificare la timeline) sui chunk sospetti. Risultato cachato. |
 | `--llm-local-threshold` | `2` | Nel flusso ordinato, numero massimo di slide senza ancora gestite dal raffinamento locale (embeddings, ~secondi, nessun 9Router) al posto dell'LLM cloud. Oltre questa soglia si usa 9Router (che si avvia da solo se spento). `0` = usa sempre 9Router |
+| `--strict-sync` | — | Modalità "non consegnare un video sospetto". Blocca PRIMA della generazione se un segmento di durata anomala risulta disallineato dal contenuto (il parlato somiglia a un'altra slide) o se la revisione LLM (`--llm-review`) contesta la mappa chunk→slide; blocca DOPO la generazione (il video resta su disco, ma l'esito è un errore) se la verifica frame vs slide trova segmenti con la slide sbagliata. Attiva automaticamente `--verify-video`. Default: avviso soltanto. Il report dei segmenti è salvato comunque in `.cache/sync_report.json` |
+| `--verify-video` | — | Dopo la generazione estrae un frame a metà di ogni segmento e lo confronta con la slide attesa: è l'unico controllo sull'ARTEFATTO (la timeline può essere coerente e il video comunque sbagliato). I frame restano in `.cache/verify_frames/` e l'esito finisce in `sync_report.json` |
 
 ---
 
@@ -352,6 +354,15 @@ per slide e segmenti anomali, similarità embedding parlato↔slide per
 segmento, confini che tagliano a metà parola, scostamento delle ancore
 "slide N" dichiarate, e confronto frame estratto vs slide renderizzata
 (scrive i frame in `.analysis_frames/`). Non modifica nulla.
+
+Ogni run salva inoltre `.cache/sync_report.json`: la tabella dei segmenti
+effettivamente mostrati (slide, inizio, fine, durata) con il verdetto di
+contenuto dei segmenti anomali (`coerente` / `disallineata` / `incerto`),
+le scelte fatte dalla run (es. `engine: llm_escalated_weak_signal` quando il
+motore embedding dichiara segnale debole e si passa all'LLM), le discrepanze
+della revisione LLM e — con `--verify-video` — l'esito del confronto frame vs
+slide. Così la sincronizzazione resta verificabile a posteriori senza
+rigenerare il video.
 
 > Richiede il file `llm_timeline_finale.json` nella cache (salvato a ogni
 > run) e il video generato. Il percorso base è auto-rilevato dalla cartella

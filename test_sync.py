@@ -14,6 +14,7 @@ import numpy as np
 
 from semantic_sync import (
     SemanticOptions,
+    build_candidates,
     make_anchor_remap_filter,
     merge_short_segments,
     refine_llm_segment_boundaries,
@@ -1127,6 +1128,60 @@ class TestAnomalousContentValidation(unittest.TestCase):
         verdicts = self._validate([(3, 400.0)], [100.0, 100.0, 400.0, 100.0], [1, 2, 3, 4], words)
         self.assertEqual(verdicts[3], "incerto")
 
+    def test_sync_report_lists_segments_and_verdicts(self):
+        # Il report è l'artefatto verificabile: una voce per slide con
+        # inizio/fine/durata e il verdetto dei soli segmenti anomali.
+        from main import _build_sync_report
+
+        report = _build_sync_report(
+            [100.0, 50.0, 150.0],
+            [1, 2, 3],
+            300.0,
+            {2: "disallineata"},
+        )
+        self.assertEqual(report["audio_duration"], 300.0)
+        segments = report["segments"]
+        self.assertEqual([s["slide"] for s in segments], [1, 2, 3])
+        self.assertEqual(
+            segments[0],
+            {"slide": 1, "start": 0.0, "end": 100.0, "duration": 100.0},
+        )
+        self.assertEqual(segments[1]["start"], 100.0)
+        self.assertEqual(segments[1]["end"], 150.0)
+        self.assertEqual(segments[1]["verdict"], "disallineata")
+        self.assertNotIn("verdict", segments[2])
+        # Senza note né revisione il report resta minimale.
+        self.assertEqual(sorted(report), ["audio_duration", "segments"])
+
+    def test_sync_report_carries_notes_and_review_diffs(self):
+        # Le scelte della run (es. escalation per segnale debole) e le
+        # discrepanze del secondo passaggio LLM devono restare sull'artefatto:
+        # prima esistevano solo nei log e andavano perse.
+        from main import _build_sync_report
+
+        report = _build_sync_report(
+            [60.0, 40.0],
+            [1, 2],
+            100.0,
+            None,
+            notes={"engine": "llm_escalated_weak_signal"},
+            review_diffs=[{"chunk": 3, "slide": 7}],
+        )
+        self.assertEqual(report["engine"], "llm_escalated_weak_signal")
+        self.assertEqual(report["review_diffs"], [{"chunk": 3, "slide": 7}])
+
+    def test_should_escalate_weak_signal(self):
+        # Segnale debole + slide da posizionare + LLM disponibile: si passa
+        # all'LLM invece di generare un video potenzialmente disallineato.
+        from main import _should_escalate_weak_signal
+
+        self.assertTrue(_should_escalate_weak_signal(True, 2, True))
+        # Tutte le slide hanno un'ancora: il segnale debole non cambia nulla.
+        self.assertFalse(_should_escalate_weak_signal(True, 0, True))
+        # --llm off: resta il motore locale.
+        self.assertFalse(_should_escalate_weak_signal(True, 2, False))
+        # Segnale buono: nessuna escalation.
+        self.assertFalse(_should_escalate_weak_signal(False, 2, True))
 
 
 class TestFreeOrderSelection(unittest.TestCase):
@@ -1631,6 +1686,71 @@ class TestLlmSegmentPostProcessing(unittest.TestCase):
         self.assertEqual(out, timeline)
 
 
+class TestSemanticAnchorInvariants(unittest.TestCase):
+    """Ancore vs programmazione dinamica nella timeline semantica.
+
+    Un'ancora fuori dalla finestra fattibile non deve sciogliere il vincolo
+    (la DP poteva piazzare la slide ovunque), e un'ancora spostata dal clamp
+    di monotonicità deve essere segnalata: erano violazioni silenziose.
+    """
+
+    @staticmethod
+    def _fake_embed(themes):
+        """Embedder finto: vettore one-hot per ogni parola-tema presente."""
+
+        def _embed(texts):
+            out = []
+            for t in texts:
+                v = np.zeros(len(themes))
+                for i, k in enumerate(themes):
+                    if k in t:
+                        v[i] = 1.0
+                norm = np.linalg.norm(v)
+                out.append(v / norm if norm else v)
+            return np.array(out)
+
+        return _embed
+
+    def test_anchor_outside_feasible_window_keeps_nearest_block(self):
+        # 10 blocchi, 5 slide, min_gap=2: per la slide 5 la finestra fattibile è
+        # [8, 9]. Un'ancora a t=0 cade prima di lo: il candidato deve essere il
+        # blocco fattibile PIÙ VICINO (8), non l'intero intervallo libero.
+        blocks = [{"time": i * 5.0, "text": "x"} for i in range(10)]
+        cands = build_candidates(10, 5, min_gap=2, blocks=blocks, anchors={5: 0.0})
+        self.assertIsNotNone(cands)
+        self.assertEqual(cands[4], [8])
+
+    def test_anchor_inside_window_restricts_to_neighbourhood(self):
+        blocks = [{"time": i * 5.0, "text": "x"} for i in range(10)]
+        cands = build_candidates(10, 3, min_gap=1, blocks=blocks, anchors={2: 20.0})
+        self.assertIsNotNone(cands)
+        # Il blocco più vicino a 20s è l'indice 4 -> {3, 4, 5}.
+        self.assertEqual(cands[1], [3, 4, 5])
+
+    def test_displaced_anchor_is_clamped_and_warned(self):
+        # Ancore non monotone: la slide 3 è pronunciata a 5.0s ma la slide 2 a
+        # 12.3s. Il clamp di monotonicità porta la 3 a 12.8s e lo SEGNALA,
+        # invece di spostarla in silenzio.
+        themes = ["alfa", "beta", "gamma", "delta"]
+        blocks = [
+            {"time": i * 5.0, "text": (themes[i // 2] + " ") * 4} for i in range(8)
+        ]
+        with self.assertLogs(level="WARNING") as captured:
+            tl = semantic_timeline_from_texts(
+                [f"{t} slide" for t in themes],
+                blocks,
+                total_slides=4,
+                total_duration=40.0,
+                embed_fn=self._fake_embed(themes),
+                options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
+                anchors={2: 12.3, 3: 5.0},
+            )
+        self.assertIsNotNone(tl)
+        self.assertAlmostEqual(tl[2], 12.3, places=3)
+        self.assertAlmostEqual(tl[3], 12.8, places=3)
+        self.assertTrue(any("spostata" in m for m in captured.output))
+
+
 class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
     """Verifica deterministica del mapping ancore (offset numerazione parlata)."""
 
@@ -1939,6 +2059,103 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
         )
         self.assertIsNone(out)
         self.assertFalse(report["suspicious"])
+
+    def test_progressive_drift_corrected_by_content(self):
+        # Il podcast ha MENO slide del PDF: lo speaker è sempre più indietro
+        # ("slide 5" mostra la 6, più avanti "slide 9" mostra la 11). Gli offset
+        # non costanti formano più run e le regole a offset uniforme/gradino
+        # rinunciano: la correzione deve arrivare dal CONTENUTO (slide "best"),
+        # in modo deterministico e senza LLM.
+        slides = [f"tema{i} slide" for i in range(1, 15)]
+        plan = [
+            (1, 0.0, 1),
+            (3, 100.0, 4),
+            (5, 200.0, 6),
+            (6, 300.0, 7),
+            (7, 400.0, 9),
+            (9, 500.0, 11),
+            (10, 600.0, 12),
+        ]
+        words = []
+        for _, start, tema in plan:
+            words += [{"word": f"tema{tema}", "start": start + i} for i in range(5)]
+        anchors = {s: t for s, t, _ in plan}
+        report: dict[str, bool] = {}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=14,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(14),
+            report=report,
+        )
+        self.assertEqual(
+            out,
+            {1: 0.0, 4: 100.0, 6: 200.0, 7: 300.0, 9: 400.0, 11: 500.0, 12: 600.0},
+        )
+        self.assertFalse(report["suspicious"])
+
+    def test_progressive_drift_drops_noisy_anchor(self):
+        # Drift progressivo + ancora di chiusura "rumorosa" (il parlato somiglia
+        # di più a una slide già assegnata): l'outlier va scartato e il resto
+        # corretto per contenuto, senza far fallire la mappa.
+        slides = [f"tema{i} slide" for i in range(1, 15)]
+        plan = [
+            (1, 0.0, 1),
+            (3, 100.0, 4),
+            (5, 200.0, 6),
+            (6, 300.0, 7),
+            (7, 400.0, 9),
+            (9, 500.0, 11),
+        ]
+        words = []
+        for _, start, tema in plan:
+            words += [{"word": f"tema{tema}", "start": start + i} for i in range(5)]
+        words += [{"word": "tema4", "start": 600.0 + i} for i in range(5)]
+        anchors = {1: 0.0, 3: 100.0, 5: 200.0, 6: 300.0, 7: 400.0, 9: 500.0, 12: 600.0}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=14,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(14),
+        )
+        self.assertEqual(out, {1: 0.0, 4: 100.0, 6: 200.0, 7: 300.0, 9: 400.0, 11: 500.0})
+
+    def test_progressive_drift_with_plateau_not_corrected(self):
+        # Offset a più run (drift) MA due ancore che il contenuto manda sulla
+        # STESSA slide senza salti all'indietro: ambiguità reale, non drift ->
+        # nessuna correzione, il mapping resta sospetto per la verifica LLM.
+        slides = [f"tema{i} slide" for i in range(1, 15)]
+        plan = [
+            (5, 100.0, 6),
+            (6, 200.0, 7),
+            (7, 300.0, 9),
+            (8, 400.0, 10),
+            (9, 500.0, 10),
+            (10, 600.0, 11),
+        ]
+        words = []
+        for _, start, tema in plan:
+            words += [{"word": f"tema{tema}", "start": start + i} for i in range(5)]
+        anchors = {s: t for s, t, _ in plan}
+        report: dict[str, bool] = {}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=14,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(14),
+            report=report,
+        )
+        self.assertIsNone(out)
+        self.assertTrue(report["suspicious"])
 
 
 class TestAnchorRemapFilter(unittest.TestCase):

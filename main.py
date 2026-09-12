@@ -14,7 +14,7 @@ import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, cast
 
 from moviepy import AudioFileClip, VideoFileClip
 
@@ -32,12 +32,14 @@ from config import (
     parse_args,
 )
 from llm_sync import (
+    LLM_REVIEW_CACHE_PREFIX,
     endpoints_for,
     is_interactive,
     llm_cache_keys_for,
     llm_ordered_timeline,
     llm_timeline_segments,
     llm_verify_anchor_mapping,
+    review_diffs_seen,
 )
 from machine_setup import machine_setup
 from ocr import PRESENTATION_SUFFIXES, convert_presentation_to_pdf, extract_slides_text_ocr
@@ -49,6 +51,7 @@ from semantic_sync import (
     model_load_seconds,
     refine_llm_segments_from_words,
     refine_llm_timeline_from_words,
+    reset_weak_signal_flag,
     semantic_timeline_from_words,
     verify_anchor_mapping_embedding,
     weak_signal_seen,
@@ -61,7 +64,7 @@ from timeline import (
 )
 from transcription import correct_transcript_names, transcribe_audio
 from updates import run_update_check
-from video import build_video
+from video import build_video, frame_consistency_check
 
 
 # =====================================================================
@@ -123,8 +126,10 @@ def _abort(message: str) -> NoReturn:
 
 
 # Chiavi "housekeeping" che NON sono cache di contenuto: vanno conservate
-# (updates_check = TTL del controllo PyPI, fastembed_ab = report test A/B).
-_KEEP_CACHE_STEMS = frozenset({"machine_setup", "updates_check", "fastembed_ab"})
+# (updates_check = TTL del controllo PyPI, fastembed_ab = report test A/B,
+# sync_report = report di sincronizzazione dell'ultima run, artefatto di
+# diagnosi che analysis_sync.py e il debug manuale devono poter leggere).
+_KEEP_CACHE_STEMS = frozenset({"machine_setup", "updates_check", "fastembed_ab", "sync_report"})
 
 def _clean_orphan_cache(active_keys: set[str]) -> int:
     """Rimuove i file .json nella cache che non corrispondono ai
@@ -161,14 +166,18 @@ def _clean_stale_llm_cache(keep_stems: set[str]) -> int:
 
     Le chiavi LLM sono hash del contenuto (slide + parlato + ancore +
     endpoint): cambiando podcast o presentazione i vecchi file non servono più.
-    Conserva SOLO gli stem in ``keep_stems`` (le chiavi della run corrente e la
-    timeline finale per la verifica post-run) e rimuove il resto.
+    Conserva gli stem in ``keep_stems`` (le chiavi della run corrente e la
+    timeline finale per la verifica post-run) e TUTTE le cache della revisione
+    (``llm_review_*``): anche la revisione è un hash del contenuto, quindi si
+    invalida da sola quando l'input cambia, mentre rimuoverla a ogni avvio
+    farebbe ripagare la chiamata LLM a ogni run.
     """
     if not CACHE_DIR.exists():
         return 0
     removed = 0
     for cache_file in CACHE_DIR.glob("llm_*.json"):
-        if cache_file.stem in keep_stems:
+        stem = cache_file.stem
+        if stem in keep_stems or stem.startswith(LLM_REVIEW_CACHE_PREFIX):
             continue
         cache_file.unlink()
         removed += 1
@@ -390,6 +399,81 @@ def _validate_anomalous_segments(
     return verdicts
 
 
+def _should_escalate_weak_signal(
+    weak_signal: bool, missing_count: int, llm_enabled: bool
+) -> bool:
+    """True se conviene abbandonare la timeline locale appena costruita.
+
+    ``weak_signal`` è il verdetto del motore embedding stesso: l'audio non
+    segue l'ordine delle slide, quindi l'allineamento appena calcolato è
+    inaffidabile. Prima questo veniva solo loggato e il video veniva generato
+    comunque; con l'LLM disponibile conviene passargli il posizionamento delle
+    slide senza ancora, perché legge il contenuto dei chunk. Se tutte le slide
+    hanno un'ancora (``missing_count == 0``) il segnale debole non cambia nulla:
+    i timestamp sono già dichiarati dal parlato.
+    """
+    return weak_signal and missing_count > 0 and llm_enabled
+
+
+def _build_sync_report(
+    durations: Sequence[float],
+    slide_ids: Sequence[int],
+    total_duration: float,
+    verdicts: dict[int, str] | None = None,
+    notes: dict[str, object] | None = None,
+    review_diffs: Sequence[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """Tabella verificabile dei segmenti effettivamente mostrati nel video.
+
+    Una voce per slide con inizio, fine, durata e (solo per i segmenti
+    anomali) il verdetto di contenuto. È l'artefatto che rende ispezionabile a
+    posteriori cosa è finito a schermo e DOVE la sincronizzazione è sospetta,
+    senza rieseguire il pipeline (usato da ``analysis_sync.py`` e dal debug
+    manuale).
+
+    ``notes`` aggiunge le scelte fatte dalla run (es. escalation per segnale
+    debole, esito della verifica frame) e ``review_diffs`` le discrepanze del
+    secondo passaggio LLM: entrambi sono segnali che prima finivano solo nei
+    log e che invece devono restare sull'artefatto.
+    """
+    verdicts = verdicts or {}
+    start = 0.0
+    segments: list[dict[str, object]] = []
+    for s, d in zip(slide_ids, durations, strict=True):
+        segment: dict[str, object] = {
+            "slide": int(s),
+            "start": round(start, 3),
+            "end": round(start + float(d), 3),
+            "duration": round(float(d), 3),
+        }
+        verdict = verdicts.get(int(s))
+        if verdict is not None:
+            segment["verdict"] = verdict
+        segments.append(segment)
+        start += float(d)
+    report: dict[str, object] = {
+        "audio_duration": round(float(total_duration), 3),
+        "segments": segments,
+    }
+    if notes:
+        report.update(notes)
+    if review_diffs:
+        report["review_diffs"] = [dict(d) for d in review_diffs]
+    return report
+
+
+def _save_sync_report(report: dict[str, object]) -> None:
+    """Scrive ``sync_report.json`` in cache (l'errore di scrittura non blocca)."""
+    try:
+        atomic_write_text(
+            CACHE_DIR / "sync_report.json",
+            json.dumps(report, ensure_ascii=False, indent=2),
+        )
+        log.debug("   Report di sincronizzazione salvato in cache (sync_report.json).")
+    except OSError:
+        log.debug("   Impossibile salvare il report di sincronizzazione (ignorato).")
+
+
 # =====================================================================
 # CACHE SYSTEM
 # =====================================================================
@@ -602,6 +686,11 @@ def main(argv: list | None = None) -> None:
     if total_slides == 0:
         log.error("[ERRORE] Nessuna slide trovata nel PDF.")
         sys.exit(1)
+    # Copia della lista COMPLETA 1..N: più avanti `slide_files` viene riallineata
+    # alla sequenza reale dei segmenti (flusso libero, --skip-slides). La verifica
+    # frame vs slide deve confrontare col file della slide per NUMERO, quindi
+    # deve usare questa lista intatta.
+    all_slide_files = list(slide_files)
     t_ocr = time.time() - t_phase_start
 
     # --- Durata audio ---
@@ -744,6 +833,11 @@ def main(argv: list | None = None) -> None:
         # --- Flusso libero (riordino): le slide seguono il contenuto del
         # podcast e possono apparire in qualsiasi ordine o ripetersi ---
         slide_ids: list[int]
+        # Scelte fatte dalla run che finiscono in sync_report.json (es.
+        # escalation per segnale debole): prima esistevano solo nei log. Va
+        # inizializzata QUI, prima della biforcazione flusso libero/ordinato,
+        # perché il report è costruito più avanti per entrambi i flussi.
+        sync_notes: dict[str, object] = {}
         if flow == "free":
             log.info("3. Selezione libera: le slide seguono il contenuto del podcast, senza vincolo di ordine.")
 
@@ -1044,7 +1138,8 @@ def main(argv: list | None = None) -> None:
             llm_hybrid_attempted = False
             if args.llm != "off" and semantic_anchors and len(semantic_anchors) < total_slides - 1:
                 missing_count = (total_slides - 1) - len(semantic_anchors)
-                if missing_count <= args.llm_local_threshold:
+                use_local = missing_count <= args.llm_local_threshold
+                if use_local:
                     # PERCORSO A: il raffinamento locale basta per poche slide
                     # senza ancora. Nessuna chiamata LLM, nessun 9Router, nessuna
                     # attesa di rete: la sincronizzazione passa da ~minuti a
@@ -1055,6 +1150,10 @@ def main(argv: list | None = None) -> None:
                         missing_count,
                         args.llm_local_threshold,
                     )
+                    # Il flag di segnale debole è globale: azzerato qui per
+                    # misurarlo SOLO su questa chiamata (altrimenti una
+                    # rilevazione precedente della stessa run lo falserebbe).
+                    reset_weak_signal_flag()
                     timeline = semantic_timeline_from_words(
                         slide_texts,
                         words_raw,
@@ -1070,7 +1169,24 @@ def main(argv: list | None = None) -> None:
                         ),
                         anchors=semantic_anchors,
                     )
-                    if timeline is not None:
+                    if timeline is not None and _should_escalate_weak_signal(
+                        weak_signal_seen(), missing_count, args.llm != "off"
+                    ):
+                        # Il motore embedding stesso dichiara il segnale
+                        # inaffidabile (l'audio non segue l'ordine delle slide):
+                        # prima l'avviso finiva solo nel log e il video veniva
+                        # generato comunque. Qui si passa al percorso LLM, che
+                        # legge il contenuto dei chunk.
+                        log.warning(
+                            "\n   [Fallback] Motore embedding locale con segnale DEBOLE: "
+                            "passo all'LLM per posizionare le %d slide senza ancora, "
+                            "invece di generare un video potenzialmente disallineato.",
+                            missing_count,
+                        )
+                        sync_notes["engine"] = "llm_escalated_weak_signal"
+                        timeline = None
+                        use_local = False
+                    elif timeline is not None:
                         # Raffinamento a livello di parola SOLO delle slide senza
                         # ancora (stesso refine usato dopo l'LLM: deterministico,
                         # zero chiamate di rete). Le ancore esatte restano ai loro
@@ -1091,10 +1207,11 @@ def main(argv: list | None = None) -> None:
                             ),
                             window_seconds=min(args.llm_chunk, 30.0),
                         )
-                else:
-                    # Molte slide senza ancora: serve l'LLM per capire dove viene
-                    # discusso il contenuto. 9Router parte in automatico se spento
-                    # (wait_for_router in llm_ordered_timeline).
+                if not use_local:
+                    # Percorso B: molte slide senza ancora (oppure percorso A
+                    # abbandonato per segnale debole). Serve l'LLM per capire dove
+                    # viene discusso il contenuto: 9Router parte in automatico se
+                    # spento (wait_for_router in llm_ordered_timeline).
                     llm_hybrid_attempted = True
                     endpoints = endpoints_for(args.llm)
                     if args.llm_model:
@@ -1238,10 +1355,28 @@ def main(argv: list | None = None) -> None:
         # errore di sincronizzazione. Solo i segmenti disallineati o incerti
         # meritano l'avviso.
         anomalous = _find_anomalous_durations(durations, slide_ids)
-        if anomalous:
-            verdicts = _validate_anomalous_segments(
+        verdicts = (
+            _validate_anomalous_segments(
                 anomalous, slide_texts, words_raw, durations, slide_ids
             )
+            if anomalous
+            else {}
+        )
+        review_diffs = review_diffs_seen()
+        # Il report dei segmenti va salvato SEMPRE, anche senza anomalie: è
+        # l'artefatto che rende verificabile a posteriori cosa è stato mostrato,
+        # con quale verdetto di contenuto, quale motore è stato scelto e cosa ha
+        # segnalato la revisione LLM.
+        sync_report = _build_sync_report(
+            durations,
+            slide_ids,
+            total_duration,
+            verdicts,
+            notes=sync_notes,
+            review_diffs=review_diffs,
+        )
+        _save_sync_report(sync_report)
+        if anomalous:
             coherent = sorted(s for s, v in verdicts.items() if v == "coerente")
             misaligned = [
                 (s, d) for s, d in anomalous if verdicts.get(s) == "disallineata"
@@ -1265,6 +1400,20 @@ def main(argv: list | None = None) -> None:
                     "podcast.",
                     ", ".join(f"slide {s} = {d:.0f}s" for s, d in misaligned),
                 )
+                # Il verdetto non deve restare un avviso ignorato: con
+                # --strict-sync si interrompe PRIMA di generare un video con la
+                # slide sbagliata (era il difetto della run dell'11/09: il
+                # pipeline sapeva che la slide 3 era disallineata e produceva
+                # comunque il video).
+                if args.strict_sync:
+                    detail = ", ".join(f"slide {s} ({d:.0f}s)" for s, d in misaligned)
+                    _abort(
+                        f"Sincronizzazione sospetta: {detail} ha il parlato più "
+                        "simile a un'altra slide (probabile allineamento errato). "
+                        "Il video NON è stato generato (--strict-sync attivo): "
+                        "rivedi la timeline, oppure rimuovi --strict-sync per "
+                        "generarlo comunque. Dettagli in .cache/sync_report.json."
+                    )
             if uncertain:
                 log.warning(
                     "\n   [Avviso] Durate slide molto squilibrate rispetto alla "
@@ -1272,6 +1421,29 @@ def main(argv: list | None = None) -> None:
                     "   Una slide che dura molto più o molto meno delle altre può "
                     "indicare un allineamento errato: verifica la timeline.",
                     ", ".join(f"slide {s} = {d:.0f}s" for s, d in uncertain),
+                )
+
+        # --- Revisione LLM (--llm-review): le discrepanze non vanno perse ---
+        # Il secondo passaggio LLM è "advisory" (non modifica la timeline) ma è
+        # già pagato: prima finiva solo nei log. Ora sta nel report e, con
+        # --strict-sync, blocca la generazione di un video sospetto.
+        if review_diffs:
+            log.warning(
+                "\n   [Verifica] La revisione LLM (--llm-review) ha segnalato %d "
+                "chunk con una slide diversa da quella proposta (dettagli in "
+                ".cache/sync_report.json).",
+                len(review_diffs),
+            )
+            if args.strict_sync:
+                details = ", ".join(
+                    f"chunk {d.get('chunk')} -> slide {d.get('slide')}"
+                    for d in review_diffs[:5]
+                )
+                _abort(
+                    f"La revisione LLM contesta la mappa chunk->slide ({details}). "
+                    "Il video NON è stato generato (--strict-sync attivo): "
+                    "controlla .cache/sync_report.json e la timeline, oppure "
+                    "rimuovi --strict-sync (o --llm-review) per procedere."
                 )
 
         # --- Filtro slide da non mostrare (--skip-slides) ---
@@ -1373,6 +1545,51 @@ def main(argv: list | None = None) -> None:
                 )
         except (OSError, ValueError, RuntimeError) as e:
             log.warning("   Impossibile verificare il video generato: %s", e)
+
+        # --- Verifica frame vs slide (--verify-video, implicita con --strict-sync) ---
+        # È l'unico controllo sull'ARTEFATTO: la timeline può essere internamente
+        # coerente e il video comunque sbagliato (filtro slide, riallineamenti,
+        # immagine non registrata). Ogni segmento viene confrontato con la slide
+        # che la timeline dichiara, non con una stima.
+        if args.verify_video:
+            offsets = [0.0]
+            for d in durations:
+                offsets.append(offsets[-1] + d)
+            frame_check = frame_consistency_check(
+                args.output_video,
+                [
+                    (slide_ids[i], offsets[i], offsets[i + 1])
+                    for i in range(len(durations))
+                ],
+                all_slide_files,
+                CACHE_DIR / "verify_frames",
+            )
+            mismatches = cast("list[dict[str, object]]", frame_check["mismatches"])
+            if frame_check["checked"]:
+                log.info(
+                    "   Verifica frame vs slide: %s/%s segmenti mostrano la slide "
+                    "attesa (frame in .cache/verify_frames/).",
+                    frame_check["coherent"],
+                    frame_check["checked"],
+                )
+            for m in mismatches:
+                log.warning(
+                    "   ⚠️ Verifica frame: a %.1fs il video mostra la slide %s ma "
+                    "la timeline dice %s (similarità %.3f).",
+                    m["time"],
+                    m["shown"],
+                    m["slide"],
+                    m["similarity"],
+                )
+            sync_report["frame_check"] = frame_check
+            _save_sync_report(sync_report)
+            if mismatches and args.strict_sync:
+                _abort(
+                    f"Verifica frame fallita: {len(mismatches)} segmenti mostrano "
+                    "una slide diversa da quella prevista dalla timeline. Il video "
+                    "È stato generato ma non è affidabile: controlla "
+                    ".cache/sync_report.json e i frame in .cache/verify_frames/."
+                )
 
         # --- Riepilogo finale ---
         t_total = time.time() - t_total_start

@@ -21,6 +21,8 @@ from video import (
     _run_ffmpeg,
     _write_concat_file,
     build_video,
+    frame_consistency_check,
+    image_similarity,
 )
 
 
@@ -221,6 +223,72 @@ class TestBuildVideoDispatch(unittest.TestCase):
             build_video(self.SLIDES, self.DURATIONS, clip, Path("out.mp4"), engine="ffmpeg")
         mov.assert_called_once()
         ffm.assert_not_called()
+
+
+def _half_image(width: int, height: int, vertical: bool) -> Image.Image:
+    """Immagine di test non uniforme: metà bianca, metà nera."""
+    img = Image.new("L", (width, height), 0)
+    if vertical:  # metà sinistra bianca
+        img.paste(255, (0, 0, width // 2, height))
+    else:  # metà alta bianca
+        img.paste(255, (0, 0, width, height // 2))
+    return img
+
+
+class TestFrameConsistencyCheck(unittest.TestCase):
+    """Verifica frame vs slide: la timeline può essere coerente e il video no."""
+
+    def test_identical_images_are_similar(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "a.png"
+            _half_image(80, 60, vertical=True).save(p)
+            self.assertGreater(image_similarity(p, p), 0.99)
+
+    def test_different_layouts_are_dissimilar(self):
+        # Metà sinistra bianca vs metà alta bianca: pattern ortogonali.
+        with tempfile.TemporaryDirectory() as d:
+            a, b = Path(d) / "a.png", Path(d) / "b.png"
+            _half_image(80, 60, vertical=True).save(a)
+            _half_image(80, 60, vertical=False).save(b)
+            self.assertLess(image_similarity(a, b), 0.5)
+
+    def test_unreadable_image_scores_zero(self):
+        # Un file corrotto non deve alzare la similarità di un confronto.
+        with tempfile.TemporaryDirectory() as d:
+            a, b = Path(d) / "a.png", Path(d) / "b.png"
+            a.write_bytes(b"non e' un'immagine")
+            _half_image(40, 30, vertical=True).save(b)
+            self.assertEqual(image_similarity(a, b), 0.0)
+
+    def test_missing_video_does_not_crash(self):
+        # Video inesistente (o ffmpeg che fallisce): i segmenti vengono saltati
+        # e la verifica non interrompe la pipeline.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            slide = tmp / "s1.png"
+            _half_image(40, 30, vertical=True).save(slide)
+            check = frame_consistency_check(
+                tmp / "manca.mp4",
+                [(1, 0.0, 10.0)],
+                [str(slide)],
+                tmp / "frames",
+            )
+            self.assertEqual(check["checked"], 0)
+            self.assertEqual(check["coherent"], 0)
+            self.assertEqual(check["mismatches"], [])
+
+    def test_segment_with_out_of_range_slide_is_skipped(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            slide = tmp / "s1.png"
+            _half_image(40, 30, vertical=True).save(slide)
+            check = frame_consistency_check(
+                tmp / "manca.mp4",
+                [(9, 0.0, 10.0)],
+                [str(slide)],
+                tmp / "frames",
+            )
+            self.assertEqual(check["checked"], 0)
 
 
 class TestOpenSlideRetry(unittest.TestCase):

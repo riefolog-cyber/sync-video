@@ -128,6 +128,13 @@ def endpoints_for(provider: str) -> list[dict[str, Any]]:
         "auto"     -> cascata 9Router (unico provider LLM online)
         "9router"  -> solo 9Router
         "off"      -> nessun endpoint (gestito dal chiamante)
+
+    NOTA: oggi "auto" e "9router" restituiscono la STESSA lista, perché tutti
+    gli endpoint di ``_endpoints()`` hanno nome "9router" (combo principale +
+    due modelli di backup, tutti dietro lo stesso gateway). La differenza tra i
+    due valori è quindi solo nominale: se in futuro si aggiungesse un provider
+    diverso da 9Router, "9router" smetterebbe di includerlo. Verificato dal
+    test ``test_endpoints_auto_e_9router_equivalenti``.
     """
     all_eps = _endpoints()
     if provider == "auto":
@@ -267,32 +274,40 @@ def _chunk_block(chunks: Sequence[dict[str, object]]) -> str:
 
 
 def _extract_json_array(content: str) -> Any | None:
-    """Trova e decodifica l'ULTIMO array JSON valido nel testo, in modo tollerante.
+    """Trova e decodifica l'array JSON della risposta, in modo tollerante.
 
     Gestisce codice fenced, testo extra attorno all'array e apostrofi singoli
-    al posto delle virgolette. Scansiona TUTTI gli array candidati e
-    restituisce l'ultimo che decodifica correttamente: un modello che spiega
-    prima di rispondere (es. "Ecco un esempio: [...] ... la risposta reale:
-    [...]") mette la risposta vera IN FONDO, non nel primo ``[...]``
-    incontrato. Prendere il primo array restituirebbe l'esempio e scarterebbe
-    silenziosamente la risposta reale.
+    al posto delle virgolette. Scansiona TUTTI gli array candidati e sceglie
+    quello con PIÙ oggetti ``dict``: la risposta vera è un array di oggetti
+    ``{"chunk": ..., "slide": ...}``, mentre un frammento tra parentesi
+    quadrate (es. la nota a piè di pagina ``(Nota: vedi [1])``) non ne ha
+    nessuno. Prendere semplicemente l'ULTIMO ``[...]`` restituirebbe la nota e
+    scarterebbe in silenzio una risposta valida. A parità di oggetti vince
+    l'ultimo incontrato: un modello che spiega prima di rispondere (es. "Ecco
+    un esempio: [...] ... la risposta reale: [...]") mette la risposta vera IN
+    FONDO e, avendo più oggetti dell'esempio, vince comunque per punteggio.
     """
     if not content:
         return None
     best: Any = None
+    best_dicts = -1
     for m in re.finditer(r"\[.*?\]", content, re.DOTALL):
         raw = m.group(0)
         try:
-            best = json.loads(raw)
-            continue
+            cand = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             # Prova a riparare: apostrofi singoli al posto di virgolette
             # (solo se il JSON con virgolette doppie non decodifica: così un
             # apostrofo legittimo dentro una stringa non corrompe il parse).
             try:
-                best = json.loads(re.sub(r"'", '"', raw))
+                cand = json.loads(re.sub(r"'", '"', raw))
             except (json.JSONDecodeError, TypeError):
                 continue
+        n_dicts = sum(1 for it in cand if isinstance(it, dict)) if isinstance(cand, list) else -1
+        # ``>=`` e non ``>``: a parità di oggetti vince l'ultimo array (la
+        # risposta finale, non l'esempio iniziale).
+        if n_dicts >= best_dicts:
+            best, best_dicts = cand, n_dicts
     return best
 
 
@@ -1646,9 +1661,11 @@ def review_llm_timeline(
         return None
 
     review_key = _review_cache_key(slide_texts, chunks, slides, eps)
+    reset_review_diffs()
     cached = _load_llm_cache(review_key)
     if cached is not None:
         log.info("   [LLM/Review] Revisione recuperata dalla cache (hash %s).", review_key[:12])
+        reset_review_diffs(cached)
         return cached
 
     # Health-check: se 9Router è spento, PAUSA con avviso e ripresa automatica
@@ -1677,7 +1694,17 @@ def review_llm_timeline(
         if slides[i] != reviewed[i]:
             diffs.append({"chunk": int(c["num"]), "slide": reviewed[i]})
     _save_llm_cache(review_key, diffs)
+    reset_review_diffs(diffs)
     return diffs
+
+
+# Prefisso dei file cache della revisione LLM (``llm_review_<hash>.json``).
+# Distingue le cache della revisione (content-addressed: hash di slide + chunk
+# + mappa + modelli, quindi si invalidano da sole quando l'input cambia) dalle
+# cache della timeline (``llm_<hash>.json``): la pulizia di fine run deve
+# CONSERVARE le prime -- altrimenti la stessa revisione viene ripagata a ogni
+# run -- e rimuovere solo le seconde non più riusabili.
+LLM_REVIEW_CACHE_PREFIX = "llm_review_"
 
 
 def _review_cache_key(
@@ -1686,14 +1713,36 @@ def _review_cache_key(
     slides: Sequence[int | None],
     endpoints: Sequence[dict[str, Any]],
 ) -> str:
-    """Chiave di cache della revisione: hash contenuti + mappa + modelli."""
-    return _hash_cache(
+    """Chiave di cache della revisione: prefisso dedicato + hash contenuti.
+
+    Il prefisso ``review_`` (file finale ``llm_review_<hash>.json``) è ciò che
+    permette alla pulizia delle cache di riconoscere e conservare la revisione
+    tra le run successive.
+    """
+    return "review_" + _hash_cache(
         ["review"],
         slide_texts,
         [f"{c['num']}:{c['start']}:{c['end']}:{c['text']}" for c in chunks],
         [repr(list(slides))],
         _endpoints_hash(endpoints),
     )
+
+
+# Discrepanze dell'ultima revisione LLM (secondo passaggio). Il verdetto è
+# "advisory" (non modifica la timeline) ma non va perso: main.py lo scrive in
+# sync_report.json e, con --strict-sync, interrompe prima di consegnare un
+# video sospetto. Una revisione per run: vale l'ultimo esito registrato.
+_REVIEW_DIFFS: list[dict[str, object]] = []
+
+
+def review_diffs_seen() -> list[dict[str, object]]:
+    """Discrepanze rilevate dall'ultima revisione LLM (vuota se nessuna)."""
+    return [dict(d) for d in _REVIEW_DIFFS]
+
+
+def reset_review_diffs(diffs: Sequence[dict[str, object]] | None = None) -> None:
+    """Registra (o azzera) le discrepanze dell'ultima revisione LLM."""
+    _REVIEW_DIFFS[:] = [dict(d) for d in diffs] if diffs else []
 
 
 def _warn_review_diffs(

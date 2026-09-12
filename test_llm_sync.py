@@ -253,6 +253,39 @@ class TestReview(unittest.TestCase):
             )
         self.assertEqual(diffs, [])
 
+    def test_diffs_recorded_for_the_report(self):
+        # Le discrepanze del secondo passaggio non devono restare solo nei log:
+        # main le scrive in sync_report.json e --strict-sync le usa come gate.
+        from llm_sync import reset_review_diffs, review_diffs_seen
+
+        chunks = build_llm_chunks(
+            [{"word": "ciao", "start": 1.0}, {"word": "mondo", "start": 31.0}],
+            total_duration=60.0,
+            chunk_seconds=30.0,
+        )
+        reset_review_diffs()
+        self.assertEqual(review_diffs_seen(), [])
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value='[{"chunk": 1, "slide": 1}, {"chunk": 2, "slide": 3}]'),
+        ):
+            diffs = review_llm_timeline(
+                ["slide a", "slide b", "slide c"],
+                chunks,
+                [1, 2],
+                total_slides=3,
+                endpoints=[self._ep("9router", "http://x")],
+            )
+        self.assertEqual(diffs, [{"chunk": 2, "slide": 3}])
+        self.assertEqual(review_diffs_seen(), [{"chunk": 2, "slide": 3}])
+        # La lista esposta è una copia: chi la legge non può mutare lo stato.
+        review_diffs_seen().append({"chunk": 99, "slide": 99})
+        self.assertEqual(len(review_diffs_seen()), 1)
+        reset_review_diffs()
+        self.assertEqual(review_diffs_seen(), [])
+
     def test_no_endpoints_returns_none(self):
         chunks = build_llm_chunks(
             [{"word": "ciao", "start": 1.0}],
@@ -443,6 +476,23 @@ class TestParseResponse(unittest.TestCase):
         )
         self.assertEqual(slides, [4])
 
+    def test_footnote_brackets_do_not_beat_real_array(self):
+        # Il modello appende una nota a piè di pagina con parentesi quadre: il
+        # frammento "[1]" non contiene oggetti e NON deve vincere sull'array
+        # della risposta. Prima il parse prendeva l'ULTIMO array e scartava in
+        # silenzio una risposta valida, facendo ripiegare sulla selezione
+        # locale (qualità inferiore) senza alcun segnale.
+        content = (
+            '[{"chunk": 1, "slide": 5}, {"chunk": 2, "slide": 6}]\n'
+            "(Nota: vedi [1] e [2])."
+        )
+        slides = parse_llm_response(content, 2)
+        self.assertEqual(slides, [5, 6])
+
+    def test_footnote_before_real_array(self):
+        slides = parse_llm_response('(Nota: vedi [1]) [{"chunk": 1, "slide": 2}]', 1)
+        self.assertEqual(slides, [2])
+
     def test_apostrophe_in_string_does_not_break_parse(self):
         # Un apostrofo legittimo dentro un valore con virgolette doppie non
         # deve corrompere il parse: il repair delle virgolette singole gira
@@ -512,6 +562,34 @@ class TestEndpointConfig(unittest.TestCase):
                 eps = endpoints_for(provider)
                 self.assertEqual(len(eps), 2)
                 self.assertTrue(all(e["name"] == "9router" for e in eps))
+
+    def test_default_endpoints_are_all_9router(self):
+        # È questo che rende 'auto' e '9router' equivalenti: l'unico provider è
+        # 9Router (combo + 2 backup), quindi il filtro per nome non li distingue.
+        # Se in futuro si aggiungesse un provider diverso, questo test va
+        # aggiornato insieme al docstring di endpoints_for.
+        import os
+
+        from llm_sync import _endpoints, endpoints_for
+
+        keys = (
+            "LLM_9ROUTER_URL",
+            "LLM_9ROUTER_MODEL",
+            "LLM_9ROUTER_BACKUP_MODEL",
+            "LLM_9ROUTER_BACKUP_MODEL_2",
+        )
+        backup = {k: os.environ.pop(k, None) for k in keys}
+        try:
+            eps = _endpoints()
+            auto = endpoints_for("auto")
+            only_9router = endpoints_for("9router")
+        finally:
+            for k, v in backup.items():
+                if v is not None:
+                    os.environ[k] = v
+        self.assertTrue(eps)
+        self.assertTrue(all(e["name"] == "9router" for e in eps))
+        self.assertEqual(auto, only_9router)
 
     def test_no_lmstudio_endpoint_in_default_config(self):
         # La configurazione di default non deve contenere LM Studio né OpenAI.
@@ -1372,6 +1450,31 @@ class TestCacheCleanup(unittest.TestCase):
         remaining = sorted(p.name for p in self._tmpdir.glob("llm_*.json"))
         self.assertEqual(remaining, ["llm_corrente.json", "llm_timeline_finale.json"])
 
+    def test_clean_stale_llm_cache_keeps_review(self):
+        # La revisione LLM è content-addressed (hash di slide + chunk + mappa +
+        # modelli): si invalida da sola quando l'input cambia, quindi va
+        # CONSERVATA. Prima la sua chiave non compariva in keep_stems e il file
+        # veniva rimosso a ogni avvio, facendo ripagare la chiamata a ogni run.
+        self._write("llm_review_deadbeef.json")
+        self._write("llm_orfano.json")
+        removed = self._main._clean_stale_llm_cache({"llm_timeline_finale"})
+        self.assertEqual(removed, 1)
+        remaining = sorted(p.name for p in self._tmpdir.glob("llm_*.json"))
+        self.assertEqual(remaining, ["llm_review_deadbeef.json"])
+
+    def test_review_cache_key_uses_dedicated_prefix(self):
+        # La conservazione della revisione si basa sul prefisso del file: chiave
+        # e pulizia devono restare d'accordo.
+        from llm_sync import LLM_REVIEW_CACHE_PREFIX, _review_cache_key
+
+        key = _review_cache_key(
+            ["slide a"],
+            [{"num": 1, "start": 0.0, "end": 5.0, "text": "x"}],
+            [1],
+            [],
+        )
+        self.assertTrue(f"llm_{key}".startswith(LLM_REVIEW_CACHE_PREFIX))
+
     def test_clean_orphan_cache_at_startup(self):
         # cache di slide/trascrizione di PDF/audio precedenti
         self._write("slides_vecchiohash_300_ita.json")
@@ -1383,6 +1486,15 @@ class TestCacheCleanup(unittest.TestCase):
         self.assertEqual(removed, 2)
         remaining = sorted(p.name for p in self._tmpdir.glob("*.json"))
         self.assertEqual(remaining, ["slides_hashattuale_300_ita.json"])
+
+    def test_clean_orphan_cache_keeps_sync_report(self):
+        # sync_report.json è un artefatto di diagnosi (cosa è stato mostrato e
+        # dove la sincronizzazione era sospetta), non una cache di contenuto:
+        # deve sopravvivere alla pulizia delle cache orfane.
+        self._write("sync_report.json")
+        removed = self._main._clean_orphan_cache(set())
+        self.assertEqual(removed, 0)
+        self.assertTrue((self._tmpdir / "sync_report.json").exists())
 
     def test_clean_orphan_cache_keeps_machine_setup(self):
         # machine_setup.json è configurazione, non cache: deve sopravvivere
