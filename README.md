@@ -253,6 +253,23 @@ e veloce il router lato server.
 > Nota hardware: 12 thread sono più lenti di 8 su Snapdragon X Elite (banda di
 > memoria), quindi il default resta 8.
 >
+> **L'embedding viene riusato, non ricalcolato.** La matrice slide↔blocchi è
+> content-addressed (`.cache/embedding_cache/`, hash dei testi + identità del
+> modello): stessi testi e stesso modello → stessi vettori, quindi le run
+> ripetute sullo stesso podcast non ripagano l'embedding (misurato: 26s → 3s,
+> run da 1m50s a 1m26s, timeline e 11/11 frame identici). Vale anche *dentro*
+> la run: le slide embeddate per la verifica ancore e per il confronto fra
+> trascrizioni sono le stesse della sincronizzazione, e il raffinamento dei
+> confini le riusa. I file sono `.npz` (invisibili alla pulizia delle cache
+> orfane, che guarda i `.json`) con un tetto di 40 voci (~1 MB l'una). Senza
+> identità del modello la cache **non** viene usata: meglio ricalcolare che
+> rischiare i vettori di un modello diverso.
+>
+> **La tabella tempi ora dice il vero.** Prima la riga `└ Embedding` mostrava il
+> *caricamento del modello* (pochi secondi) e i ~25-30s di embedding veri non
+> comparivano da nessuna parte — per questo lo spreco non era mai emerso. Ora
+> `└ Embedding` è il calcolo dei vettori e `└ Modello` il caricamento, separati.
+>
 > **OpenVINO GenAI (solo iGPU Intel).** Su PC Intel con iGPU Iris Xe e senza
 > GPU NVIDIA è un'alternativa più veloce di faster-whisper su CPU (~5 min per 28
 > min di audio), con word timestamps identici. Non serve su macchine ARM/AMD,
@@ -604,6 +621,7 @@ embedding fallito) e non vanno "stretti" senza motivo.
 | `video_finale.mp4` | Output video |
 | `transcript_raw.txt` | Trascrizione completa (debug) |
 | `temp_slides/` | Slide renderizzate |
+| `.cache/embedding_cache/` | Vettori embedding content-addressed (`.npz`, max 40 voci) |
 | `.cache/` | Cache OCR, trascrizione, embedding |
 
 La cache della trascrizione è indicizzata da **tutto ciò che cambia il testo
@@ -614,6 +632,10 @@ type o il device la trascrizione viene **rifatta**, invece di riusare in
 silenzio un testo prodotto con altre impostazioni. Al primo avvio dopo un
 aggiornamento che cambia questi parametri, quindi, la trascrizione riparte da
 zero una volta sola.
+
+Anche la cache degli embedding è indicizzata dal **contenuto** (testi + identità
+del modello), non dalla sessione: ripetere la stessa run riusa i vettori (0s di
+embedding), cambiando `--semantic-model` vengono ricalcolati.
 
 ---
 

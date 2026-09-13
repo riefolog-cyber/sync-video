@@ -27,16 +27,20 @@ flusso libero guida la selezione chunk→slide.
 from __future__ import annotations
 
 import bisect
+import contextlib
+import hashlib
 import re
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
 
 from chunks import Segment, Word, build_windows
 from config import (
+    CACHE_DIR,
     DEFAULT_EMBED_THREADS,
     DEFAULT_EMBEDDING_CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL,
@@ -58,6 +62,24 @@ except ImportError:  # pragma: no cover
 # Esposto al chiamante per il riepilogo tempi di main.py.
 _MODEL_LOAD_SECONDS = 0.0
 
+# Tempo cumulato di EMBEDDING vero e proprio (calcolo dei vettori), distinto dal
+# caricamento del modello: è la voce che domina la sincronizzazione (misurato:
+# ~25s per 261 blocchi con e5-large) e che il riepilogo tempi non mostrava.
+_EMBED_SECONDS = 0.0
+
+# Cache degli embedding, content-addressed: stessi testi + stesso modello =
+# stessi vettori, quindi si può riusare senza toccare la precisione. Vive su
+# disco (.npz, invisibile alla pulizia delle cache orfane che guarda i .json) e
+# in memoria per la singola run, dove lo stesso embedding serve più volte (il
+# confronto fra trascrizioni e la sincronizzazione embeddano gli stessi blocchi).
+_EMBED_CACHE_DIR: Path = CACHE_DIR / "embedding_cache"
+_EMBED_CACHE_MAX = 40
+_EMBED_MEMO: dict[str, tuple[np.ndarray, float]] = {}
+
+# ``--no-cache`` deve ignorare anche questi vettori, altrimenti il flag
+# mentirebbe su una delle poche cache che sopravvivono alla pulizia orfana.
+_EMBED_CACHE_ENABLED = True
+
 # Cache a livello di modulo dei modelli embedding caricati: evita di ricaricare
 # i pesi ONNX quando la verifica deterministica delle ancore e la sync semantica
 # usano lo stesso modello nello stesso processo.
@@ -76,6 +98,31 @@ _LAST_QUALITY: dict[str, float] = {}
 def model_load_seconds() -> float:
     """Restituisce i secondi cumulati di caricamento dei modelli embedding."""
     return _MODEL_LOAD_SECONDS
+
+
+def embed_seconds() -> float:
+    """Secondi cumulati di EMBEDDING (calcolo dei vettori), non di caricamento.
+
+    Esposto al riepilogo tempi: senza questa voce il costo più grande della
+    sincronizzazione restava fuori dalla tabella (la riga "Embedding" mostrava
+    il caricamento del modello, pochi secondi).
+    """
+    return _EMBED_SECONDS
+
+
+def reset_embed_cache() -> None:
+    """Svuota il memo di processo della cache embedding (usato dai test)."""
+    _EMBED_MEMO.clear()
+
+
+def set_embed_cache_enabled(enabled: bool) -> None:
+    """Attiva/disattiva la cache embedding in-process (``--no-cache``).
+
+    Non cancella nulla su disco: disattiva solo lettura e scrittura per la run
+    corrente, così ``--no-cache`` significa davvero "ricalcola".
+    """
+    global _EMBED_CACHE_ENABLED
+    _EMBED_CACHE_ENABLED = enabled
 
 
 def weak_signal_seen() -> bool:
@@ -242,16 +289,149 @@ def _make_embed_fn(model: TextEmbedding, batch_size: int = 64) -> EmbedFn:
     """
 
     def _embed(texts: Sequence[str]) -> np.ndarray:
+        global _EMBED_SECONDS
         prepared = list(texts)
         if getattr(model, "model_name", "") and "e5" in str(model.model_name).lower():
             prepared = ["passage: " + t for t in prepared]
-        vecs = [np.asarray(v, dtype=np.float32) for v in model.embed(prepared, batch_size=batch_size)]
+        t0 = time.time()
+        try:
+            vecs = [np.asarray(v, dtype=np.float32) for v in model.embed(prepared, batch_size=batch_size)]
+        finally:
+            # Anche un embedding fallito è tempo speso: va contato.
+            _EMBED_SECONDS += time.time() - t0
         arr = np.vstack(vecs)
         norms = np.linalg.norm(arr, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         return cast(np.ndarray, arr / norms)
 
+    # Identità della configurazione attaccata alla funzione: è ciò che rende
+    # SICURA la cache content-addressed (stessi testi + stesso modello + stessa
+    # dimensione di batch = stessi vettori; il batch entra nell'identità perché
+    # il padding è per-batch). Un embed_fn senza identità (es. finto, nei test)
+    # non usa la cache.
+    model_id = str(getattr(model, "model_name", "") or "")
+    cast(Any, _embed).embed_id = f"{model_id}|b{batch_size}" if model_id else ""
     return _embed
+
+
+def _embed_cache_key(embed_id: str, texts: Sequence[str]) -> str:
+    """Chiave content-addressed dell'embedding di una lista di testi."""
+    h = hashlib.sha1()
+    h.update(embed_id.encode("utf-8"))
+    h.update(b"\x00")
+    for t in texts:
+        h.update(t.encode("utf-8"))
+        h.update(b"\x01")
+    return h.hexdigest()[:16]
+
+
+def _prune_embed_cache() -> None:
+    """Tiene solo le cache di embedding più recenti (LRU per data del file).
+
+    Le cache sono content-addressed (si invalidano da sole quando l'input
+    cambia), quindi non vanno cancellate: senza un tetto però crescono a ogni
+    podcast nuovo. Il tetto tiene il costo di disco prevedibile (~1 MB per
+    voce con e5-large) senza toccare quelle appena usate.
+    """
+    try:
+        files = sorted(
+            _EMBED_CACHE_DIR.glob("emb_*.npz"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return
+    for old in files[_EMBED_CACHE_MAX:]:
+        with contextlib.suppress(OSError):
+            old.unlink()
+
+
+def _embed_list_cached(
+    embed_fn: EmbedFn,
+    texts: Sequence[str],
+    context: str,
+) -> np.ndarray | None:
+    """Embedding di una lista di testi dalla cache (memoria + disco), o None.
+
+    La chiave è il contenuto (testi + identità del modello): se non cambia
+    nulla, i vettori sono gli stessi e ricalcolarli è puro spreco. Senza
+    identità del modello non si usa la cache: preferiamo ricalcolare piuttosto
+    che rischiare vettori di un modello diverso. La cache è per-lista, quindi
+    le slide restano riusabili anche da chi le embedda per conto suo
+    (verifica ancore, raffinamento confini).
+    """
+    embed_id = str(getattr(embed_fn, "embed_id", "") or "")
+    if not embed_id or not _EMBED_CACHE_ENABLED:
+        return None
+
+    key = _embed_cache_key(embed_id, texts)
+    memo = _EMBED_MEMO.get(key)
+    if memo is not None:
+        arr, saved = memo
+        log.debug("   [%s] Embedding dalla cache di processo (%.0fs già spesi).", context, saved)
+        return arr
+
+    path = _EMBED_CACHE_DIR / f"emb_{key}.npz"
+    if path.exists():
+        try:
+            with np.load(path) as data:
+                arr = np.asarray(data["emb"], dtype=np.float32)
+                saved = float(np.asarray(data["seconds"]).reshape(()))
+        except (OSError, ValueError, KeyError) as e:
+            log.debug("   [%s] Cache embedding illeggibile (%s): ricalcolo.", context, e)
+        else:
+            # La forma è la verifica di integrità: file troncato o chiave
+            # riusata con contenuti diversi devono portare al ricalcolo.
+            if arr.ndim == 2 and arr.shape[0] == len(texts):
+                _EMBED_MEMO[key] = (arr, saved)
+                log.info(
+                    "   [%s] Embedding riusati dalla cache: ~%.0fs risparmiati "
+                    "(stessi testi, stesso modello).",
+                    context,
+                    saved,
+                )
+                return arr
+            log.debug("   [%s] Cache embedding con forma inattesa: ricalcolo.", context)
+        with contextlib.suppress(OSError):
+            path.unlink()
+    return None
+
+
+def _embed_list_and_save(
+    embed_fn: EmbedFn,
+    texts: Sequence[str],
+    context: str,
+) -> np.ndarray:
+    """Calcola l'embedding di una lista e lo salva in cache (memoria + disco)."""
+    t0 = time.time()
+    arr = np.asarray(embed_fn(texts), dtype=np.float32)
+    saved = time.time() - t0
+
+    embed_id = str(getattr(embed_fn, "embed_id", "") or "")
+    if not embed_id or not _EMBED_CACHE_ENABLED:
+        return arr
+    key = _embed_cache_key(embed_id, texts)
+    _EMBED_MEMO[key] = (arr, saved)
+    try:
+        _EMBED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        np.savez(_EMBED_CACHE_DIR / f"emb_{key}.npz", emb=arr, seconds=np.float32(saved))
+        _prune_embed_cache()
+    except OSError as e:
+        # La cache è un'ottimizzazione: se il disco non collabora si prosegue.
+        log.debug("   [%s] Cache embedding non salvata (%s).", context, e)
+    return arr
+
+
+def _embed_list(embed_fn: EmbedFn, texts: Sequence[str], context: str) -> np.ndarray:
+    """Embedding di una lista di testi, dalla cache quando possibile.
+
+    Gli errori di ``embed_fn`` si propagano al chiamante (che li gestisce come
+    prima): la cache è solo un'accelerazione, non un cambio di semantica.
+    """
+    cached = _embed_list_cached(embed_fn, texts, context)
+    if cached is not None:
+        return cached
+    return _embed_list_and_save(embed_fn, texts, context)
 
 
 # =====================================================================
@@ -275,8 +455,8 @@ def _embed_and_report(
     block_texts = [str(b["text"]) for b in blocks]
 
     try:
-        slide_emb = embed_fn(slide_clean)
-        block_emb = embed_fn(block_texts)
+        slide_emb = _embed_list(embed_fn, slide_clean, context)
+        block_emb = _embed_list(embed_fn, block_texts, context)
     except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
         log.warning("   [%s] Errore durante l'embedding: %s", context, e)
         return None
@@ -1017,7 +1197,7 @@ def verify_anchor_mapping_embedding(
 
     slide_clean = [_clean_slide_text(t) for t in slide_texts[:total_slides]]
     try:
-        slide_emb = embed_fn(slide_clean)
+        slide_emb = _embed_list(embed_fn, slide_clean, "Ancore")
     except Exception as e:  # noqa: BLE001 - embedding può fallire per molti motivi
         log.warning("   [Ancore] Embedding slide non riuscito: %s", e)
         return _done(None, False)
@@ -1210,7 +1390,7 @@ def make_anchor_remap_filter(
 
     slide_clean = [_clean_slide_text(t) for t in slide_texts[:total_slides]]
     try:
-        slide_emb = embed_fn(slide_clean)
+        slide_emb = _embed_list(embed_fn, slide_clean, "Ancore")
     except Exception as e:  # noqa: BLE001
         log.warning("   [Ancore] Embedding slide non riuscito: %s", e)
         return None
@@ -1595,7 +1775,9 @@ def refine_llm_segment_boundaries(
     if len(segments) < 2 or not words:
         return segments
     try:
-        slide_emb = np.asarray(embed_fn([_clean_slide_text(t) for t in slide_texts]), dtype=np.float32)
+        slide_emb = _embed_list(
+            embed_fn, [_clean_slide_text(t) for t in slide_texts], "LLM/Refine"
+        )
     except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
         log.warning("   [LLM/Refine] Embedding slide non disponibile: confini invariati (%s).", e)
         return segments

@@ -6,9 +6,13 @@ Coprono la logica di "precisione assoluta": niente distribuzioni uniformi,
 interruzione con avviso se la sincronizzazione è impossibile.
 """
 
+import pathlib
+import tempfile
+import time
 import unittest
 from itertools import pairwise
 from typing import ClassVar
+from unittest import mock
 
 import numpy as np
 
@@ -781,6 +785,166 @@ class TestBeamAbQuality(unittest.TestCase):
                 embed_fn=_FakeThemedEmbed(self.THEMES),
             )
         )
+
+
+class TestEmbedCache(unittest.TestCase):
+    """Cache content-addressed degli embedding: riusa i vettori, non la precisione.
+
+    I vettori sono identici per costruzione (stessi testi + stesso modello),
+    quindi ciò che va dimostrato è che la cache li riusi DAVVERO e che non possa
+    mai servire vettori di un modello o di testi diversi.
+    """
+
+    def setUp(self):
+        import semantic_sync
+
+        self._ss = semantic_sync
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig_dir = semantic_sync._EMBED_CACHE_DIR
+        semantic_sync._EMBED_CACHE_DIR = pathlib.Path(self._tmp.name)
+        semantic_sync.reset_embed_cache()
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        self._ss._EMBED_CACHE_DIR = self._orig_dir
+        self._ss.set_embed_cache_enabled(True)
+        self._ss.reset_embed_cache()
+
+    @staticmethod
+    def _counting_embed(embed_id, dim=3):
+        """Embedder finto deterministico che registra le chiamate ricevute."""
+        calls = []
+
+        def _embed(texts):
+            calls.append(list(texts))
+            out = np.zeros((len(texts), dim), dtype=np.float32)
+            for i, t in enumerate(texts):
+                out[i, sum(map(ord, t)) % dim] = 1.0
+            return out
+
+        _embed.embed_id = embed_id
+        _embed.calls = calls
+        return _embed
+
+    def test_same_texts_and_model_hit_cache(self):
+        embed = self._counting_embed("modello-A")
+        first = self._ss._embed_list(embed, ["uno", "due"], "test")
+        second = self._ss._embed_list(embed, ["uno", "due"], "test")
+        self.assertEqual(len(embed.calls), 1)
+        np.testing.assert_array_equal(first, second)
+
+    def test_different_model_does_not_reuse(self):
+        embed_a = self._counting_embed("modello-A")
+        embed_b = self._counting_embed("modello-B")
+        self._ss._embed_list(embed_a, ["uno"], "test")
+        self._ss._embed_list(embed_b, ["uno"], "test")
+        self.assertEqual(len(embed_a.calls), 1)
+        self.assertEqual(len(embed_b.calls), 1)
+
+    def test_different_texts_do_not_reuse(self):
+        embed = self._counting_embed("modello-A")
+        self._ss._embed_list(embed, ["uno"], "test")
+        self._ss._embed_list(embed, ["due"], "test")
+        self.assertEqual(len(embed.calls), 2)
+
+    def test_without_identity_cache_is_disabled(self):
+        embed = self._counting_embed("")
+        first = self._ss._embed_list(embed, ["uno"], "test")
+        second = self._ss._embed_list(embed, ["uno"], "test")
+        self.assertEqual(len(embed.calls), 2)
+        np.testing.assert_array_equal(first, second)
+
+    def test_disk_cache_survives_memo_reset(self):
+        embed = self._counting_embed("modello-A")
+        self._ss._embed_list(embed, ["uno", "due"], "test")
+        self._ss.reset_embed_cache()  # come una nuova run nello stesso processo
+        again = self._ss._embed_list(embed, ["uno", "due"], "test")
+        self.assertEqual(len(embed.calls), 1)
+        self.assertEqual(again.shape, (2, 3))
+
+    def test_corrupt_cache_file_is_ignored(self):
+        embed = self._counting_embed("modello-A")
+        key = self._ss._embed_cache_key("modello-A", ["uno", "due"])
+        self._ss._EMBED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        (self._ss._EMBED_CACHE_DIR / f"emb_{key}.npz").write_bytes(b"non un npz")
+        out = self._ss._embed_list(embed, ["uno", "due"], "test")
+        self.assertEqual(len(embed.calls), 1)
+        self.assertEqual(out.shape, (2, 3))
+
+    def test_shape_mismatch_is_recomputed(self):
+        embed = self._counting_embed("modello-A")
+        key = self._ss._embed_cache_key("modello-A", ["uno", "due"])
+        self._ss._EMBED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            self._ss._EMBED_CACHE_DIR / f"emb_{key}.npz",
+            emb=np.zeros((5, 3), dtype=np.float32),
+            seconds=np.float32(1.0),
+        )
+        out = self._ss._embed_list(embed, ["uno", "due"], "test")
+        self.assertEqual(len(embed.calls), 1)
+        self.assertEqual(out.shape, (2, 3))
+
+    def test_slide_embedding_reused_across_passes(self):
+        """Le slide non vengono ri-embeddate dal confronto trascrizioni alla sync."""
+        embed = self._counting_embed("modello-A")
+        slides = ["alfa slide", "beta slide"]
+        blocks = [
+            {"time": 0.0, "text": "alfa " * 4},
+            {"time": 5.0, "text": "beta " * 4},
+        ]
+        self._ss._embed_and_report(slides, blocks, 2, embed, "Semantico")
+        self._ss._embed_and_report(slides, blocks, 2, embed, "Confronto trascrizioni")
+        # slide (riusate) + blocchi (riusati): una sola chiamata per lista
+        self.assertEqual(len(embed.calls), 2)
+
+    def test_disabled_cache_always_recomputes(self):
+        self._ss.set_embed_cache_enabled(False)
+        self.addCleanup(self._ss.set_embed_cache_enabled, True)
+        embed = self._counting_embed("modello-A")
+        self._ss._embed_list(embed, ["uno"], "test")
+        self._ss._embed_list(embed, ["uno"], "test")
+        self.assertEqual(len(embed.calls), 2)
+
+    def test_prune_keeps_most_recent(self):
+        d = self._ss._EMBED_CACHE_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        for i in range(self._ss._EMBED_CACHE_MAX + 3):
+            np.savez(d / f"emb_{i:016d}.npz", emb=np.zeros((1, 3)), seconds=np.float32(0.1))
+        self._ss._prune_embed_cache()
+        self.assertEqual(len(list(d.glob("emb_*.npz"))), self._ss._EMBED_CACHE_MAX)
+
+    def test_embed_seconds_counts_vector_time(self):
+        class _StubModel:
+            model_name = "stub"
+
+            @staticmethod
+            def embed(texts, batch_size=64):
+                time.sleep(0.02)
+                return [np.ones(3, dtype=np.float32) for _ in texts]
+
+        # Il conteggio vive nell'embed_fn reale (quello che chiama il modello),
+        # non nel finto: qui si usa proprio quel percorso.
+        embed = self._ss._make_embed_fn(_StubModel())
+        before = self._ss.embed_seconds()
+        self._ss._embed_list(embed, ["uno"], "test")
+        self.assertGreaterEqual(self._ss.embed_seconds() - before, 0.015)
+
+
+class TestTimingTable(unittest.TestCase):
+    """La tabella tempi deve mostrare l'embedding vero, non il caricamento."""
+
+    def test_embedding_and_model_shown_separately(self):
+        import main
+
+        with (
+            mock.patch.object(main, "_append_timing_history"),
+            self.assertLogs(main.log, level="INFO") as cm,
+        ):
+            main._print_timing(1.0, 2.0, 30.0, 28.0, 3.0, 5.0, 40.0)
+        printed = "\n".join(r.getMessage() for r in cm.records)
+        self.assertIn("Embedding │ 28s", printed)
+        self.assertIn("Modello   │ 3s", printed)
 
 
 class TestSemanticSync(unittest.TestCase):

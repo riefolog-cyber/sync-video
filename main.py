@@ -50,6 +50,7 @@ from ocr import PRESENTATION_SUFFIXES, convert_presentation_to_pdf, extract_slid
 from semantic_sync import (
     SemanticOptions,
     alignment_quality_from_words,
+    embed_seconds,
     free_order_segments_from_words,
     last_quality,
     make_anchor_remap_filter,
@@ -60,6 +61,7 @@ from semantic_sync import (
     repair_segments_from_frames_from_words,
     reset_weak_signal_flag,
     semantic_timeline_from_words,
+    set_embed_cache_enabled,
     verify_anchor_mapping_embedding,
     weak_signal_seen,
 )
@@ -235,9 +237,21 @@ def _save_final_timeline(
 
 
 def _print_timing(
-    t_ocr: float, t_transcribe: float, t_sync: float, t_embed: float, t_video: float, t_total: float
+    t_ocr: float,
+    t_transcribe: float,
+    t_sync: float,
+    t_embed: float,
+    t_model: float,
+    t_video: float,
+    t_total: float,
 ) -> None:
-    """Stampa il riepilogo dei tempi di ogni fase e lo salva nello storico."""
+    """Stampa il riepilogo dei tempi di ogni fase e lo salva nello storico.
+
+    ``t_embed`` è il calcolo dei vettori (la voce che domina la
+    sincronizzazione), ``t_model`` è il caricamento dei pesi: confonderli
+    nascondeva il costo vero (la riga "Embedding" mostrava pochi secondi di
+    caricamento invece dei ~30s di embedding).
+    """
     log.info("\n" + "─" * 50)
     log.info(" ⏱️  RIEPILOGO TEMPI")
     log.info("─" * 50)
@@ -246,6 +260,8 @@ def _print_timing(
     log.info("   Sincronizzaz. │ %s", _format_time(t_sync))
     if t_embed > 0:
         log.info("     └ Embedding │ %s", _format_time(t_embed))
+    if t_model > 0:
+        log.info("     └ Modello   │ %s", _format_time(t_model))
     if t_video > 0:
         log.info("   Encoding Video│ %s", _format_time(t_video))
     log.info("   ─────────────────────────")
@@ -1100,6 +1116,11 @@ def main(argv: list | None = None) -> None:
     # --- Hash per cache ---
     pdf_hash = _file_hash(pdf_path)
     audio_hash = _file_hash(audio_path)
+    # ``--no-cache`` ignora anche i vettori embedding (content-addressed):
+    # senza questo il flag mentirebbe, perché quella cache non viene toccata
+    # dalla pulizia orfana (che guarda solo i .json).
+    set_embed_cache_enabled(not args.no_cache)
+
     cache_key_slides = f"slides_{pdf_hash[:12]}_{args.dpi}_{args.lang}"
     # Il modello E il motore fanno parte della chiave: cambiando motore o
     # --whisper-model non deve riusarsi la cache di un altro, che produce
@@ -2111,7 +2132,15 @@ def main(argv: list | None = None) -> None:
         # --- Dry-run: fermati qui ---
         if args.dry_run:
             t_total = time.time() - t_total_start
-            _print_timing(t_ocr, t_transcribe, t_sync + beam_ab_seconds, model_load_seconds(), 0.0, t_total)
+            _print_timing(
+                t_ocr,
+                t_transcribe,
+                t_sync + beam_ab_seconds,
+                embed_seconds(),
+                model_load_seconds(),
+                0.0,
+                t_total,
+            )
             _warn_sync_uncertainty()
             _log_plain_summary(
                 durations,
@@ -2249,7 +2278,15 @@ def main(argv: list | None = None) -> None:
 
         # --- Riepilogo finale ---
         t_total = time.time() - t_total_start
-        _print_timing(t_ocr, t_transcribe, t_sync + beam_ab_seconds, model_load_seconds(), t_video, t_total)
+        _print_timing(
+            t_ocr,
+            t_transcribe,
+            t_sync + beam_ab_seconds,
+            embed_seconds(),
+            model_load_seconds(),
+            t_video,
+            t_total,
+        )
         _warn_sync_uncertainty()
 
         # Pulizia cache orfana
