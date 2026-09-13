@@ -7,6 +7,12 @@ title Sync Video: Slide -> Audio
 set "PAUSE_IT=1"
 set "CHECK_UPDATES=0"
 rem --- Modello whisper: sovrascrivibile con set WHISPER_MODEL=tiny (default small, piu' preciso) ---
+rem --- Velocita' trascrizione (default gia' veloci, misurati): decoding a batch
+rem     (WHISPER_BATCH=8) e beam greedy (WHISPER_BEAM=1, ~2.3x piu' veloce con le
+rem     ancore 'slide N' entro 0.15s). Per il testo piu' accurato possibile:
+rem       set WHISPER_BEAM=5
+rem     Per disattivare il decoding a batch:
+rem       set WHISPER_BATCH=0
 if not defined WHISPER_MODEL set "WHISPER_MODEL=small"
 set "MAIN_ARGS=--whisper-model %WHISPER_MODEL% --engine ffmpeg"
 

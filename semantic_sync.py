@@ -831,6 +831,79 @@ def semantic_timeline_from_words(
     )
 
 
+def alignment_quality_from_words(
+    slide_texts: list[str],
+    words_raw: list[Word],
+    total_slides: int,
+    total_duration: float,
+    options: SemanticOptions | None = None,
+    anchors: dict[int, float] | None = None,
+    embed_fn: EmbedFn | None = None,
+) -> dict[str, float] | None:
+    """Qualità del segnale di allineamento per UNA trascrizione, senza effetti.
+
+    Serve a confrontare due trascrizioni dello STESSO audio (es. decodifica
+    veloce contro accurata): la qualità della pipeline è misurata sui blocchi
+    che la DP ha assegnato alle slide, quindi le due trascrizioni vanno
+    allineate entrambe allo stesso modo, altrimenti il confronto misurerebbe
+    anche le differenze di segmentazione. Esegue quindi la stessa catena
+    (blocchi -> embedding -> z-score per slide -> competizione -> DP -> media
+    dei picchi) e restituisce le stesse voci di ``last_quality()``, più il
+    contesto del segnale (``concordance``/``confusability``).
+
+    A differenza di ``semantic_timeline_from_words`` NON tocca la timeline,
+    il flag di segnale debole né ``last_quality()``: è una misura, non una
+    decisione. L'uguaglianza col metro della sincronizzazione vera è fissata da
+    un test (`test_sync.TestBeamAbQuality`), così le due catene non possono
+    divergere in silenzio.
+
+    Returns:
+        ``{"avg_sim", "avg_z", "concordance", "confusability", "blocks"}``
+        oppure None se il segnale non basta (blocchi insufficienti, modello
+        non caricabile, nessuna segmentazione valida).
+    """
+    opts = options or SemanticOptions()
+    blocks = build_semantic_blocks(words_raw, total_duration, opts.window_seconds)
+    if len(blocks) < total_slides:
+        return None
+
+    if embed_fn is None:
+        model = _load_embed_model(
+            opts.model_name or DEFAULT_EMBEDDING_MODEL,
+            opts.cache_dir or DEFAULT_EMBEDDING_CACHE_DIR,
+            alternate_name=opts.alternate_model_name or DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+        )
+        if model is None:
+            return None
+        embed_fn = _make_embed_fn(model)
+
+    embedded = _embed_and_report(slide_texts, blocks, total_slides, embed_fn, "Confronto trascrizioni")
+    if embedded is None:
+        return None
+    sim, report = embedded
+
+    min_gap = max(1, int(opts.min_slide_duration / opts.window_seconds))
+    candidates = build_candidates(len(blocks), total_slides, min_gap, blocks, anchors)
+    if candidates is None:
+        return None
+    sim_norm = zscore_matrix(sim)
+    starts = monotonic_alignment(competition_matrix(sim_norm, opts.temperature), candidates, min_gap)
+    if starts is None:
+        return None
+
+    pairs = [
+        (blk, s - 1) for s in range(1, total_slides) for blk in range(starts[s - 1], starts[s])
+    ]
+    avg_sim, avg_z = _mean_pair_scores(sim, sim_norm, pairs)
+    return {
+        "avg_sim": avg_sim,
+        "avg_z": avg_z,
+        "concordance": float(report.get("concordance", 0.0)),
+        "confusability": float(report.get("confusability", 0.0)),
+        "blocks": float(len(blocks)),
+    }
+
+
 # =====================================================================
 # VERIFICA DETERMINISTICA DEL MAPPING ANCORE (offset numerazione parlata)
 # =====================================================================

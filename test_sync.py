@@ -665,25 +665,131 @@ class TestReconcileTimeline(unittest.TestCase):
             reconcile_timeline({1: 0.0, 2: 350.0}, 2, 300.0)
 
 
+class _FakeThemedEmbed:
+    """Embedder finto condiviso: vettore one-hot per ogni parola-tema presente."""
+
+    def __init__(self, themes):
+        self.themes = themes
+
+    def __call__(self, texts):
+        out = []
+        for t in texts:
+            v = np.zeros(len(self.themes))
+            for i, k in enumerate(self.themes):
+                if k in t:
+                    v[i] = 1.0
+            norm = np.linalg.norm(v)
+            out.append(v / norm if norm else v)
+        return np.array(out)
+
+
+class TestBeamAbQuality(unittest.TestCase):
+    """Confronto fra le due trascrizioni: deve usare il METRO della pipeline.
+
+    Se qualcuno cambia la catena di allineamento (blocchi, z-score,
+    competizione, DP) senza aggiornare anche la misura di confronto, il primo
+    test qui sotto cade: è la garanzia che il numero registrato nel report
+    resti confrontabile con ``quality`` della sincronizzazione vera.
+    """
+
+    THEMES: ClassVar[list] = ["alfa", "beta", "gamma", "delta"]
+    DURATION: ClassVar[float] = 20.0
+
+    def _words(self):
+        # 3 parole per finestra da 5s (il minimo per non essere scartata come
+        # silenzio): un blocco per tema, in ordine.
+        return [
+            {"word": t, "start": float(i * 5 + k * 0.5)}
+            for i, t in enumerate(self.THEMES)
+            for k in range(3)
+        ]
+
+    def _options(self):
+        return SemanticOptions(window_seconds=5.0, min_slide_duration=2.0)
+
+    def test_measure_equals_real_sync_metric(self):
+        from semantic_sync import (
+            alignment_quality_from_words,
+            build_semantic_blocks,
+            last_quality,
+            reset_weak_signal_flag,
+        )
+
+        slides = [f"{t} slide" for t in self.THEMES]
+        words = self._words()
+        qual = alignment_quality_from_words(
+            slides,
+            words,
+            4,
+            self.DURATION,
+            options=self._options(),
+            embed_fn=_FakeThemedEmbed(self.THEMES),
+        )
+        self.assertIsNotNone(qual)
+        assert qual is not None
+
+        reset_weak_signal_flag()
+        tl = semantic_timeline_from_texts(
+            slides,
+            build_semantic_blocks(words, self.DURATION, 5.0),
+            total_slides=4,
+            total_duration=self.DURATION,
+            embed_fn=_FakeThemedEmbed(self.THEMES),
+            options=self._options(),
+        )
+        self.assertIsNotNone(tl)
+        expected = last_quality()
+        self.assertAlmostEqual(qual["avg_z"], expected["avg_z"], places=9)
+        self.assertAlmostEqual(qual["avg_sim"], expected["avg_sim"], places=9)
+        self.assertEqual(sorted(qual), ["avg_sim", "avg_z", "blocks", "concordance", "confusability"])
+
+    def test_measure_has_no_side_effects(self):
+        # È una misura, non una decisione: non deve toccare la timeline di
+        # riferimento né il flag di segnale debole usato dal riepilogo.
+        from semantic_sync import (
+            alignment_quality_from_words,
+            last_quality,
+            reset_weak_signal_flag,
+            weak_signal_seen,
+        )
+
+        slides = [f"{t} slide" for t in self.THEMES]
+        reset_weak_signal_flag()
+        before = last_quality()
+        alignment_quality_from_words(
+            slides,
+            self._words(),
+            4,
+            self.DURATION,
+            options=self._options(),
+            embed_fn=_FakeThemedEmbed(self.THEMES),
+        )
+        self.assertEqual(last_quality(), before)
+        self.assertFalse(weak_signal_seen())
+
+    def test_measure_reports_none_when_signal_is_insufficient(self):
+        from semantic_sync import alignment_quality_from_words
+
+        # Nessun blocco: meglio None che un numero inventato da confrontare.
+        self.assertIsNone(
+            alignment_quality_from_words(
+                ["alfa slide", "beta slide"],
+                [],
+                2,
+                self.DURATION,
+                options=self._options(),
+                embed_fn=_FakeThemedEmbed(self.THEMES),
+            )
+        )
+
+
 class TestSemanticSync(unittest.TestCase):
     """Sincronizzazione semantica (embeddings): DP monotona senza LLM."""
 
     @staticmethod
     def _fake_embed(themes):
         """Embedder finto: vettore one-hot per ogni parola-tema presente."""
-
-        def _embed(texts):
-            out = []
-            for t in texts:
-                v = np.zeros(len(themes))
-                for i, k in enumerate(themes):
-                    if k in t:
-                        v[i] = 1.0
-                norm = np.linalg.norm(v)
-                out.append(v / norm if norm else v)
-            return np.array(out)
-
-        return _embed
+        return _FakeThemedEmbed(themes)
 
     def _blocks_sequential(self, themes, window=5.0):
         # Ogni coppia di blocchi parla dello stesso tema (transizioni ogni 10s)
@@ -1455,7 +1561,18 @@ class TestPlainSummary(unittest.TestCase):
         )
         self.assertIn("somiglianza tra parlato e slide è risultata debole", out)
         self.assertIn("contesta 2 scelte di slide", out)
-        self.assertIn("bassa (picco medio 0.20", out)
+        self.assertIn("bassa (slide confondibili per il motore, picco medio 0.20", out)
+
+    def test_low_confidence_names_the_reason_not_only_the_peak(self):
+        # Caso reale (13/09): il motore segnala slide confondibili mentre il
+        # picco normalizzato è ALTO (0.75 su soglia 0.45). La frase non deve
+        # sembrare in contraddizione con se stessa: "bassa" va motivata.
+        from semantic_sync import _set_weak_signal
+
+        _set_weak_signal()
+        out = self._render(quality={"avg_sim": 0.83, "avg_z": 0.75, "min_avg_z": 0.45})
+        self.assertIn("bassa (slide confondibili per il motore, picco medio 0.75", out)
+        self.assertNotIn("picco medio 0.75, soglia", out)
 
     def test_missing_check_is_stated(self):
         out = self._render()

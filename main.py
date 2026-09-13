@@ -15,17 +15,20 @@ import time
 from collections.abc import Sequence
 from contextlib import suppress
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import Any, NoReturn, cast
 
 from moviepy import AudioFileClip, VideoFileClip
 
 from chunks import Word
 from config import (
+    AUTO_BEAM_AB_MARGIN,
+    AUTO_BEAM_PINNED_RATIO,
     BASE_DIR,
     CACHE_DIR,
     DEFAULT_VIDEO_BUFFER_SEC,
     DEFAULT_VIDEO_FPS,
     DEFAULT_VIDEO_THREADS,
+    DEFAULT_WHISPER_BEAM_ACCURATE,
     STOPWORDS_ITA,
     atomic_write_text,
     bootstrap,
@@ -46,6 +49,7 @@ from machine_setup import machine_setup
 from ocr import PRESENTATION_SUFFIXES, convert_presentation_to_pdf, extract_slides_text_ocr
 from semantic_sync import (
     SemanticOptions,
+    alignment_quality_from_words,
     free_order_segments_from_words,
     last_quality,
     make_anchor_remap_filter,
@@ -65,7 +69,7 @@ from timeline import (
     extract_slide_one_references,
     reconcile_timeline,
 )
-from transcription import correct_transcript_names, transcribe_audio
+from transcription import correct_transcript_names, resolved_transcriber, transcribe_audio
 from updates import run_update_check
 from video import build_video, frame_consistency_check
 
@@ -427,9 +431,13 @@ def _quality_phrase(quality: dict[str, float] | None, weak: bool) -> str:
     min_z = float(quality.get("min_avg_z") or 0.0)
     avg_sim = float(quality.get("avg_sim") or 0.0)
     if weak:
+        # Il verdetto "bassa" NON nasce dal picco (che può essere alto, es. 0.75
+        # su soglia 0.45) ma dal fatto che le slide sono confondibili tra loro:
+        # citare solo il picco faceva sembrare la frase in contraddizione con il
+        # numero accanto. Si nomina il motivo reale.
         return (
-            f"bassa (picco medio {avg_z:.2f}, soglia {min_z:.2f}): la scaletta è "
-            "stimata dal contenuto"
+            f"bassa (slide confondibili per il motore, picco medio {avg_z:.2f}): "
+            "la scaletta è stimata dal contenuto"
         )
     return f"alta (picco medio {avg_z:.2f} su soglia {min_z:.2f}, cosine {avg_sim:.2f})"
 
@@ -728,6 +736,237 @@ def _file_hash(path: Path) -> str:
     return md5.hexdigest()
 
 
+def _transcript_cache_key(audio_hash: str, args: Any, beam: int | None = None) -> str:
+    """Chiave di cache della trascrizione.
+
+    Deve descrivere TUTTE le scelte che cambiano il testo prodotto: il motore
+    RISOLTO ('auto' non dice nulla: può essere OpenVINO o faster-whisper),
+    modello, e i parametri del motore effettivamente usato (device, compute
+    type, beam, batch per faster-whisper; device per OpenVINO).
+
+    Senza questo, cambiare `--whisper-beam`/`--whisper-batch`, il compute type
+    o il device riusava in silenzio la trascrizione prodotta con altre
+    impostazioni: testo e timestamp diversi da quelli attesi, senza alcun
+    avviso (la cache è per chiave, non valida il contenuto).
+
+    Args:
+        beam: beam da usare nella chiave, se diverso da quello della run. Serve
+            alla decodifica accurata, che deve avere una chiave SUA (altrimenti
+            la seconda trascrizione sovrascriverebbe la prima).
+    """
+    engine = resolved_transcriber(args.transcriber, Path(args.openvino_model_dir))
+    if engine == "openvino":
+        engine_params = [args.openvino_device]
+    else:
+        engine_params = [
+            args.whisper_device,
+            args.whisper_compute_type,
+            f"beam{args.whisper_beam if beam is None else beam}",
+            f"batch{args.whisper_batch}",
+        ]
+    parts = ["transcript", audio_hash[:12], args.lang, args.whisper_model, engine, *engine_params]
+    return "_".join(str(p) for p in parts)
+
+
+def _beam_auto_enabled(args: Any) -> bool:
+    """True se la pipeline può scegliere da sola il beam.
+
+    Solo con la decodifica veloce (beam <= 1) e con la scelta automatica
+    attiva: se l'utente chiede beam 2-5 ha già scelto l'accuratezza, e non c'è
+    nulla da rifare.
+    """
+    return bool(getattr(args, "auto_beam", True)) and int(args.whisper_beam) <= 1
+
+
+def _needs_accurate_beam(pinned_slides: int, total_slides: int) -> bool:
+    """True quando è il CONTENUTO a decidere la timeline, non le ancore.
+
+    Con la timeline fissata dalle ancore 'slide N' il testo serve solo a
+    rifinire confini già decisi, quindi la decodifica greedy è sufficiente.
+    Quando le slide vincolate sono poche (o nessuna: flusso libero), i confini
+    sono stimati dal testo: lì vale la decodifica di massima accuratezza.
+
+    Args:
+        pinned_slides: slide con un'ancora esplicita (la slide 1 non ha ancora)
+        total_slides: slide totali
+    """
+    if total_slides <= 1:
+        return False
+    pinned_ratio = pinned_slides / (total_slides - 1)
+    return pinned_ratio < AUTO_BEAM_PINNED_RATIO
+
+
+def _beam_ab_cache_key(slides_key: str, audio_hash: str, args: Any) -> str:
+    """Chiave della misura di confronto fra le due trascrizioni.
+
+    Contiene tutto ciò che può cambiare la MISURA: le slide (testi OCR),
+    l'audio, il modello di embedding e i parametri dell'allineamento. NON
+    contiene ``AUTO_BEAM_AB_MARGIN``: la misura è un dato, la decisione si
+    riapplica a ogni run, quindi cambiare soglia non invalida nulla.
+    """
+    model_tag = re.sub(r"[^A-Za-z0-9]+", "-", args.semantic_model.rsplit("/", 1)[-1]).strip("-")
+    return "_".join(
+        [
+            "beamab",
+            slides_key,
+            audio_hash[:12],
+            model_tag,
+            f"w{args.semantic_window}",
+            f"d{args.semantic_min_duration}",
+            f"t{args.semantic_temperature}",
+        ]
+    )
+
+
+def _use_accurate_transcript(ab: dict[str, object], accurate_added_anchors: bool) -> tuple[bool, str]:
+    """Decide quale delle due trascrizioni usare, in base alla misura.
+
+    Regola (in ordine):
+
+    1. l'accurata ha trovato ancore che la veloce non aveva -> resta l'accurata:
+       le ancore sono riferimenti espliciti, più affidabili di un proxy di
+       somiglianza;
+    2. confronto non calcolabile -> resta l'accurata (scelta prudente);
+    3. l'accurata vince di almeno ``AUTO_BEAM_AB_MARGIN`` -> resta l'accurata;
+    4. altrimenti si usa la VELOCE: se il testo migliore ce l'ha lei, pagare
+       (e usare) la decodifica accurata non ha senso.
+
+    Returns:
+        ``(usa_accurata, motivo)``
+    """
+    if accurate_added_anchors:
+        return True, "ha trovato ancore che la decodifica veloce non aveva"
+    if "error" in ab:
+        return True, "confronto non calcolabile, tengo la scelta prudente"
+    delta = float(cast(float, ab.get("delta_avg_z", 0.0)) or 0.0)
+    if delta >= AUTO_BEAM_AB_MARGIN:
+        return True, f"l'accurata ha il segnale migliore (Δ {delta:+.3f})"
+    return False, f"la veloce ha il segnale migliore (Δ {delta:+.3f})"
+
+
+def _compare_transcript_alignment(
+    args: Any,
+    slide_texts: list[str],
+    total_slides: int,
+    total_duration: float,
+    greedy_words: list[Word],
+    accurate_words: list[Word],
+    cache_key: str = "",
+) -> dict[str, object]:
+    """Misura la qualità di allineamento delle due trascrizioni dell'audio.
+
+    Le due trascrizioni sono misurate con lo STESSO metro e SENZA ancore:
+    è esattamente il caso in cui il testo decide la timeline, quindi la
+    differenza misura la trascrizione e non i vincoli. ``concordance`` e
+    ``confusability`` restano nel risultato perché su un deck confondibile
+    (slide quasi-duplicate) il confronto è rumore e va riconosciuto come tale.
+
+    La misura costa due embedding completi (~25s per trascrizione su un podcast
+    di 17 minuti): viene quindi messa in cache e riusata, perché la decisione va
+    riapplicata identica a ogni run.
+    """
+    if cache_key and not args.no_cache:
+        cached = _load_cache(cache_key)
+        ab_cached = cached.get("ab") if cached else None
+        if isinstance(ab_cached, dict):
+            log.info("   [Beam] Misura di confronto recuperata dalla cache (nessun re-embedding).")
+            note = dict(ab_cached)
+            note["from_cache"] = True
+            return note
+    options = SemanticOptions(
+        model_name=args.semantic_model,
+        cache_dir=args.semantic_cache_dir,
+        window_seconds=args.semantic_window,
+        min_slide_duration=args.semantic_min_duration,
+        min_avg_similarity=args.semantic_min_sim,
+        min_avg_z=args.semantic_min_z,
+        temperature=args.semantic_temperature,
+    )
+    t0 = time.time()
+    q_greedy = alignment_quality_from_words(
+        slide_texts, greedy_words, total_slides, total_duration, options=options
+    )
+    q_accurate = alignment_quality_from_words(
+        slide_texts, accurate_words, total_slides, total_duration, options=options
+    )
+    elapsed = time.time() - t0
+    if q_greedy is None or q_accurate is None:
+        log.info(
+            "   [Beam] Confronto non calcolabile (segnale insufficiente o modello "
+            "embedding non disponibile): tengo la trascrizione accurata."
+        )
+        return {"error": "qualità non calcolabile", "from_cache": False}
+
+    delta = float(q_accurate["avg_z"]) - float(q_greedy["avg_z"])
+    if delta > 0:
+        winner, verdict = "accurate", "avrebbe vinto la decodifica ACCURATA"
+    elif delta < 0:
+        winner, verdict = "greedy", "avrebbe vinto la decodifica VELOCE"
+    else:
+        winner, verdict = "pari", "le due decodifiche sono equivalenti"
+    log.info(
+        "   [Beam] Confronto sulle stesse slide, senza ancore: veloce %.3f, accurata "
+        "%.3f (Δ %+.3f) -> %s (%.0fs).",
+        float(q_greedy["avg_z"]),
+        float(q_accurate["avg_z"]),
+        delta,
+        verdict,
+        elapsed,
+    )
+    note = {
+        "greedy": {k: round(v, 4) for k, v in q_greedy.items()},
+        "accurate": {k: round(v, 4) for k, v in q_accurate.items()},
+        "delta_avg_z": round(delta, 4),
+        "would_have_won": winner,
+        "seconds": round(elapsed, 1),
+        "from_cache": False,
+    }
+    if cache_key and not args.no_cache:
+        _save_cache(cache_key, {"ab": note})
+    return note
+
+
+def _transcribe_with_accurate_beam(
+    audio_path: Path,
+    args: Any,
+    cache_key_accurate: str,
+) -> tuple[str, list[Word], dict[str, object]]:
+    """Rifà la trascrizione con il beam di massima accuratezza (o la riprende).
+
+    Restituisce (testo, parole raw, nota per il report). Il testo della
+    decodifica veloce resta in cache sotto la sua chiave: la scelta automatica
+    non cancella il lavoro già fatto, e la run successiva ritrova entrambe le
+    trascrizioni senza rifare nulla.
+    """
+    beam = DEFAULT_WHISPER_BEAM_ACCURATE
+    cached = None if args.no_cache else _load_cache(cache_key_accurate)
+    if cached and "transcript" in cached:
+        log.info("   [Beam] Trascrizione accurata (beam %d) recuperata dalla cache.", beam)
+        return cast(str, cached["transcript"]), cast("list[Word]", cached.get("words_raw") or []), {
+            "accurate_beam": beam,
+            "accurate_from_cache": True,
+        }
+
+    t0 = time.time()
+    transcript, words = transcribe_audio(
+        audio_path,
+        language=args.lang,
+        model_size=args.whisper_model,
+        transcriber=args.transcriber,
+        openvino_model_dir=Path(args.openvino_model_dir),
+        openvino_device=args.openvino_device,
+        whisper_device=args.whisper_device,
+        whisper_compute_type=args.whisper_compute_type,
+        whisper_beam=beam,
+        whisper_batch=args.whisper_batch,
+    )
+    seconds = time.time() - t0
+    if not args.no_cache:
+        _save_cache(cache_key_accurate, {"transcript": transcript, "words_raw": words})
+    log.info("   [Beam] Trascrizione accurata (beam %d) completata in %.0fs.", beam, seconds)
+    return transcript, words, {"accurate_beam": beam, "accurate_seconds": round(seconds, 1)}
+
+
 def _cache_path(key: str) -> Path:
     """Percorso del file di cache per una data chiave."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -865,8 +1104,25 @@ def main(argv: list | None = None) -> None:
     # Il modello E il motore fanno parte della chiave: cambiando motore o
     # --whisper-model non deve riusarsi la cache di un altro, che produce
     # timestamp/token diversi.
-    cache_key_transcript = f"transcript_{audio_hash[:12]}_{args.lang}_{args.whisper_model}_{args.transcriber}"
-    active_cache_keys: set[str] = {cache_key_slides, cache_key_transcript}
+    cache_key_transcript = _transcript_cache_key(audio_hash, args)
+    # Entrambe le trascrizioni possibili dell'audio corrente (veloce e accurata)
+    # sono cache ATTIVE: la scelta automatica del beam può produrle tutte e due,
+    # e cancellare la seconda a fine run farebbe ripagare la trascrizione
+    # accurata a ogni esecuzione (la decisione si prende solo dopo aver letto il
+    # testo, quindi all'avvio non si sa quale servirà).
+    cache_key_transcript_accurate = _transcript_cache_key(
+        audio_hash, args, beam=DEFAULT_WHISPER_BEAM_ACCURATE
+    )
+    # Anche la misura di confronto fra le due trascrizioni è una cache attiva:
+    # rifarla a ogni run costerebbe due embedding completi per una decisione che
+    # non cambia.
+    cache_key_beam_ab = _beam_ab_cache_key(cache_key_slides, audio_hash, args)
+    active_cache_keys: set[str] = {
+        cache_key_slides,
+        cache_key_transcript,
+        cache_key_transcript_accurate,
+        cache_key_beam_ab,
+    }
 
     # --- Pulizia cache ALL'AVVIO ---
     # A ogni nuova run rimuove subito le cache di slide/trascrizione di
@@ -880,6 +1136,10 @@ def main(argv: list | None = None) -> None:
     # --- Timing ---
     t_total_start = time.time()
     t_ocr = t_transcribe = t_sync = t_video = 0.0
+    # Secondi del confronto fra le due trascrizioni (misura, non decisione):
+    # è lavoro semantico, quindi viene attribuito alla sincronizzazione, così la
+    # tabella dei tempi continua a sommare al totale.
+    beam_ab_seconds = 0.0
 
     # Strutture accumulate
     slide_files: list[str] | None = None
@@ -965,6 +1225,7 @@ def main(argv: list | None = None) -> None:
                 whisper_device=args.whisper_device,
                 whisper_compute_type=args.whisper_compute_type,
                 whisper_beam=args.whisper_beam,
+                whisper_batch=args.whisper_batch,
             )
             if not args.no_cache:
                 # Fix A: salva anche le parole raw per estrazione deterministica
@@ -996,6 +1257,13 @@ def main(argv: list | None = None) -> None:
         # cruciali per il matching slide<->parlato di LLM e MiniLM. ---
         if words_raw:
             words_raw = correct_transcript_names(words_raw)
+
+        # Scelte fatte dalla run che finiscono in sync_report.json (es.
+        # escalation per segnale debole, beam automatico): prima esistevano solo
+        # nei log. Va inizializzata prima della biforcazione flusso
+        # libero/ordinato, perché il report è costruito più avanti per entrambi i
+        # flussi, e prima della scelta del beam, che la annota qui dentro.
+        sync_notes: dict[str, object] = {}
 
         # --- Auto-detection flusso (dopo trascrizione, prima della sincronizzazione) ---
         flow: str
@@ -1036,13 +1304,21 @@ def main(argv: list | None = None) -> None:
                     flow = "slide-audio"
                     args.llm = "off"
 
+        # --- Ancore deterministiche disponibili ---
+        # Calcolate una volta: servono all'avviso qui sotto e alla scelta
+        # automatica del beam. Nel flusso libero non vincolano l'allineamento
+        # (le slide seguono il contenuto), quindi non si cercano.
+        flow_anchors: dict[int, float] = (
+            extract_slide_anchors(words_raw, total_slides, flow) if flow != "free" and words_raw else {}
+        )
+
         # --- Check preventivo ancore: avviso PRIMA della sincronizzazione se il
         # podcast ha annunciato poche slide (probabile deriva del prompt
         # NotebookLM). Con poche ancore la timeline sarà stimata (9Router o
         # fallback MiniLM) e le slide non annunciate avranno durate brevi o
         # micro-segmenti: conviene rigenerare l'audio. ---
         if flow != "free" and words_raw:
-            early_anchors = extract_slide_anchors(words_raw, total_slides, flow)
+            early_anchors = flow_anchors
             early_missing = [s for s in range(2, total_slides + 1) if s not in early_anchors]
             if early_anchors and early_missing:
                 log.warning(
@@ -1066,6 +1342,88 @@ def main(argv: list | None = None) -> None:
                     except (EOFError, KeyboardInterrupt):
                         _abort("Interrotto dall'utente prima della sincronizzazione.")
 
+        # --- Beam automatico: veloce quando le ancore vincolano, accurato
+        # quando è il contenuto a decidere -------------------------------------
+        # La decisione non si può prendere PRIMA di trascrivere (le ancore
+        # esistono solo dentro il testo), quindi si corregge a posteriori: se le
+        # ancore fissano la timeline il testo rifinisce confini già decisi e la
+        # decodifica veloce non costa precisione; se ne fissano poche (o nessuna:
+        # flusso libero) i confini sono STIMATI dal testo, e lì vale la decodifica
+        # di massima accuratezza. Il costo si paga una volta per audio: la cache
+        # è per chiave, quindi la run successiva ritrova entrambe le trascrizioni.
+        if _beam_auto_enabled(args) and _needs_accurate_beam(len(flow_anchors), total_slides):
+            # Istantanea della decodifica veloce: serve al confronto misurabile e
+            # a poter tornare indietro senza rifare nulla (è già in cache).
+            greedy_transcript = transcript
+            greedy_words = list(words_raw or [])
+            greedy_anchors = dict(flow_anchors)
+            log.info(
+                "\n   [Beam] %d slide su %d hanno un'ancora esplicita: la timeline è "
+                "decisa dal contenuto, quindi serve la decodifica accurata (beam %d). "
+                "Con le ancore complete basta la decodifica veloce.",
+                len(flow_anchors),
+                max(total_slides - 1, 0),
+                DEFAULT_WHISPER_BEAM_ACCURATE,
+            )
+            transcript, accurate_words, beam_note = _transcribe_with_accurate_beam(
+                audio_path, args, cache_key_transcript_accurate
+            )
+            t_transcribe += float(cast("float", beam_note.pop("accurate_seconds", 0.0)) or 0.0)
+            if accurate_words:
+                words_raw = correct_transcript_names(accurate_words)
+            # Le ancore vanno ricercate nel testo nuovo: una trascrizione più
+            # accurata può riconoscere annunci che la decodifica veloce aveva
+            # perso, e allora la timeline torna vincolata (gratis).
+            rechecked = (
+                extract_slide_anchors(words_raw, total_slides, flow) if flow != "free" and words_raw else {}
+            )
+            if rechecked and not flow_anchors:
+                log.info(
+                    "   [Beam] La trascrizione accurata ha trovato %d ancore che la "
+                    "decodifica veloce aveva perso: la timeline torna vincolata.",
+                    len(rechecked),
+                )
+            flow_anchors = rechecked or flow_anchors
+            beam_note["pinned_slides"] = len(flow_anchors)
+            beam_note["total_slides"] = total_slides
+            beam_note["chosen"] = "accurate"
+            # Confronto misurabile fra le due trascrizioni. Richiede l'embedding
+            # di entrambe (~25s l'una), quindi si fa solo qui, dove la seconda
+            # trascrizione esiste già e il caso è quello in cui il testo decide
+            # tutto; la misura viene messa in cache e riusata.
+            if greedy_words and words_raw:
+                ab_note = _compare_transcript_alignment(
+                    args,
+                    slide_texts,
+                    total_slides,
+                    total_duration,
+                    greedy_words,
+                    words_raw,
+                    cache_key_beam_ab,
+                )
+                beam_note["ab"] = ab_note
+                if not ab_note.get("from_cache"):
+                    beam_ab_seconds = float(cast(float, ab_note.get("seconds", 0.0)) or 0.0)
+                # Le ancore sono riferimenti espliciti: se la trascrizione
+                # accurata ne ha trovate di nuove, resta quella.
+                use_accurate, reason = _use_accurate_transcript(
+                    ab_note, len(flow_anchors) > len(greedy_anchors)
+                )
+                beam_note["reason"] = reason
+                if not use_accurate:
+                    # La misura ha deciso: si torna alla trascrizione veloce
+                    # (già in cache, nessuna trascrizione rifatta).
+                    transcript = greedy_transcript
+                    words_raw = greedy_words
+                    flow_anchors = greedy_anchors
+                    beam_note["chosen"] = "greedy"
+                log.info(
+                    "   [Beam] Uso la trascrizione %s: %s.",
+                    "ACCURATA" if use_accurate else "VELOCE",
+                    reason,
+                )
+            sync_notes["beam"] = beam_note
+
         # --- Fase 3: Sincronizzazione semantica (unico motore) ---
         t_phase_start = time.time()
 
@@ -1075,11 +1433,6 @@ def main(argv: list | None = None) -> None:
         # --- Flusso libero (riordino): le slide seguono il contenuto del
         # podcast e possono apparire in qualsiasi ordine o ripetersi ---
         slide_ids: list[int]
-        # Scelte fatte dalla run che finiscono in sync_report.json (es.
-        # escalation per segnale debole): prima esistevano solo nei log. Va
-        # inizializzata QUI, prima della biforcazione flusso libero/ordinato,
-        # perché il report è costruito più avanti per entrambi i flussi.
-        sync_notes: dict[str, object] = {}
         if flow == "free":
             log.info("3. Selezione libera: le slide seguono il contenuto del podcast, senza vincolo di ordine.")
 
@@ -1198,7 +1551,10 @@ def main(argv: list | None = None) -> None:
         else:
             # Ancore deterministiche "slide N" dalla trascrizione: riferimenti
             # espliciti ad alta precisione che vincolano l'allineamento semantico.
-            semantic_anchors = extract_slide_anchors(words_raw, total_slides, flow)
+            # Sono già state calcolate sopra (`flow_anchors`) e ricalcolate se la
+            # scelta automatica del beam ha rifatto la trascrizione: riusarle
+            # evita una seconda scansione identica (e il suo log duplicato).
+            semantic_anchors = flow_anchors
             # Riferimento parlato alla "slide 1": la slide 1 reale è sempre 0.0,
             # ma la numerazione dello speaker può essere sfasata (dice "slide 1"
             # mostrando la slide 2 del PDF). Viene passato SOLO alla verifica LLM
@@ -1755,7 +2111,7 @@ def main(argv: list | None = None) -> None:
         # --- Dry-run: fermati qui ---
         if args.dry_run:
             t_total = time.time() - t_total_start
-            _print_timing(t_ocr, t_transcribe, t_sync, model_load_seconds(), 0.0, t_total)
+            _print_timing(t_ocr, t_transcribe, t_sync + beam_ab_seconds, model_load_seconds(), 0.0, t_total)
             _warn_sync_uncertainty()
             _log_plain_summary(
                 durations,
@@ -1893,7 +2249,7 @@ def main(argv: list | None = None) -> None:
 
         # --- Riepilogo finale ---
         t_total = time.time() - t_total_start
-        _print_timing(t_ocr, t_transcribe, t_sync, model_load_seconds(), t_video, t_total)
+        _print_timing(t_ocr, t_transcribe, t_sync + beam_ab_seconds, model_load_seconds(), t_video, t_total)
         _warn_sync_uncertainty()
 
         # Pulizia cache orfana

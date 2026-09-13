@@ -168,10 +168,95 @@ e veloce il router lato server.
 | Modello Whisper OpenVINO `small` | ~930 MB | `--openvino-download` (una tantum, consigliato) |
 | Lingua Tesseract ITA | inclusa | `tessdata/ita.traineddata` |
 
-> **Trascrizione veloce (consigliata): OpenVINO GenAI.** Su PC Intel con iGPU
-> Iris Xe e senza GPU NVIDIA, faster-whisper su CPU impiega ~8 min per 28 min
-> di audio. Il motore **OpenVINO** (default `--transcriber auto`) usa la iGPU
-> via IR e ci mette ~5 min, con word timestamps identici. Setup una tantum:
+> **La trascrizione è il collo di bottiglia** (≈85% del tempo su un podcast
+> reale). I due acceleratori sono attivi **di default** e non richiedono setup:
+>
+> 1. **Decoding a batch** (`--whisper-batch 8`): stesso modello, stessi pesi,
+>    stessa decodifica, solo più segmenti elaborati insieme.
+> 2. **Beam size 1** (`--whisper-beam 1`): decodifica greedy.
+>
+> Misurato su podcast reale (17m38s, Snapdragon X Elite, small int8, 8 thread):
+>
+> | configurazione | tempo |
+> |---|---|
+> | beam 5 sequenziale | 91.5 s (su 240 s di audio) |
+> | beam 1 sequenziale | 74.6 s |
+> | **beam 1 + batch 8 (default)** | **40.1 s** |
+>
+> Sull'audio intero: 2m59s invece di ~6m40s stimati, cioè **~2.3× più veloce**.
+> **Precisione:** confrontando le 10 ancore `slide N` con quelle prodotte da
+> beam 5, lo scarto medio è 0.050s e il massimo **0.150s** — 20 volte sotto la
+> durata minima di una slide (3s), nessuna ancora persa o aggiunta. Le ancore
+> sono ciò che vincola la timeline, quindi la sincronizzazione non cambia.
+> Se serve il testo più accurato possibile: `--whisper-beam 5` (il batch resta
+> attivo, nessuna perdita); per disattivare il batch: `--whisper-batch 0`.
+>
+> **La scelta del beam è automatica.** Il beam è un parametro della
+> *trascrizione*, ma le ancore `slide N` si conoscono solo *dopo* aver
+> trascritto: la decisione non può essere presa in anticipo. Quindi la pipeline
+> trascrive veloce (greedy) e poi corregge:
+>
+> - **timeline vincolata dalle ancore** (≥ metà delle slide annunciate): il testo
+>   rifinisce confini già decisi, quindi la decodifica veloce resta. Nessun costo.
+> - **timeline decisa dal contenuto** (flusso libero, o meno della metà delle
+>   slide annunciate): il testo è l'unico segnale di sincronizzazione, quindi la
+>   trascrizione viene rifatta a beam `5`.
+>
+> Il costo della seconda trascrizione si paga **una volta sola per audio**: la
+> cache è per chiave, quindi la run successiva ritrova entrambe le trascrizioni
+> (verificato: seconda run 0s). Con un deck ancorato non succede nulla di tutto
+> questo. Disattivabile con `--no-auto-beam` (o `AUTO_BEAM=0`); si può forzare il
+> percorso accurato con `AUTO_BEAM_PINNED_RATIO=1.1`. Con `--whisper-beam 2` o
+> superiore la scelta automatica non interviene: hai già scelto l'accuratezza.
+>
+> **La scelta viene misurata, e poi seguita.** Poiché le due trascrizioni
+> esistono entrambe, la pipeline ne confronta la qualità di allineamento sulle
+> stesse slide e **senza ancore** (è il caso in cui il testo decide) e usa
+> quella col segnale migliore:
+>
+> - l'accurata vince (di almeno `AUTO_BEAM_AB_MARGIN`, default `0`) → resta l'accurata;
+> - vince la **veloce** → si usa la veloce: i minuti della decodifica accurata
+>   non si pagano più, né per il testo né per il resto della pipeline;
+> - l'accurata ha trovato **ancore** che la veloce non aveva → resta l'accurata
+>   (le ancore sono riferimenti espliciti, più affidabili di un proxy di somiglianza);
+> - confronto non calcolabile → resta l'accurata (scelta prudente).
+>
+> La misura costa ~25s per trascrizione (~50-70s in tutto su un podcast da 17
+> minuti, solo nel percorso accurato), quindi viene **messa in cache** e riusata:
+> rifarla a ogni run significherebbe due embedding completi per una decisione che
+> non cambia. Sui dati reali del 13/09 vinceva la veloce (0.791 contro 0.770) e la
+> pipeline usa la veloce: seconda run **40s in tutto**, senza re-embedding.
+>
+> **Quanto vale questa misura?** Verificata confrontando ~18 timeline candidate
+> (corretta, spostata di 4s, invertita, mescolata, casuale) con la verità nota, su
+> un deck derivato dall'audio e sul deck reale (probe temporaneo, non nel repo):
+>
+> - **differenze grandi → separazione netta.** Ordine invertito: 0.05 contro 0.68
+>   della timeline corretta (accuratezza 0.00 contro 0.97). Il punteggio riconosce
+>   senza ambiguità "slide sbagliata" e "ordine sbagliato".
+> - **differenze piccole → non le distingue.** Spostando un confine di 8-20s il
+>   punteggio può **salire** (0.530) mentre l'accuratezza **scende** (0.97 → 0.84):
+>   il picco di somiglianza sta oltre il confine reale, perché lo speaker anticipa
+>   l'argomento prima della transizione. Concordanza con la verità: 79.7%
+>   (Spearman +0.743).
+> - **la cosine grezza (vecchia misura) resta inutilizzabile:** varia tra 0.821 e
+>   0.859 su *tutte* le candidate, giuste o sbagliate.
+>
+> Conseguenza pratica: uno scarto di ~0.02 fra due trascrizioni è **dentro la
+> banda di rumore** del punteggio. La scelta fra le due resta legittima ma non è
+> una "vittoria" dimostrata; per non ribaltare su rumore usare
+> `AUTO_BEAM_AB_MARGIN=0.05`. Da sapere anche: il controllo frame **non può**
+> rispondere a questa domanda — verifica che il video rispetti la timeline
+> dichiarata (11/11 anche su una timeline arbitraria), non che la timeline sia
+> quella giusta.
+>
+> Nota hardware: 12 thread sono più lenti di 8 su Snapdragon X Elite (banda di
+> memoria), quindi il default resta 8.
+>
+> **OpenVINO GenAI (solo iGPU Intel).** Su PC Intel con iGPU Iris Xe e senza
+> GPU NVIDIA è un'alternativa più veloce di faster-whisper su CPU (~5 min per 28
+> min di audio), con word timestamps identici. Non serve su macchine ARM/AMD,
+> dove OpenVINO vede solo la CPU. Setup una tantum:
 >
 > ```bash
 > pip install openvino openvino-genai
@@ -328,7 +413,12 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `WHISPER_MODEL` (env) | `small` | Modello usato da `genera_video.bat` (es. `set WHISPER_MODEL=tiny` per la bozza veloce) |
 | `VERIFY_VIDEO` (env) | `1` | Controllo del video finito attivato da `genera_video.bat` (pochi secondi): `set VERIFY_VIDEO=0` per disattivarlo |
 | `--transcriber` | `auto` | `auto`/`openvino`/`whisper` (OpenVINO ~1.5x più veloce) |
-| `--whisper-beam` | `5` | Beam size faster-whisper (1-2 = più veloce, 5 = più preciso) |
+| `--whisper-beam` | `1` | Beam size faster-whisper. `1` = decodifica greedy, default **misurato**: ~2.3× più veloce con le ancore `slide N` entro 0.15s da beam 5. Con `1` la pipeline **sceglie da sola**: decodifica veloce se le slide sono vincolate dalle ancore, altrimenti rifà la trascrizione a beam `5` (vedi sopra). `2`-`5` = scelta manuale, nessuna correzione automatica |
+| `--no-auto-beam` | — | Disattiva la scelta automatica del beam: usa esattamente `--whisper-beam` (o `AUTO_BEAM=0`) |
+| `AUTO_BEAM_PINNED_RATIO` (env) | `0.5` | Frazione di slide vincolate da ancore sotto la quale scatta la decodifica accurata (`1.1` = forza sempre il percorso accurato). `WHISPER_BEAM_ACCURATE` (env, default `5`) sceglie il beam di quella decodifica |
+| `AUTO_BEAM_AB_MARGIN` (env) | `0.0` | Quanto deve vincere la decodifica **accurata** (in `avg_z`) per essere preferita alla veloce. `0.0` = basta non perdere. La **risoluzione misurata** del punteggio è ~`0.05-0.10` (vedi sotto): con `AUTO_BEAM_AB_MARGIN=0.05` la veloce subentra solo se il vantaggio è fuori dalla banda di rumore |
+| `--whisper-batch` | `8` | Segmenti decodificati insieme (stesso modello e stessa decodifica: cambia solo il throughput). `0` = sequenziale. Ripiega da solo se il decoder a batch non è disponibile |
+| `WHISPER_BEAM` / `WHISPER_BATCH` (env) | `1` / `8` | Override dei due parametri senza toccare la riga di comando |
 | `--openvino-device` | `GPU` | Device OpenVINO (`GPU` iGPU o `CPU`) |
 | `--openvino-download` | — | Scarica modello OpenVINO IR (una tantum) |
 | `--semantic-model` | e5-large | Modello embedding |
@@ -373,6 +463,16 @@ misurata** dal motore (`quality`: `avg_sim` grezza, `avg_z` normalizzata,
 soglia usata) e il verdetto `weak_signal`, le discrepanze della revisione LLM
 e — con `--verify-video` — l'esito del confronto frame vs slide. Così la
 sincronizzazione resta verificabile a posteriori senza rigenerare il video.
+
+Quando la scelta automatica del beam entra in gioco, il report contiene anche
+`beam`: la trascrizione **usata** (`chosen`: `greedy` o `accurate`), il motivo
+(`reason`) e `beam.ab`, cioè la **misura di allineamento delle due trascrizioni**
+sulle stesse slide e senza ancore (`greedy`, `accurate`, `delta_avg_z`,
+`would_have_won`, `seconds`, `from_cache`). Sui dati reali del 13/09: veloce
+0.791, accurata 0.770 → *avrebbe vinto la veloce*, con `concordance` 0.62 contro
+0.53, e la pipeline ha usato la veloce. `concordance` e `confusability` restano
+nel report perché su un deck confondibile il confronto è rumore e va riconosciuto
+come tale.
 
 ### Riparazione automatica (verifica del video → nuovo confine)
 
@@ -506,12 +606,21 @@ embedding fallito) e non vanno "stretti" senza motivo.
 | `temp_slides/` | Slide renderizzate |
 | `.cache/` | Cache OCR, trascrizione, embedding |
 
+La cache della trascrizione è indicizzata da **tutto ciò che cambia il testo
+prodotto** — audio, lingua, modello, motore risolto (`auto` può essere OpenVINO
+o faster-whisper) e i parametri del motore (`..._small_whisper_cpu_int8_beam1_batch8.json`).
+Conseguenza pratica: cambiando `--whisper-beam`, `--whisper-batch`, il compute
+type o il device la trascrizione viene **rifatta**, invece di riusare in
+silenzio un testo prodotto con altre impostazioni. Al primo avvio dopo un
+aggiornamento che cambia questi parametri, quindi, la trascrizione riparte da
+zero una volta sola.
+
 ---
 
 ## 🔧 Come funziona
 
 1. **OCR** — Ogni pagina PDF → immagine (DPI 300) → Tesseract.
-2. **Trascrizione** — Audio → Whisper (faster-whisper) con timestamp al decimo di secondo. Stopword rimosse, parole di transizione ("passiamo", "slide", "blocco"...) preservate.
+2. **Trascrizione** — Audio → Whisper (faster-whisper) con timestamp al decimo di secondo, **decodifica a batch** e beam 1 (~2.3× più veloce a parità di ancore: vedi sopra). Stopword rimosse, parole di transizione ("passiamo", "slide", "blocco"...) preservate.
 3. **Auto-detection** — Scansione trascrizione per decidere il flusso (`slide-audio` o `audio-slide`).
 4. **Ancore "slide N"** — Riferimenti espliciti → ancore deterministiche ad alta precisione. Riconosce numeri in cifre (*"slide 3"*), cardinali (*"slide tre"*, *"numero due"*), **ordinali** (*"la terza diapositiva"*, *"la quinta slide"*) in entrambi i generi, con articolo o "numero" in mezzo, e varianti fonetiche di trascrizione (*"nonna slide"* → slide 9, *"sla e due"* → slide 2, *"asl cinque"* → slide 5, *"sallay 2"* / *"slaib6"* → slide 2/6 con numero incorporato).
 5. **Verifica mapping ancore** — Se la numerazione parlata è sfasata rispetto al PDF (es. copertina esclusa: lo speaker dice "slide 1" mostrando la slide 2), corregge il numero di slide delle ancore mantenendone i tempi esatti. Prima l'**euristica deterministica** (embeddings locali, offline, sempre attiva): rileva un offset sistematico coerente su tutte le ancore e lo applica senza 9Router. Fallback **LLM** se l'offset non è sistematico: legge il contenuto del parlato dopo ogni "slide N" e decide il numero reale di slide. Tempi sempre rispettati, mai spostati.

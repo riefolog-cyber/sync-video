@@ -570,10 +570,61 @@ DEFAULT_WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")  # tiny/base/sm
 DEFAULT_WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")  # 'cpu' o 'cuda'
 DEFAULT_WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")  # int8 (cpu) / float16 (cuda)
 
-# Beam size faster-whisper: 5 = massima precisione (default); 1-2 accelera
-# la trascrizione del 30-50% con perdita minima su modelli piccoli.
-# Override con WHISPER_BEAM.
-DEFAULT_WHISPER_BEAM = _env_int("WHISPER_BEAM", 5)
+# Beam size faster-whisper. 1 (greedy) = default MISURATO.
+#
+# Misura su podcast reale (1058s di audio, faster-whisper small int8):
+#   beam 5 sequenziale   91.5s su uno slice di 240s  (RTF 0.381)
+#   beam 1 sequenziale   74.6s                       (RTF 0.311)
+#   beam 1 + batch 8     40.1s                       (RTF 0.167)  <- default
+#   beam 1 + batch 8 + 12 thread: 44.2s (PEGGIO: 8 thread e' il sweet spot)
+#
+# Precisione della sincronizzazione sull'audio INTERO, 10 ancore 'slide N':
+#   beam 5 -> beam 1: delta medio 0.050s, delta MASSIMO 0.150s, nessuna ancora
+#   persa o aggiunta. Il drift e' 20x sotto la durata minima di una slide
+#   (DEFAULT_SEMANTIC_MIN_DURATION = 3s), quindi non sposta alcun confine.
+# Override con WHISPER_BEAM (5 = massima accuratezza del testo).
+DEFAULT_WHISPER_BEAM = _env_int("WHISPER_BEAM", 1)
+# Decoding a batch (BatchedInferencePipeline di faster-whisper): stesso modello,
+# stessi pesi, stessa decodifica -> nessuna perdita di qualita', solo throughput.
+# 8 = batch ottimale misurato (16 non migliora, 40.1s vs 40.1s).
+# 0 o 1 = decodifica sequenziale (fallback automatico se la classe manca).
+# Override con WHISPER_BATCH.
+DEFAULT_WHISPER_BATCH = _env_int("WHISPER_BATCH", 8)
+# Beam size della decodifica ACCURATA: usato quando la timeline NON è vincolata
+# dalle ancore 'slide N', cioè quando il testo è l'unico segnale di
+# sincronizzazione (flusso libero, o quasi nessuna slide annunciata).
+# Override con WHISPER_BEAM_ACCURATE.
+DEFAULT_WHISPER_BEAM_ACCURATE = _env_int("WHISPER_BEAM_ACCURATE", 5)
+# Scelta automatica del beam (vedi main._needs_accurate_beam). La decisione non
+# può essere presa prima di trascrivere: le ancore si conoscono solo dal testo.
+# Quindi si trascrive veloce (greedy) e, SOLO se le ancore vincolano meno di
+# questa frazione delle slide, la trascrizione viene rifatta con la decodifica
+# accurata: lì i confini sono stimati dal contenuto e la qualità del testo conta.
+#   slide vincolate / (slide totali - 1) < AUTO_BEAM_PINNED_RATIO -> rifà
+# Override con AUTO_BEAM_PINNED_RATIO (1.1 = forza sempre il percorso accurato).
+AUTO_BEAM_PINNED_RATIO = _env_float("AUTO_BEAM_PINNED_RATIO", 0.5)
+# Attiva la scelta automatica (disattivabile con --no-auto-beam o AUTO_BEAM=0).
+DEFAULT_AUTO_BEAM = os.environ.get("AUTO_BEAM", "1") == "1"
+# Quanto deve vincere la decodifica ACCURATA (in `avg_z`) per essere preferita
+# alla veloce quando le due trascrizioni vengono confrontate. 0.0 = basta non
+# perdere: a parità resta l'accurata, ma se la veloce ha il segnale migliore si
+# usa quella e non si pagano minuti di trascrizione per nulla.
+#
+# ⚠️ RISOLUZIONE MISURATA DEL PUNTEGGIO (probe su podcast reale, 261 blocchi):
+# confrontando ~18 timeline candidate (giusta, spostate di 4s, invertite,
+# mescolate, casuali) con la verità nota, il punteggio ordinato per accuratezza:
+#   - differenze GRANDI = separazione netta: ordine invertito 0.05 contro 0.68
+#     della timeline corretta (accuracy 0.00 contro 0.97);
+#   - differenze PICCOLE = non distinguibili: spostando un confine di 8-20s il
+#     punteggio può SALIRE (0.530) mentre l'accuratezza scende (0.97 -> 0.84),
+#     perché il picco di somiglianza sta oltre il confine reale (lo speaker
+#     anticipa l'argomento). Sotto ~0.05-0.10 il punteggio non dice chi è
+#     meglio: concordanza con la verità 79.7%, Spearman +0.743.
+# Quindi: 0.0 = "la misura decide sempre", anche su scarti che non distingue.
+# Con 0.05 (consigliato) o 0.10 la veloce subentra solo quando il vantaggio è
+# fuori dalla banda di rumore.
+# Override con AUTO_BEAM_AB_MARGIN.
+AUTO_BEAM_AB_MARGIN = _env_float("AUTO_BEAM_AB_MARGIN", 0.0)
 # Motore OpenVINO GenAI (più veloce su iGPU Intel). Modello IR pre-convertito,
 # scaricabile da HuggingFace: OpenVINO/whisper-small-fp16-ov
 DEFAULT_OPENVINO_MODEL_DIR = os.environ.get("OPENVINO_MODEL_DIR", str(CACHE_DIR / "whisper_openvino_small"))
@@ -775,7 +826,29 @@ Esempi:
         type=int,
         default=DEFAULT_WHISPER_BEAM,
         help=f"Beam size faster-whisper (default: {DEFAULT_WHISPER_BEAM}). "
-        f"1-2 = più veloce, 5 = più preciso",
+        f"1 = più veloce (misurato: ancore 'slide N' entro 0.15s da beam 5), "
+        f"5 = massima accuratezza del testo. Con 1 (default) la pipeline sceglie "
+        f"DA SOLA: se le slide sono vincolate dalle ancore 'slide N' tiene la "
+        f"decodifica veloce, altrimenti rifà la trascrizione a beam "
+        f"{DEFAULT_WHISPER_BEAM_ACCURATE} (il testo è l'unico segnale di "
+        f"sincronizzazione). Un valore >= 2 disattiva la scelta automatica",
+    )
+    parser.add_argument(
+        "--no-auto-beam",
+        action="store_false",
+        dest="auto_beam",
+        default=DEFAULT_AUTO_BEAM,
+        help="Disattiva la scelta automatica del beam: usa esattamente "
+        "--whisper-beam, senza mai rifare la trascrizione per accuratezza",
+    )
+    parser.add_argument(
+        "--whisper-batch",
+        type=int,
+        default=DEFAULT_WHISPER_BATCH,
+        help=f"Batch size del decoding faster-whisper (default: {DEFAULT_WHISPER_BATCH}). "
+        f"Stesso modello e stessa decodifica, solo più throughput; 0 = sequenziale. "
+        f"Se il decoder a batch non è disponibile la trascrizione ripiega da sola "
+        f"sul percorso sequenziale",
     )
     parser.add_argument(
         "--no-auto-setup",
