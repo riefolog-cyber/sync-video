@@ -36,9 +36,6 @@ Per ogni sezione:
 2. spiega i punti e le parole chiave della slide
 3. chiudi con una domanda aperta e poi con una frase riassuntiva. (non ripetere ogni volta "in sintesi")
 
-VERIFICA FINALE (OBBLIGATORIO):
-Ripercorri il piano voce per voce: ogni voce deve corrispondere a ESATTAMENTE una sezione, nessuna fusa con la precedente o la successiva (nemmeno se breve o simile alla precedente). A fine audio devi aver annunciato TUTTE le slide 2..M del PDF in ordine (la slide 1 inizia a 0.0 senza annuncio), ciascuna con la sua ancora "passiamo alla slide N" seguita dal titolo della slide.
-
 
 TONO E STILE DEL DIBATTITO
 ═══════════════════════════════════════════════════════════
@@ -47,17 +44,6 @@ TONO E STILE DEL DIBATTITO
 ▸ DINAMICA: Due conduttori in scambio rapido, senza monologhi; uno solleva dubbi da studente, l'altro chiarisce senza giudicare. Rivolgiti sempre direttamente agli studenti.
 ▸ FOCUS: Nodi con valenza educativa, etica, esistenziale o culturale; niente tono moralistico: proponi i concetti come domande, non come verità.
 ▸ INTRO: Breve (30-40 s) e già parte della prima sezione, senza annunciare una scaletta.
-
-
-## Checklist qualità post-generazione
-
-- [ ] Ogni sezione (dalla seconda in poi) inizia con "passiamo alla slide N", numero pronunciato per esteso e chiaramente subito dopo "slide", una sola volta, seguito dal titolo della slide.
-- [ ] Tutte le slide annunciate in ordine rigoroso, nessuna saltata né fusa con un'altra; nessun sinonimo ("sezione 3", "diapositiva", "punto 2").
-- [ ] Conteggio finale: numero di "passiamo alla slide N" = numero di slide del PDF meno 1 (la slide 1 non si annuncia).
-- [ ] Nessun numero prima di "slide" né parafrasi ("la slide numero 5", "slide di dieci").
-- [ ] Prova finale: `python main.py --dry-run` → l'avviso "Solo N slide su M annunciate" non deve apparire.
-
-
 
 
 
