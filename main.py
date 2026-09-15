@@ -67,6 +67,7 @@ from semantic_sync import (
 )
 from timeline import (
     detect_flow_from_words,
+    enforce_min_durations,
     extract_slide_anchors,
     extract_slide_one_references,
     reconcile_timeline,
@@ -1341,6 +1342,27 @@ def main(argv: list | None = None) -> None:
         if flow != "free" and words_raw:
             early_anchors = flow_anchors
             early_missing = [s for s in range(2, total_slides + 1) if s not in early_anchors]
+            # Gate opzionale (batch/CI): con --require-full-anchors un podcast che
+            # non annuncia (tutte) le slide NON genera un video degradato (slide
+            # stimate + micro-segmenti). Meglio fermarsi e rigenerare l'audio: il
+            # prompt NotebookLM richiede l'annuncio di ogni slide.
+            if args.require_full_anchors and (not early_anchors or early_missing):
+                _abort(
+                    "Ancore 'slide N' incomplete: "
+                    + (
+                        "nessuna ancora trovata nella trascrizione"
+                        if not early_anchors
+                        else f"{len(early_anchors)} su {total_slides - 1} annunciate "
+                        f"(mancanti: {', '.join(str(s) for s in early_missing)})"
+                    )
+                    + ".\n"
+                    "   Con --require-full-anchors la sincronizzazione non parte: "
+                    "le slide non annunciate verrebbero posizionate per contenuto, "
+                    "con durate stimate e possibili micro-segmenti.\n"
+                    "   Rigenera il podcast facendo annunciare OGNI slide "
+                    '(\"passiamo alla slide N\" in cifre) e rilancia la pipeline; '
+                    "oppure togli --require-full-anchors per procedere comunque."
+                )
             if early_anchors and early_missing:
                 log.warning(
                     "\n   [Avviso] Solo %d slide su %d annunciate esplicitamente "
@@ -1921,6 +1943,29 @@ def main(argv: list | None = None) -> None:
 
             if timeline is None:
                 _abort("Sincronizzazione semantica fallita: nessuna timeline generabile da slide + trascrizione.")
+
+            # --- Anti-flicker: garanzia di durata minima per ogni slide ---
+            # Una slide a video 1-4s è un lampo illeggibile (tipico delle slide
+            # senza ancora posizionate a ridosso dell'ancora successiva). Qui le
+            # slide troppo corte vengono allungate spostando SOLO i confini NON
+            # ancorati: le ancore "slide N" pronunciate restano esatte al
+            # decimo di secondo (principio del progetto). Stessa soglia
+            # dell'anti-flicker del flusso libero: max(8s, 2x durata minima).
+            min_slide_seconds = max(8.0, 2 * args.semantic_min_duration)
+            timeline, _moved = enforce_min_durations(
+                timeline,
+                total_duration,
+                min_slide_seconds,
+                anchors=semantic_anchors,
+            )
+            if _moved:
+                log.info(
+                    "   Anti-flicker: %d confini non ancorati spostati per garantire "
+                    "almeno %.0fs per slide (%s).",
+                    len(_moved),
+                    min_slide_seconds,
+                    ", ".join(f"slide {s}: {old:.1f}->{new:.1f}s" for s, old, new in _moved),
+                )
 
             t_sync = time.time() - t_phase_start
 

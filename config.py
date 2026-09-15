@@ -877,6 +877,15 @@ Esempi:
         "(procede automaticamente anche con slide non annunciate)",
     )
     parser.add_argument(
+        "--require-full-anchors",
+        action="store_true",
+        help="Nel flusso ordinato, interrompi se il podcast non annuncia "
+        "TUTTE le slide (ancore 'slide N' incomplete): le slide non "
+        "annunciate verrebbero stimate per contenuto, con durate poco "
+        "affidabili. Utile in batch/CI (es. genera_video.bat), dove non "
+        "si vuole generare un video degradato: rigenera l'audio e rilancia.",
+    )
+    parser.add_argument(
         "--openvino-download",
         action="store_true",
         help="Scarica una tantum il modello Whisper OpenVINO IR "

@@ -9,6 +9,7 @@ citazioni a posteriori), la timeline viene completata usando le ancore reali
 """
 
 import re
+from collections.abc import Mapping
 from typing import cast
 
 from chunks import Word
@@ -517,15 +518,90 @@ def extract_slide_one_references(
     """Riferimenti parlati alla 'slide 1' (es. "slide 1", "la prima slide").
 
     La slide 1 reale è SEMPRE a 0.0 e non viene mai vincolata come ancora:
-    questi riferimenti servono solo alla verifica LLM del mapping, perché la
-    numerazione dello speaker può essere sfasata (es. dice "slide 1" mentre
-    mostra la slide 2 del PDF). Restituisce {1: timestamp} o {}.
+    questi riferimenti servono solo come CONTESTO alla verifica del mapping,
+    perché la numerazione dello speaker può essere sfasata (es. dice "slide 1"
+    mentre mostra la slide 2 del PDF). Non sono mai rimappabili da soli: la
+    slide 1 reale non è un confine di transizione (vedi
+    ``filter_anchor_remaps``). Restituisce {1: timestamp} o {}.
     """
     if not words:
         return {}
     mentions = _collect_slide_mentions(words, total_slides, include_slide_one=True)
     # Prima menzione: è il momento reale della transizione alla slide 1.
     return {1: mentions[1][0]} if 1 in mentions else {}
+
+
+def filter_anchor_remaps(
+    anchors: Mapping[int, float],
+    proposed: Mapping[int, int],
+    min_run: int = 2,
+) -> tuple[dict[int, int], list[tuple[int, int]]]:
+    """Filtra i rimappi *slide parlata -> slide del PDF* proposti da una verifica.
+
+    Le ancore "slide N" sono vincoli ad alta precisione: un rimappo va applicato
+    solo se è una DERIVA REALE della numerazione, cioè una run contigua (in
+    ordine temporale) di almeno ``min_run`` ancore sfasate dello STESSO delta
+    (es. copertina esclusa: tutte +1; slide del PDF saltata a metà narrazione:
+    tutte le successive +1). È la stessa regola dell'euristica deterministica
+    (``semantic_sync.verify_anchor_mapping_embedding``).
+
+    I rimappi ISOLATI, invece, sono quasi sempre falsi positivi: il contenuto
+    subito dopo l'annuncio è già quello della slide SUCCESSIVA, quindi ogni
+    test di contenuto (embeddings o LLM) la preferisce alla slide annunciata
+    (caso tipico: copertina con OCR illeggibile, "passiamo alla slide 1" seguito
+    dal tema della slide 3). Per questo un rimappo isolato viene accettato solo
+    se le altre ancore NON confermano la numerazione parlata (nessuna evidenza
+    di identità, caso in cui l'unico segnale disponibile è il contenuto);
+    quando invece almeno 2 ancore si confermano da sole, l'isolato è un falso
+    positivo e viene rifiutato.
+
+    La 'slide 1' parlata non è MAI rimappabile: la slide 1 reale è sempre a
+    0.0s, quindi il suo riferimento non è un confine di transizione.
+
+    Args:
+        anchors: ancore pronunciate ``{slide_parlata: tempo}``.
+        proposed: rimappi proposti ``{slide_parlata: slide_pdf}``.
+        min_run: ancore minime (contigue, stesso delta) per una deriva reale.
+
+    Returns:
+        ``(accettati, rifiutati)``: ``accettati`` è ``{slide_parlata: slide_pdf}``
+        con i soli rimappi da applicare, ``rifiutati`` la lista di tuple
+        ``(slide_parlata, slide_proposta)`` scartate (per il log del chiamante).
+    """
+    ordered = sorted(anchors.items(), key=lambda kv: kv[1])
+    deltas = [(s, proposed.get(s, s) - s) for s, _ in ordered]
+
+    accepted: dict[int, int] = {}
+    for i, (s, delta) in enumerate(deltas):
+        if delta == 0:
+            continue
+        run = [s]
+        j = i + 1
+        while j < len(deltas) and deltas[j][1] == delta:
+            run.append(deltas[j][0])
+            j += 1
+        if len(run) >= min_run:
+            for rs in run:
+                accepted[rs] = proposed[rs]
+
+    aligned = sum(1 for _, delta in deltas if delta == 0)
+    rejected: list[tuple[int, int]] = []
+    for s, delta in deltas:
+        if delta == 0 or s in accepted:
+            continue
+        if aligned >= 2:
+            # Le altre ancore confermano la numerazione parlata: il rimappo
+            # isolato è il contenuto della slide successiva, non una deriva.
+            rejected.append((s, proposed[s]))
+        else:
+            # Nessuna evidenza di identità: l'unico segnale è il contenuto,
+            # l'LLM (già filtrato dal validatore semantico) fa fede.
+            accepted[s] = proposed[s]
+
+    # La slide 1 reale è sempre a 0.0s: il suo riferimento non è un confine.
+    if 1 in accepted:
+        rejected.append((1, accepted.pop(1)))
+    return accepted, rejected
 
 
 def _lis_anchors(refs: dict[int, float]) -> dict[int, float]:
@@ -915,6 +991,84 @@ def detect_flow_from_words(
             return "audio-slide"
 
     return None
+
+
+# =====================================================================
+# GARANZIA DI DURATA MINIMA (anti-flicker sulla timeline ordinata)
+# =====================================================================
+def enforce_min_durations(
+    timeline: dict[int, float],
+    total_duration: float,
+    min_seconds: float,
+    anchors: Mapping[int, float] | None = None,
+    max_passes: int = 3,
+) -> tuple[dict[int, float], list[tuple[int, float, float]]]:
+    """Garanzia di durata minima: nessuna slide mostrata per un lampo.
+
+    Una slide che resta a video 1-4 secondi è illeggibile. Qui le slide troppo
+    corte vengono allungate spostando SOLO i confini NON ancorati, cioè gli
+    start delle slide senza un'ancora "slide N" pronunciata (vincolo a
+    precisione assoluta: mai toccato). Ogni spostamento rispetta due regole:
+
+      - lo start resta strettamente dopo la slide precedente;
+      - nessuna slide vicina scende sotto ``min_seconds`` (lo spazio si prende
+        solo da chi ne ha in abbondanza).
+
+    Se nessun confine è spostabile (slide incastrata tra due ancore pronunciate)
+    la slide resta corta e NON viene inventata una posizione: il chiamante la
+    segnala con l'avviso sulle durate minime.
+
+    Args:
+        timeline: ``{slide: start}`` completo 1..N, strettamente crescente.
+        total_duration: durata dell'audio (fine dell'ultima slide).
+        min_seconds: durata minima desiderata per ogni slide.
+        anchors: ancore pronunciate ``{slide: tempo}``: start NON spostabili.
+        max_passes: passate massime (uno spostamento può creare un nuovo corto).
+
+    Returns:
+        ``(timeline aggiornata, spostamenti)`` dove ``spostamenti`` è la lista
+        di ``(slide, vecchio_start, nuovo_start)``.
+    """
+    anchor_set = set(anchors or {})
+    work = {s: float(t) for s, t in timeline.items()}
+    ordered = sorted(work)
+    moved: list[tuple[int, float, float]] = []
+
+    for _ in range(max_passes):
+        changed = False
+        for i, s in enumerate(ordered):
+            nxt = ordered[i + 1] if i + 1 < len(ordered) else None
+            end = work[nxt] if nxt is not None else total_duration
+            if end - work[s] >= min_seconds:
+                continue
+
+            # 1) Allunga all'indietro: sposta lo start di QUESTA slide,
+            #    prendendo spazio dalla precedente (che resta >= min_seconds).
+            if i > 0 and s not in anchor_set:
+                prev = ordered[i - 1]
+                candidate = min(work[s], end - min_seconds)
+                candidate = max(candidate, work[prev] + min_seconds)
+                if candidate < work[s]:
+                    moved.append((s, work[s], candidate))
+                    work[s] = candidate
+                    changed = True
+                    continue
+
+            # 2) Allunga in avanti: ritarda lo start della slide SUCCESSIVA,
+            #    se non è un'ancora e se le resta spazio sufficiente.
+            if nxt is not None and nxt not in anchor_set:
+                candidate = work[s] + min_seconds
+                nnext = ordered[i + 2] if i + 2 < len(ordered) else None
+                next_end = work[nnext] if nnext is not None else total_duration
+                if next_end - candidate >= min_seconds:
+                    moved.append((nxt, work[nxt], candidate))
+                    work[nxt] = candidate
+                    changed = True
+                    continue
+        if not changed:
+            break
+
+    return work, moved
 
 
 # =====================================================================
