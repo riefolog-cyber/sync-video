@@ -36,25 +36,18 @@
 
 3. Scarica l'audio del podcast.
 
-## Fase 2 — Recupera la trascrizione dal programma
-
-La pipeline trascrive già il podcast a ogni run: la trascrizione più recente è
-in `.cache/transcript_*.json` (campo `words_raw`, oppure usa il testo dei
-blocchi). Apri il file, copia il testo parlato in ordine e salvalo come PDF o
-documento (una sezione per paragrafo). In alternativa, chiedi a NotebookLM di
-trascrivere/riassumere l'audio appena generato.
-
-> Suggerimento: `python main.py --dry-run` genera la trascrizione SENZA
-> creare il video: serve proprio per preparare questa fase.
 
 ## Fase 3 — Genera la presentazione DERIVATA dal podcast
 
-1. Aggiungi alle fonti la **trascrizione del podcast** (Fase 2) e tienila
-   selezionata SOLO insieme a eventuali fonti utili per arricchire il testo
-   delle slide.
 2. Genera la presentazione (**Studio → Slide Deck**) incollando:
 
-   "Crea una presentazione che segua ESATTAMENTE le sezioni della
+  
+
+3. Scarica la presentazione e mettila nella cartella del progetto come
+   `presentazione.pdf` 
+
+
+"Crea una presentazione che segua ESATTAMENTE le sezioni della
    trascrizione del podcast nell'ordine in cui compaiono: UNA slide per
    sezione, con lo stesso numero di sezioni (niente fusioni, niente slide
    extra).
@@ -84,28 +77,4 @@ trascrivere/riassumere l'audio appena generato.
    diretto del podcast, adatto a studenti 14-19 anni. NUMERA OGNI SLIDE
    (1, 2, 3...) in un piccolo angolo in basso a sinistra, nell'ordine delle
    pagine. TESTO RIGOROSAMENTE SOLO IN ITALIANO."
-
-3. Scarica la presentazione e mettila nella cartella del progetto come
-   `presentazione.pdf` (dopo aver rinominato quella vecchia).
-
-## Cosa cambia nella pipeline (nota tecnica)
-
-- Il podcast NON contiene ancore "slide N" → il programma usa il **flusso
-  semantico puro** (`--flow free`): i confini sono stimati con gli embedding.
-  Con una presentazione derivata 1:1 dal parlato il segnale è forte e
-  l'allineamento affidabile, ma i confini sono meno precisi al secondo rispetto
-  al flusso A.
-- Se vuoi verificare prima del render: `python main.py --dry-run` e controlla
-  similarità media e avvisi ("segnale debole" non dovrebbe apparire).
-
-## Checklist qualità post-generazione
-
-- [ ] Nessuna menzione di "slide", "diapositiva", "capitolo" o numeri di sezione (vietati dal prompt).
-- [ ] Ogni slide comunica UNA sola idea (mai elenchi lunghi di argomenti).
-- [ ] Formati visivi variati tra slide consecutive (dichiarazione, domanda, dato, esempio, citazione, schema).
-- [ ] Titoli brevi, specifici e distintivi, con il termine chiave della sezione (come nel podcast).
-- [ ] Sezioni con titoli e contenuti ben DISTINTI tra loro (per un allineamento 1:1 preciso).
-- [ ] Nessun dato o numero inventato: le slide-dato usano SOLO cifre presenti nelle fonti.
-- [ ] Sezioni di lunghezza ragionevolmente omogenea (durate molto squilibrate generano un avviso nel pipeline).
-- [ ] Prova finale: `python main.py --dry-run` → l'avviso "segnale debole" non deve apparire.
 

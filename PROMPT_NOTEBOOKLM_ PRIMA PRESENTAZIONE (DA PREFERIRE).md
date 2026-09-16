@@ -49,15 +49,6 @@ TONO E STILE DEL DIBATTITO
 ▸ INTRO: Breve (30-40 s) e già parte della prima sezione, senza annunciare una scaletta.
 
 
-## Checklist qualità post-generazione
-
-- [ ] Ogni sezione (dalla seconda in poi) inizia con "passiamo alla slide N", numero pronunciato per esteso e chiaramente subito dopo "slide", una sola volta, seguito dal titolo della slide.
-- [ ] Tutte le slide annunciate in ordine rigoroso, nessuna saltata né fusa con un'altra; nessun sinonimo ("sezione 3", "diapositiva", "punto 2").
-- [ ] Conteggio finale: numero di "passiamo alla slide N" = numero di slide del PDF meno 1 (la slide 1 non si annuncia).
-- [ ] Nessun numero prima di "slide" né parafrasi ("la slide numero 5", "slide di dieci").
-- [ ] Prova finale: `python main.py --dry-run` → l'avviso "Solo N slide su M annunciate" non deve apparire.
-
-
 
 
 
