@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Ambiente Python dedicato (ricreabile con crea_venv.bat)
+.venv/
+
 # Cache e temporanei
 .cache/
 .mypy_cache/

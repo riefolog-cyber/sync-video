@@ -7,6 +7,7 @@ Esegui con: python -m unittest test_updates -v
 """
 
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -261,6 +262,137 @@ class TestBootstrapEnvBlocked(unittest.TestCase):
 
         self.assertFalse(_is_env_blocked_import("numpy", ImportError("x")))
         self.assertFalse(_is_env_blocked_import("pymupdf", RuntimeError("x")))
+
+
+# Python che nessuna delle versioni di CI soddisfa: serve per i test su
+# requires_python senza dipendere dalla versione in esecuzione.
+_PY_IRRAGGIUNGIBILE = ">=3.99"
+_PY_QUALSIASI = ">=3.9"
+
+
+def _file(yanked=False, requires_python=None):
+    return {"filename": "x.whl", "yanked": yanked, "requires_python": requires_python}
+
+
+def _pypi(**releases):
+    return {"releases": {v: files for v, files in releases.items()}}
+
+
+class TestLatestCompatible(unittest.TestCase):
+    """La "latest" deve essere una versione che pip installerebbe davvero."""
+
+    def test_sceglie_la_piu_alta(self):
+        data = _pypi(**{"1.0.0": [_file()], "1.5.0": [_file()], "2.0.0": [_file()]})
+        self.assertEqual(updates._latest_compatible(data), "2.0.0")
+
+    def test_salta_pre_release(self):
+        # pip senza --pre non installa una beta: annunciarla sarebbe un falso
+        # aggiornamento (il report direbbe "1.0.0 -> 2.0.0b1" e pip non farebbe nulla)
+        data = _pypi(**{"1.0.0": [_file()], "2.0.0b1": [_file()]})
+        self.assertEqual(updates._latest_compatible(data), "1.0.0")
+
+    def test_salta_release_interamente_yanked(self):
+        data = _pypi(**{"1.0.0": [_file()], "2.0.0": [_file(yanked=True)]})
+        self.assertEqual(updates._latest_compatible(data), "1.0.0")
+
+    def test_requires_python_dal_primo_file_utile(self):
+        # files[0] è yanked e dichiara un Python più nuovo: non deve escludere
+        # la release, perché esiste un file che il Python corrente lo accetta
+        data = _pypi(
+            **{
+                "2.0.0": [
+                    _file(yanked=True, requires_python=_PY_IRRAGGIUNGIBILE),
+                    _file(requires_python=_PY_QUALSIASI),
+                ]
+            }
+        )
+        self.assertEqual(updates._latest_compatible(data), "2.0.0")
+
+    def test_salta_requires_python_incompatibile(self):
+        data = _pypi(**{"1.0.0": [_file()], "2.0.0": [_file(requires_python=_PY_IRRAGGIUNGIBILE)]})
+        self.assertEqual(updates._latest_compatible(data), "1.0.0")
+
+    def test_salta_release_senza_file_e_versioni_illeggibili(self):
+        data = _pypi(**{"1.0.0": [_file()], "2.0.0": [], "boh": [_file()]})
+        self.assertEqual(updates._latest_compatible(data), "1.0.0")
+
+    def test_nessuna_release_utilizzabile(self):
+        data = _pypi(**{"1.0.0": [_file(yanked=True)]})
+        self.assertIsNone(updates._latest_compatible(data))
+
+
+def _urlopen_con(contenuto: bytes):
+    """Finto urlopen che restituisce il JSON indicato."""
+    gestore = mock.MagicMock()
+    gestore.__enter__.return_value.read.return_value = contenuto
+    return gestore
+
+
+class TestLatestVersionPypiNonSolleva(unittest.TestCase):
+    """`_latest_version_pypi` è interrogata in un thread pool: mai eccezioni."""
+
+    def test_json_valido(self):
+        data = json.dumps({"releases": {"1.0.0": [_file()]}}).encode()
+        with mock.patch("updates.urllib.request.urlopen", return_value=_urlopen_con(data)):
+            self.assertEqual(updates._latest_version_pypi("qualsiasi"), "1.0.0")
+
+    def test_errore_interno_non_solleva(self):
+        data = json.dumps({"releases": {"1.0.0": [_file()]}}).encode()
+        with mock.patch("updates.urllib.request.urlopen", return_value=_urlopen_con(data)), mock.patch(
+            "updates._latest_compatible", side_effect=RuntimeError("versione assurda")
+        ), mock.patch("updates.log"):
+            self.assertIsNone(updates._latest_version_pypi("qualsiasi"))
+
+    def test_rete_assente_non_solleva(self):
+        with mock.patch("updates.urllib.request.urlopen", side_effect=OSError("offline")):
+            self.assertIsNone(updates._latest_version_pypi("qualsiasi"))
+
+
+class TestTailLines(unittest.TestCase):
+    def test_ultime_righe_non_vuote(self):
+        testo = "prima\n\nseconda\n   \nterza\n"
+        self.assertEqual(updates._tail_lines(testo, 2), ["seconda", "terza"])
+
+    def test_testo_vuoto(self):
+        self.assertEqual(updates._tail_lines(None), [])
+
+
+class TestPipUpgrade(unittest.TestCase):
+    def _risultato(self, returncode, stdout="", stderr=""):
+        return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def test_successo_mostra_la_riga_di_pip(self):
+        res = self._risultato(0, stdout="Successfully installed numpy-1.26.4")
+        with mock.patch("updates.subprocess.run", return_value=res) as run, mock.patch("updates.log") as log:
+            self.assertTrue(updates._pip_upgrade(["numpy"]))
+        comando = run.call_args.args[0]
+        self.assertEqual(comando[-2:], ["-U", "numpy"])
+        messaggi = " ".join(str(argomento) for chiamata in log.info.call_args_list for argomento in chiamata.args)
+        self.assertIn("Successfully installed numpy-1.26.4", messaggi)
+
+    def test_fallimento_mostra_le_ultime_righe_di_pip(self):
+        # prima si vedeva solo "non-zero exit status 1": inutile per capire se
+        # è la rete, un conflitto di versioni o i permessi
+        res = self._risultato(1, stderr="ERROR: ResolutionImpossible\nERROR: No matching distribution found")
+        with mock.patch("updates.subprocess.run", return_value=res), mock.patch("updates.log") as log:
+            self.assertFalse(updates._pip_upgrade(["numpy>=1.26.0"]))
+        # il codice di uscita di pip è il primo argomento della prima riga
+        self.assertEqual(log.warning.call_args_list[0].args[1], 1)
+        messaggi = " ".join(str(argomento) for chiamata in log.warning.call_args_list for argomento in chiamata.args)
+        self.assertIn("No matching distribution", messaggi)
+
+    def test_fallimento_senza_stderr_usa_stdout(self):
+        res = self._risultato(2, stdout="qualcosa e' andato storto")
+        with mock.patch("updates.subprocess.run", return_value=res), mock.patch("updates.log") as log:
+            self.assertFalse(updates._pip_upgrade(["numpy"]))
+        messaggi = " ".join(str(argomento) for chiamata in log.warning.call_args_list for argomento in chiamata.args)
+        self.assertIn("qualcosa e' andato storto", messaggi)
+
+    def test_timeout(self):
+        with mock.patch(
+            "updates.subprocess.run", side_effect=subprocess.TimeoutExpired("pip", 900)
+        ), mock.patch("updates.log"):
+            self.assertFalse(updates._pip_upgrade(["numpy"]))
 
 
 if __name__ == "__main__":

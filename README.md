@@ -31,7 +31,30 @@ python main.py
 # Il bootstrap installa automaticamente TUTTE le dipendenze:
 # pacchetti pip, Tesseract OCR, ffmpeg, modelli ML
 # Output: video_finale.mp4
+#
+# Installa/aggiorna anche i pacchetti sotto la versione minima richiesta: un
+# pacchetto troppo vecchio può far fallire l'import di un ALTRO pacchetto (es.
+# numpy vecchio -> pandas non si importa -> pytesseract sembra guasto).
 ```
+
+### 🔒 Ambiente dedicato (consigliato)
+
+Il programma funziona anche col Python di sistema, ma quel Python è **condiviso con tutti gli altri programmi del PC**: un `pip install` fatto altrove può cambiare una versione e impedire l'avvio. Misurato il 16/09/2026: un'altra installazione ha messo `numpy 1.24.3` e `pandas` (dipendenza di pytesseract) non si importava più, quindi la pipeline non partiva nemmeno per le fasi che non usano l'OCR.
+
+```bash
+# Una volta sola: crea la cartella .venv e installa i pacchetti del progetto
+crea_venv.bat
+```
+
+Da quel momento `genera_video.bat`, `aggiornamenti.bat`, `prova.bat` e `check_embedding_models.bat` usano `.venv` da soli: non serve cambiare nulla a mano.
+
+| Comando | Cosa fa |
+|---|---|
+| `crea_venv.bat` | Crea `.venv` (o completa i pacchetti mancanti se esiste) |
+| `crea_venv.bat --ricrea` | Cancella `.venv` e la ricrea da zero |
+| `set SYNC_VIDEO_NO_VENV=1` | Usa il Python di sistema, ignorando `.venv` |
+
+La venv **riusa i modelli già scaricati** (cartella `.cache` e cache di HuggingFace): non riscarica nulla, e la prima run resta veloce. Dentro `.venv` `pip check` non segnala conflitti; nel Python globale ne convivono diversi (pacchetti di altri progetti).
 
 > **Precisione assoluta**: il programma non distribuisce mai le slide uniformemente. La timeline viene costruita dal **solo** allineamento semantico (embeddings offline, senza LLM), vincolato dai riferimenti espliciti "slide N" nella trascrizione. Se non è generabile → **interruzione con avviso**.
 
@@ -756,6 +779,9 @@ sincronizzazione perfetta.
 | `TESSERACT OCR NON TROVATO` | Auto-install fallita: installa manualmente da [UB-Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) |
 | `TesseractError: language 'ita' not found` | `tessdata/ita.traineddata` è incluso — verifica che la cartella `tessdata/` esista |
 | `ModuleNotFoundError` | `pip install -r requirements.txt` |
+| `ImportError: C extension: None not built` o `Please upgrade numpy to >= 1.26.0` | numpy troppo vecchio per pandas (dipendenza di pytesseract): `pip install -U "numpy>=1.26.0"`. Il bootstrap lo rileva e lo ripara da solo prima di usare l'OCR |
+| `Pacchetti installati ma non importabili` | Un'altra installazione ha cambiato una versione nel Python globale (condiviso con altri progetti): `python -m pip check` elenca i conflitti, poi `pip install -U <pacchetto>` |
+| Il programma smette di partire senza aver toccato il codice | L'ambiente condiviso è cambiato: `python -m pip check`. Per non rivederlo più: `crea_venv.bat` (ambiente dedicato, immune alle installazioni altrui) |
 | Sincronizzazione fallita | Similarità troppo bassa. Verifica che l'audio parli dei contenuti delle slide |
 | Timeline sbagliata | Prova `--flow audio-slide` o aggiungi ancore "slide N" nell'audio |
 | Audio troncato | Già protetto da fps=5 + buffer 3.0s |

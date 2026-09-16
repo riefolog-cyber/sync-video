@@ -4,7 +4,9 @@ pillow>=10.0.0
 pytesseract>=0.3.10
 pydub>=0.25.0
 moviepy>=2.0.0
-numpy>=1.24.0
+# numpy >= 1.26 richiesto da pandas (dipendenza di pytesseract) e moviepy 2.x:
+# con numpy 1.24.3 l'import di pandas fallisce e il programma non parte piu'
+numpy>=1.26.0
 tqdm>=4.66.0
 
 # Fallback semantico (sincronizzazione via embeddings, senza LLM)
@@ -14,6 +16,10 @@ tqdm>=4.66.0
 # coseno medio 0.935, decision match 47% -> VERDETTO DIVERGENTE, pin confermato.
 fastembed==0.5.1
 
+
+# Confronto versioni (updates.py) e soglie minime del bootstrap (config.py).
+# Arriva già con pytesseract, ma il progetto lo importa direttamente.
+packaging>=23.0
 
 # Selezione slide via LLM opzionale (9Router online, endpoint OpenAI-compatibile)
 requests>=2.31.0

@@ -16,9 +16,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import Pool
 from pathlib import Path
+from typing import Any
 
 import pymupdf as fitz  # PyMuPDF (alias deprecato importato come compat)
-import pytesseract
 from PIL import Image
 
 from config import log, tqdm
@@ -304,8 +304,24 @@ def _render_page(args: tuple[str, int, str, int]) -> str:
     return output_path
 
 
+def _tesseract() -> Any:
+    """pytesseract, importato solo al primo uso effettivo dell'OCR.
+
+    pytesseract importa pandas a livello di modulo, e pandas dipende da numpy:
+    un import in cima al file rende l'INTERO programma ostaggio di quella
+    catena. Misurato il 16/09/2026: con numpy 1.24.3 l'import di pandas falliva
+    ("C extension: None not built") e main.py non partiva più, nemmeno per le
+    fasi che non usano affatto l'OCR. L'import pigro sposta il guasto dove
+    serve davvero, cioè nel punto d'uso.
+    """
+    import pytesseract
+
+    return pytesseract
+
+
 def _ocr_single_slide(image_path: Path, lang: str, max_retries: int = 3) -> str:
     """Esegue OCR su una singola immagine con retry e backoff."""
+    pt = _tesseract()
     raw = ""
     for attempt in range(max_retries):
         try:
@@ -313,9 +329,9 @@ def _ocr_single_slide(image_path: Path, lang: str, max_retries: int = 3) -> str:
             # regressione quando pytesseract ri-salva il PNG (AttributeError:
             # 'PngImageFile' object has no attribute '_im'). Col path pytesseract
             # usa il file direttamente senza duplicarlo.
-            raw = pytesseract.image_to_string(str(image_path), lang=lang)
+            raw = pt.image_to_string(str(image_path), lang=lang)
             break
-        except (pytesseract.TesseractError, OSError) as e:
+        except (pt.TesseractError, OSError) as e:
             if attempt < max_retries - 1:
                 wait = (attempt + 1) * 1.0
                 log.debug(
@@ -330,8 +346,8 @@ def _ocr_single_slide(image_path: Path, lang: str, max_retries: int = 3) -> str:
             else:
                 log.debug("   OCR fallito con lang=%s, riprovo senza lingua.", lang)
                 try:
-                    raw = pytesseract.image_to_string(str(image_path))
-                except (pytesseract.TesseractError, OSError):
+                    raw = pt.image_to_string(str(image_path))
+                except (pt.TesseractError, OSError):
                     raw = ""
     clean = re.sub(r"\s+", " ", raw).strip()
     return clean if clean else "[Nessun testo rilevato. Immagine visiva.]"

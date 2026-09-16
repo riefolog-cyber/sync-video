@@ -36,6 +36,7 @@ _PACKAGES: tuple[str, ...] = (
     "pydub",
     "moviepy",
     "numpy",
+    "packaging",
     "tqdm",
     "fastembed",
     "faster-whisper",
@@ -50,7 +51,7 @@ _PACKAGES: tuple[str, ...] = (
 _PINNED: dict[str, str] = {
     # Pinnato a 0.5.1: le versioni successive usano mean pooling invece di CLS
     # per e5-large, cambiando gli embedding rispetto alla baseline validata.
-    "fastembed": "==0.5.1 (pinnato: embedding validati A/B)",
+    "fastembed": "pinnato a 0.5.1: embedding e5-large validati A/B",
 }
 
 
@@ -63,13 +64,14 @@ def _installed_version(pip_name: str) -> str | None:
 
 
 def _latest_version_pypi(pip_name: str) -> str | None:
-    """Ultima versione su PyPI compatibile con il Python in esecuzione.
+    """Ultima versione su PyPI INSTALLABILE con il Python in esecuzione.
 
     Il campo ``info.version`` è la versione più recente GLOBALE, ma può
-    richiedere un Python più nuovo (es. numpy 2.5.x richiede >=3.12): pip
-    non la installerebbe mai. Si filtrano quindi le release per
-    ``requires_python`` e si restituisce la più alta compatibile. None se
-    rete/API fallisce.
+    richiedere un Python più nuovo (es. numpy 2.5.x richiede >=3.12) o essere
+    una pre-release: pip non la installerebbe mai. Si filtra quindi l'elenco
+    delle release (vedi ``_latest_compatible``). None se rete/API/versione
+    non è determinabile: questa funzione non deve mai sollevare, perché il
+    chiamante la interroga dentro un thread pool.
     """
     url = f"https://pypi.org/pypi/{pip_name}/json"
     try:
@@ -79,27 +81,46 @@ def _latest_version_pypi(pip_name: str) -> str | None:
     except Exception:
         return None
 
-    return _latest_compatible(data)
+    try:
+        return _latest_compatible(data)
+    except Exception as e:  # API/versione inattesa: mai bloccare l'avvio
+        log.debug("   Check aggiornamenti: versione di %s non determinabile (%s).", pip_name, e)
+        return None
 
 
 def _latest_compatible(data: dict[str, Any]) -> str | None:
-    """Ultima versione tra le release compatibili col Python corrente."""
+    """Ultima versione STABILE e compatibile col Python corrente.
+
+    Vengono saltate le release che pip non installerebbe:
+    - quelle con tutti i file yanked (pip rifiuta una release ritirata);
+    - le pre-release (beta/rc/dev: senza ``--pre`` pip non le installa, quindi
+      annunciarle darebbe un falso aggiornamento: il report direbbe "X -> Y"
+      e ``pip install -U X`` non farebbe nulla);
+    - quelle il cui ``requires_python`` esclude il Python in esecuzione.
+
+    ``requires_python`` è dichiarato per-file: si usa il primo file non yanked
+    che lo dichiara, non il solo primo file della release (che può essere
+    l'sdist, o un file yanked).
+    """
     from packaging.specifiers import SpecifierSet
     from packaging.version import InvalidVersion, Version
 
     releases = data.get("releases", {})
     best: tuple[Version, str] | None = None
     for version_str, files in releases.items():
-        if not files:
-            continue
-        requires_python = files[0].get("requires_python")
-        if requires_python and not SpecifierSet(requires_python).contains(
-            f"{sys.version_info.major}.{sys.version_info.minor}"
-        ):
+        files_validi = [f for f in files if not f.get("yanked")] if files else []
+        if not files_validi:
             continue
         try:
             version = Version(version_str)
         except InvalidVersion:
+            continue
+        if version.is_prerelease:
+            continue
+        requires_python = next((f.get("requires_python") for f in files_validi if f.get("requires_python")), None)
+        if requires_python and not SpecifierSet(requires_python).contains(
+            f"{sys.version_info.major}.{sys.version_info.minor}"
+        ):
             continue
         if best is None or version > best[0]:
             best = (version, version_str)
@@ -169,7 +190,7 @@ def print_updates(outdated: list[dict]) -> None:
         return
     log.info("   📦 Sono disponibili aggiornamenti per %d pacchetto/i:", len(outdated))
     for d in outdated:
-        suffix = f" — ⚠️ {d['note']}" if d["pinned"] and d["note"] else ""
+        suffix = f" — 🔒 {d['note']}" if d["pinned"] and d["note"] else ""
         suffix = " — 🔒 pinnato" if d["pinned"] and not d["note"] else suffix
         suffix = " — ⚠️ major version" if d.get("major") and not d["pinned"] else suffix
         log.info("      %s: %s -> %s%s", d["name"], d["installed"], d["latest"], suffix)
@@ -273,21 +294,44 @@ def _run_pinned_ab_test(pkg: dict) -> str | None:
     return str(res["verdict"])
 
 
+def _tail_lines(testo: str | None, quante: int = 12) -> list[str]:
+    """Ultime righe non vuote di un output di pip."""
+    righe = [riga.strip() for riga in (testo or "").splitlines() if riga.strip()]
+    return righe[-quante:]
+
+
 def _pip_upgrade(packages: list[str]) -> bool:
-    """Aggiorna i pacchetti indicati (pip install -U). True se riuscito."""
+    """Aggiorna i pacchetti indicati (pip install -U). True se riuscito.
+
+    L'output di pip viene catturato: in caso di errore se ne mostrano le
+    ultime righe. Senza quelle l'utente vedrebbe solo "non-zero exit status 1"
+    e non saprebbe se è la rete, un conflitto di versioni o i permessi; in
+    caso di successo l'ultima riga di pip dice cosa è stato davvero installato
+    (utile quando pip non cambia nulla).
+    """
+    log.info("   ⏳ pip install -U %s ...", " ".join(packages))
     try:
-        log.info("   ⏳ pip install -U %s ...", " ".join(packages))
-        subprocess.check_call(
+        res = subprocess.run(
             [sys.executable, "-m", "pip", "install", "-U", *packages],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors="replace",
             timeout=900,
+            check=False,
         )
-        log.info("   ✅ Aggiornati: %s", ", ".join(packages))
-        return True
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        log.warning("   ❌ Aggiornamento fallito: %s", e)
+    except subprocess.TimeoutExpired as e:
+        log.warning("   ❌ Aggiornamento fallito (timeout): %s", e)
         return False
+
+    if res.returncode != 0:
+        log.warning("   ❌ Aggiornamento fallito (pip exit %d):", res.returncode)
+        for riga in _tail_lines(res.stderr or res.stdout):
+            log.warning("      %s", riga)
+        return False
+
+    esito = _tail_lines(res.stdout, 1)
+    log.info("   ✅ Aggiornati: %s%s", ", ".join(packages), f" — {esito[0]}" if esito else "")
+    return True
 
 
 def _ask_yes_no(prompt: str) -> bool:

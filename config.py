@@ -6,8 +6,10 @@ Costanti, argparse, logging e setup automatico dipendenze.
 
 import argparse
 import contextlib
+import importlib.metadata
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -159,16 +161,27 @@ except ImportError:
 # =====================================================================
 # BOOTSTRAP — Controlla e installa automaticamente le dipendenze
 # =====================================================================
+# Requisiti dei pacchetti: nome di import -> requisito pip (con eventuale
+# versione minima). La versione minima serve perché un pacchetto troppo
+# vecchio può far fallire l'import di un ALTRO pacchetto, e senza il controllo
+# il messaggio sarebbe quello sbagliato ("X manca") invece di quello giusto
+# ("X è troppo vecchio").
 _REQUIRED_PACKAGES = {
     "pymupdf": "pymupdf",
     "PIL": "pillow",
     "pytesseract": "pytesseract",
     "pydub": "pydub",
     "moviepy": "moviepy",
-    "numpy": "numpy",
+    # Soglia imposta da pandas (dipendenza di pytesseract) e da moviepy 2.x.
+    # Con numpy 1.24.3, misurato il 16/09/2026: "ImportError: Please upgrade
+    # numpy to >= 1.26.0" dentro pandas, che sembra un guasto di pytesseract.
+    "numpy": "numpy>=1.26.0",
     "tqdm": "tqdm",
     "fastembed": "fastembed",
     "faster_whisper": "faster-whisper>=1.2.1",
+    # Confronto versioni (qui sotto e in updates.py): senza questo pacchetto la
+    # verifica delle versioni minime si disattiva in silenzio.
+    "packaging": "packaging>=23.0",
 }
 
 _TESSERACT_DOWNLOAD_URL = "https://github.com/UB-Mannheim/tesseract/wiki"
@@ -211,15 +224,19 @@ def _try_system_install(name: str, winget_id: str, apt_pkg: str, brew_pkg: str) 
     return False
 
 
-def _try_pip_install(package: str) -> bool:
-    """Tenta di installare un pacchetto via pip. Restituisce True se ok."""
+def _try_pip_install(package: str, upgrade: bool = False) -> bool:
+    """Tenta di installare (o aggiornare, con upgrade=True) un pacchetto via pip."""
     try:
-        print(f"   ⏳ pip install {package} ...", end=" ", flush=True)
+        print(f"   ⏳ pip install {'-U ' if upgrade else ''}{package} ...", end=" ", flush=True)
+        cmd = [sys.executable, "-m", "pip", "install"]
+        if upgrade:
+            cmd.append("-U")
+        cmd.append(package)
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", package],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=180,
+            timeout=300,
         )
         print("✅")
         return True
@@ -229,6 +246,62 @@ def _try_pip_install(package: str) -> bool:
     except subprocess.TimeoutExpired:
         print("⏰ timeout")
         return False
+
+
+def _req_name(req: str) -> str:
+    """Nome pip di un requisito: 'numpy>=1.26.0' -> 'numpy'."""
+    return re.split(r"[<>=!~\s]", req, maxsplit=1)[0]
+
+
+def _installed_version(pip_name: str) -> str | None:
+    """Versione installata del pacchetto, o None se non presente."""
+    try:
+        return importlib.metadata.version(pip_name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _spec_ok(req: str, installed: str) -> bool:
+    """True se ``installed`` soddisfa la parte di versione di ``req``.
+
+    Se la verifica non è possibile (packaging assente, versione non
+    parseabile) si prosegue: il bootstrap non deve bloccare l'avvio per un
+    dubbio, semmai per un guasto accertato.
+    """
+    name = _req_name(req)
+    spec = req[len(name) :].strip()
+    if not spec:
+        return True
+    try:
+        from packaging.specifiers import SpecifierSet
+
+        return bool(SpecifierSet(spec).contains(installed))
+    except Exception:  # noqa: BLE001 - verifica non disponibile: non bloccare
+        return True
+
+
+def _missing_or_old(req: str) -> str | None:
+    """Motivo per cui un requisito va installato/aggiornato, o None se è a posto."""
+    installed = _installed_version(_req_name(req))
+    if installed is None:
+        return "assente"
+    if _spec_ok(req, installed):
+        return None
+    return f"versione {installed}"
+
+
+def _import_error_detail(exc: BaseException) -> str:
+    """Errore d'import con la sua causa radice, se presente.
+
+    L'eccezione esterna è spesso generica ("C extension: None not built"): la
+    riga utile per capire cosa fare (es. "Please upgrade numpy to >= 1.26.0")
+    sta nella causa.
+    """
+    detail = f"{type(exc).__name__}: {exc}"
+    cause = exc.__cause__
+    if cause is not None:
+        detail += f" | causa: {type(cause).__name__}: {cause}"
+    return detail
 
 
 def _is_env_blocked_import(import_name: str, exc: Exception) -> bool:
@@ -242,6 +315,90 @@ def _is_env_blocked_import(import_name: str, exc: Exception) -> bool:
     if isinstance(exc, ModuleNotFoundError):
         return False
     return isinstance(exc, (ImportError, RuntimeError))
+
+
+def _ensure_pip_packages() -> None:
+    """Installa/aggiorna i pacchetti richiesti e verifica che si importino.
+
+    Due passaggi, in quest'ordine:
+    1. metadata (``importlib.metadata``, nessun import): i pacchetti assenti o
+       sotto la versione minima vengono installati con ``pip install -U``. Un
+       pacchetto troppo vecchio può far fallire l'import di un ALTRO pacchetto,
+       e il messaggio giusto in quel caso è "X è vecchio", non "Y manca".
+    2. import di ciascun pacchetto: se resta un import rotto con il pacchetto
+       installato, l'errore viene mostrato per intero (con la causa radice)
+       invece di lasciar esplodere un traceback a metà avvio.
+
+    Esce con codice 1 se qualcosa resta non installabile o non importabile.
+    """
+    to_install = []
+    for pip_req in _REQUIRED_PACKAGES.values():
+        reason = _missing_or_old(pip_req)
+        if reason:
+            to_install.append((pip_req, reason))
+
+    if to_install:
+        log.info("🔧 Pacchetti da installare/aggiornare: %s", ", ".join(p[0] for p in to_install))
+        log.info("   Installazione automatica in corso...")
+
+        all_ok = True
+        for pip_req, reason in to_install:
+            log.info("   %s (%s) ...", pip_req, reason)
+            if _try_pip_install(pip_req, upgrade=True):
+                log.info("   ✅ %s ok.", pip_req)
+            else:
+                log.warning("   ❌ %s NON installato.", pip_req)
+                all_ok = False
+
+        if not all_ok:
+            log.error(
+                "\nAlcuni pacchetti non sono stati installati. Installa manualmente:\n"
+                "   pip install -U %s\n"
+                "Oppure: pip install -r requirements.txt",
+                " ".join(p[0] for p in to_install),
+            )
+            sys.exit(1)
+
+        log.info("   ✅ Tutti i pacchetti installati.")
+
+    # --- Verifica degli import (dopo gli eventuali aggiornamenti) ---
+    broken = []
+    for import_name, pip_req in _REQUIRED_PACKAGES.items():
+        try:
+            __import__(import_name)
+        except (ImportError, RuntimeError) as e:
+            # Alcuni pacchetti possono fallire l'import anche se installati:
+            # MoviePy se manca uno strumento di sistema (FFmpeg), oppure
+            # faster-whisper se Windows blocca una DLL di PyAV. In entrambi
+            # i casi il pacchetto è presente: la verifica dello strumento di
+            # sistema avviene più avanti nel bootstrap e la trascrizione usa
+            # OpenVINO (che non dipende da av).
+            if _is_env_blocked_import(import_name, e):
+                log.debug(
+                    "   %s installato ma import bloccato dall'ambiente (%s): proseguo.",
+                    pip_req,
+                    e,
+                )
+                continue
+            broken.append((pip_req, e))
+
+    if broken:
+        # Installato ma non importabile: quasi sempre una dipendenza con la
+        # versione sbagliata, non il pacchetto in sé (16/09/2026: numpy 1.24.3
+        # faceva fallire pytesseract, perché pytesseract importa pandas).
+        log.error(
+            "\n❌ Pacchetti installati ma non importabili: %s\n"
+            "   Causa più probabile: una dipendenza dell'ambiente ha la versione\n"
+            "   sbagliata (es. numpy troppo vecchio per il pandas di pytesseract).\n"
+            "   Diagnosi completa:  %s -m pip check\n"
+            "   Riparazione:        %s -m pip install -U <pacchetto>",
+            ", ".join(req for req, _ in broken),
+            sys.executable,
+            sys.executable,
+        )
+        for pip_req, err in broken:
+            log.error("   %s -> %s", pip_req, _import_error_detail(err))
+        sys.exit(1)
 
 
 def bootstrap() -> None:
@@ -259,52 +416,8 @@ def bootstrap() -> None:
         log.error("Richiesto Python 3.10 o superiore. Versione attuale: %s", sys.version)
         sys.exit(1)
 
-    # --- Pip packages ---
-    missing = []
-    for import_name, pip_name in _REQUIRED_PACKAGES.items():
-        try:
-            __import__(import_name)
-        except (ImportError, RuntimeError) as e:
-            # Alcuni pacchetti possono fallire l'import anche se installati:
-            # MoviePy se manca uno strumento di sistema (FFmpeg), oppure
-            # faster-whisper se Windows blocca una DLL di PyAV. In entrambi
-            # i casi il pacchetto è presente: la verifica dello strumento di
-            # sistema avviene più avanti nel bootstrap e la trascrizione usa
-            # OpenVINO (che non dipende da av).
-            # Un ModuleNotFoundError invece significa pacchetto (o dipendenza)
-            # davvero mancante: va installato, non ignorato.
-            if _is_env_blocked_import(import_name, e):
-                log.debug(
-                    "   %s installato ma import bloccato dall'ambiente (%s): proseguo.",
-                    pip_name,
-                    e,
-                )
-                continue
-            missing.append((import_name, pip_name))
-
-    if missing:
-        log.info("🔧 Pacchetti mancanti: %s", ", ".join(p[1] for p in missing))
-        log.info("   Installazione automatica in corso...")
-
-        all_ok = True
-        for _import_name, pip_name in missing:
-            log.info("   pip install %s ...", pip_name)
-            if _try_pip_install(pip_name):
-                log.info("   ✅ %s installato.", pip_name)
-            else:
-                log.warning("   ❌ %s NON installato.", pip_name)
-                all_ok = False
-
-        if not all_ok:
-            log.error(
-                "\nAlcuni pacchetti non sono stati installati. Installa manualmente:\n"
-                "   pip install %s\n"
-                "Oppure: pip install -r requirements.txt",
-                " ".join(p[1] for p in missing),
-            )
-            sys.exit(1)
-
-        log.info("   ✅ Tutti i pacchetti installati.")
+    # --- Pip packages (assenti, vecchi, o non importabili) ---
+    _ensure_pip_packages()
 
     # --- Tesseract OCR ---
     import pytesseract  # garantito installato dal bootstrap pip qui sopra
