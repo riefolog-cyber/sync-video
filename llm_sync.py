@@ -75,7 +75,12 @@ from typing import Any, cast
 
 from chunks import Word, build_windows
 from config import CACHE_DIR, atomic_write_text, log
-from timeline import _complete_from_anchors, _lis_anchors, reconcile_timeline
+from timeline import (
+    _complete_from_anchors,
+    _lis_anchors,
+    filter_anchor_remaps,
+    reconcile_timeline,
+)
 
 try:
     import requests
@@ -1378,11 +1383,32 @@ def llm_verify_anchor_mapping(
         verified = _verified_anchors_from_cached(cached)
         if verified is None:
             return None
+        # Le ancore cachate devono superare le STESSE guardie dei rimappi live:
+        # una cache prodotta da una run precedente (o da una verifica errata)
+        # non può bypassare né la regola sulle derive coerenti né quella sulla
+        # 'slide 1' parlata. Si ricostruisce la slide parlata originale per
+        # prossimità temporale (i tempi delle ancore restano invariati).
+        normalized = _normalize_cached_remaps(verified, anchors)
+        if normalized != verified:
+            # La cache conteneva rimappi non ammessi: la si riscrive pulita (senza
+            # la 'slide 1', che non è mai un'ancora), così anche gli strumenti di
+            # verifica post-run (analysis_sync.py) leggono le ancore REALMENTE
+            # usate invece di quelle di una verifica scartata.
+            healed = {s: t for s, t in normalized.items() if s != 1}
+            if healed:
+                _save_llm_cache(
+                    cache_key,
+                    [{"slide": s, "start": healed[s]} for s in sorted(healed)],
+                )
+                log.info(
+                    "   [LLM/Ancore] Cache della verifica riscritta senza i rimappi "
+                    "non ammessi (%d ancore).",
+                    len(healed),
+                )
+        verified = normalized
         # Le ancore cachate devono superare lo STESSO validatore dei rimappi
         # live: una cache prodotta da una run precedente (o da una verifica
-        # errata) non può bypassare il filtro sul contenuto del parlato. Si
-        # ricostruisce la slide parlata originale per prossimità temporale
-        # (i tempi delle ancore restano invariati dalla verifica).
+        # errata) non può bypassare il filtro sul contenuto del parlato.
         if remap_filter is not None:
             for pdf_slide, t in list(verified.items()):
                 spoken = _nearest_spoken_anchor(pdf_slide, t, anchors)
@@ -1431,14 +1457,42 @@ def llm_verify_anchor_mapping(
         log.warning("   [LLM/Ancore] Risposta non interpretabile: uso le ancore originali.")
         return None
 
+    # 1) Rimappi proposti dall'LLM (slide parlata -> slide del PDF) con range valido.
+    proposed: dict[int, int] = {}
+    for s, t in anchors.items():
+        new_slide = mapping.get(round(t, 1))
+        if new_slide is not None and new_slide != s and 1 <= new_slide <= total_slides:
+            proposed[s] = new_slide
+
+    # 2) Guardia strutturale: le ancore sono vincoli ad alta precisione, quindi si
+    #    applicano solo le DERIVE coerenti della numerazione (run contigue di
+    #    ancore con lo stesso delta). I rimappi isolati sono quasi sempre falsi
+    #    positivi: subito dopo un annuncio il parlato è già quello della slide
+    #    SUCCESSIVA, quindi ogni test di contenuto la preferisce alla slide
+    #    annunciata (copertine/diapositive di transizione con poco testo: l'OCR
+    #    non può confermarle). Vedi ``timeline.filter_anchor_remaps``.
+    accepted, rejected = filter_anchor_remaps(anchors, proposed)
+    for s, new_slide in rejected:
+        log.warning(
+            "   [LLM/Ancore] Rimappo 'slide %d' a %.1fs -> slide %d IGNORATO: non è "
+            "una deriva della numerazione (rimappo isolato, mentre le altre ancore "
+            "confermano il numero pronunciato: resta slide %d).",
+            s,
+            anchors[s],
+            new_slide,
+            s,
+        )
+
     corrected: dict[int, float] = {}
     remaps_applied = 0
     for s, t in anchors.items():
         new_slide = mapping.get(round(t, 1))
-        if new_slide is None:
-            corrected[s] = t  # l'LLM non ha risposto per questo timestamp
-        elif 1 <= new_slide <= total_slides:
-            if new_slide != s and remap_filter is not None:
+        if new_slide is None or s not in accepted:
+            # Nessuna risposta per questo timestamp, oppure rimappo non accettato
+            # (isolato o 'slide 1' parlata): l'ancora resta quella deterministica.
+            corrected[s] = t
+        else:
+            if remap_filter is not None:
                 verdict = remap_filter(s, t, new_slide)
                 if verdict is False:
                     log.warning(
@@ -1463,14 +1517,13 @@ def llm_verify_anchor_mapping(
                     corrected[new_slide],
                 )
             corrected[new_slide] = t
-            if new_slide != s:
-                remaps_applied += 1
-                log.info(
-                    "   [LLM/Ancore] Ancora 'slide %d' a %.1fs -> slide %d del PDF.",
-                    s,
-                    t,
-                    new_slide,
-                )
+            remaps_applied += 1
+            log.info(
+                "   [LLM/Ancore] Ancora 'slide %d' a %.1fs -> slide %d del PDF.",
+                s,
+                t,
+                new_slide,
+            )
 
     lis = _lis_anchors(corrected)
     if not lis:
@@ -1492,6 +1545,45 @@ def llm_verify_anchor_mapping(
     )
     _save_llm_cache(cache_key, [{"slide": s, "start": lis[s]} for s in sorted(lis)])
     return lis
+
+
+def _normalize_cached_remaps(
+    verified: dict[int, float],
+    anchors: dict[int, float],
+) -> dict[int, float]:
+    """Riporta un mapping di verifica CACHÉ dentro le regole dei rimappi live.
+
+    ``verified`` è ``{slide_pdf: tempo}``. I rimappi che non sono derive
+    coerenti della numerazione (o che riguardano la 'slide 1' parlata) vengono
+    annullati: l'ancora torna alla slide pronunciata, così una cache scritta da
+    una versione precedente del codice — o da una verifica errata, come il
+    rimappo isolato 'slide 1' -> slide 3 che sposta la copertina a metà
+    narrazione — non può più corrompere le ancore deterministiche.
+
+    I tempi non cambiano mai (la verifica LLM mantiene i timestamp).
+    """
+    proposed: dict[int, int] = {}
+    for pdf_slide, t in verified.items():
+        spoken = _nearest_spoken_anchor(pdf_slide, t, anchors)
+        if spoken is not None and spoken != pdf_slide:
+            proposed[spoken] = pdf_slide
+    if not proposed:
+        return verified
+
+    _accepted, rejected = filter_anchor_remaps(anchors, proposed)
+    if not rejected:
+        return verified
+    normalized = dict(verified)
+    for spoken, pdf_slide in rejected:
+        normalized[spoken] = normalized.pop(pdf_slide, anchors[spoken])
+        log.warning(
+            "   [LLM/Ancore] Rimappo cachato 'slide %d' -> slide %d ignorato "
+            "(rimappo isolato: l'ancora resta la slide %d deterministica).",
+            spoken,
+            pdf_slide,
+            spoken,
+        )
+    return normalized
 
 
 def _verified_anchors_from_cached(

@@ -6,9 +6,7 @@
 2. Genera la presentazione con NotebookLM (**Studio → Slide Deck**) incollando questo prompt:
 
 
-
 "Crea una presentazione strutturata in sezioni/argomenti, una slide per argomento, in ordine logico; ogni slide con titolo chiaro e contenuti distinti dalle altre. NUMERA OGNI SLIDE (1, 2, 3...) in un piccolo angolo in basso a sinistra, nell'ordine delle pagine. TESTO RIGOROSAMENTE SOLO IN ITALIANO."
-
 
 
 NotebookLM sintetizza le fonti selezionate e sceglie il numero di slide più adatto: ogni slide sarà una sezione annunciata dal podcast.
@@ -26,32 +24,21 @@ ANCORE E STRUTTURA (OBBLIGATORIO):
 * Una sezione = una slide del PDF. Il numero che pronunci DEV'ESSERE il numero di pagina della slide nel PDF (la prima pagina è la slide 1). Segui tutte le slide in ordine rigoroso, senza saltarne.
 * PRIMA di scrivere: elenca TUTTE le slide del PDF (numero di pagina + titolo). Quel piano è lo scheletro del podcast: segui ogni voce in ordine, senza unirne due in un'unica sezione.
 * Anche se una slide ti sembra breve o simile alla precedente, annunciala comunque con "passiamo alla slide N" e dedicale almeno 2-3 frasi che spiegano cosa aggiunge rispetto alla precedente. Non inglobarla nella sezione precedente.
-* All'inizio di ogni sezione (dalla seconda in poi) pronuncia UNA sola volta "passiamo alla slide N": il numero va detto per esteso e chiaramente, subito dopo la parola "slide" (es. "slide cinque"), senza altre parole in mezzo. Mai "slide di dieci", "la slide numero", parafrasi o preposizioni tra "slide" e il numero (l'audio non ha "cifre": conta solo la pronuncia chiara). Prima di annunciare, controlla il numero della pagina successiva del PDF.
-* Quando annunci una slide, pronuncia anche il suo titolo o le parole chiave come compaiono nella presentazione.
+* All'inizio di ogni sezione (dalla seconda in poi) pronuncia UNA sola volta "passiamo alla slide N": il numero va detto per esteso e chiaramente, subito dopo la parola "slide" (es. "slide cinque"), senza altre parole in mezzo. Mai "slide di dieci", "la slide numero", parafrasi o preposizioni tra "slide" e il numero (l'audio non ha "cifre": conta solo la pronuncia chiara). Prima di announcements, controlla il numero della pagina successiva del PDF.
+* Quando announce una slide, pronuncia anche il suo titolo o le parole chiave come compaiono nella presentazione.
 * Mai sinonimi ("sezione 3", "capitolo", "punto 2", "diapositiva") né "slide"+ numero in altri contesti.
 
 Per ogni sezione:
 
-1. annuncia "passiamo alla slide N"
+1. announce "passiamo alla slide N"
 2. spiega i punti e le parole chiave della slide
 3. chiudi con una domanda aperta e poi con una frase riassuntiva. (non ripetere ogni volta "in sintesi")
 
-VERIFICA FINALE (OBBLIGATORIO):
-Ripercorri il piano voce per voce: ogni voce deve corrispondere a ESATTAMENTE una sezione, nessuna fusa con la precedente o la successiva (nemmeno se breve o simile alla precedente). A fine audio devi aver annunciato TUTTE le slide 2..M del PDF in ordine (la slide 1 inizia a 0.0 senza annuncio), ciascuna con la sua ancora "passiamo alla slide N" seguita dal titolo della slide.
-
 
 TONO E STILE DEL DIBATTITO
-═══════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════
 ▸ TARGET: Classe di scuola secondaria di secondo grado (14-19 anni), lezione di IRC.
 ▸ TONO: Frasi corte, linguaggio fresco e immediato, esempi dalla quotidianità dei giovani (scuola, amicizia, famiglia, social); zero tecnicismi e termini stranieri non spiegati.
 ▸ DINAMICA: Due conduttori in scambio rapido, senza monologhi; uno solleva dubbi da studente, l'altro chiarisce senza giudicare. Rivolgiti sempre direttamente agli studenti.
 ▸ FOCUS: Nodi con valenza educativa, etica, esistenziale o culturale; niente tono moralistico: proponi i concetti come domande, non come verità.
-▸ INTRO: Breve (30-40 s) e già parte della prima sezione, senza annunciare una scaletta.
-
-
-
-
-
-
-
-
+▸ INTRO: Breve (30-40 s) e già parte della prima sezione, senza announcements una scaletta.

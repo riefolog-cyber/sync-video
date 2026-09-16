@@ -10,6 +10,7 @@ mockati (nessuna rete).
 
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 from llm_sync import (
@@ -1407,6 +1408,119 @@ class TestAnchorVerification(unittest.TestCase):
             )
         self.assertIsNotNone(verified)
         self.assertEqual(verified, {5: 100.0})
+
+    # --- Regressione run 15/09/2026 (podcast con 6 slide non annunciate) ---
+    #
+    # La verifica aveva "corretto" due ancore CORRETTE: 'slide 1' -> slide 3
+    # (contenuto dopo l'annuncio = tema della slide 3) e 'slide 12' -> slide 11
+    # (il parlato dice "livello macro", che è anche il tema della slide 11).
+    # I rimappi isolati non sono derive della numerazione: vanno rifiutati,
+    # anche se il validatore di contenuto li conferma.
+    _REAL_ANCHORS: ClassVar[dict[int, float]] = {
+        1: 111.9,
+        4: 176.5,
+        5: 260.5,
+        7: 335.7,
+        9: 424.1,
+        12: 521.2,
+        13: 594.0,
+    }
+    _REAL_RESPONSE = (
+        '[{"timestamp": 111.9, "slide": 3}, {"timestamp": 176.5, "slide": 4}, '
+        '{"timestamp": 260.5, "slide": 5}, {"timestamp": 335.7, "slide": 7}, '
+        '{"timestamp": 424.1, "slide": 9}, {"timestamp": 521.2, "slide": 11}, '
+        '{"timestamp": 594.0, "slide": 13}]'
+    )
+
+    def test_isolated_remaps_from_llm_are_rejected(self):
+        # Anche con il validatore di contenuto PERMISSIVO (True), i due rimappi
+        # isolati non si applicano: le ancore deterministiche restano intatte.
+        words = [{"word": f"w{t}", "start": t} for t in self._REAL_ANCHORS.values()]
+        with (
+            self._no_cache()[0],
+            self._no_cache()[1],
+            self._no_cache()[2],
+            patch("llm_sync._call_endpoint", return_value=self._REAL_RESPONSE),
+        ):
+            verified = llm_verify_anchor_mapping(
+                [f"s{i}" for i in range(1, 14)],
+                words,
+                anchors=self._REAL_ANCHORS,
+                total_slides=13,
+                endpoints=[self._ep("9router", "http://x")],
+                remap_filter=lambda _s, _t, _s2: True,
+            )
+        self.assertIsNone(verified)
+
+    def test_cached_isolated_remaps_rewrite_cache_clean(self):
+        # Oltre a ignorare i rimappi isolati, la cache viene riscritta pulita:
+        # così gli strumenti di verifica post-run (analysis_sync.py) leggono le
+        # ancore realmente usate, non quelle di una verifica scartata.
+        cached = [
+            {"slide": 3, "start": 111.9},
+            {"slide": 4, "start": 176.5},
+            {"slide": 5, "start": 260.5},
+            {"slide": 7, "start": 335.7},
+            {"slide": 9, "start": 424.1},
+            {"slide": 11, "start": 521.2},
+            {"slide": 13, "start": 594.0},
+        ]
+        words = [{"word": f"w{t}", "start": t} for t in self._REAL_ANCHORS.values()]
+        with (
+            patch("llm_sync._load_llm_cache", return_value=cached),
+            patch("llm_sync._save_llm_cache") as save,
+            patch("llm_sync.router_alive", return_value=True),
+        ):
+            llm_verify_anchor_mapping(
+                [f"s{i}" for i in range(1, 14)],
+                words,
+                anchors=self._REAL_ANCHORS,
+                total_slides=13,
+                endpoints=[self._ep("9router", "http://x")],
+                remap_filter=lambda _s, _t, _s2: True,
+            )
+        self.assertTrue(save.called)
+        saved = save.call_args[0][1]
+        # le ancore REALI: niente 'slide 1' (non è mai un'ancora) e niente
+        # mapping su slide 3/11 prodotti dalla verifica scartata.
+        self.assertEqual(
+            saved,
+            [
+                {"slide": 4, "start": 176.5},
+                {"slide": 5, "start": 260.5},
+                {"slide": 7, "start": 335.7},
+                {"slide": 9, "start": 424.1},
+                {"slide": 12, "start": 521.2},
+                {"slide": 13, "start": 594.0},
+            ],
+        )
+
+    def test_cached_isolated_remaps_are_ignored(self):
+        # Una cache scritta dalla versione precedente (rimappi isolati 'slide 1'
+        # -> 3 e 'slide 12' -> 11) non può più corrompere le ancore.
+        cached = [
+            {"slide": 3, "start": 111.9},
+            {"slide": 4, "start": 176.5},
+            {"slide": 5, "start": 260.5},
+            {"slide": 7, "start": 335.7},
+            {"slide": 9, "start": 424.1},
+            {"slide": 11, "start": 521.2},
+            {"slide": 13, "start": 594.0},
+        ]
+        words = [{"word": f"w{t}", "start": t} for t in self._REAL_ANCHORS.values()]
+        with (
+            patch("llm_sync._load_llm_cache", return_value=cached),
+            patch("llm_sync.router_alive", return_value=True),
+        ):
+            verified = llm_verify_anchor_mapping(
+                [f"s{i}" for i in range(1, 14)],
+                words,
+                anchors=self._REAL_ANCHORS,
+                total_slides=13,
+                endpoints=[self._ep("9router", "http://x")],
+                remap_filter=lambda _s, _t, _s2: True,
+            )
+        self.assertEqual(verified, self._REAL_ANCHORS)
 
 
 class TestCacheCleanup(unittest.TestCase):

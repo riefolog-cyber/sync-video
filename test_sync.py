@@ -28,7 +28,9 @@ from semantic_sync import (
 )
 from timeline import (
     detect_flow_from_words,
+    enforce_min_durations,
     extract_timeline_from_transcript,
+    filter_anchor_remaps,
     reconcile_timeline,
 )
 
@@ -2950,3 +2952,139 @@ class TestAnchorRemapFilter(unittest.TestCase):
                 window_seconds=40.0,
             )
         self.assertIsNone(filtro)
+
+
+class TestFilterAnchorRemaps(unittest.TestCase):
+    """Guardia strutturale sui rimappi delle ancore: solo DERIVE coerenti.
+
+    Regressione della run del 15/09/2026: la verifica del mapping aveva
+    "corretto" due ancore già corrette ('slide 1' -> slide 3 e 'slide 12' ->
+    slide 11) perché il contenuto subito dopo un annuncio è già quello della
+    slide SUCCESSIVA. Un rimappo isolato non è una deriva di numerazione.
+    """
+
+    # Ancore reali della run: numerazione identica a quella del PDF.
+    ANCHORS: ClassVar[dict[int, float]] = {
+        1: 111.9,
+        4: 176.5,
+        5: 260.5,
+        7: 335.7,
+        9: 424.1,
+        12: 521.2,
+        13: 594.0,
+    }
+
+    def test_isolated_remaps_rejected_when_other_anchors_confirm(self):
+        accepted, rejected = filter_anchor_remaps(self.ANCHORS, {1: 3, 12: 11})
+        self.assertEqual(accepted, {})
+        self.assertEqual(rejected, [(1, 3), (12, 11)])
+
+    def test_isolated_remap_accepted_without_identity_evidence(self):
+        # Una sola ancora: nessuna evidenza di identità dalle altre, resta il
+        # contenuto (già filtrato dal validatore semantico) a fare fede.
+        accepted, rejected = filter_anchor_remaps({4: 100.0}, {4: 5})
+        self.assertEqual(accepted, {4: 5})
+        self.assertEqual(rejected, [])
+
+    def test_coherent_run_accepted(self):
+        # Deriva reale: il podcast salta una slide del PDF, tutte le ancore di
+        # quel tratto sono sfasate dello stesso delta (run contigua >= 2).
+        accepted, rejected = filter_anchor_remaps(
+            {4: 100.0, 5: 180.0, 8: 260.0}, {4: 5, 5: 6, 8: 9}
+        )
+        self.assertEqual(accepted, {4: 5, 5: 6, 8: 9})
+        self.assertEqual(rejected, [])
+
+    def test_spoken_slide_one_never_remapped(self):
+        # Copertina esclusa: tutte le ancore sfasate di +1 tranne la 'slide 1'
+        # (che non è un confine di transizione: la slide 1 reale è a 0.0s).
+        accepted, rejected = filter_anchor_remaps(
+            {1: 100.0, 2: 200.0, 3: 300.0}, {1: 2, 2: 3, 3: 4}
+        )
+        self.assertEqual(accepted, {2: 3, 3: 4})
+        self.assertEqual(rejected, [(1, 2)])
+
+    def test_run_broken_by_aligned_anchor_is_rejected(self):
+        # Due sfasate NON contigue (una confermata in mezzo): non è una deriva.
+        accepted, rejected = filter_anchor_remaps(
+            {4: 100.0, 5: 180.0, 6: 260.0, 7: 340.0}, {4: 5, 6: 7}
+        )
+        self.assertEqual(accepted, {})
+        self.assertEqual(rejected, [(4, 5), (6, 7)])
+
+
+class TestEnforceMinDurations(unittest.TestCase):
+    """Anti-flicker: nessuna slide a video per un lampo (1-4s).
+
+    Regressione della run del 15/09/2026: la timeline conteneva la slide 10 da
+    1.1s e le slide 5 e 8 da 3.6s, perché le slide senza ancora erano state
+    posizionate a ridosso dell'ancora successiva.
+    """
+
+    TIMELINE: ClassVar[dict[int, float]] = {
+        1: 0.0,
+        2: 4.46,
+        3: 111.9,
+        4: 176.5,
+        5: 260.54,
+        6: 264.18,
+        7: 335.74,
+        8: 420.5,
+        9: 424.1,
+        10: 520.04,
+        11: 521.16,
+        12: 572.26,
+        13: 593.96,
+    }
+    ANCHORS: ClassVar[dict[int, float]] = {
+        3: 111.9,
+        4: 176.5,
+        5: 260.54,
+        7: 335.74,
+        9: 424.1,
+        11: 521.16,
+        13: 593.96,
+    }
+    TOTAL = 681.62
+    TOTAL_SLIDES = 13
+
+    def test_short_slides_lengthened_and_anchors_untouched(self):
+        out, moved = enforce_min_durations(
+            self.TIMELINE, self.TOTAL, 8.0, anchors=self.ANCHORS
+        )
+        self.assertTrue(moved)
+        for s, t in self.ANCHORS.items():
+            self.assertAlmostEqual(out[s], t, msg=f"ancora slide {s} spostata")
+        ordered = sorted(out)
+        for i, s in enumerate(ordered):
+            end = out[ordered[i + 1]] if i + 1 < len(ordered) else self.TOTAL
+            self.assertGreaterEqual(end - out[s], 8.0 - 1e-9, msg=f"slide {s} corta")
+        # La timeline resta riconciliabile (tempi crescenti, tutte le slide).
+        durations = reconcile_timeline(out, self.TOTAL_SLIDES, self.TOTAL)
+        self.assertEqual(len(durations), self.TOTAL_SLIDES)
+
+    def test_anchored_slide_keeps_time_next_slide_moves(self):
+        # La slide 5 è ancorata (260.5s) e quella dopo (senza ancora) era a 264.2s:
+        # si ritarda la successiva, l'ancora non si tocca.
+        out, _moved = enforce_min_durations(
+            self.TIMELINE, self.TOTAL, 8.0, anchors=self.ANCHORS
+        )
+        self.assertAlmostEqual(out[5], 260.54)
+        self.assertGreaterEqual(out[6] - out[5], 8.0 - 1e-9)
+
+    def test_no_invention_when_no_boundary_can_move(self):
+        # Slide ancorata incastrata tra due ancore: nessuno spazio per allungarla
+        # (spostare la vicina la renderebbe corta a sua volta) -> nessuna
+        # posizione inventata, la timeline resta quella data.
+        timeline = {1: 0.0, 2: 10.0, 3: 10.5, 4: 20.0}
+        out, moved = enforce_min_durations(
+            timeline, 30.0, 8.0, anchors={2: 10.0, 4: 20.0}
+        )
+        self.assertEqual(out, timeline)
+        self.assertEqual(moved, [])
+
+    def test_long_slides_untouched(self):
+        timeline = {1: 0.0, 2: 60.0, 3: 120.0}
+        out, moved = enforce_min_durations(timeline, 180.0, 8.0)
+        self.assertEqual(out, timeline)
+        self.assertEqual(moved, [])
