@@ -6,13 +6,16 @@
 2. Genera la presentazione con NotebookLM (**Studio → Slide Deck**) incollando questo prompt:
 
 
+
 "Crea una presentazione strutturata in sezioni/argomenti, una slide per argomento, in ordine logico; ogni slide con titolo chiaro e contenuti distinti dalle altre. NUMERA OGNI SLIDE (1, 2, 3...) in un piccolo angolo in basso a sinistra, nell'ordine delle pagine. TESTO RIGOROSAMENTE SOLO IN ITALIANO."
+
 
 
 NotebookLM sintetizza le fonti selezionate e sceglie il numero di slide più adatto: ogni slide sarà una sezione annunciata dal podcast.
 3. Scarica la presentazione generata e mettila nelle fonti come **PRESENTAZIONE**.
 
 ## 1\. Da incollare in "Personalizza" → "Istruzioni" per generare audio (con TUTTE le fonti selezionate)
+
 
 
 Segui l'ordine del file presentazione.pdf nelle fonti: procedi per slide e per ognuna non limitarti a rileggere o parafrasare: cita le altre fonti, collega le sezioni e aggiungi esempi concreti. La presentazione resta la spina dorsale.
@@ -35,10 +38,12 @@ Per ogni sezione:
 3. chiudi con una domanda aperta e poi con una frase riassuntiva. (non ripetere ogni volta "in sintesi")
 
 
+
 TONO E STILE DEL DIBATTITO
 ══════════════════════════════════════════════════════════
 ▸ TARGET: Classe di scuola secondaria di secondo grado (14-19 anni), lezione di IRC.
 ▸ TONO: Frasi corte, linguaggio fresco e immediato, esempi dalla quotidianità dei giovani (scuola, amicizia, famiglia, social); zero tecnicismi e termini stranieri non spiegati.
 ▸ DINAMICA: Due conduttori in scambio rapido, senza monologhi; uno solleva dubbi da studente, l'altro chiarisce senza giudicare. Rivolgiti sempre direttamente agli studenti.
 ▸ FOCUS: Nodi con valenza educativa, etica, esistenziale o culturale; niente tono moralistico: proponi i concetti come domande, non come verità.
-▸ INTRO: Breve (30-40 s) e già parte della prima sezione, senza announcements una scaletta.
+▸ INTRO: Breve (30-40 s) e già parte della prima sezione, senza annunciare una scaletta.
+

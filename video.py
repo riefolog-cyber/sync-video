@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 
 import numpy as np
@@ -464,6 +465,9 @@ def frame_consistency_check(
         segments: sequenza di ``(slide, start, end)`` effettivamente usati.
         slide_files: percorsi delle slide (indice 0 = slide 1).
         frames_dir: dove salvare i frame estratti (per la diagnosi manuale).
+            Viene svuotata prima di scrivere: la cartella deve contenere solo i
+            frame dell'artefatto appena verificato, non quelli delle run
+            precedenti (in produzione era cresciuta fino a 191 file / 297 MB).
         min_similarity: soglia sotto cui il match non è considerato affidabile.
 
     Returns:
@@ -471,6 +475,14 @@ def frame_consistency_check(
     """
     video = Path(video_path)
     frames_dir.mkdir(parents=True, exist_ok=True)
+    # La pulizia sta QUI, dove i frame vengono scritti, e non nel chiamante: la
+    # verifica può girare più volte per run (prima e dopo una riparazione) e
+    # ogni giro descrive un video diverso. Prima esisteva solo nel ramo di
+    # riparazione, quindi una run senza riparazioni non cancellava mai nulla:
+    # ~18 MB a esecuzione, accumulati per sempre.
+    for stale in frames_dir.glob("seg*.png"):
+        with suppress(OSError):
+            stale.unlink()
     checked = 0
     coherent = 0
     mismatches: list[dict[str, object]] = []

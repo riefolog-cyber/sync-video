@@ -598,10 +598,10 @@ class TestBeamAbReport(unittest.TestCase):
 class TestBeamChoice(unittest.TestCase):
     """La misura decide quale trascrizione usare, senza pagarne una nuova."""
 
-    def _decide(self, ab, added_anchors=False):
+    def _decide(self, ab, accurate_anchors=0, greedy_anchors=0):
         import main as m
 
-        return m._use_accurate_transcript(ab, added_anchors)
+        return m._use_accurate_transcript(ab, accurate_anchors, greedy_anchors)
 
     def test_accurate_wins(self):
         use_accurate, reason = self._decide({"delta_avg_z": 0.05})
@@ -631,14 +631,116 @@ class TestBeamChoice(unittest.TestCase):
         # Le ancore sono riferimenti espliciti: se le trova solo la decodifica
         # accurata, resta quella anche se il proxy di somiglianza preferirebbe
         # la veloce.
-        use_accurate, reason = self._decide({"delta_avg_z": -0.30}, added_anchors=True)
+        use_accurate, reason = self._decide(
+            {"delta_avg_z": -0.30}, accurate_anchors=2, greedy_anchors=1
+        )
         self.assertTrue(use_accurate)
         self.assertIn("ancore", reason)
+
+    def test_lost_anchors_beat_a_better_score(self):
+        # Caso reale (25/09): la decodifica beam 5 ha saltato 10,4s di parlato con
+        # l'annuncio "passiamo slide 2", passando da 2 ancore a 1. Il punteggio
+        # (Δ +0.029) non può compensare la perdita: si usa la veloce.
+        use_accurate, reason = self._decide(
+            {"delta_avg_z": 0.0289}, accurate_anchors=1, greedy_anchors=2
+        )
+        self.assertFalse(use_accurate)
+        self.assertIn("PERSO", reason)
+        self.assertIn("1 contro 2", reason)
+
+    def test_lost_anchors_win_over_everything(self):
+        # La perdita di ancore è un segnale forte: nessun margine, nessun deck
+        # confondibile e nessuna nota di errore la ribaltano.
+        ab = {
+            "delta_avg_z": 0.9,
+            "greedy": {"confusability": 0.0},
+            "accurate": {"confusability": 0.0},
+        }
+        self.assertFalse(self._decide(ab, accurate_anchors=0, greedy_anchors=3)[0])
+
+    def test_equal_anchors_let_the_measurement_decide(self):
+        # Stesso numero di ancore: qui il punteggio è l'unica differenza fra le
+        # due decodifiche, quindi decide (Δ negativo -> veloce).
+        use_accurate, reason = self._decide(
+            {"delta_avg_z": -0.40}, accurate_anchors=2, greedy_anchors=2
+        )
+        self.assertFalse(use_accurate)
+        self.assertIn("veloce ha il segnale migliore", reason)
 
     def test_unmeasurable_comparison_keeps_the_accurate(self):
         use_accurate, reason = self._decide({"error": "qualità non calcolabile"})
         self.assertTrue(use_accurate)
         self.assertIn("non calcolabile", reason)
+
+    def test_confusable_deck_invalidates_the_comparison(self):
+        # Deck con slide quasi-duplicate (confusability 1.0): la misura è rumore,
+        # quindi il Δ NON decide. Caso reale: Δ +0.029 su confusability 1.0.
+        ab = {
+            "delta_avg_z": 0.0289,
+            "greedy": {"confusability": 1.0},
+            "accurate": {"confusability": 1.0},
+        }
+        use_accurate, reason = self._decide(ab, accurate_anchors=1, greedy_anchors=1)
+        self.assertTrue(use_accurate)
+        self.assertIn("non affidabile", reason)
+        self.assertIn("100%", reason)
+
+    def test_confusability_also_voids_a_negative_delta(self):
+        # La stessa misura, quando è rumore, non deve poter far vincere la veloce
+        # né far perdere l'accurata: la decisione torna alle ancore/prudenza.
+        ab = {
+            "delta_avg_z": -0.30,
+            "greedy": {"confusability": 0.9},
+            "accurate": {"confusability": 0.8},
+        }
+        use_accurate, reason = self._decide(ab)
+        self.assertTrue(use_accurate)
+        self.assertIn("non affidabile", reason)
+
+    def test_low_confusability_keeps_the_score_usable(self):
+        ab = {
+            "delta_avg_z": -0.30,
+            "greedy": {"confusability": 0.4},
+            "accurate": {"confusability": 0.1},
+        }
+        use_accurate, reason = self._decide(ab)
+        self.assertFalse(use_accurate)
+        self.assertIn("veloce ha il segnale migliore", reason)
+
+    def test_confusability_threshold_is_configurable(self):
+        import main as m
+
+        ab = {
+            "delta_avg_z": -0.30,
+            "greedy": {"confusability": 0.4},
+            "accurate": {"confusability": 0.1},
+        }
+        with mock.patch.object(m, "AUTO_BEAM_CONFUSABILITY_MAX", 0.05):
+            use_accurate, reason = self._decide(ab)
+        self.assertTrue(use_accurate)
+        self.assertIn("non affidabile", reason)
+
+    def test_confusability_absent_from_the_cached_measure_is_tolerated(self):
+        # Le misure salvate prima di questa regola non hanno il campo: assente =
+        # sconosciuto, non "confondibile" (il punteggio resta utilizzabile).
+        use_accurate, reason = self._decide({"delta_avg_z": -0.30})
+        self.assertFalse(use_accurate)
+        self.assertIn("veloce ha il segnale migliore", reason)
+
+    def test_confusability_helper_takes_the_worst_side_and_ignores_garbage(self):
+        import main as m
+
+        self.assertIsNone(m._ab_confusability({}))
+        self.assertIsNone(m._ab_confusability({"error": "x"}))
+        self.assertEqual(m._ab_confusability({"greedy": {"confusability": 0.3}}), 0.3)
+        self.assertEqual(
+            m._ab_confusability({"greedy": {"confusability": 0.3}, "accurate": {"confusability": 0.8}}),
+            0.8,
+        )
+        self.assertEqual(
+            m._ab_confusability({"greedy": {"confusability": "n/d"}, "accurate": {"confusability": 0.2}}),
+            0.2,
+        )
 
     def test_cache_key_ignores_the_margin_but_not_the_engine(self):
         import main as m

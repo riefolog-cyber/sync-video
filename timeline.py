@@ -996,6 +996,14 @@ def detect_flow_from_words(
 # =====================================================================
 # GARANZIA DI DURATA MINIMA (anti-flicker sulla timeline ordinata)
 # =====================================================================
+# Spostamento minimo che vale la pena applicare: sotto questa soglia è rumore
+# numerico (i confini arrivano da medie di similarità, non da misure esatte).
+# Senza questa soglia il ciclo registrava spostamenti nulli o all'indietro di
+# 1e-13s ("slide 14: 544.1->544.1s") e consumava le passate senza cambiare
+# nulla.
+_MIN_BOUNDARY_MOVE_SECONDS = 0.05
+
+
 def enforce_min_durations(
     timeline: dict[int, float],
     total_duration: float,
@@ -1018,6 +1026,11 @@ def enforce_min_durations(
     la slide resta corta e NON viene inventata una posizione: il chiamante la
     segnala con l'avviso sulle durate minime.
 
+    Attenzione: la durata garantita NON è una durata misurata. Il tempo dato a
+    una slide corta viene preso alle vicine, quindi vale per leggibilità, non
+    perché il parlato lo sostenga: chi chiama deve poterlo dire (vedi
+    ``main._floor_report``).
+
     Args:
         timeline: ``{slide: start}`` completo 1..N, strettamente crescente.
         total_duration: durata dell'audio (fine dell'ultima slide).
@@ -1027,7 +1040,9 @@ def enforce_min_durations(
 
     Returns:
         ``(timeline aggiornata, spostamenti)`` dove ``spostamenti`` è la lista
-        di ``(slide, vecchio_start, nuovo_start)``.
+        di ``(slide, vecchio_start, nuovo_start)`` per i soli confini spostati
+        DAVVERO (oltre ``_MIN_BOUNDARY_MOVE_SECONDS``): un confine fermo al
+        decimillesimo di secondo non è uno spostamento e non viene registrato.
     """
     anchor_set = set(anchors or {})
     work = {s: float(t) for s, t in timeline.items()}
@@ -1048,7 +1063,7 @@ def enforce_min_durations(
                 prev = ordered[i - 1]
                 candidate = min(work[s], end - min_seconds)
                 candidate = max(candidate, work[prev] + min_seconds)
-                if candidate < work[s]:
+                if work[s] - candidate > _MIN_BOUNDARY_MOVE_SECONDS:
                     moved.append((s, work[s], candidate))
                     work[s] = candidate
                     changed = True
@@ -1060,7 +1075,10 @@ def enforce_min_durations(
                 candidate = work[s] + min_seconds
                 nnext = ordered[i + 2] if i + 2 < len(ordered) else None
                 next_end = work[nnext] if nnext is not None else total_duration
-                if next_end - candidate >= min_seconds:
+                if (
+                    next_end - candidate >= min_seconds
+                    and candidate - work[nxt] > _MIN_BOUNDARY_MOVE_SECONDS
+                ):
                     moved.append((nxt, work[nxt], candidate))
                     work[nxt] = candidate
                     changed = True

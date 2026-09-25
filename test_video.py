@@ -277,6 +277,29 @@ class TestFrameConsistencyCheck(unittest.TestCase):
             self.assertEqual(check["coherent"], 0)
             self.assertEqual(check["mismatches"], [])
 
+    def test_stale_frames_are_removed_before_writing(self):
+        # Bug osservato in produzione: la cartella dei frame cresceva di ~18 MB a
+        # run (191 file / 297 MB) perché veniva svuotata solo nel ramo di
+        # riparazione. Ora la pulizia sta dove i frame vengono scritti.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            slide = tmp / "s1.png"
+            _half_image(40, 30, vertical=True).save(slide)
+            frames = tmp / "frames"
+            frames.mkdir()
+            stale = frames / "seg00_t0005.0_slide01.png"
+            stale.write_bytes(b"frame di una run precedente")
+            altro = frames / "nota.txt"
+            altro.write_text("non è un frame della verifica", encoding="utf-8")
+            frame_consistency_check(
+                tmp / "manca.mp4",
+                [(1, 0.0, 10.0)],
+                [str(slide)],
+                frames,
+            )
+            self.assertFalse(stale.exists())
+            self.assertTrue(altro.exists())  # solo i frame, non tutta la cartella
+
     def test_segment_with_out_of_range_slide_is_skipped(self):
         with tempfile.TemporaryDirectory() as d:
             tmp = Path(d)

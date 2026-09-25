@@ -738,6 +738,21 @@ DEFAULT_AUTO_BEAM = os.environ.get("AUTO_BEAM", "1") == "1"
 # fuori dalla banda di rumore.
 # Override con AUTO_BEAM_AB_MARGIN.
 AUTO_BEAM_AB_MARGIN = _env_float("AUTO_BEAM_AB_MARGIN", 0.0)
+# Il punteggio di somiglianza è un PROXY: due segnali espliciti lo battono sempre
+# (vedi main._use_accurate_transcript).
+#
+# 1. ANCORE. Se la decodifica accurata perde un'ancora che la veloce aveva, la
+#    veloce vince a prescindere dal punteggio: le ancore sono riferimenti
+#    espliciti nel parlato, il punteggio è una stima. Caso reale misurato: beam 5
+#    ha saltato 10,4s di parlato (345,9s -> 356,3s) contenenti l'annuncio
+#    "passiamo slide 2", passando da 2 ancore a 1 e facendo partire un remap
+#    della numerazione (slide 1 -> 8) che ha compresso 7 slide in 81s.
+# 2. CONFONDIBILITÀ. Se il deck ha slide quasi-duplicate oltre questa soglia, la
+#    misura di allineamento è rumore: il punteggio non vota e resta la scelta
+#    prudente (accurata). Stessa soglia di semantic_sync.weak_signal.
+#    Override con AUTO_BEAM_CONFUSABILITY_MAX (1.1 = ignora sempre la
+#    confondibilità).
+AUTO_BEAM_CONFUSABILITY_MAX = _env_float("AUTO_BEAM_CONFUSABILITY_MAX", 0.5)
 # Motore OpenVINO GenAI (più veloce su iGPU Intel). Modello IR pre-convertito,
 # scaricabile da HuggingFace: OpenVINO/whisper-small-fp16-ov
 DEFAULT_OPENVINO_MODEL_DIR = os.environ.get("OPENVINO_MODEL_DIR", str(CACHE_DIR / "whisper_openvino_small"))

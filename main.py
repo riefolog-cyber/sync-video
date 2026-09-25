@@ -22,6 +22,7 @@ from moviepy import AudioFileClip, VideoFileClip
 from chunks import Word
 from config import (
     AUTO_BEAM_AB_MARGIN,
+    AUTO_BEAM_CONFUSABILITY_MAX,
     AUTO_BEAM_PINNED_RATIO,
     BASE_DIR,
     CACHE_DIR,
@@ -297,6 +298,21 @@ def _append_timing_history(
         log.debug("   Impossibile salvare lo storico tempi (ignorato).")
 
 
+def _slide_list_text(slides: Sequence[int], *, di: bool = False) -> str:
+    """Elenco di slide in italiano per il riepilogo finale.
+
+    ``[13]`` -> "la slide 13", ``[6, 12]`` -> "le slide 6 e 12"; con
+    ``di=True`` gli articoli diventano "della/delle" (per frasi come "il parlato
+    della slide 2"). Il riepilogo è testo per l'utente: "per le slide 13 la
+    durata è anomala" è una frase sbagliata, non solo poco elegante.
+    """
+    numbers = [str(s) for s in slides]
+    if len(numbers) == 1:
+        return f"{'della' if di else 'la'} slide {numbers[0]}"
+    joined = f"{numbers[0]} e {numbers[1]}" if len(numbers) == 2 else f"{', '.join(numbers[:-1])} e {numbers[-1]}"
+    return f"{'delle' if di else 'le'} slide {joined}"
+
+
 def _warn_sync_uncertainty() -> None:
     """Avviso nel riepilogo finale se l'ultima sync semantica aveva segnale debole."""
     if not weak_signal_seen():
@@ -322,6 +338,7 @@ def _log_plain_summary(
     quality: dict[str, float] | None = None,
     review_diffs: int = 0,
     repairs: Sequence[dict[str, object]] = (),
+    floor_report: dict[str, object] | None = None,
     title: str = "IL VIDEO È PRONTO — COSA C'È DENTRO",
 ) -> None:
     """Riepilogo finale in parole semplici (quello che l'utente vuole sapere).
@@ -388,21 +405,41 @@ def _log_plain_summary(
             _format_time(float(cast("float", r.get("new_start")) or 0.0)),
         )
 
+    # --- Durate garantite dal pavimento anti-flicker ---
+    # Non sono misure: sono tempo dato per leggibilità, preso alle slide vicine.
+    # Vanno DICHIARATE (l'utente vede "8s" e non sa da dove viene) e tenute
+    # fuori dai dubbi: non c'è nulla da correggere, a meno che il pavimento non
+    # sia riuscito a salvarle.
+    floor_guaranteed, floor_unguaranteed, floor_min = _floor_split(floor_report)
+    if floor_guaranteed:
+        log.info(
+            "\n   Durata garantita dall'anti-flicker: per %s ha deciso il minimo "
+            "di %.0fs di leggibilità, non una misura del parlato.",
+            _slide_list_text(sorted(floor_guaranteed)),
+            floor_min,
+        )
+
     # --- Dubbi da verificare a mano ---
     doubts: list[str] = []
     misaligned = sorted(s for s, v in verdicts.items() if v == "disallineata")
-    uncertain = sorted(s for s, v in verdicts.items() if v == "incerto")
-    if misaligned:
-        slides_txt = ", ".join(str(s) for s in misaligned)
+    uncertain = sorted(
+        s for s, v in verdicts.items() if v == "incerto" and s not in floor_guaranteed
+    )
+    if floor_unguaranteed:
         doubts.append(
-            f"il parlato delle slide {slides_txt} somiglia di più a un'altra "
-            "slide: guarda dove iniziano nel video"
+            "durata sotto il minimo leggibile e non allungabile (nessun confine "
+            f"non ancorato da spostare): {_slide_list_text(sorted(floor_unguaranteed))} "
+            "— serve un'ancora 'slide N' o più parlato in quel punto"
+        )
+    if misaligned:
+        doubts.append(
+            f"il parlato {_slide_list_text(misaligned, di=True)} somiglia di più "
+            "a un'altra slide: guarda dove iniziano nel video"
         )
     if uncertain:
-        slides_txt = ", ".join(str(s) for s in uncertain)
         doubts.append(
-            f"per le slide {slides_txt} la durata è anomala e il contenuto non "
-            "conferma: controlla a mano"
+            f"per {_slide_list_text(uncertain)} la durata è anomala e il "
+            "contenuto non conferma: controlla a mano"
         )
     if frame_check is not None:
         mismatches = cast("Sequence[dict[str, object]]", frame_check.get("mismatches") or [])
@@ -575,6 +612,93 @@ def _find_anomalous_durations(
         for s, d in zip(slide_ids, durations, strict=True)
         if d > long_ratio * median or d < short_ratio * median
     ]
+
+
+# Tolleranza nel confronto con il pavimento anti-flicker: i confini arrivano
+# da medie di similarità, quindi "esattamente 8s" significa "8s ± rumore".
+_FLOOR_TOLERANCE_SECONDS = 0.05
+
+
+def _timeline_durations(
+    timeline: dict[int, float], total_duration: float
+) -> dict[int, float]:
+    """Durate per slide da una timeline ``{slide: start}`` (l'ultima fino in fondo)."""
+    ordered = sorted(timeline)
+    return {
+        s: (timeline[ordered[i + 1]] if i + 1 < len(ordered) else total_duration) - timeline[s]
+        for i, s in enumerate(ordered)
+    }
+
+
+def _floor_report(
+    before: dict[int, float],
+    after: dict[int, float],
+    total_duration: float,
+    min_seconds: float,
+) -> dict[str, object]:
+    """Quali durate esistono per il PAVIMENTO anti-flicker, non per misura.
+
+    Confronta la timeline prima e dopo ``enforce_min_durations``: una slide che
+    era sotto ``min_seconds`` e che il pavimento ha allungato non è stata
+    "misurata dal parlato", è stata COSTRUITA per leggibilità, prendendo tempo
+    alle vicine. Senza questo dato la differenza fra le due cose finiva solo nel
+    log e il riepilogo finale chiedeva all'utente di "controllare a mano"
+    durate che sono per costruzione, non per allineamento.
+
+    Distingue il caso in cui il pavimento NON è riuscito a salvare la slide
+    (incastrata tra due ancore pronunciate): lì sì che serve un intervento.
+
+    Returns:
+        ``{"min_seconds", "guaranteed": [{slide, before, duration}],
+        "unguaranteed": [{slide, duration}]}``
+    """
+    before_durations = _timeline_durations(before, total_duration)
+    after_durations = _timeline_durations(after, total_duration)
+    guaranteed: list[dict[str, object]] = []
+    unguaranteed: list[dict[str, object]] = []
+    for s in sorted(after_durations):
+        was = before_durations.get(s, 0.0)
+        if was >= min_seconds - _FLOOR_TOLERANCE_SECONDS:
+            continue  # lunga di suo: il pavimento non l'ha toccata
+        now = after_durations[s]
+        if now < min_seconds - _FLOOR_TOLERANCE_SECONDS:
+            unguaranteed.append({"slide": s, "duration": round(now, 1)})
+        else:
+            guaranteed.append({"slide": s, "before": round(was, 1), "duration": round(now, 1)})
+    return {
+        "min_seconds": round(min_seconds, 1),
+        "guaranteed": guaranteed,
+        "unguaranteed": unguaranteed,
+    }
+
+
+def _floor_split(
+    floor_report: dict[str, object] | None,
+) -> tuple[dict[int, float], dict[int, float], float]:
+    """Estrae ``(slide garantite, slide rimaste corte, minimo)`` dal report.
+
+    Tollerante per costruzione: il report arriva da un dict JSON, quindi ogni
+    voce può mancare o essere del tipo sbagliato senza dover far fallire la run.
+    """
+    guaranteed: dict[int, float] = {}
+    unguaranteed: dict[int, float] = {}
+    min_seconds = 0.0
+    if not isinstance(floor_report, dict):
+        return guaranteed, unguaranteed, min_seconds
+    with suppress(TypeError, ValueError):
+        min_seconds = float(cast(float, floor_report.get("min_seconds") or 0.0))
+    for key, target in (("guaranteed", guaranteed), ("unguaranteed", unguaranteed)):
+        entries = floor_report.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            with suppress(TypeError, ValueError):
+                target[int(cast(int, entry.get("slide")))] = float(
+                    cast(float, entry.get("duration") or 0.0)
+                )
+    return guaranteed, unguaranteed, min_seconds
 
 
 def _slide_tokens(text: str) -> list[str]:
@@ -835,26 +959,68 @@ def _beam_ab_cache_key(slides_key: str, audio_hash: str, args: Any) -> str:
     )
 
 
-def _use_accurate_transcript(ab: dict[str, object], accurate_added_anchors: bool) -> tuple[bool, str]:
+def _ab_confusability(ab: dict[str, object]) -> float | None:
+    """Confondibilità del deck nella misura A/B (``None`` se non disponibile).
+
+    Dipende dalle slide, non dalla trascrizione, ma la misura è per-trascrizione:
+    se ne prende la peggiore. Sopra ``AUTO_BEAM_CONFUSABILITY_MAX`` il confronto
+    è rumore e non deve decidere (stessa soglia di ``semantic_sync.weak_signal``).
+    """
+    values: list[float] = []
+    for side in ("greedy", "accurate"):
+        block = ab.get(side)
+        if not isinstance(block, dict) or "confusability" not in block:
+            continue
+        try:
+            values.append(float(cast(float, block["confusability"])))
+        except (TypeError, ValueError):
+            continue
+    return max(values) if values else None
+
+
+def _use_accurate_transcript(
+    ab: dict[str, object],
+    accurate_anchors: int,
+    greedy_anchors: int,
+) -> tuple[bool, str]:
     """Decide quale delle due trascrizioni usare, in base alla misura.
 
-    Regola (in ordine):
+    Regola (in ordine), dai segnali espliciti ai proxy:
 
-    1. l'accurata ha trovato ancore che la veloce non aveva -> resta l'accurata:
-       le ancore sono riferimenti espliciti, più affidabili di un proxy di
-       somiglianza;
-    2. confronto non calcolabile -> resta l'accurata (scelta prudente);
-    3. l'accurata vince di almeno ``AUTO_BEAM_AB_MARGIN`` -> resta l'accurata;
-    4. altrimenti si usa la VELOCE: se il testo migliore ce l'ha lei, pagare
+    1. l'accurata ha PIÙ ancore della veloce -> resta l'accurata: le ancore sono
+       riferimenti espliciti nel parlato, più affidabili di una somiglianza;
+    2. l'accurata ne ha MENO -> si usa la VELOCE. La perdita di un'ancora è un
+       segnale forte e verificabile, il punteggio è un proxy che non può mai
+       compensarla (la decodifica più accurata può saltare una frase intera);
+    3. confronto non calcolabile -> resta l'accurata (scelta prudente);
+    4. confronto non AFFIDABILE (deck confondibile: slide quasi-duplicate) -> il
+       punteggio non vota e vale la scelta prudente (accurata): è il caso in cui
+       la timeline è decisa dal contenuto, quindi l'accuratezza del testo conta;
+    5. l'accurata vince di almeno ``AUTO_BEAM_AB_MARGIN`` -> resta l'accurata;
+    6. altrimenti si usa la VELOCE: se il testo migliore ce l'ha lei, pagare
        (e usare) la decodifica accurata non ha senso.
 
     Returns:
         ``(usa_accurata, motivo)``
     """
-    if accurate_added_anchors:
-        return True, "ha trovato ancore che la decodifica veloce non aveva"
+    if accurate_anchors > greedy_anchors:
+        return True, (
+            f"ha trovato ancore che la decodifica veloce non aveva "
+            f"({accurate_anchors} contro {greedy_anchors})"
+        )
+    if accurate_anchors < greedy_anchors:
+        return False, (
+            f"ha PERSO ancore che la decodifica veloce aveva "
+            f"({accurate_anchors} contro {greedy_anchors})"
+        )
     if "error" in ab:
         return True, "confronto non calcolabile, tengo la scelta prudente"
+    confusability = _ab_confusability(ab)
+    if confusability is not None and confusability > AUTO_BEAM_CONFUSABILITY_MAX:
+        return True, (
+            f"confronto non affidabile (deck confondibile: {confusability:.0%} di slide "
+            "quasi-duplicate), il punteggio non decide: tengo la scelta prudente"
+        )
     delta = float(cast(float, ab.get("delta_avg_z", 0.0)) or 0.0)
     if delta >= AUTO_BEAM_AB_MARGIN:
         return True, f"l'accurata ha il segnale migliore (Δ {delta:+.3f})"
@@ -1286,6 +1452,12 @@ def main(argv: list | None = None) -> None:
         # libero/ordinato, perché il report è costruito più avanti per entrambi i
         # flussi, e prima della scelta del beam, che la annota qui dentro.
         sync_notes: dict[str, object] = {}
+        # Provenienza delle durate garantite dal pavimento anti-flicker (solo il
+        # flusso ordinato): restano vuoti quando quel pavimento non è stato
+        # applicato, così nessun ramo deve indovinare se il dato esiste.
+        floor_note: dict[str, object] | None = None
+        floor_guaranteed: dict[int, float] = {}
+        floor_unguaranteed: dict[int, float] = {}
 
         # --- Auto-detection flusso (dopo trascrizione, prima della sincronizzazione) ---
         flow: str
@@ -1447,10 +1619,13 @@ def main(argv: list | None = None) -> None:
                 beam_note["ab"] = ab_note
                 if not ab_note.get("from_cache"):
                     beam_ab_seconds = float(cast(float, ab_note.get("seconds", 0.0)) or 0.0)
-                # Le ancore sono riferimenti espliciti: se la trascrizione
-                # accurata ne ha trovate di nuove, resta quella.
+                # Le ancore sono riferimenti espliciti: contano più di ogni
+                # somiglianza, in ENTRAMBE le direzioni. Trovate -> resta
+                # l'accurata; PERSE -> si torna alla veloce, che le aveva.
+                beam_note["greedy_anchors"] = len(greedy_anchors)
+                beam_note["accurate_anchors"] = len(flow_anchors)
                 use_accurate, reason = _use_accurate_transcript(
-                    ab_note, len(flow_anchors) > len(greedy_anchors)
+                    ab_note, len(flow_anchors), len(greedy_anchors)
                 )
                 beam_note["reason"] = reason
                 if not use_accurate:
@@ -1460,6 +1635,10 @@ def main(argv: list | None = None) -> None:
                     words_raw = greedy_words
                     flow_anchors = greedy_anchors
                     beam_note["chosen"] = "greedy"
+                    # Le ancore che vincolano la timeline sono di nuovo quelle
+                    # della decodifica veloce: il report deve dirlo, o risulta
+                    # che la timeline usata poggia su un'ancora sola.
+                    beam_note["pinned_slides"] = len(flow_anchors)
                 log.info(
                     "   [Beam] Uso la trascrizione %s: %s.",
                     "ACCURATA" if use_accurate else "VELOCE",
@@ -1952,12 +2131,18 @@ def main(argv: list | None = None) -> None:
             # decimo di secondo (principio del progetto). Stessa soglia
             # dell'anti-flicker del flusso libero: max(8s, 2x durata minima).
             min_slide_seconds = max(8.0, 2 * args.semantic_min_duration)
+            timeline_before_floor = dict(timeline)
             timeline, _moved = enforce_min_durations(
                 timeline,
                 total_duration,
                 min_slide_seconds,
                 anchors=semantic_anchors,
             )
+            floor_note = _floor_report(
+                timeline_before_floor, timeline, total_duration, min_slide_seconds
+            )
+            sync_notes["anti_flicker"] = floor_note
+            floor_guaranteed, floor_unguaranteed, _floor_min = _floor_split(floor_note)
             if _moved:
                 log.info(
                     "   Anti-flicker: %d confini non ancorati spostati per garantire "
@@ -1965,6 +2150,27 @@ def main(argv: list | None = None) -> None:
                     len(_moved),
                     min_slide_seconds,
                     ", ".join(f"slide {s}: {old:.1f}->{new:.1f}s" for s, old, new in _moved),
+                )
+            if floor_guaranteed:
+                # La durata di queste slide è una GARANZIA di leggibilità, non una
+                # misura del parlato: dirlo, invece di far apparire "8s" come se
+                # fosse un confine trovato.
+                log.info(
+                    "   Anti-flicker: per %s il minimo di %.0fs ha DECISO la durata "
+                    "(garanzia di leggibilità, non misura del parlato: il tempo è "
+                    "stato preso alle slide vicine).",
+                    _slide_list_text(sorted(floor_guaranteed)),
+                    min_slide_seconds,
+                )
+            if floor_unguaranteed:
+                log.warning(
+                    "\n   [Avviso] Slide sotto il minimo leggibile e non allungabili "
+                    "(nessun confine non ancorato da spostare): %s.\n"
+                    "   Il rimedio è un'ancora 'slide N' pronunciata alla transizione "
+                    "o più parlato su quella slide.",
+                    ", ".join(
+                        f"slide {s} = {d:.0f}s" for s, d in sorted(floor_unguaranteed.items())
+                    ),
                 )
 
             t_sync = time.time() - t_phase_start
@@ -2021,7 +2227,17 @@ def main(argv: list | None = None) -> None:
         # con parlato coerente è reale (il podcast si è soffermato), non un
         # errore di sincronizzazione. Solo i segmenti disallineati o incerti
         # meritano l'avviso.
-        anomalous = _find_anomalous_durations(durations, slide_ids)
+        #
+        # Le slide il cui tempo è stato GARANTITO dal pavimento anti-flicker
+        # sono escluse a monte: la loro durata è una scelta di leggibilità, non
+        # una misura, quindi non è un'anomalia da attribuire all'allineamento.
+        # Finiscono in ``anti_flicker`` nel report, dichiarate per quello che
+        # sono.
+        anomalous = [
+            (s, d)
+            for s, d in _find_anomalous_durations(durations, slide_ids)
+            if s not in floor_guaranteed
+        ]
         verdicts = (
             _validate_anomalous_segments(
                 anomalous, slide_texts, words_raw, durations, slide_ids
@@ -2194,6 +2410,7 @@ def main(argv: list | None = None) -> None:
                 verdicts=verdicts,
                 quality=quality,
                 review_diffs=len(review_diffs),
+                floor_report=floor_note,
                 title="TIMELINE PRONTA — COSA CONTERRÀ IL VIDEO",
             )
             log.info("\n" + "=" * 70)
@@ -2288,12 +2505,9 @@ def main(argv: list | None = None) -> None:
                         engine=args.engine,
                     )
                     t_video = time.time() - t_phase_start
-                    # I frame vecchi descrivono il video precedente: la cartella
-                    # citata nei log e nel riepilogo deve contenere solo quelli
-                    # dell'artefatto attuale.
-                    for stale in (CACHE_DIR / "verify_frames").glob("seg*.png"):
-                        with suppress(OSError):
-                            stale.unlink()
+                    # I frame del video precedente li rimuove la verifica stessa
+                    # (``video.frame_consistency_check`` svuota la cartella prima
+                    # di scrivere): qui non serve un secondo punto di pulizia.
                     # L'artefatto di verifica (letto da analysis_sync.py) deve
                     # descrivere il video NUOVO, non la timeline pre-riparazione.
                     # Con slide ripetute (flusso libero) la mappa slide->start
@@ -2353,6 +2567,7 @@ def main(argv: list | None = None) -> None:
             quality=quality,
             review_diffs=len(review_diffs),
             repairs=repairs,
+            floor_report=floor_note,
         )
 
     finally:

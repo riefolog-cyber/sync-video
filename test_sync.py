@@ -1756,6 +1756,62 @@ class TestPlainSummary(unittest.TestCase):
             out,
         )
 
+    def test_floor_guaranteed_duration_is_declared_and_not_a_doubt(self):
+        # La durata di 8s viene dal pavimento anti-flicker, non dal parlato: va
+        # DETTA (l'utente vede "8s" e non sa da dove viene) e non deve finire
+        # tra i dubbi da controllare a mano, perché non c'è nulla da correggere.
+        out = self._render(
+            durations=[8.0, 60.0, 60.0],
+            verdicts={1: "incerto"},
+            floor_report={
+                "min_seconds": 8.0,
+                "guaranteed": [{"slide": 1, "before": 4.3, "duration": 8.0}],
+                "unguaranteed": [],
+            },
+        )
+        self.assertIn("Durata garantita dall'anti-flicker", out)
+        self.assertIn("slide 1", out)
+        self.assertNotIn("controlla a mano", out)
+        self.assertIn("nessuno, la sincronizzazione è", out)
+
+    def test_slide_too_short_even_for_the_floor_is_still_a_doubt(self):
+        # Incastrata fra due ancore: il pavimento non può allungarla. Qui sì che
+        # serve un intervento (un'ancora pronunciata o più parlato).
+        out = self._render(
+            durations=[2.0, 60.0, 60.0],
+            floor_report={
+                "min_seconds": 8.0,
+                "guaranteed": [],
+                "unguaranteed": [{"slide": 1, "duration": 2.0}],
+            },
+        )
+        self.assertIn("sotto il minimo leggibile", out)
+        self.assertIn("la slide 1", out)
+        self.assertIn("Da controllare a mano", out)
+
+    def test_slide_numbers_are_listed_in_italian(self):
+        # Il riepilogo è testo per l'utente: "per le slide 13" è sbagliato, non
+        # solo poco elegante.
+        from main import _slide_list_text
+
+        self.assertEqual(_slide_list_text([13]), "la slide 13")
+        self.assertEqual(_slide_list_text([6, 12]), "le slide 6 e 12")
+        self.assertEqual(_slide_list_text([3, 6, 12]), "le slide 3, 6 e 12")
+        self.assertEqual(_slide_list_text([2], di=True), "della slide 2")
+        self.assertEqual(_slide_list_text([2, 5], di=True), "delle slide 2 e 5")
+
+    def test_single_anomalous_slide_is_worded_in_the_singular(self):
+        out = self._render(verdicts={2: "disallineata", 13: "incerto"})
+        self.assertIn("il parlato della slide 2 somiglia", out)
+        self.assertIn("per la slide 13 la durata è anomala", out)
+        self.assertNotIn("per le slide 13", out)
+
+    def test_no_floor_report_keeps_the_old_summary(self):
+        # Nessun pavimento applicato (flusso libero): nessuna riga in più.
+        out = self._render(verdicts={3: "incerto"})
+        self.assertNotIn("Durata garantita dall'anti-flicker", out)
+        self.assertIn("slide 3 la durata è anomala", out)
+
 
 class TestAnomalousDurations(unittest.TestCase):
     """Guard-rail durate anomale del riepilogo finale (main._find_anomalous_durations)."""
@@ -3088,3 +3144,100 @@ class TestEnforceMinDurations(unittest.TestCase):
         out, moved = enforce_min_durations(timeline, 180.0, 8.0)
         self.assertEqual(out, timeline)
         self.assertEqual(moved, [])
+
+    def test_float_noise_is_not_recorded_as_a_move(self):
+        # Osservato nella run del 25/09/2026: la lista degli spostamenti
+        # conteneva "slide 14: 544.1->544.1s", cioè uno spostamento nullo (o
+        # all'indietro di 1e-13s) nato dal rumore numerico dei confini. Non è
+        # uno spostamento: sporcava il log e consumava le passate senza
+        # cambiare nulla.
+        timeline = {1: 0.0, 2: 8.0 - 1e-9, 3: 16.0 - 1e-9}
+        out, moved = enforce_min_durations(timeline, 24.0, 8.0)
+        self.assertEqual(moved, [])
+        self.assertEqual(out, timeline)
+
+    def test_negligible_shift_does_not_count_as_a_move(self):
+        # La slide 2 è corta di 2 centesimi: il guadagno di leggibilità è nullo,
+        # quindi il confine resta dov'è invece di registrare una modifica
+        # inesistente (e di spostare la vicina per nulla).
+        timeline = {1: 0.0, 2: 100.0, 3: 107.98}
+        out, moved = enforce_min_durations(timeline, 200.0, 8.0)
+        self.assertEqual(moved, [])
+        self.assertEqual(out, timeline)
+
+
+class TestFloorDurations(unittest.TestCase):
+    """Durate dal pavimento anti-flicker: dichiarate, non spacciate per misure.
+
+    Il pavimento allunga una slide corta prendendo tempo alle vicine: la durata
+    risultante è una garanzia di leggibilità, non una misura del parlato. Il
+    report deve saperlo dire (dati reali della run del 25/09/2026).
+    """
+
+    def test_raised_slide_is_declared_as_guaranteed(self):
+        from main import _floor_report
+
+        before = {1: 0.0, 2: 204.1, 3: 208.4}
+        after = {1: 0.0, 2: 200.4, 3: 208.4}
+        report = _floor_report(before, after, 268.4, 8.0)
+        self.assertEqual(report["min_seconds"], 8.0)
+        self.assertEqual(
+            report["guaranteed"], [{"slide": 2, "before": 4.3, "duration": 8.0}]
+        )
+        self.assertEqual(report["unguaranteed"], [])
+
+    def test_naturally_long_slides_are_not_called_guaranteed(self):
+        from main import _floor_report
+
+        before = {1: 0.0, 2: 60.0}
+        report = _floor_report(before, dict(before), 120.0, 8.0)
+        self.assertEqual(report["guaranteed"], [])
+        self.assertEqual(report["unguaranteed"], [])
+
+    def test_slide_the_floor_could_not_save_is_reported_separately(self):
+        from main import _floor_report
+
+        before = {1: 0.0, 2: 10.0, 3: 10.5, 4: 20.0}
+        report = _floor_report(before, dict(before), 30.0, 8.0)
+        self.assertEqual(report["guaranteed"], [])
+        self.assertEqual(report["unguaranteed"], [{"slide": 2, "duration": 0.5}])
+
+    def test_last_slide_duration_uses_the_audio_end(self):
+        # L'ultima slide finisce con l'audio: la sua durata non ha un confine
+        # successivo, quindi va misurata contro ``total_duration``.
+        from main import _floor_report
+
+        before = {1: 0.0, 2: 60.0, 3: 100.0}
+        after = {1: 0.0, 2: 60.0, 3: 98.0}
+        report = _floor_report(before, after, 106.0, 8.0)
+        self.assertEqual(
+            report["guaranteed"], [{"slide": 3, "before": 6.0, "duration": 8.0}]
+        )
+
+    def test_split_is_tolerant_of_a_missing_or_broken_report(self):
+        from main import _floor_split
+
+        for broken in (
+            None,
+            {},
+            {"min_seconds": "n/d"},
+            {"guaranteed": "n/d"},
+            {"guaranteed": [{"slide": "x"}]},
+            {"guaranteed": [None]},
+        ):
+            guaranteed, unguaranteed, min_seconds = _floor_split(broken)
+            self.assertEqual(guaranteed, {})
+            self.assertEqual(unguaranteed, {})
+            self.assertEqual(min_seconds, 0.0)
+
+    def test_split_round_trips_the_report(self):
+        from main import _floor_report, _floor_split
+
+        before = {1: 0.0, 2: 204.1, 3: 208.4}
+        after = {1: 0.0, 2: 200.4, 3: 208.4}
+        guaranteed, unguaranteed, min_seconds = _floor_split(
+            _floor_report(before, after, 268.4, 8.0)
+        )
+        self.assertEqual(guaranteed, {2: 8.0})
+        self.assertEqual(unguaranteed, {})
+        self.assertEqual(min_seconds, 8.0)
