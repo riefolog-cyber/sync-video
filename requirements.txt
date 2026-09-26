@@ -25,11 +25,16 @@ packaging>=23.0
 requests>=2.31.0
 
 # Trascrizione audio (faster-whisper, fallback CPU)
-faster-whisper>=1.2.1
+# Nativo solo dove CTranslate2 esiste: non pubblica wheel win_arm64, quindi su
+# Windows ARM il pacchetto (e la sua dipendenza) non è installabile. Il marcatore
+# PEP 508 lo esclude senza far fallire `pip install -r` sull'intera riga.
+faster-whisper>=1.2.1; platform_machine != "ARM64" and platform_machine != "aarch64"
 
-# Trascrizione veloce su iGPU Intel (opzionale ma raccomandato):
-openvino>=2025.1.0
-openvino-genai>=2025.1.0
+# Trascrizione veloce su iGPU Intel (opzionale ma raccomandato): OpenVINO esiste
+# solo per x86, quindi su ARM non e installabile (e su ARM e comunque inutile:
+# l'Adreno non e accelerabile da OpenVINO).
+openvino>=2025.1.0; platform_machine != "ARM64" and platform_machine != "aarch64"
+openvino-genai>=2025.1.0; platform_machine != "ARM64" and platform_machine != "aarch64"
 
 # Dipendenze di sviluppo
 mypy>=1.10.0

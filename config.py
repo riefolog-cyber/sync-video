@@ -9,6 +9,7 @@ import contextlib
 import importlib.metadata
 import logging
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -184,6 +185,35 @@ _REQUIRED_PACKAGES = {
     "packaging": "packaging>=23.0",
 }
 
+# =====================================================================
+# ARCHITETTURA: pacchetti senza build nativa ARM
+# =====================================================================
+# faster-whisper dipende da CTranslate2, che non pubblica wheel win_arm64 (ne
+# OpenVINO, che e x86-only). Su ARM quei pacchetti semplicemente non si
+# installano: se restassero tra i "richiesti", il bootstrap fallirebbe e il
+# programma uscirebbe prima di arrivare alla trascrizione. Qui vengono quindi
+# tolti dai pacchetti da controllare/installare, restando opzionali: senza
+# motore di trascrizione il progetto non produce sottotitoli, ma su ARM non
+# c'e alternative pronta (CTranslate2 non esiste per questa CPU).
+#
+# Nota: `_REQUIRED_PACKAGES` resta invariato di proposito, perche' i test e
+# updates.py lo leggono come elenco completo delle dipendenze dichiarate.
+IS_ARM = platform.machine().upper() in ("ARM64", "AARCH64")
+
+_X64_ONLY_PACKAGES = frozenset({"faster_whisper"})
+
+
+def _active_required_packages() -> dict[str, str]:
+    """`_REQUIRED_PACKAGES` privata dei pacchetti non installabili su ARM.
+
+    Su x64 restituisce l'intero dizionario: il comportamento del bootstrap e
+    identico a prima, quindi la macchina x64 non cambia nulla.
+    """
+    if not IS_ARM:
+        return dict(_REQUIRED_PACKAGES)
+    return {name: req for name, req in _REQUIRED_PACKAGES.items() if name not in _X64_ONLY_PACKAGES}
+
+
 _TESSERACT_DOWNLOAD_URL = "https://github.com/UB-Mannheim/tesseract/wiki"
 _FFMPEG_DOWNLOAD_URL = "https://ffmpeg.org/download.html"
 
@@ -332,7 +362,7 @@ def _ensure_pip_packages() -> None:
     Esce con codice 1 se qualcosa resta non installabile o non importabile.
     """
     to_install = []
-    for pip_req in _REQUIRED_PACKAGES.values():
+    for pip_req in _active_required_packages().values():
         reason = _missing_or_old(pip_req)
         if reason:
             to_install.append((pip_req, reason))
@@ -363,7 +393,7 @@ def _ensure_pip_packages() -> None:
 
     # --- Verifica degli import (dopo gli eventuali aggiornamenti) ---
     broken = []
-    for import_name, pip_req in _REQUIRED_PACKAGES.items():
+    for import_name, pip_req in _active_required_packages().items():
         try:
             __import__(import_name)
         except (ImportError, RuntimeError) as e:

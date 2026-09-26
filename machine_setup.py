@@ -16,6 +16,7 @@ in ``.cache/machine_setup.json`` + ``.env``. Le run successive usano la
 configurazione salvata senza rifare il rilevamento (salvo ``--force-setup``).
 """
 
+import importlib.util
 import json
 import subprocess
 import sys
@@ -259,6 +260,22 @@ def _apply(args: _TranscriberArgs, rec: dict) -> None:
 # =====================================================================
 # ENTRY POINT
 # =====================================================================
+def _engine_note(rec: dict) -> str:
+    """Messaggio esplicito se il motore scelto non e utilizzabile qui.
+
+    Su ARM faster-whisper non e installabile (CTranslate2 non pubblica wheel
+    win_arm64) e OpenVINO e x86-only: il progetto si avvia e fa tutto il resto
+    (PDF, OCR, embeddings, video), ma la trascrizione audio non e disponibile.
+    Meglio dirlo esplicitamente che fallire piu' avanti con un ImportError.
+    """
+    if rec.get("transcriber") == "openvino":
+        if importlib.util.find_spec("openvino_genai") is None:
+            return "OpenVINO GenAI non installabile su questa CPU: e x86-only (su ARM anche l'Adreno non e accelerabile da OpenVINO)."
+    if importlib.util.find_spec("faster_whisper") is None:
+        return "faster-whisper non installabile su questa CPU: CTranslate2 non pubblica wheel ARM. La trascrizione audio non sara disponibile."
+    return ""
+
+
 def machine_setup(args: _TranscriberArgs, force: bool = False) -> None:
     """Rileva l'hardware e configura il miglior motore (idempotente).
 
@@ -282,6 +299,10 @@ def machine_setup(args: _TranscriberArgs, force: bool = False) -> None:
         log.info("   Device OpenVINO: %s", rec["openvino_device"])
     elif rec["whisper_device"] == "cuda":
         log.info("   Device faster-whisper: CUDA (float16)")
+
+    nota = _engine_note(rec)
+    if nota:
+        log.warning("   \u26a0\ufe0f  %s", nota)
 
     _apply(args, rec)
     _write_config(rec)
