@@ -268,11 +268,13 @@ def _engine_note(rec: dict) -> str:
     (PDF, OCR, embeddings, video), ma la trascrizione audio non e disponibile.
     Meglio dirlo esplicitamente che fallire piu' avanti con un ImportError.
     """
-    if rec.get("transcriber") == "openvino":
-        if importlib.util.find_spec("openvino_genai") is None:
-            return "OpenVINO GenAI non installabile su questa CPU: e x86-only (su ARM anche l'Adreno non e accelerabile da OpenVINO)."
+    if (rec.get("transcriber") == "openvino"
+            and importlib.util.find_spec("openvino_genai") is None):
+        return ("OpenVINO GenAI non installabile su questa CPU: e x86-only "
+                "(su ARM anche l'Adreno non e accelerabile da OpenVINO).")
     if importlib.util.find_spec("faster_whisper") is None:
-        return "faster-whisper non installabile su questa CPU: CTranslate2 non pubblica wheel ARM. La trascrizione audio non sara disponibile."
+        return ("faster-whisper non installabile su questa CPU: CTranslate2 non "
+                "pubblica wheel ARM. La trascrizione audio non sara disponibile.")
     return ""
 
 
