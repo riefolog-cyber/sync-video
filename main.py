@@ -31,6 +31,7 @@ from config import (
     DEFAULT_VIDEO_FPS,
     DEFAULT_VIDEO_THREADS,
     DEFAULT_WHISPER_BEAM_ACCURATE,
+    DEFAULT_WHISPER_DEVICE,
     STOPWORDS_ITA,
     atomic_write_text,
     bootstrap,
@@ -1143,6 +1144,7 @@ def _transcribe_with_accurate_beam(
         whisper_compute_type=args.whisper_compute_type,
         whisper_beam=beam,
         whisper_batch=args.whisper_batch,
+        whisper_device_explicit=getattr(args, "whisper_device_explicit", False),
     )
     seconds = time.time() - t0
     if not args.no_cache:
@@ -1302,6 +1304,12 @@ def main(argv: list | None = None) -> None:
     # Bootstrap esplicito: verifica dipendenze prima di tutto
     bootstrap()
     args = parse_args(argv)
+
+    # Se l'utente ha scelto il device a mano, un eventuale fallimento di CUDA non
+    # viene nascosto da un ripiego silenzioso su CPU. Va segnalato PRIMA che
+    # machine_setup riscriva il device in modalita' auto: da quel momento non si
+    # saprebbe piu' cosa aveva scelto l'utente. Stesso criterio di `_apply`.
+    args.whisper_device_explicit = args.whisper_device != DEFAULT_WHISPER_DEVICE
 
     # --- Rilevamento hardware automatico al primo avvio ---
     # Sceglie il motore migliore per il PC (NVIDIA->CUDA, iGPU Intel->OpenVINO,
@@ -1506,6 +1514,7 @@ def main(argv: list | None = None) -> None:
                 whisper_compute_type=args.whisper_compute_type,
                 whisper_beam=args.whisper_beam,
                 whisper_batch=args.whisper_batch,
+                whisper_device_explicit=getattr(args, "whisper_device_explicit", False),
             )
             if not args.no_cache:
                 # Fix A: salva anche le parole raw per estrazione deterministica

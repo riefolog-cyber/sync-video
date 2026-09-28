@@ -61,15 +61,23 @@ Da quel momento `genera_video.bat`, `aggiornamenti.bat`, `prova.bat` e `check_em
 
 La venv **riusa i modelli già scaricati** (cartella `.cache` e cache di HuggingFace): non riscarica nulla, e la prima run resta veloce. Dentro `.venv` `pip check` non segnala conflitti; nel Python globale ne convivono diversi (pacchetti di altri progetti).
 
-> **Cambio di PC / hardware**: la scelta del motore di trascrizione viene salvata
-> in `.cache/machine_setup.json` **con un'impronta della macchina**
-> (`platform.system()/platform.machine()`). Se cloni o sposti la cartella su un
-> PC diverso, la config viene scartata e il rilevamento rifatto: senza questo,
-> il motore scelto sull'hardware di partenza (es. OpenVINO su una iGPU Intel)
-> verrebbe riusato d'accordo su una macchina che non ha quella GPU, senza avviso.
-> La scelta **non** viene scritta in `.env` (che resta agli override espliciti
-> dell'utente, con precedenza). Se invece cambi GPU restando sullo stesso
-> sistema, usa `--force-setup`.
+> **Cambio di PC / hardware**: il motore di trascrizione **non viene mai
+> ripreso da disco**. In `.cache/machine_setup.json` si salvano solo i *fatti*
+> hardware (impronta della macchina + lista delle GPU), che sono lenti da
+> ottenere ma stabili; la *decisione* ("usa CUDA", "usa OpenVINO") è ricalcolata
+> a ogni run e poi **validata contro il runtime reale** (il device esiste? il
+> pacchetto è installato? il modello c'è?). Se non regge, ripiega su CPU
+> avvisando. Perché: la decisione dipende da fatti che cambiano (che pacchetti
+> sono installati, che device espone il runtime *adesso*), mentre l'hardware no.
+> Persistendola, copiare la cartella da un PC con GPU NVIDIA a uno senza chiudeva
+> la run con `CUDA driver version is insufficient` **dopo** OCR e rendering, senza
+> che nulla avesse notato che la GPU non c'era più.
+>
+> Come difesa aggiuntiva, se faster-whisper non riesce a costruire il modello su
+> CUDA, ripiega da solo su CPU (int8) e la pipeline prosegue; se però avevi
+> chiesto `--whisper-device cuda` esplicitamente, non lo fa di nascosto e ti
+> avvisa. `.env` resta per gli override espliciti tuoi (che hanno precedenza);
+> se cambi GPU restando sullo stesso sistema, `--force-setup` rileva di nuovo.
 
 > **Precisione assoluta**: il programma non distribuisce mai le slide uniformemente. La timeline viene costruita dal **solo** allineamento semantico (embeddings offline, senza LLM), vincolato dai riferimenti espliciti "slide N" nella trascrizione. Se non è generabile → **interruzione con avviso**.
 
@@ -328,10 +336,11 @@ e veloce il router lato server.
 >   + download modello IR inclusi automaticamente)
 > - altrimenti → faster-whisper su CPU
 >
-> La scelta è persistita in `.cache/machine_setup.json` (con l'impronta della
-> macchina, vedi "Ambiente dedicato"); le run successive la riusano senza rifare
-> il rilevamento. Controlla con `--force-setup` (rileva di nuovo) o disabilita
-> con `--no-auto-setup`.
+> La scelta è ricalcolata a ogni run a partire dall'hardware rilevato e
+> validata contro il runtime (vedi "Cambio di PC / hardware" qui sotto); i fatti
+> hardware restano in `.cache/machine_setup.json` con l'impronta della macchina.
+> Controlla con `--force-setup` (rileva di nuovo) o disabilita con
+> `--no-auto-setup`.
 >
 > **Su un PC nuovo, scarica i modelli prima.** Al primo avvio i modelli (~3 GB:
 > embedding e5-large 2.2 GB, pesi Whisper, modello OpenVINO IR 930 MB) vengono

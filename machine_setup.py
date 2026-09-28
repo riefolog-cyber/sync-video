@@ -11,20 +11,36 @@ Sceglie il motore di trascrizione più adatto alla configurazione del PC:
 - GPU AMD                          -> faster-whisper su CPU (OpenVINO supporta solo Intel)
 - GPU Qualcomm Adreno (Snapdragon) -> faster-whisper su CPU (niente CUDA/OpenVINO su ARM)
 
-La prima run rileva, installa/scarica ciò che serve e persiste la scelta
-in ``.cache/machine_setup.json``. Le run successive usano la configurazione
-salvata senza rifare il rilevamento (salvo ``--force-setup``).
+Che cosa viene persistito, e che cosa no
+-----------------------------------------
+In ``.cache/machine_setup.json`` si salvano i FATTI hardware (``fingerprint`` +
+lista delle GPU), non la decisione. La distinzione non e' accademica: la
+decisione ("usa CUDA", "usa OpenVINO") dipende da cose che cambiano nel tempo
+(che pacchetti sono installati, che device il runtime espone *adesso*), mentre
+l'hardware no. Persistere la decisione la faceva invecchiare: copiando la
+cartella da un PC con GPU NVIDIA a uno senza, la run si chiudeva con un
+traceback di CTranslate2 ("CUDA driver version is insufficient") DOPO aver
+gia' fatto OCR e rendering, senza che nulla avesse notato che la GPU non c'era
+piu'.
 
-La config salvata porta con se' un'impronta della macchina
-(``platform.system()/platform.machine()``): se la cartella del progetto viene
-clonata o spostata su un PC diverso, la config viene scartata e il rilevamento
-rifatto. Senza questo, il motore scelto sull'hardware di partenza (es. OpenVINO
-su una iGPU Intel) verrebbe riusato d'acordo su una macchina che non ha quella
-GPU, senza alcun avviso.
+Quindi la decisione e' ricalcolata a ogni run da ``recommend()`` e poi validata
+contro il runtime reale (``_validate``): una lista GPU stale puo' produrre una
+raccomandazione sbagliata, ma non puo' piu' produrre un motore inutilizzabile,
+perche' la validazione controlla che il device esista davvero e ripiega su CPU
+avvisando. I fatti hardware sono invece cachati perche' rilevarli costa una
+subprocess, e portano con se' l'impronta della macchina
+(``platform.system()/platform.machine()``): se la cartella viene clonata o
+spostata su un PC diverso, si rileva di nuovo.
 
-La scelta NON viene scritta in ``.env``: quel file resta agli override espliciti
-dell'utente, che hanno la precedenza. Scrivere li' creava una seconda fonte di
-verita' capace di rendere ``--force-setup`` inefficace (vedi `_apply`).
+Il provisioning (installare openvino-genai, scaricare il modello IR) avviene
+solo quando l'hardware viene realmente rilevato, non a ogni run: e' la parte
+costosa e con effetti di rete, e non ha senso ripeterla quando i fatti non
+sono cambiati.
+
+La decisione NON viene scritta in ``.env``: quel file resta agli override
+espliciti dell'utente, che hanno la precedenza. Scrivere li' creava una
+seconda fonte di verita' capace di rendere ``--force-setup`` inefficace (vedi
+``_apply``).
 """
 
 import importlib.util
@@ -191,7 +207,11 @@ def _provision_openvino(model_dir: Path) -> bool:
 
 
 def _provision(rec: dict, model_dir: Path) -> dict:
-    """Applica il provisioning necessario per il motore consigliato."""
+    """Applica il provisioning necessario per il motore consigliato.
+
+    Costa rete (pip install, download del modello IR): viene chiamato solo
+    quando l'hardware e' stato davvero rilevato, non a ogni run.
+    """
     if rec["transcriber"] == "openvino":
         if not _provision_openvino(model_dir):
             log.warning("   ⚠️ OpenVINO non pronto, ripiego su faster-whisper su CPU.")
@@ -202,50 +222,116 @@ def _provision(rec: dict, model_dir: Path) -> dict:
     return rec
 
 
+def _downgrade(rec: dict, motivo: str) -> dict:
+    """Ripiega su faster-whisper su CPU, spiegando perche'."""
+    log.warning("   ⚠️ %s: ripiego su faster-whisper su CPU.", motivo)
+    out = dict(_CPU_FALLBACK)
+    out["reason"] = f"{motivo} -> {_CPU_FALLBACK['reason']}"
+    return out
+
+
+def _validate(rec: dict, model_dir: Path | None) -> dict:
+    """Controlla che il motore consigliato sia USABILE ADESSO, qui.
+
+    È il controllo che rende impossibile morire su un device inesistente.
+    Nessuna rete, nessun download: solo fatti del runtime corrente.
+
+    Una lista GPU cached può essere stale (hardware cambiato, cartella clonata,
+    GPU sostituita) e raccomandare CUDA su una macchina senza GPU NVIDIA, o
+    OpenVINO dove il runtime non è installato. Prima la decisione salvata
+    veniva applicata alla cieca e la run moriva con un traceback di CTranslate2
+    DOPO OCR e rendering. Qui ogni raccomandazione viene confrontata con quello
+    che il runtime espone davvero, e se non regge si ripiega su CPU avvisando.
+    """
+    # faster-whisper assente: su ARM è assente per costruzione (CTranslate2 non
+    # ha wheel). Non è un problema di configurazione, e non c'è alternative
+    # (cfr. _engine_note): si lascia la raccomandazione e lo si dice dopo.
+    if rec["transcriber"] == "openvino":
+        if importlib.util.find_spec("openvino_genai") is None:
+            return _downgrade(rec, "openvino-genai non e' installato")
+        if model_dir is not None and not model_dir.exists():
+            return _downgrade(rec, f"modello OpenVINO assente in {model_dir}")
+        # La GPU Intel c'e' ma il runtime potrebbe esporre solo la CPU (es.
+        # driver non installato): si usa comunque OpenVINO, ma su CPU.
+        if rec.get("openvino_device") == "GPU" and not openvino_gpu_available():
+            log.warning(
+                "   ⚠️ iGPU Intel presente ma il runtime OpenVINO non espone un device GPU: uso OpenVINO su CPU."
+            )
+            rec = dict(rec)
+            rec["openvino_device"] = "CPU"
+        return rec
+
+    # whisper: CUDA e' la sola accelerazione possibile, e va verificata due
+    # volte perche' fallisce in due modi diversi: driver troppo vecchio
+    # ("CUDA driver version is insufficient") o CTranslate2 compilato senza
+    # supporto CUDA, entrambi indistinguibili da qui e risolti dal ripiego.
+    if rec.get("whisper_device") == "cuda":
+        if importlib.util.find_spec("faster_whisper") is None:
+            return _downgrade(rec, "faster-whisper non e' installato")
+        if not _cuda_available():
+            return _downgrade(rec, "nessun device CUDA utilizzabile")
+    return rec
+
+
 # =====================================================================
 # PERSISTENZA
 # =====================================================================
 def _fingerprint() -> str:
-    """Identita' della macchina per cui' e' stata fatta la rilevazione.
+    """Identita' della macchina per cui' l'hardware e' stato rilevato.
 
     La cartella del progetto e' pensata per essere clonata su un altro PC (o
-    spostata via pendrive/cartella di rete). Senza un'impronta,
-    `machine_setup.json` verrebbe riusato anche su hardware diverso: la scelta
-    salvata ("Intel iGPU -> OpenVINO") vincerebbe su una macchina NVIDIA senza
-    che nessuno se ne accorga, per sempre.
+    spostata via pendrive/cartella di rete). Senza un'impronta, la lista GPU
+    cachata sopravviverebbe al cambio di macchina e raccomanderebbe un motore
+    per hardware che qui non esiste.
 
-    Il confronto e' gratuito (nessuna subprocess, nessun import pesante): qui si
-    controlla solo identita' di sistema e architettura, che e' gia' il caso in
-    cui la cartella viene spostata. Un cambio di GPU a parita' di sistema (es.
-    si passa da una iGPU Intel a una NVIDIA sullo stesso portatile) resta
-    delegato a `--force-setup`, che rileva davvero: rilevare le GPU costa una
-    subprocess a ogni run solo per coprire un caso raro non vale la pena.
+    Il confronto e' gratuito (nessuna subprocess, nessun import pesante): si
+    controlla solo identita' di sistema e architettura. Un cambio di GPU a
+    parita' di sistema resta delegato a `--force-setup`, che rileva davvero:
+    rilevare le GPU costa una subprocess a ogni run, e per coprire un caso raro
+    non vale il prezzo. E se la lista risultasse stale, `_validate` ripiega comunque
+    su CPU invece di lasciare la run morire su un device inesistente.
     """
     return f"{platform.system()}/{platform.machine()}"
 
 
-def _is_stale(cfg: dict) -> bool:
-    """True se la config salvata non e' di questa macchina.
+def _read_hardware() -> list[str] | None:
+    """GPU rilevate in precedenza su QUESTA macchina, se disponibili.
 
-    Un file senza `fingerprint` (scritto da una versione precedente) viene
-    accettato: non c'e' modo di sapere da dove arriva, e l'utente puo' sempre
-    invalidarlo con `--force-setup`.
+    Restituisce None quando non si puo' fidarsi del file: assente, illeggibile,
+    scritto su un'altra macchina, o di una versione precedente che non aveva la
+    lista. In quel caso il chiamante rileva davvero.
+
+    Nota: le chiavi di decisione che un file scritto da versioni precedenti puo'
+    contenere (transcriber, whisper_device, ...) vengono IGNORATE di proposito:
+    sono la decisione, che non deve sopravvivere. Il file puo' quindi contenere
+    ancora quei campi senza che influiscano su nulla.
     """
-    saved = cfg.get("fingerprint")
-    return bool(saved) and saved != _fingerprint()
-
-
-def _read_config() -> dict:
     try:
         data = json.loads(MACHINE_CONFIG_PATH.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
     except Exception:
-        return {}
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("fingerprint") != _fingerprint():
+        return None
+    gpus = data.get("gpus")
+    if not isinstance(gpus, list) or not all(isinstance(g, str) for g in gpus):
+        return None
+    return gpus
 
 
-def _write_config(rec: dict) -> None:
+def _write_hardware(gpus: list[str]) -> None:
+    """Persiste i FATTI hardware, non la decisione sul motore.
+
+    Il file non deve contenere `transcriber`/`whisper_device`/`openvino_device`:
+    sono la decisione, e la decisione dipende da fatti che cambiano (che
+    pacchetti sono installati, che device il runtime espone). Persisterla la
+    faceva invecchiare fino a rompere la run. Qui si scrive solo l'inventario
+    delle GPU, che e' lento da ottenere e stabile nel tempo.
+    """
+    payload = {"fingerprint": _fingerprint(), "gpus": gpus}
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    MACHINE_CONFIG_PATH.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+    MACHINE_CONFIG_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 class _TranscriberArgs(Protocol):
@@ -296,36 +382,35 @@ def _engine_note(rec: dict) -> str:
 
 
 def machine_setup(args: _TranscriberArgs, force: bool = False) -> None:
-    """Rileva l'hardware e configura il miglior motore (idempotente).
+    """Configura il motore di trascrizione piu' adatto (idempotente).
 
-    Se gia' configurato (``machine_setup.json`` presente, salvato per QUESTA
-    macchina) e ``force`` e' False, riapplica solo la scelta salvata senza
-    rifare il rilevamento. Una config salvata per un'altra macchina viene
-    scartata e il rilevamento rifatto: e' il caso normale quando la cartella
-    del progetto viene clonata su un PC diverso.
+    La decisione NON viene ripresa da disco: `recommend()` la ricalcola a ogni
+    run dalla lista GPU e `_validate()` la confronta con il runtime reale, quindi
+    un file di cache stale non puo' far partire la pipeline su un device che non
+    esiste. Di disco si riusano solo i fatti hardware (lista GPU + impronta della
+    macchina), che sono lenti da ottenere ma stabili.
+
+    Il provisioning (installare, scaricare il modello IR) avviene solo se
+    l'hardware e' stato davvero rilevato in questa run.
     """
-    if not force and MACHINE_CONFIG_PATH.exists():
-        cfg = _read_config()
-        if cfg and not _is_stale(cfg):
-            _apply(args, cfg)
-            return
-        if cfg:
-            log.info(
-                "\U0001f504 Config hardware salvata per una macchina diversa (%s, qui %s): rilevo di nuovo.",
-                cfg.get("fingerprint", "ignota"),
-                _fingerprint(),
-            )
+    model_dir = Path(getattr(args, "openvino_model_dir", CACHE_DIR / "whisper_openvino_small"))
 
-    log.info("🔧 Rilevamento configurazione hardware al primo avvio...")
-    gpus = detect_gpus()
+    gpus = None if force else _read_hardware()
+    if gpus is None:
+        fresh_detection = True
+        log.info("🔧 Rilevamento configurazione hardware al primo avvio...")
+        gpus = detect_gpus()
+        _write_hardware(gpus)
+        log.info("   GPU rilevate: %s", ", ".join(gpus) if gpus else "(nessuna)")
+    else:
+        fresh_detection = False
+
+    # La raccomandazione dipende dal runtime corrente, non dal file: qui e' l'unico
+    # posto in cui viene decisa. Il provisioning (che costa rete) gira solo se
+    # l'hardware e' stato davvero rilevato in questa run; altrimenti si valida.
     rec = recommend(gpus)
-    rec = _provision(rec, Path(getattr(args, "openvino_model_dir", CACHE_DIR / "whisper_openvino_small")))
-    # L'impronta viene scritta DENTRO la config: rende la cache di questa
-    # macchina auto-invalidante quando la cartella viene spostata altrove.
-    rec["fingerprint"] = _fingerprint()
-    rec["gpus"] = gpus
+    rec = _provision(rec, model_dir) if fresh_detection else _validate(rec, model_dir)
 
-    log.info("   GPU rilevate: %s", ", ".join(gpus) if gpus else "(nessuna)")
     log.info("   Motore scelto: %s (%s)", rec["transcriber"], rec["reason"])
     if rec["transcriber"] == "openvino":
         log.info("   Device OpenVINO: %s", rec["openvino_device"])
@@ -334,7 +419,6 @@ def machine_setup(args: _TranscriberArgs, force: bool = False) -> None:
 
     nota = _engine_note(rec)
     if nota:
-        log.warning("   \u26a0\ufe0f  %s", nota)
+        log.warning("   ⚠️  %s", nota)
 
     _apply(args, rec)
-    _write_config(rec)

@@ -19,8 +19,9 @@ from machine_setup import (
     _apply,
     _classify_gpu,
     _fingerprint,
-    _is_stale,
-    _read_config,
+    _read_hardware,
+    _validate,
+    _write_hardware,
     machine_setup,
     recommend,
 )
@@ -124,22 +125,44 @@ class TestApply(unittest.TestCase):
 
 
 class TestMachineSetup(_TempConfigMixin, unittest.TestCase):
-    def test_rerun_uses_saved_config_without_provisioning(self):
+    """La run riusa i FATTI hardware, ma ricalcola e riverifica la decisione."""
+
+    def test_saved_decision_is_ignored_and_recomputed(self):
+        # Il file puo' contenere ancora le chiavi di decisione di versioni
+        # precedenti: non devono influire. La GPU salvata viene ricalcolata e la
+        # decisione pure.
         args = _FakeArgs()
-        rec = {
-            "transcriber": "whisper",
-            "whisper_device": "cuda",
-            "whisper_compute_type": "float16",
-            "openvino_device": None,
-            "reason": "test",
-        }
-        self.config_path.write_text(json.dumps(rec), encoding="utf-8")
-        with mock.patch("machine_setup._provision") as prov, mock.patch("machine_setup.detect_gpus") as det:
+        self.config_path.write_text(
+            json.dumps(
+                {
+                    "fingerprint": _fingerprint(),
+                    "gpus": ["Intel(R) Iris(R) Xe Graphics"],
+                    "transcriber": "whisper",
+                    "whisper_device": "cuda",
+                }
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch("machine_setup._validate", side_effect=lambda rec, d: rec) as val:
             machine_setup(args, force=False)
-            prov.assert_not_called()
+            val.assert_called_once()
+        self.assertEqual(args.transcriber, "openvino")
+        self.assertNotEqual(args.whisper_device, "cuda")
+
+    def test_cached_gpus_skip_detection_but_not_provisioning(self):
+        # Rilevare costa una subprocess: si riusa la lista. Ma il provisioning
+        # (che scarica) gira solo quando l'hardware e' stato davvero rilevato.
+        args = _FakeArgs()
+        _write_hardware(["NVIDIA GeForce RTX 4060"])
+        with (
+            mock.patch("machine_setup.detect_gpus") as det,
+            mock.patch("machine_setup._provision") as prov,
+            mock.patch("machine_setup._validate", side_effect=lambda rec, d: rec) as val,
+        ):
+            machine_setup(args, force=False)
             det.assert_not_called()
-        self.assertEqual(args.transcriber, "whisper")
-        self.assertEqual(args.whisper_device, "cuda")
+            prov.assert_not_called()
+            val.assert_called_once()
 
     def test_first_run_provisions_and_persists(self):
         args = _FakeArgs()
@@ -149,22 +172,20 @@ class TestMachineSetup(_TempConfigMixin, unittest.TestCase):
         ):
             machine_setup(args, force=True)
         self.assertEqual(args.transcriber, "whisper")
-        saved = _read_config()
-        self.assertEqual(saved["transcriber"], "whisper")
-        self.assertEqual(saved["whisper_device"], "cuda")
 
-    def test_first_run_records_machine_fingerprint(self):
-        # Senza l'impronta, la config riusata su un'altra macchina imporrebbe un
-        # motore pensato per hardware diverso (es. OpenVINO su una GPU NVIDIA).
+    def test_persisted_file_holds_only_hardware_facts(self):
+        # La decisione NON deve finire su disco: e' cio' che la faceva invecchiare.
         args = _FakeArgs()
         with (
             mock.patch("machine_setup.detect_gpus", return_value=["Intel(R) Iris(R) Xe Graphics"]),
             mock.patch("machine_setup._provision", side_effect=lambda rec, d: rec),
         ):
             machine_setup(args, force=True)
-        saved = _read_config()
+        saved = json.loads(self.config_path.read_text(encoding="utf-8"))
         self.assertEqual(saved["fingerprint"], _fingerprint())
         self.assertEqual(saved["gpus"], ["Intel(R) Iris(R) Xe Graphics"])
+        for key in ("transcriber", "whisper_device", "whisper_compute_type", "openvino_device"):
+            self.assertNotIn(key, saved)
 
     def test_provision_failure_falls_back_to_cpu(self):
         args = _FakeArgs()
@@ -177,61 +198,119 @@ class TestMachineSetup(_TempConfigMixin, unittest.TestCase):
         self.assertEqual(args.whisper_device, "cpu")
 
 
-class TestFingerprint(_TempConfigMixin, unittest.TestCase):
-    """La config salvata vale solo per la macchina per cui' e' stata fatta."""
+class TestReadHardware(_TempConfigMixin, unittest.TestCase):
+    """`_read_hardware` decide se la lista GPU cachata e' fidabile."""
 
-    _REC: ClassVar[dict] = {
+    def test_matching_fingerprint_returns_gpus(self):
+        _write_hardware(["Intel(R) Iris(R) Xe Graphics"])
+        self.assertEqual(_read_hardware(), ["Intel(R) Iris(R) Xe Graphics"])
+
+    def test_fingerprint_of_another_machine_returns_none(self):
+        # Cartella clonata: la lista GPU di un altro PC non e' fidabile.
+        self.config_path.write_text(
+            json.dumps({"fingerprint": "Darwin/arm64", "gpus": ["Apple M2"]}), encoding="utf-8"
+        )
+        self.assertIsNone(_read_hardware())
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(_read_hardware())
+
+    def test_corrupt_file_returns_none(self):
+        self.config_path.write_text("{ non json", encoding="utf-8")
+        self.assertIsNone(_read_hardware())
+
+    def test_legacy_file_without_gpus_returns_none(self):
+        # File di una versione precedente: non ha la lista, quindi si rileva.
+        self.config_path.write_text(json.dumps({"transcriber": "openvino"}), encoding="utf-8")
+        self.assertIsNone(_read_hardware())
+
+    def test_empty_gpu_list_is_valid(self):
+        # "nessuna GPU" e' un risultato legittimo e deve sopravvivere al cache:
+        # rilevare di nuovo servirebbe solo a riavere la stessa risposta.
+        _write_hardware([])
+        self.assertEqual(_read_hardware(), [])
+
+    def test_non_string_gpu_entries_rejected(self):
+        self.config_path.write_text(
+            json.dumps({"fingerprint": _fingerprint(), "gpus": [1, 2]}), encoding="utf-8"
+        )
+        self.assertIsNone(_read_hardware())
+
+
+class TestValidate(unittest.TestCase):
+    """`_validate` e' il controllo che impedisce di morire su un device assente."""
+
+    _CUDA: ClassVar[dict] = {
+        "transcriber": "whisper",
+        "whisper_device": "cuda",
+        "whisper_compute_type": "float16",
+        "openvino_device": None,
+        "reason": "GPU NVIDIA",
+    }
+    _OPENVINO: ClassVar[dict] = {
         "transcriber": "openvino",
         "whisper_device": "cpu",
         "whisper_compute_type": "int8",
         "openvino_device": "GPU",
-        "reason": "test",
+        "reason": "iGPU Intel",
     }
 
-    def _write(self, fingerprint):
-        rec = dict(self._REC)
-        if fingerprint is not None:
-            rec["fingerprint"] = fingerprint
-        self.config_path.write_text(json.dumps(rec), encoding="utf-8")
+    def test_cuda_without_cuda_device_falls_back_to_cpu(self):
+        # Il caso reale: lista GPU stale che raccomanda CUDA dove CUDA non esiste.
+        with mock.patch("machine_setup._cuda_available", return_value=False):
+            out = _validate(dict(self._CUDA), None)
+        self.assertEqual(out["transcriber"], "whisper")
+        self.assertEqual(out["whisper_device"], "cpu")
+        self.assertEqual(out["whisper_compute_type"], "int8")
 
-    def test_matching_fingerprint_is_reused_without_detecting(self):
-        self._write(_fingerprint())
-        args = _FakeArgs()
-        with mock.patch("machine_setup.detect_gpus") as det:
-            machine_setup(args, force=False)
-            det.assert_not_called()
-        self.assertEqual(args.transcriber, "openvino")
-
-    def test_fingerprint_of_another_machine_triggers_redetection(self):
-        # Cartella clonata da un PC Intel+iGPU a uno NVIDIA: la config salvata
-        # non deve sopravvivere, altrimenti OpenVINO verrebbe riusato su una
-        # macchina che non ha quella iGPU, senza avviso.
-        self._write("Darwin/arm64")
-        args = _FakeArgs()
+    def test_cuda_with_cuda_device_is_kept(self):
         with (
-            mock.patch("machine_setup.detect_gpus", return_value=["NVIDIA GeForce RTX 4060"]),
-            mock.patch("machine_setup._provision", side_effect=lambda rec, d: rec),
+            mock.patch("machine_setup._cuda_available", return_value=True),
+            mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
         ):
-            machine_setup(args, force=False)
-        self.assertEqual(args.transcriber, "whisper")
-        self.assertEqual(args.whisper_device, "cuda")
-        # La config riscritta porta l'impronta della macchina corrente.
-        self.assertEqual(_read_config()["fingerprint"], _fingerprint())
+            out = _validate(dict(self._CUDA), None)
+        self.assertEqual(out["whisper_device"], "cuda")
 
-    def test_legacy_config_without_fingerprint_is_accepted(self):
-        # File scritto da una versione precedente: non c'e' modo di sapere da
-        # dove arriva, quindi non si invalida (l'utente puo' usare --force-setup).
-        self._write(None)
-        args = _FakeArgs()
-        with mock.patch("machine_setup.detect_gpus") as det:
-            machine_setup(args, force=False)
-            det.assert_not_called()
-        self.assertEqual(args.transcriber, "openvino")
+    def test_openvino_without_runtime_falls_back_to_cpu(self):
+        with mock.patch("machine_setup.importlib.util.find_spec", return_value=None):
+            out = _validate(dict(self._OPENVINO), Path("C:/qualcosa/che/non/esiste"))
+        self.assertEqual(out["transcriber"], "whisper")
+        self.assertEqual(out["whisper_device"], "cpu")
 
-    def test_is_stale_helper(self):
-        self.assertFalse(_is_stale({}))
-        self.assertFalse(_is_stale({"fingerprint": _fingerprint()}))
-        self.assertTrue(_is_stale({"fingerprint": "Something/else"}))
+    def test_openvino_with_missing_model_falls_back_to_cpu(self):
+        with mock.patch("machine_setup.importlib.util.find_spec", return_value=object()):
+            out = _validate(dict(self._OPENVINO), Path("C:/non/esiste"))
+        self.assertEqual(out["transcriber"], "whisper")
+
+    def test_openvino_without_gpu_device_demotes_to_cpu_openvino(self):
+        # La iGPU c'e' ma il runtime non espone il device GPU: si usa comunque
+        # OpenVINO, solo su CPU. Non e' un ripiego su faster-whisper.
+        with (
+            mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
+            mock.patch("machine_setup.openvino_gpu_available", return_value=False),
+        ):
+            out = _validate(dict(self._OPENVINO), Path(tempfile.gettempdir()))
+        self.assertEqual(out["transcriber"], "openvino")
+        self.assertEqual(out["openvino_device"], "CPU")
+
+    def test_valid_openvino_is_untouched(self):
+        with (
+            mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
+            mock.patch("machine_setup.openvino_gpu_available", return_value=True),
+        ):
+            out = _validate(dict(self._OPENVINO), Path(tempfile.gettempdir()))
+        self.assertEqual(out["transcriber"], "openvino")
+        self.assertEqual(out["openvino_device"], "GPU")
+
+    def test_cpu_recommendation_needs_no_check(self):
+        rec = {
+            "transcriber": "whisper",
+            "whisper_device": "cpu",
+            "whisper_compute_type": "int8",
+            "openvino_device": None,
+            "reason": "CPU",
+        }
+        self.assertIs(_validate(rec, None), rec)
 
 
 if __name__ == "__main__":

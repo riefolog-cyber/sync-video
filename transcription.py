@@ -323,6 +323,7 @@ def transcribe_audio(
     whisper_compute_type: str = "int8",
     whisper_beam: int = DEFAULT_WHISPER_BEAM,
     whisper_batch: int = DEFAULT_WHISPER_BATCH,
+    whisper_device_explicit: bool = False,
 ) -> tuple[str, list[Word]]:
     """
     Dispatcher trascrizione: sceglie il motore più veloce disponibile.
@@ -380,6 +381,7 @@ def transcribe_audio(
         compute_type=whisper_compute_type,
         beam_size=whisper_beam,
         batch_size=whisper_batch,
+        device_explicit=whisper_device_explicit,
     )
 
 
@@ -471,6 +473,7 @@ def transcribe_with_whisper(
     openvino_available: bool | None = None,
     cpu_threads: int | None = None,
     batch_size: int = DEFAULT_WHISPER_BATCH,
+    device_explicit: bool = False,
 ) -> tuple[str, list[Word]]:
     """
     Trascrizione audio con faster-whisper.
@@ -480,11 +483,16 @@ def transcribe_with_whisper(
         resto della pipeline; viene mappato su ISO 639-1 per Whisper.
         `batch_size > 1` abilita il decoding a batch (stesso modello, solo
         più throughput); 0 o 1 lo disattivano.
+        `device_explicit` True se il device è arrivato da una scelta esplicita
+        dell'utente: in quel caso un fallimento di CUDA non viene nascosto con
+        un ripiego silenzioso su CPU.
 
     Returns:
         (trascrizione compressa, lista parole raw con timestamp)
     """
     from faster_whisper import WhisperModel
+
+    _device_was_explicit = device_explicit
 
     log.info(
         "2. Trascrizione con faster-whisper (%s, %s, %s, beam=%d, batch=%d)...",
@@ -516,13 +524,41 @@ def transcribe_with_whisper(
     # saturare la banda memoria; resta pero' esposto via WHISPER_THREADS
     # perche' il cap nasce dalla misura su una sola CPU.
     n_threads = cpu_threads if cpu_threads else DEFAULT_WHISPER_THREADS
-    model = WhisperModel(
-        model_size,
-        device=device,
-        compute_type=compute_type,
-        cpu_threads=n_threads,
-    )
-    log.debug("   Modello Whisper caricato.")
+    # Rete di sicurezza: se l'accelerazione richiesta fallisce alla COSTRUZIONE
+    # del modello, si ripiega su CPU invece di far morire la pipeline. Il
+    # fallimento qui e' istantaneo (nessuna decodifica e' iniziata), quindi il
+    # ripiego non costa il doppio del runtime.
+    #
+    # Motori di fallimento osservati: driver NVIDIA troppo vecchio per la
+    # runtime CUDA ("CUDA driver version is insufficient for CUDA runtime
+    # version"), CTranslate2 compilato senza supporto CUDA, GPU non visibile
+    # dopo un suspend/riavvio del driver. Sono tutti indistinguibili dall'alto,
+    # e tutti risolti dal ripiego: la trascrizione e' piu' lenta ma esce.
+    #
+    # Se invece e' l'utente ad aver chiesto CUDA esplicitamente, il fallback
+    # silenzioso sarebbe una sorpresa: si avvisa e si lascia morire.
+    try:
+        model = WhisperModel(
+            model_size,
+            device=device,
+            compute_type=compute_type,
+            cpu_threads=n_threads,
+        )
+    except (RuntimeError, OSError) as e:
+        if device != "cuda":
+            raise
+        log.warning("   ⚠️  CUDA non utilizzabile (%s)", e)
+        if _device_was_explicit:
+            log.error(
+                "   Hai chiesto esplicitamente --whisper-device cuda, quindi non ripiego "
+                "silenziosamente: usa --whisper-device cpu (oppure lascia --transcriber auto)."
+            )
+            raise
+        log.warning("   Ripiego su faster-whisper su CPU (int8): piu' lento, ma la run prosegue.")
+        device = "cpu"
+        compute_type = "int8"
+        model = WhisperModel(model_size, device=device, compute_type=compute_type, cpu_threads=n_threads)
+    log.debug("   Modello Whisper caricato (device=%s).", device)
 
     # Parametri VAD
     vad_params = vad_parameters or {
