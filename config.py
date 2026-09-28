@@ -11,6 +11,7 @@ import logging
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -214,39 +215,125 @@ def _active_required_packages() -> dict[str, str]:
     return {name: req for name, req in _REQUIRED_PACKAGES.items() if name not in _X64_ONLY_PACKAGES}
 
 
+# Intestazione di `tesseract --list-langs`, da cui si ricava la cartella
+# tessdata che Tesseratch sta usando davvero:
+#   List of available languages in "C:\Program Files\Tesseract-OCR/tessdata/" (2):
+#   List of available languages in "/usr/share/tesseract-ocr/5/tessdata" (1):
+# È l'unico modo affidabile di trovarla senza hardcodare i layout delle tre
+# piattaforme (apt usa /usr/share/tesseract-ocr/<versione>/tessdata, brew
+# /opt/homebrew/share/tessdata, l'installer Windows <exe>\tessdata).
+_TESSDATA_PATH_RE = re.compile(r'List of available languages in "([^"]+)"')
+
+
+def _list_tessdata(tesseract_exe: str) -> tuple[set[str], Path | None]:
+    """Chiede a Tesseract le lingue disponibili e la cartella che sta usando.
+
+    Restituisce (lingue, cartella). La cartella è None se Tesseract non
+    risponde o se l'intestazione non è quella prevista.
+    """
+    try:
+        res = subprocess.run([tesseract_exe, "--list-langs"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return set(), None
+    out = res.stdout or ""
+    m = _TESSDATA_PATH_RE.search(out)
+    system_dir = None
+    if m:
+        candidate = Path(m.group(1))
+        if candidate.is_dir():
+            system_dir = candidate
+    # Le lingue sono le righe non vuote dopo l'intestazione.
+    langs = {line.strip() for line in out.splitlines()[1:] if line.strip()}
+    return langs, system_dir
+
+
+def _mirror_system_tessdata(system_dir: Path, local_dir: Path) -> int:
+    """Copia in `local_dir` i modelli di lingua di sistema che mancano.
+
+    `TESSDATA_PREFIX` SOSTITUISCE la cartella di sistema invece di aggiungerla:
+    puntarla a una cartella che contiene solo `ita.traineddata` fa sparire
+    `eng` e `osd`. Il testo inglese dentro slide italiane (nomi di prodotto,
+    termini tecnici, URL, codice) verrebbe riconosciuto dal modello italiano con
+    precisione peggiore, e `osd` (rilevamento orientamento/script) non sarebbe
+    più disponibile. Copiare — invece di symlinkare, che su Windows richiede
+    privilegi — lascia la cartella locale identica a quella di sistema più
+    l'italiano.
+
+    Restituisce quanti file sono stati copiati.
+    """
+    copied = 0
+    for src in sorted(system_dir.glob("*.traineddata")):
+        dst = local_dir / src.name
+        if dst.exists():
+            continue
+        try:
+            shutil.copy2(src, dst)
+            copied += 1
+        except OSError as e:
+            log.debug("   Copia di %s non riuscita: %s", src.name, e)
+    return copied
+
+
 _TESSERACT_DOWNLOAD_URL = "https://github.com/UB-Mannheim/tesseract/wiki"
 _FFMPEG_DOWNLOAD_URL = "https://ffmpeg.org/download.html"
+
+# Timeout per l'installazione di uno strumento di sistema. Tesseract (~40 MB) e
+# ffmpeg (~80 MB) su una connessione lenta superano facilmente 120s: un timeout
+# scaduto viene letto come "installazione fallita" anche se il pacchetto sta per
+# landare, e il programma prosegue senza lo strumento che credeva di aver
+# installato. 600s copre con margine le installazioni reali.
+_SYSTEM_INSTALL_TIMEOUT = 600
+
+# brew in modalita' non interattiva. Senza questi flag brew puo' chiedere una
+# conferma (aggiornamento delle formule, telemetria, cleanup) e il bootstrap si
+# blocca su una domanda che nessuno puo' vedere, dato che l'output della
+# subprocess e' DEVNULL: dall'esterno sembra un hang.
+_BREW_ENV = {
+    "HOMEBREW_NO_AUTO_UPDATE": "1",
+    "HOMEBREW_NO_INSTALL_CLEANUP": "1",
+    "HOMEBREW_NO_ENV_HINTS": "1",
+    "NONINTERACTIVE": "1",
+}
 
 
 def _try_system_install(name: str, winget_id: str, apt_pkg: str, brew_pkg: str) -> bool:
     """Tenta auto-install tool di sistema via package manager nativo.
 
-    Prova in ordine: winget (Windows), apt-get (Linux), brew (macOS).
-    Restituisce True se l'installazione è riuscita.
+    Prova nell'ordine giusto per la piattaforma: winget (Windows), brew
+    (macOS), apt (Linux). Restituisce True se l'installazione è riuscita.
     """
-    commands = []
+    # Ogni tentativo è (env_extra, argv, label): env_extra rende il package
+    # manager non interattivo, così il bootstrap non si blocca su una conferma
+    # che nessuno può vedere (l'output è DEVNULL).
+    commands: list[tuple[dict[str, str], list[str], str]] = []
     if sys.platform == "win32":
         commands.append(
             (
+                {},
                 ["winget", "install", "--accept-source-agreements", "--accept-package-agreements", winget_id],
                 f"winget install {winget_id}",
             )
         )
     elif sys.platform == "darwin":
         if brew_pkg:
-            commands.append((["brew", "install", brew_pkg], f"brew install {brew_pkg}"))
-    if apt_pkg:
-        commands.append(
-            (
-                ["sudo", "apt-get", "install", "-y", apt_pkg],
-                f"sudo apt-get install -y {apt_pkg}",
-            )
-        )
+            commands.append((_BREW_ENV, ["brew", "install", brew_pkg], f"brew install {brew_pkg}"))
+    # Solo Linux ha apt. Senza questo gate, su macOS un brew fallito finiva con
+    # `sudo apt-get`: su un Mac quello chiede la password sudo dentro una
+    # subprocess muta, e l'utente vede solo un processo apparentemente bloccato.
+    elif apt_pkg:
+        commands.append(({}, ["sudo", "apt-get", "install", "-y", apt_pkg], f"sudo apt-get install -y {apt_pkg}"))
 
-    for cmd, label in commands:
+    for env_extra, cmd, label in commands:
         try:
             print(f"   ⏳ {label} ...", end=" ", flush=True)
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120, check=True)
+            subprocess.run(
+                cmd,
+                env={**os.environ, **env_extra},
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_SYSTEM_INSTALL_TIMEOUT,
+                check=True,
+            )
             print("✅")
             return True
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
@@ -452,13 +539,11 @@ def bootstrap() -> None:
     # --- Tesseract OCR ---
     import pytesseract  # garantito installato dal bootstrap pip qui sopra
 
-    # --- Tessdata locale portabile (ita.traineddata senza bisogno di admin) ---
-    # Se esiste una cartella "tessdata" nel progetto, usala al posto di quella
-    # di sistema: evita "TesseractError: language 'ita' not found".
+    # La cartella locale del progetto: contiene ita.traineddata quando
+    # l'italiano non e' installato nel sistema (vedi _ensure_italian_tessdata,
+    # che decide se e come usarla). Non viene impostata qui come
+    # TESSDATA_PREFIX: la scelta richiede di sapere cosa ha gia' Tesseract.
     _local_tessdata = BASE_DIR / "tessdata"
-    if _local_tessdata.is_dir() and any(_local_tessdata.glob("*.traineddata")):
-        os.environ["TESSDATA_PREFIX"] = str(_local_tessdata)
-        log.debug("   TESSDATA_PREFIX impostato su: %s", _local_tessdata)
 
     _CANDIDATES = [
         # Windows
@@ -543,25 +628,26 @@ def bootstrap() -> None:
         sys.exit(1)
 
     # --- Lingua italiana per Tesseract (portabile su tutte le piattaforme) ---
-    # ita.traineddata NON è nel repo (cartella tessdata/ gitignored). Su alcune
-    # piattaforme (brew tesseract, apt tesseract-ocr) l'italiano non è incluso:
+    # ita.traineddata NON e' nel repo (cartella tessdata/ gitignored). Su alcune
+    # piattaforme (brew tesseract, apt tesseract-ocr) l'italiano non e' incluso:
     # se manca, viene scaricato in una cartella locale del progetto e usato via
     # TESSDATA_PREFIX. Nessun intervento manuale.
     tesseract_exe = pytesseract.pytesseract.tesseract_cmd or "tesseract"
-    _langs_ok = False
-    try:
-        _langs = subprocess.run(
-            [tesseract_exe, "--list-langs"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        _langs_ok = "ita" in (_langs.stdout or "")
-    except (OSError, subprocess.TimeoutExpired):
-        _langs_ok = False
+    _langs, _system_tessdata = _list_tessdata(tesseract_exe)
 
-    if not _langs_ok:
+    if "ita" not in _langs:
         _local_tessdata.mkdir(parents=True, exist_ok=True)
+        # TESSDATA_PREFIX SOSTITUISCE la cartella di sistema: prima di puntarla
+        # qui si specchiano dentro i modelli che gia' esistono, cosi' eng e osd
+        # non spariscono (il testo inglese dentro slide italiane verrebbe
+        # riconosciuto col modello italiano, peggiorandone la precisione).
+        if _system_tessdata is not None:
+            _mirrored = _mirror_system_tessdata(_system_tessdata, _local_tessdata)
+            if _mirrored:
+                log.info(
+                    "   Tessdata locale: copiati %d modelli di lingua di sistema (eng/osd).",
+                    _mirrored,
+                )
         ita_path = _local_tessdata / "ita.traineddata"
         if not ita_path.exists():
             log.info("🔧 Lingua italiana Tesseract mancante: scarico ita.traineddata (una tantum)...")
@@ -575,7 +661,7 @@ def bootstrap() -> None:
                 )
                 log.info("   ✅ ita.traineddata scaricato in %s", _local_tessdata)
             except Exception as e:  # noqa: BLE001 - rete: non deve bloccare il bootstrap
-                log.warning("   ⚠️ Scaricamento ita.traineddata fallito: %s", e)
+                log.warning("   \u26a0\ufe0f  Scaricamento ita.traineddata fallito: %s", e)
         if ita_path.exists():
             os.environ["TESSDATA_PREFIX"] = str(_local_tessdata)
             log.debug("   TESSDATA_PREFIX impostato su: %s", _local_tessdata)
@@ -694,7 +780,13 @@ if _VIDEO_RES_ENV and "x" in _VIDEO_RES_ENV:
         DEFAULT_VIDEO_RES = (1920, 1080)
 else:
     DEFAULT_VIDEO_RES = (1920, 1080)
-DEFAULT_VIDEO_THREADS = min(8, os.cpu_count() or 4)
+# Thread di encoding del video. Stesso tetto di 8 dei thread embedding: il
+# default nasce dalla misura sullo Snapdragon X Elite, dove oltre 8 thread la
+# banda memoria satura e il risultato peggiora. Su una CPU con piu' core
+# fisici quel tetto e' pero' una scelta conservativa ereditata, non un muro:
+# conviene misurarlo (stessa procedura di EMBED_THREADS) prima di alzarlo.
+# Override con VIDEO_THREADS.
+DEFAULT_VIDEO_THREADS = _env_int("VIDEO_THREADS", min(8, os.cpu_count() or 4))
 # Motore di rendering video: 'ffmpeg' (concat demuxer, encoding diretto, veloce)
 # o 'moviepy' (percorso legacy, richiesto per --transitions > 0).
 _VIDEO_ENGINE_ENV = os.environ.get("VIDEO_ENGINE", "").strip().lower()
@@ -712,6 +804,12 @@ DEFAULT_TRANSCRIBER = os.environ.get("TRANSCRIBER", "auto")  # 'auto'/'openvino'
 DEFAULT_WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")  # tiny/base/small/medium/large
 DEFAULT_WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")  # 'cpu' o 'cuda'
 DEFAULT_WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")  # int8 (cpu) / float16 (cuda)
+# Thread per faster-whisper. Il default di faster-whisper sottoutilizza le CPU
+# con piu' core (misurato su Snapdragon X Elite: 8 thread ~27% piu' veloci di 4 su
+# clip da 60s), e il cap a 8 e' per la stessa ragione di EMBED_THREADS: su
+# Snapdragon la banda memoria satura oltre 8. Altrove il limite e' arbitrario,
+# quindi e' esposto. Override con WHISPER_THREADS.
+DEFAULT_WHISPER_THREADS = _env_int("WHISPER_THREADS", min(8, os.cpu_count() or 4))
 
 # Beam size faster-whisper. 1 (greedy) = default MISURATO.
 #
@@ -1049,6 +1147,15 @@ Esempi:
         help="Scarica una tantum il modello Whisper OpenVINO IR "
         f"({DEFAULT_OPENVINO_MODEL_ID}) in {DEFAULT_OPENVINO_MODEL_DIR}, "
         "poi esce. Necessario prima del primo uso con --transcriber openvino/auto.",
+    )
+    parser.add_argument(
+        "--prefetch-models",
+        action="store_true",
+        help="Scarica tutti i modelli ML (embedding e5, Whisper, OpenVINO IR) "
+        "poi esce, senza toccare PDF o audio. Utile dopo un clone o un "
+        "cambio di macchina: tiene i download fuori dalla prima run reale, "
+        "dove un timeout di rete troncherebbe tutto a meta' senza distinguere "
+        "'modello mancante' da 'download fallito'.",
     )
 
     # Opzioni

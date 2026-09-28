@@ -26,6 +26,7 @@ from config import (
     AUTO_BEAM_PINNED_RATIO,
     BASE_DIR,
     CACHE_DIR,
+    DEFAULT_EMBEDDING_MODEL_ALTERNATE,
     DEFAULT_VIDEO_BUFFER_SEC,
     DEFAULT_VIDEO_FPS,
     DEFAULT_VIDEO_THREADS,
@@ -1211,6 +1212,92 @@ def _detect_flow(transcript: str, words: list[Word] | None = None) -> str:
 # =====================================================================
 # MAIN ORCHESTRATOR
 # =====================================================================
+def _prefetch_models(args: Any) -> None:
+    """Scarica tutti i modelli ML che la pipeline puo' usare, poi esce.
+
+    Senza questo, i modelli (~3 GB: e5-large 2.2 GB, Whisper, OpenVINO IR
+    930 MB) vengono scaricati dentro la prima run reale, mescolati al lavoro
+    vero. Un timeout di rete tronca tutto a meta' e il log non distingue "modello
+    mancante" da "download fallito": la prima run utile arriva dopo un'attesa
+    di cui non si capisce la causa. Cosi la prima run parte con tutto in locale,
+    e un eventuale fallimento e' netto e isolato.
+
+    Ogni modello e' indipendente: quello che non e' installabile su questa CPU
+    (faster-whisper su Windows ARM) viene saltato con una nota, non e' un errore.
+    """
+    log.info("⬇️  Download dei modelli in anticipo (una tantum)...")
+    falliti: list[str] = []
+
+    # 1) Embedding: fastembed scarica al primo caricamento, quindi basta
+    #    istanziarlo. Si prova il modello richiesto e, se diverso, il fallback.
+    _candidates = [args.semantic_model]
+    if DEFAULT_EMBEDDING_MODEL_ALTERNATE not in _candidates:
+        _candidates.append(DEFAULT_EMBEDDING_MODEL_ALTERNATE)
+    for model_name in _candidates:
+        if not model_name:
+            continue
+        try:
+            from semantic_sync import _load_embed_model
+
+            if _load_embed_model(model_name, args.semantic_cache_dir) is None:
+                falliti.append(f"embedding {model_name}")
+                log.warning("   ⚠️  Modello embedding non caricato: %s", model_name)
+            else:
+                log.info("   ✅ Embedding pronto: %s", model_name)
+            break  # il primo che va bene basta
+        except ImportError:
+            log.warning("   ⚠️  fastembed non installato: embedding non scaricabile.")
+            break
+        except Exception as e:  # noqa: BLE001 - rete: non deve bloccare il prefetch
+            falliti.append(f"embedding {model_name}")
+            log.warning("   ⚠️  Download embedding fallito (%s): %s", model_name, e)
+
+    # 2) faster-whisper: i pesi stanno su HuggingFace come
+    #    Systran/faster-whisper-<size>. Si scarica il pacchetto senza caricarlo
+    #    in memoria (il prefetch non deve costare RAM).
+    try:
+        from huggingface_hub import snapshot_download
+
+        repo = f"Systran/faster-whisper-{args.whisper_model}"
+        log.info("   ⏳ Download pesi Whisper %s...", repo)
+        snapshot_download(repo)
+        log.info("   ✅ Pesi Whisper pronti: %s", repo)
+    except ImportError:
+        log.warning("   ⚠️  faster-whisper/huggingface_hub non installati: pesi Whisper non scaricabili.")
+    except Exception as e:  # noqa: BLE001 - rete
+        falliti.append(f"whisper {args.whisper_model}")
+        log.warning("   ⚠️  Download pesi Whisper fallito: %s", e)
+
+    # 3) OpenVINO IR: serve solo se il motore scelto e' OpenVINO.
+    _ovino_dir = Path(args.openvino_model_dir)
+    if resolved_transcriber(args.transcriber, _ovino_dir) == "openvino":
+        try:
+            # `download_openvino_model` esce in silenzio se la cartella esiste
+            # gia': qui si dice lo stesso, altrimenti un prefetch ripetuto
+            # sembra aver saltato un passaggio.
+            if _ovino_dir.exists():
+                log.info("   · Modello OpenVINO gia' presente in %s", _ovino_dir)
+            else:
+                from transcription import download_openvino_model
+
+                download_openvino_model(_ovino_dir)
+        except Exception as e:  # noqa: BLE001 - rete
+            falliti.append("openvino")
+            log.warning("   ⚠️  Download modello OpenVINO fallito: %s", e)
+    else:
+        log.info("   · Modello OpenVINO non necessario su questa macchina (motore: %s).", args.transcriber)
+
+    if falliti:
+        log.warning(
+            "\n⚠️  Alcuni modelli non sono pronti: %s\n"
+            "   La pipeline puo' ripiegare su un fallback, ma la prima run sara'\n"
+            "   piu' lenta o puo' fermarsi. Rilancia --prefetch-models per riprovare.",
+            ", ".join(falliti),
+        )
+    else:
+        log.info("\n✅ Tutti i modelli sono pronti. La prima run non scarichera' nulla.")
+
+
 def main(argv: list | None = None) -> None:
     # Bootstrap esplicito: verifica dipendenze prima di tutto
     bootstrap()
@@ -1227,6 +1314,11 @@ def main(argv: list | None = None) -> None:
     # non-pinnati. --no-update = solo notifica.
     if not args.no_update_check:
         run_update_check(ask_to_update=not args.no_update)
+
+    # --- Download di TUTTI i modelli (una tantum) e uscita ---
+    if args.prefetch_models:
+        _prefetch_models(args)
+        return
 
     # --- Download modello OpenVINO (una tantum) e uscita ---
     if args.openvino_download:

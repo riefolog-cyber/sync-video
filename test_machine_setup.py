@@ -11,12 +11,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 from machine_setup import (
     _CPU_FALLBACK,
     _apply,
     _classify_gpu,
+    _fingerprint,
+    _is_stale,
     _read_config,
     machine_setup,
     recommend,
@@ -143,7 +146,6 @@ class TestMachineSetup(_TempConfigMixin, unittest.TestCase):
         with (
             mock.patch("machine_setup.detect_gpus", return_value=["NVIDIA GeForce RTX 4060"]),
             mock.patch("machine_setup._provision", side_effect=lambda rec, d: rec),
-            mock.patch("machine_setup._update_env"),
         ):
             machine_setup(args, force=True)
         self.assertEqual(args.transcriber, "whisper")
@@ -151,16 +153,85 @@ class TestMachineSetup(_TempConfigMixin, unittest.TestCase):
         self.assertEqual(saved["transcriber"], "whisper")
         self.assertEqual(saved["whisper_device"], "cuda")
 
+    def test_first_run_records_machine_fingerprint(self):
+        # Senza l'impronta, la config riusata su un'altra macchina imporrebbe un
+        # motore pensato per hardware diverso (es. OpenVINO su una GPU NVIDIA).
+        args = _FakeArgs()
+        with (
+            mock.patch("machine_setup.detect_gpus", return_value=["Intel(R) Iris(R) Xe Graphics"]),
+            mock.patch("machine_setup._provision", side_effect=lambda rec, d: rec),
+        ):
+            machine_setup(args, force=True)
+        saved = _read_config()
+        self.assertEqual(saved["fingerprint"], _fingerprint())
+        self.assertEqual(saved["gpus"], ["Intel(R) Iris(R) Xe Graphics"])
+
     def test_provision_failure_falls_back_to_cpu(self):
         args = _FakeArgs()
         with (
             mock.patch("machine_setup.detect_gpus", return_value=["Intel(R) Iris(R) Xe Graphics"]),
             mock.patch("machine_setup._provision", return_value=dict(_CPU_FALLBACK)),
-            mock.patch("machine_setup._update_env"),
         ):
             machine_setup(args, force=True)
         self.assertEqual(args.transcriber, "whisper")
         self.assertEqual(args.whisper_device, "cpu")
+
+
+class TestFingerprint(_TempConfigMixin, unittest.TestCase):
+    """La config salvata vale solo per la macchina per cui' e' stata fatta."""
+
+    _REC: ClassVar[dict] = {
+        "transcriber": "openvino",
+        "whisper_device": "cpu",
+        "whisper_compute_type": "int8",
+        "openvino_device": "GPU",
+        "reason": "test",
+    }
+
+    def _write(self, fingerprint):
+        rec = dict(self._REC)
+        if fingerprint is not None:
+            rec["fingerprint"] = fingerprint
+        self.config_path.write_text(json.dumps(rec), encoding="utf-8")
+
+    def test_matching_fingerprint_is_reused_without_detecting(self):
+        self._write(_fingerprint())
+        args = _FakeArgs()
+        with mock.patch("machine_setup.detect_gpus") as det:
+            machine_setup(args, force=False)
+            det.assert_not_called()
+        self.assertEqual(args.transcriber, "openvino")
+
+    def test_fingerprint_of_another_machine_triggers_redetection(self):
+        # Cartella clonata da un PC Intel+iGPU a uno NVIDIA: la config salvata
+        # non deve sopravvivere, altrimenti OpenVINO verrebbe riusato su una
+        # macchina che non ha quella iGPU, senza avviso.
+        self._write("Darwin/arm64")
+        args = _FakeArgs()
+        with (
+            mock.patch("machine_setup.detect_gpus", return_value=["NVIDIA GeForce RTX 4060"]),
+            mock.patch("machine_setup._provision", side_effect=lambda rec, d: rec),
+        ):
+            machine_setup(args, force=False)
+        self.assertEqual(args.transcriber, "whisper")
+        self.assertEqual(args.whisper_device, "cuda")
+        # La config riscritta porta l'impronta della macchina corrente.
+        self.assertEqual(_read_config()["fingerprint"], _fingerprint())
+
+    def test_legacy_config_without_fingerprint_is_accepted(self):
+        # File scritto da una versione precedente: non c'e' modo di sapere da
+        # dove arriva, quindi non si invalida (l'utente puo' usare --force-setup).
+        self._write(None)
+        args = _FakeArgs()
+        with mock.patch("machine_setup.detect_gpus") as det:
+            machine_setup(args, force=False)
+            det.assert_not_called()
+        self.assertEqual(args.transcriber, "openvino")
+
+    def test_is_stale_helper(self):
+        self.assertFalse(_is_stale({}))
+        self.assertFalse(_is_stale({"fingerprint": _fingerprint()}))
+        self.assertTrue(_is_stale({"fingerprint": "Something/else"}))
 
 
 if __name__ == "__main__":

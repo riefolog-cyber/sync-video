@@ -12,18 +12,30 @@ Sceglie il motore di trascrizione più adatto alla configurazione del PC:
 - GPU Qualcomm Adreno (Snapdragon) -> faster-whisper su CPU (niente CUDA/OpenVINO su ARM)
 
 La prima run rileva, installa/scarica ciò che serve e persiste la scelta
-in ``.cache/machine_setup.json`` + ``.env``. Le run successive usano la
-configurazione salvata senza rifare il rilevamento (salvo ``--force-setup``).
+in ``.cache/machine_setup.json``. Le run successive usano la configurazione
+salvata senza rifare il rilevamento (salvo ``--force-setup``).
+
+La config salvata porta con se' un'impronta della macchina
+(``platform.system()/platform.machine()``): se la cartella del progetto viene
+clonata o spostata su un PC diverso, la config viene scartata e il rilevamento
+rifatto. Senza questo, il motore scelto sull'hardware di partenza (es. OpenVINO
+su una iGPU Intel) verrebbe riusato d'acordo su una macchina che non ha quella
+GPU, senza alcun avviso.
+
+La scelta NON viene scritta in ``.env``: quel file resta agli override espliciti
+dell'utente, che hanno la precedenza. Scrivere li' creava una seconda fonte di
+verita' capace di rendere ``--force-setup`` inefficace (vedi `_apply`).
 """
 
 import importlib.util
 import json
+import platform
 import subprocess
 import sys
 from pathlib import Path
 from typing import Protocol
 
-from config import BASE_DIR, CACHE_DIR, log
+from config import CACHE_DIR, log
 
 MACHINE_CONFIG_PATH = CACHE_DIR / "machine_setup.json"
 
@@ -193,6 +205,36 @@ def _provision(rec: dict, model_dir: Path) -> dict:
 # =====================================================================
 # PERSISTENZA
 # =====================================================================
+def _fingerprint() -> str:
+    """Identita' della macchina per cui' e' stata fatta la rilevazione.
+
+    La cartella del progetto e' pensata per essere clonata su un altro PC (o
+    spostata via pendrive/cartella di rete). Senza un'impronta,
+    `machine_setup.json` verrebbe riusato anche su hardware diverso: la scelta
+    salvata ("Intel iGPU -> OpenVINO") vincerebbe su una macchina NVIDIA senza
+    che nessuno se ne accorga, per sempre.
+
+    Il confronto e' gratuito (nessuna subprocess, nessun import pesante): qui si
+    controlla solo identita' di sistema e architettura, che e' gia' il caso in
+    cui la cartella viene spostata. Un cambio di GPU a parita' di sistema (es.
+    si passa da una iGPU Intel a una NVIDIA sullo stesso portatile) resta
+    delegato a `--force-setup`, che rileva davvero: rilevare le GPU costa una
+    subprocess a ogni run solo per coprire un caso raro non vale la pena.
+    """
+    return f"{platform.system()}/{platform.machine()}"
+
+
+def _is_stale(cfg: dict) -> bool:
+    """True se la config salvata non e' di questa macchina.
+
+    Un file senza `fingerprint` (scritto da una versione precedente) viene
+    accettato: non c'e' modo di sapere da dove arriva, e l'utente puo' sempre
+    invalidarlo con `--force-setup`.
+    """
+    saved = cfg.get("fingerprint")
+    return bool(saved) and saved != _fingerprint()
+
+
 def _read_config() -> dict:
     try:
         data = json.loads(MACHINE_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -204,31 +246,6 @@ def _read_config() -> dict:
 def _write_config(rec: dict) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     MACHINE_CONFIG_PATH.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _update_env(rec: dict) -> None:
-    """Appende le variabili consigliate a .env (senza sovrascrivere chiavi esistenti)."""
-    env_path = BASE_DIR / ".env"
-    existing: set[str] = set()
-    if env_path.exists():
-        for line in env_path.read_text(encoding="utf-8-sig").splitlines():
-            if "=" in line and not line.lstrip().startswith("#"):
-                existing.add(line.partition("=")[0].strip())
-
-    updates = {
-        "TRANSCRIBER": rec["transcriber"],
-        "WHISPER_DEVICE": rec["whisper_device"],
-        "WHISPER_COMPUTE_TYPE": rec["whisper_compute_type"],
-    }
-    if rec.get("openvino_device"):
-        updates["OPENVINO_DEVICE"] = rec["openvino_device"]
-
-    added = [k for k in updates if k not in existing]
-    if added:
-        with env_path.open("a", encoding="utf-8") as f:
-            for key in added:
-                f.write(f"{key}={updates[key]}\n")
-        log.info("   ✅ Configurazione salvata in .env: %s", ", ".join(added))
 
 
 class _TranscriberArgs(Protocol):
@@ -281,19 +298,32 @@ def _engine_note(rec: dict) -> str:
 def machine_setup(args: _TranscriberArgs, force: bool = False) -> None:
     """Rileva l'hardware e configura il miglior motore (idempotente).
 
-    Se già configurato (``machine_setup.json`` presente) e ``force`` è False,
-    riapplica solo la scelta salvata senza rifare il rilevamento.
+    Se gia' configurato (``machine_setup.json`` presente, salvato per QUESTA
+    macchina) e ``force`` e' False, riapplica solo la scelta salvata senza
+    rifare il rilevamento. Una config salvata per un'altra macchina viene
+    scartata e il rilevamento rifatto: e' il caso normale quando la cartella
+    del progetto viene clonata su un PC diverso.
     """
     if not force and MACHINE_CONFIG_PATH.exists():
         cfg = _read_config()
-        if cfg:
+        if cfg and not _is_stale(cfg):
             _apply(args, cfg)
             return
+        if cfg:
+            log.info(
+                "\U0001f504 Config hardware salvata per una macchina diversa (%s, qui %s): rilevo di nuovo.",
+                cfg.get("fingerprint", "ignota"),
+                _fingerprint(),
+            )
 
     log.info("🔧 Rilevamento configurazione hardware al primo avvio...")
     gpus = detect_gpus()
     rec = recommend(gpus)
     rec = _provision(rec, Path(getattr(args, "openvino_model_dir", CACHE_DIR / "whisper_openvino_small")))
+    # L'impronta viene scritta DENTRO la config: rende la cache di questa
+    # macchina auto-invalidante quando la cartella viene spostata altrove.
+    rec["fingerprint"] = _fingerprint()
+    rec["gpus"] = gpus
 
     log.info("   GPU rilevate: %s", ", ".join(gpus) if gpus else "(nessuna)")
     log.info("   Motore scelto: %s (%s)", rec["transcriber"], rec["reason"])
@@ -308,4 +338,3 @@ def machine_setup(args: _TranscriberArgs, force: bool = False) -> None:
 
     _apply(args, rec)
     _write_config(rec)
-    _update_env(rec)

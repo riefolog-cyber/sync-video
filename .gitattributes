@@ -1,0 +1,10 @@
+# Fine-riga per tipo di file. Senza questo, core.autocrlf di Windows mette
+# CRLF anche negli script shell: lo shebang (/usr/bin/env bash) non viene
+# riconosciuto e lo script non parte su macOS e Linux.
+*.sh text eol=lf
+
+# I .bat viceversa sono cmd di Windows: vanno tenuti CRLF.
+*.bat text eol=crlf
+
+# Modelli di lingua Tesseract: binari, mai da normalizzare.
+*.traineddata binary

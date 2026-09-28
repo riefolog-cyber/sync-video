@@ -43,18 +43,33 @@ Il programma funziona anche col Python di sistema, ma quel Python è **condiviso
 
 ```bash
 # Una volta sola: crea la cartella .venv e installa i pacchetti del progetto
-crea_venv.bat
+crea_venv.bat          # Windows
+./crea_venv.sh         # macOS e Linux (stesso scopo, script shell)
 ```
 
-Da quel momento `genera_video.bat`, `aggiornamenti.bat`, `prova.bat` e `check_embedding_models.bat` usano `.venv` da soli: non serve cambiare nulla a mano.
+> I due script sono gemelli: `crea_venv.bat` per Windows, `crea_venv.sh` per
+> macOS/Linux. Usa quello del tuo sistema — i `.bat` non esistono su macOS/Linux
+> e i `.sh` su Windows.
+
+Da quel momento `genera_video.bat`, `aggiornamenti.bat`, `prova.bat` e `check_embedding_models.bat` usano `.venv` da soli: non serve cambiare nulla a mano. Su macOS/Linux il comando è `.venv/bin/python main.py`.
 
 | Comando | Cosa fa |
 |---|---|
-| `crea_venv.bat` | Crea `.venv` (o completa i pacchetti mancanti se esiste) |
-| `crea_venv.bat --ricrea` | Cancella `.venv` e la ricrea da zero |
-| `set SYNC_VIDEO_NO_VENV=1` | Usa il Python di sistema, ignorando `.venv` |
+| `crea_venv.bat` / `./crea_venv.sh` | Crea `.venv` (o completa i pacchetti mancanti se esiste) |
+| `crea_venv.bat --ricrea` / `./crea_venv.sh --ricrea` | Cancella `.venv` e la ricrea da zero |
+| `set SYNC_VIDEO_NO_VENV=1` | Usa il Python di sistema, ignorando `.venv` (Windows) |
 
 La venv **riusa i modelli già scaricati** (cartella `.cache` e cache di HuggingFace): non riscarica nulla, e la prima run resta veloce. Dentro `.venv` `pip check` non segnala conflitti; nel Python globale ne convivono diversi (pacchetti di altri progetti).
+
+> **Cambio di PC / hardware**: la scelta del motore di trascrizione viene salvata
+> in `.cache/machine_setup.json` **con un'impronta della macchina**
+> (`platform.system()/platform.machine()`). Se cloni o sposti la cartella su un
+> PC diverso, la config viene scartata e il rilevamento rifatto: senza questo,
+> il motore scelto sull'hardware di partenza (es. OpenVINO su una iGPU Intel)
+> verrebbe riusato d'accordo su una macchina che non ha quella GPU, senza avviso.
+> La scelta **non** viene scritta in `.env` (che resta agli override espliciti
+> dell'utente, con precedenza). Se invece cambi GPU restando sullo stesso
+> sistema, usa `--force-setup`.
 
 > **Precisione assoluta**: il programma non distribuisce mai le slide uniformemente. La timeline viene costruita dal **solo** allineamento semantico (embeddings offline, senza LLM), vincolato dai riferimenti espliciti "slide N" nella trascrizione. Se non è generabile → **interruzione con avviso**.
 
@@ -313,9 +328,24 @@ e veloce il router lato server.
 >   + download modello IR inclusi automaticamente)
 > - altrimenti → faster-whisper su CPU
 >
-> La scelta è persistita in `.cache/machine_setup.json` + `.env`; le run
-> successive la riusano senza rifare il rilevamento. Controlla con
-> `--force-setup` (rileva di nuovo) o disabilita con `--no-auto-setup`.
+> La scelta è persistita in `.cache/machine_setup.json` (con l'impronta della
+> macchina, vedi "Ambiente dedicato"); le run successive la riusano senza rifare
+> il rilevamento. Controlla con `--force-setup` (rileva di nuovo) o disabilita
+> con `--no-auto-setup`.
+>
+> **Su un PC nuovo, scarica i modelli prima.** Al primo avvio i modelli (~3 GB:
+> embedding e5-large 2.2 GB, pesi Whisper, modello OpenVINO IR 930 MB) vengono
+> scaricati *dentro* la run reale, mescolati al lavoro: un timeout di rete tronca
+> tutto a metà e il log non distingue "modello mancante" da "download fallito".
+> Meglio tenerli separati:
+>
+> ```bash
+> python main.py --prefetch-models   # scarica tutto e esce (~3 GB, una tantum)
+> python main.py                     # ora la prima run non scarica nulla
+> ```
+>
+> Ogni modello è indipendente: quello non installabile su quella CPU viene
+> saltato con una nota, senza far fallire gli altri.
 >
 > Fallback automatico a faster-whisper se OpenVINO non è installato o il
 > modello manca. Seleziona il motore con `--transcriber {auto,openvino,whisper}`
@@ -461,8 +491,30 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `AUTO_BEAM_AB_MARGIN` (env) | `0.0` | Quanto deve vincere la decodifica **accurata** (in `avg_z`) per essere preferita alla veloce. `0.0` = basta non perdere. La **risoluzione misurata** del punteggio è ~`0.05-0.10` (vedi sotto): con `AUTO_BEAM_AB_MARGIN=0.05` la veloce subentra solo se il vantaggio è fuori dalla banda di rumore |
 | `--whisper-batch` | `8` | Segmenti decodificati insieme (stesso modello e stessa decodifica: cambia solo il throughput). `0` = sequenziale. Ripiega da solo se il decoder a batch non è disponibile |
 | `WHISPER_BEAM` / `WHISPER_BATCH` (env) | `1` / `8` | Override dei due parametri senza toccare la riga di comando |
+| `EMBED_THREADS` (env) | `min(8, cpu_count)` | Thread ONNX per gli embedding |
+| `WHISPER_THREADS` (env) | `min(8, cpu_count)` | Thread per faster-whisper |
+| `VIDEO_THREADS` (env) | `min(8, cpu_count)` | Thread di encoding del video |
+
+> **I tre parametri di thread hanno lo stesso default, `min(8, cpu_count())`,**
+> perché nasce tutti dalla stessa misura: sullo **Snapdragon X Elite** 12 thread
+> erano *più lenti* di 8 (saturazione della banda memoria). Su una CPU Intel/AMD
+> con più core fisici quel tetto è però una scelta conservativa ereditata, non un
+> muro, e i thread non vengono agganciati ai core P. Se la trascrizione è il
+> collo di bottiglia della tua run, conviene misurare:
+>
+> ```powershell
+> $env:WHISPER_THREADS="14"   # 14 = core fisici della i7-12700H (6P+8E)
+> $env:EMBED_THREADS="14"
+> $env:VIDEO_THREADS="14"
+> .\.venv\Scripts\python.exe main.py --no-cache
+> ```
+>
+> Misura tempo e qualità (`--whisper-beam 1` veloce vs `5` accurato): il beam
+> influenza la timeline, i thread no. Tieni il valore che misuri migliore in
+> `.env`.
 | `--openvino-device` | `GPU` | Device OpenVINO (`GPU` iGPU o `CPU`) |
 | `--openvino-download` | — | Scarica modello OpenVINO IR (una tantum) |
+| `--prefetch-models` | — | Scarica **tutti** i modelli ML (embedding, pesi Whisper, OpenVINO IR) e esce, senza toccare PDF o audio. Utile dopo un clone o un cambio di macchina: tiene i download fuori dalla prima run reale |
 | `--semantic-model` | e5-large | Modello embedding |
 | `--semantic-window` | `4.0` | Secondi per blocco |
 | `--semantic-min-duration` | `3.0` | Durata minima slide (s) |
@@ -577,6 +629,10 @@ inutilmente:
   - premi **`S`** → salta l'LLM e usa subito l'embedding locale;
   - oppure imposta `--llm-wait-timeout <secondi>` → fallback embedding automatico
     allo scadere (0 = illimitato).
+- **9Router non è installato** (il comando `9router` non è nel PATH) → lo
+  programma lo dice esplicitamente e propone le due uscite (`--llm off`,
+  `--llm-wait-timeout`): l'attesa automatica è impossibile, quindi conviene
+  scegliere prima di lanciare.
 - **Flusso libero senza terminale** (es. CI, automazione): il fallback embedding
   non basta (tetto di precisione ed è lento su audio lunghi), quindi il programma si
   **interrompe subito con un errore chiaro** invece di produrre un video
@@ -587,6 +643,13 @@ python main.py --llm auto                 # pausa + ripresa automatica (consigli
 python main.py --llm auto --llm-wait-timeout 60   # fallback embedding dopo 60s
 python main.py --llm off                  # solo embedding, nessuna attesa
 ```
+
+> **PC senza 9Router**: il programma funziona comunque, purché il podcast
+> segua il prompt con le ancore esplicite "slide N" (flusso `slide-audio`): in
+> quel caso 9Router non viene mai chiamato. Se il podcast non ha ancore si passa
+> al flusso libero, dove l'LLM serve: usa `--llm off` (funziona sempre, qualità
+> leggermente inferiore) oppure `--flow slide-audio --llm off` per forzare
+> l'allineamento ordinato deterministico.
 
 ---
 
@@ -606,7 +669,9 @@ test_sync.py             ← Suite di test unitari
 test_llm_sync.py         ← Test modulo LLM
 test_chunks.py           ← Test finestre temporali condivise
 test_integration.py      ← Test di integrazione
-genera_video.bat         ← Launcher 1-click
+genera_video.bat         ← Launcher 1-click (Windows)
+crea_venv.bat            ← Crea .venv (Windows)
+crea_venv.sh             ← Crea .venv (macOS/Linux)
 requirements.txt         ← Dipendenze pip
 ruff.toml                ← Configurazione lint (guardrail di stile)
 mypy.ini                 ← Configurazione type-check

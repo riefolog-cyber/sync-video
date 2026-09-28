@@ -10,7 +10,6 @@ Due motori disponibili:
 """
 
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any, cast
@@ -23,6 +22,7 @@ from config import (
     DEFAULT_TRANSCRIPT_WINDOW,
     DEFAULT_WHISPER_BATCH,
     DEFAULT_WHISPER_BEAM,
+    DEFAULT_WHISPER_THREADS,
     TRANSITION_WORDS_ITA,
     get_stopwords,
     log,
@@ -511,9 +511,11 @@ def transcribe_with_whisper(
         )
 
     # Carica modello. cpu_threads esplicito: il default di faster-whisper
-    # sottoutilizza CPU con più core (misurato su Snapdragon X Elite: 8
-    # thread ~27% più veloci di 4 su clip da 60s). Cap a 8 per non saturare.
-    n_threads = cpu_threads if cpu_threads else min(os.cpu_count() or 4, 8)
+    # sottoutilizza CPU con piu' core (misurato su Snapdragon X Elite: 8
+    # thread ~27% piu' veloci di 4 su clip da 60s). Il cap a 8 evita di
+    # saturare la banda memoria; resta pero' esposto via WHISPER_THREADS
+    # perche' il cap nasce dalla misura su una sola CPU.
+    n_threads = cpu_threads if cpu_threads else DEFAULT_WHISPER_THREADS
     model = WhisperModel(
         model_size,
         device=device,

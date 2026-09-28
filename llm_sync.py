@@ -694,8 +694,17 @@ def wait_for_router(
             int(_AUTO_LAUNCH_WAIT),
         )
     else:
+        # Il comando non e' installato: e' il caso di un PC su cui 9Router non
+        # e' mai stato installato, diverso dal "installato ma spento". La
+        # differenza conta perche' l'attesa successiva e' illimitata: su una
+        # macchina dove il router non esiste, restare in pausa per sempre non
+        # serve a nulla, quindi qui si dice subito come si esce.
         log.warning(
-            "   [LLM] Comando '9router' non disponibile: avvio manuale richiesto (9router --tray).",
+            "   [LLM] Comando '9router' NON TROVATO: 9Router non e' installato su questo PC.\n"
+            "        Avvio automatico non possibile (serve 'npm i -g 9router', poi '9router --tray').\n"
+            "        Se non vuoi installarlo: rilancia con --llm off (solo embedding locale,\n"
+            "        nessuna attesa) oppure con --llm-wait-timeout <secondi> per ripiegare\n"
+            "        sull'embedding locale dopo un timeout.",
         )
 
     if not is_interactive():
