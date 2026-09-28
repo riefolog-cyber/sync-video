@@ -139,6 +139,36 @@ def _is_pinned(pip_name: str) -> bool:
     return False
 
 
+def _is_newer(latest: str, installed: str) -> bool:
+    """True se `latest` è una versione STRIETTAMENTE più recente di `installed`.
+
+    Confronto per ordine (PEP 440), non per disuguaglianza di stringhe. Le
+    stringhe danno tre falsi positivi che si vedono nella pratica:
+
+    - downgrade: ``"1.26.3" != "1.27.0"`` è vero, ma 1.26.3 non è un upgrade;
+    - versione locale: ``"2.5.0" != "2.5.0+cu124"`` è vero, ma la build locale
+      è più recente della release e va lasciata stare (succede con torch/cuda,
+      openvino e pacchetti vendorizzati);
+    - ordinamento lessicografico: ``"1.9.0" > "1.10.0"`` come stringhe.
+
+    Se le due versioni non sono confrontabili (PyPI può rispondere con qualcosa
+    che non è una versione PEP 440), si resta sul confronto storico per
+    disuguaglianza: è impreciso, ma evita di perdere un aggiornamento reale, e
+    segnalare cose che non lo sono è un fastidio minore.
+    """
+    if latest == installed:
+        return False
+    try:
+        from packaging.version import InvalidVersion, Version
+
+        try:
+            return Version(latest) > Version(installed)
+        except InvalidVersion:
+            return True
+    except ImportError:
+        return True
+
+
 def _pin_note(pip_name: str) -> str:
     """Nota sul pin per i pacchetti pinnati."""
     return _PINNED.get(pip_name, "")
@@ -158,13 +188,30 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
         return list(cache.get("outdated", []))
 
     outdated: list[dict] = []
+    # Quanti pacchetti sono rimasti senza risposta: se sono TUTTI, il problema
+    # non e' "nessun aggiornamento", e' che PyPI non ha risposto. Senza questo
+    # conteggio la run con rete down scriveva `outdated: []` in cache e la seconda
+    # run (entro TTL) stampava "tutti aggiornati" con la stessa sicurezza di
+    # quando la rete funziona: 6 ore di falsi allarmi indistinguibili dalla
+    # verita'. Con la rete tirata fuori, invece, la cache NON viene scritta e il
+    # check viene ritentato alla run successiva.
+    unreachable = 0
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = {pool.submit(_latest_version_pypi, p): p for p in _PACKAGES}
         for fut in as_completed(futures):
             pip_name = futures[fut]
             latest = fut.result()  # _latest_version_pypi non solleva mai (None su errore)
             installed = _installed_version(pip_name)
-            if latest is None or installed is None or latest == installed:
+            if latest is None or installed is None:
+                unreachable += 1
+                continue
+            # Confronto per ORDINE, non per disuguaglianza di stringhe:
+            # `latest != installed` segnalava come "outdated" anche un downgrade
+            # (1.27.0 -> 1.26.3) e ogni versione con suffisso locale
+            # (2.5.0+cu124 contro 2.5.0), quindi pacchetti gia' aggiornati
+            # finivano in _upgradable e l'utente veniva invitato a reinstallarli
+            # a ogni run, per sempre.
+            if not _is_newer(latest, installed):
                 continue
             pinned = _is_pinned(pip_name)
             outdated.append(
@@ -178,7 +225,19 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
                 }
             )
 
+    if unreachable >= len(_PACKAGES) and _PACKAGES:
+        log.warning(
+            "   ⚠️ PyPI non raggiungibile (%d/%d pacchetti senza risposta): "
+            "impossibile verificare gli aggiornamenti. Niente viene messo in cache, "
+            "così il controllo verrà ritentato.",
+            unreachable,
+            len(_PACKAGES),
+        )
+        return list(cache.get("outdated", []))
+
     outdated.sort(key=lambda d: d["name"].lower())
+    if unreachable:
+        log.debug("   %d pacchetti senza risposta su %d.", unreachable, len(_PACKAGES))
     _write_cache({"ts": now, "outdated": outdated})
     return outdated
 

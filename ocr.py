@@ -221,6 +221,19 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
         log.info("   -> PDF in cache scaduto (sorgente cambiato), riconverto...")
 
     ext_upper = ppt_path.suffix.upper().lstrip(".")
+    # Rimuovi il PDF (e il marker) del tentativo precedente PRIMA di convertire.
+    # Il successo qui si valuta dalla presenza del file, quindi lasciare il
+    # vecchio in posto significa che un converter fallito "riusa" il PDF
+    # stantio, aggiorna il marker con l'MD5 del sorgente NUOVO e da quel momento
+    # ogni run successiva riusa quel PDF per sempre: slide vecchie nel video,
+    # con la cache OCR riusata perche' l'hash del PDF non e' cambiato, e un log
+    # che dice "PDF convertito".
+    # Nota il fallback Python usa lo stesso pdf_path di output: rimuovere qui
+    # vale anche per lui, che altrimenti ha lo stesso problema.
+    for stale in (pdf_path, marker_path):
+        with contextlib.suppress(OSError):
+            stale.unlink()
+
     # Prova converter nativo se disponibile
     if has_converter:
         converter: str
@@ -244,6 +257,12 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
             )
         except subprocess.TimeoutExpired:
             log.warning("   Conversione %s->PDF timeout (180s), provo fallback...", ext_upper)
+        except OSError as e:
+            # soffice/x2t presenti nel PATH ma non eseguibili (ACL, voce
+            # spazzatura, architettura sbagliata, permessi). Senza questo
+            # l'utente prende un traceback invece del messaggio costruito in
+            # fondo, che spiega cosa provare.
+            log.warning("   %s non eseguibile (%s), provo fallback...", converter, e)
         if proc is not None:
             # x2t ritorna exit !=0 anche quando produce il PDF con warning:
             # il successo si valuta dalla presenza del file, non dall'exit code.
@@ -389,7 +408,10 @@ def extract_slides_text_ocr(
         n_render = len(pages_to_render)
         log.info("   Rendering %d slide (%d cached)...", n_render, total_pages - n_render)
         n_workers = min(workers, n_render)
-        if n_workers <= 1 or n_render <= 1:
+        # `or n_render <= 1` era un secondo termine morto: n_workers è già il
+        # minimo tra workers e n_render, quindi n_render <= 1 implica
+        # n_workers <= 1. Resta solo il test sul worker effettivo.
+        if n_workers <= 1:
             for args in tqdm(pages_to_render, desc="Rendering slide"):
                 _render_page(args)
         else:

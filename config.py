@@ -1429,4 +1429,14 @@ Esempi:
 
     # Sincronizzazione semantica
     args.semantic_cache_dir = args.semantic_cache_dir or DEFAULT_EMBEDDING_CACHE_DIR
+    # Una finestra non positiva non ha senso e, senza clamp, faceva girare
+    # build_windows all'infinito. build_windows si difende comunque da solo
+    # (difesa in profondita'), ma qui l'utente viene avvisato che il valore
+    # richiesto non e' quello applicato, invece di scoprirlo dalla qualita'
+    # dell'allineamento.
+    if args.semantic_window <= 0:
+        log.warning(
+            "   ⚠️  --semantic-window %.3f non valido: uso il minimo di 1.0s per blocco.", args.semantic_window
+        )
+        args.semantic_window = 1.0
     return args
