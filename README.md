@@ -107,8 +107,8 @@ Due ricette pronte, in base al punto di partenza:
 
 | Prompt | Flusso | Quando usarlo |
 |---|---|---|
-| [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE%20%28DA%20PREFERIRE%29.md) | **A**: deck → podcast con ancore `slide N` | Default: massima precisione di allineamento (ancore esatte), podcast più strutturato |
-| [`PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PODCAST.md) | **B**: podcast libero → deck derivato dal parlato | Podcast più naturale; anche come piano B quando appare l'avviso "segnale debole" (slide troppo simili tra loro) |
+| [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](<PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md>) | **A**: deck → podcast con ancore `slide N` | Default: massima precisione di allineamento (ancore esatte), podcast più strutturato |
+| [`PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md`](<PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md>) | **B**: podcast libero → deck derivato dal parlato | Podcast più naturale; anche come piano B quando appare l'avviso "segnale debole" (slide troppo simili tra loro) |
 
 Il flusso A sfrutta le ancore esplicite (flusso ordinato + ibrido LLM); il
 flusso B produce slide che rispecchiano 1:1 il parlato e funziona bene col
@@ -160,7 +160,7 @@ python main.py --llm auto --preview     # valuta senza generare video
 python main.py --llm 9router           # forza 9Router online
 ```
 
-> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto. Prompt ottimale per NotebookLM: [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE%20%28DA%20PREFERIRE%29.md) — vedi "Quale prompt usare".
+> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto. Prompt ottimale per NotebookLM: [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](<PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md>) — vedi "Quale prompt usare".
 
 #### Manutenzione 9Router (`9router-maintenance/`)
 
@@ -540,6 +540,22 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--strict-sync` | — | Modalità "non consegnare un video sospetto". Blocca PRIMA della generazione se un segmento di durata anomala risulta disallineato dal contenuto (il parlato somiglia a un'altra slide) o se la revisione LLM (`--llm-review`) contesta la mappa chunk→slide; blocca DOPO la generazione (il video resta su disco, ma l'esito è un errore) se la verifica frame vs slide trova segmenti con la slide sbagliata. Attiva automaticamente `--verify-video`. Default: avviso soltanto. Il report dei segmenti è salvato comunque in `.cache/sync_report.json` |
 | `--verify-video` | — | Dopo la generazione estrae un frame a metà di ogni segmento e lo confronta con la slide attesa: è l'unico controllo sull'ARTEFATTO (la timeline può essere coerente e il video comunque sbagliato). I frame restano in `.cache/verify_frames/` e l'esito finisce in `sync_report.json`. `genera_video.bat` lo attiva di default (pochi secondi in più) |
 | `--no-auto-repair` | — | Disattiva la **riparazione automatica**. Quando la verifica del video trova un segmento con la slide sbagliata, la pipeline sposta da sola quel confine (motore embedding, solo nella direzione indicata dall'evidenza) e rigenera il video, poi lo ricontrolla. Con questo flag l'esito resta un avviso e il video non viene rifatto |
+| `--force-setup` | — | Rileva l'hardware da capo e riscrive i fatti in `.cache/machine_setup.json` (utile se hai cambiato GPU o spostato la cartella). La *decisione* sul motore viene comunque ricalcolata a ogni run |
+| `--no-auto-setup` | — | Salta il rilevamento hardware: il motore è solo quello passato con `--transcriber` |
+| `--whisper-device` | `cpu` | Device faster-whisper (`cpu`/`cuda`). **Sceglilo a mano solo se sai cosa fai**: in quel caso un fallimento di CUDA non viene ripiegato su CPU in silenzio, perché un fallback non richiesto sarebbe una sorpresa |
+| `--whisper-compute-type` | `int8` | Precisione faster-whisper (`int8` CPU, `float16` CUDA) |
+| `--openvino-model-dir` | `.cache/whisper_openvino_small` | Cartella del modello OpenVINO IR |
+| `--engine` | `ffmpeg` | Motore di rendering video (`ffmpeg` veloce, `moviepy` richiesto per `--transitions`) |
+| `--ocr-workers` | `min(4, cpu_count)` | Thread per l'OCR (sovrappone `OCR_WORKERS`) |
+| `--dpi` | `300` | Risoluzione di rendering delle slide per l'OCR |
+| `--slides-dir` | `temp_slides` | Cartella delle slide renderizzate |
+| `--skip-slides` | — | Esclude un elenco di slide (indici 1-based, es. `1,4,9`) dal flusso |
+| `--no-free-ordered-fallback` | — | Nel flusso libero, non ripiegare sull'allineamento ordinato quando la selezione semantica fallisce: interrompi |
+| `--no-confirm` | — | Non chiedere conferma interattiva (per batch/CI) |
+| `--no-update` | — | Al controllo aggiornamenti: notifica senza installare |
+| `--no-update-check` | — | Non controllare gli aggiornamenti su PyPI (default di `genera_video.bat`) |
+| `--semantic-cache-dir` | `.cache/embedding_model` | Cartella dei modelli embedding |
+| `--log-file` | — | Scrivi anche il log su file |
 
 ---
 
@@ -819,7 +835,7 @@ pronunciare le ancore "slide N" **in cifre** a ogni sezione: senza ancore il
 pipeline non può sapere dove cambia la slide e passa al flusso libero (che usa
 l'LLM — un avviso in console lo segnala).
 
-Il prompt [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE%20%28DA%20PREFERIRE%29.md)
+Il prompt [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](<PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md>)
 guida sia la generazione della presentazione (Studio → Slide Deck, dalle tue
 fonti) sia il podcast che la segue nell'ordine, arricchendola con le altre
 fonti. Ancore strette: cifre, "slide" chiara, mai "la slide successiva",

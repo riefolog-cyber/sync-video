@@ -5,7 +5,6 @@ Test unitari per la correzione dei nomi propri nella trascrizione
 Esegui con: python -m unittest test_transcription -v
 """
 
-import json
 import sys
 import tempfile
 import unittest
@@ -13,7 +12,7 @@ from pathlib import Path
 from typing import cast
 from unittest import mock
 
-from transcription import correct_transcript_names, openvino_usable
+from transcription import correct_transcript_names, openvino_usable, resolved_transcriber
 
 
 def _words(items):
@@ -60,23 +59,18 @@ class TestCorrectTranscriptNames(unittest.TestCase):
 
     def test_empty_input(self):
         self.assertEqual(correct_transcript_names([]), [])
-
-
 class TestOpenvinoUsable(unittest.TestCase):
-    """openvino_usable: l'avviso OpenVINO va mostrato solo se percorribile."""
+    """openvino_usable: l'avviso OpenVINO va mostrato solo se percorribile.
+
+    Non guarda la decisione di machine_setup (non viene piu' persistita): le tre
+    condizioni sono runtime importabile + modello IR presente + device GPU reale.
+    """
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.config_path = Path(self._tmp.name) / "machine_setup.json"
-        patcher = mock.patch("transcription.MACHINE_CONFIG_PATH", self.config_path)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def _write_config(self, transcriber: str) -> None:
-        self.config_path.write_text(
-            json.dumps({"transcriber": transcriber}), encoding="utf-8"
-        )
+        self.model_dir = Path(self._tmp.name) / "openvino_model"
+        self.model_dir.mkdir()
 
     def _patch_runtime(self, genai_ok: bool, devices: list[str] | None = None):
         """Simula la presenza/assenza del runtime OpenVINO in sys.modules."""
@@ -88,45 +82,57 @@ class TestOpenvinoUsable(unittest.TestCase):
             modules["openvino"] = None
         return mock.patch.dict(sys.modules, modules)
 
-    def test_setup_says_openvino(self):
-        self._write_config("openvino")
-        self.assertTrue(openvino_usable())
+    def test_usable_with_runtime_model_and_igpu(self):
+        with self._patch_runtime(genai_ok=True, devices=["GPU"]):
+            self.assertTrue(openvino_usable(self.model_dir))
 
-    def test_setup_says_whisper(self):
-        self._write_config("whisper")
-        self.assertFalse(openvino_usable())
-
-    def test_setup_whisper_wins_over_runtime(self):
-        # Anche col runtime installato, la decisione di machine_setup prevale.
-        self._write_config("whisper")
-        with self._patch_runtime(genai_ok=True, devices=["CPU"]):
-            self.assertFalse(openvino_usable())
-
-    def test_no_setup_and_no_runtime(self):
-        # Nessun machine_setup.json e openvino non installato -> avviso soppresso.
+    def test_not_usable_without_runtime(self):
         with self._patch_runtime(genai_ok=False):
-            self.assertFalse(openvino_usable())
+            self.assertFalse(openvino_usable(self.model_dir))
 
-    def test_no_setup_with_igpu(self):
-        # Runtime installato con device GPU (iGPU Intel): consiglio sensato.
+    def test_not_usable_without_model(self):
+        # Runtime presente e iGPU presente, ma il modello IR manca: ogni run lo
+        # riscaricherebbe, quindi l'avviso "usa OpenVINO" non sta in piedi.
         with self._patch_runtime(genai_ok=True, devices=["GPU"]):
-            self.assertTrue(openvino_usable())
+            self.assertFalse(openvino_usable(self.model_dir / "inesistente"))
 
-    def test_no_setup_cpu_only(self):
-        # openvino installato ma solo CPU (es. ARM/AMD): senza iGPU non c'è
-        # guadagno di velocità -> avviso soppresso (caso Snapdragon).
+    def test_not_usable_cpu_only(self):
+        # openvino installato ma solo CPU (es. ARM/AMD): senza iGPU non c'e'
+        # guadagno di velocita' -> avviso soppresso (caso Snapdragon).
         with self._patch_runtime(genai_ok=True, devices=["CPU"]):
-            self.assertFalse(openvino_usable())
+            self.assertFalse(openvino_usable(self.model_dir))
 
-    def test_no_setup_runtime_without_devices(self):
-        # Runtime installato ma nessun device disponibile -> non percorribile.
+    def test_not_usable_runtime_without_devices(self):
         with self._patch_runtime(genai_ok=True, devices=[]):
-            self.assertFalse(openvino_usable())
+            self.assertFalse(openvino_usable(self.model_dir))
 
-    def test_corrupt_setup_falls_back_to_runtime(self):
-        self.config_path.write_text("{non-json", encoding="utf-8")
-        with self._patch_runtime(genai_ok=True, devices=["GPU"]):
+    def test_defaults_to_default_model_dir(self):
+        # Senza argomento si guarda DEFAULT_OPENVINO_MODEL_DIR, non un path
+        # arbitrario: e' il modo in cui la chiama chi non ne ha uno proprio.
+        with (
+            self._patch_runtime(genai_ok=True, devices=["GPU"]),
+            mock.patch("transcription.DEFAULT_OPENVINO_MODEL_DIR", self.model_dir),
+        ):
             self.assertTrue(openvino_usable())
+
+    def test_uses_the_given_model_dir_not_the_default(self):
+        # Con --openvino-model-dir personalizzato il probe deve guardare lo
+        # stesso percorso che la pipeline usera' davvero: qui il default esiste
+        # ma il percorso richiesto no, quindi l'unico risultato corretto e' False.
+        with (
+            self._patch_runtime(genai_ok=True, devices=["GPU"]),
+            mock.patch("transcription.DEFAULT_OPENVINO_MODEL_DIR", self.model_dir),
+        ):
+            self.assertFalse(openvino_usable(self.model_dir / "personalizzato_inesistente"))
+
+    def test_given_model_dir_that_exists_is_usable(self):
+        altro = self.model_dir / "personalizzato"
+        altro.mkdir()
+        with (
+            self._patch_runtime(genai_ok=True, devices=["GPU"]),
+            mock.patch("transcription.DEFAULT_OPENVINO_MODEL_DIR", self.model_dir / "inesistente"),
+        ):
+            self.assertTrue(openvino_usable(altro))
 
 
 class TestWhisperBeamConfig(unittest.TestCase):
@@ -255,34 +261,41 @@ class TestResolvedTranscriber(unittest.TestCase):
         return mock.patch.dict(sys.modules, {"openvino_genai": mock.MagicMock() if installed else None})
 
     def test_explicit_whisper(self):
-        from transcription import resolved_transcriber
 
         with self._runtime(installed=True):
             self.assertEqual(resolved_transcriber("whisper", self.model_dir), "whisper")
 
     def test_auto_without_runtime(self):
-        from transcription import resolved_transcriber
 
         with self._runtime(installed=False):
             self.assertEqual(resolved_transcriber("auto", self.model_dir), "whisper")
 
     def test_auto_without_model(self):
-        from transcription import resolved_transcriber
 
         with self._runtime(installed=True):
             self.assertEqual(resolved_transcriber("auto", self.model_dir), "whisper")
 
     def test_auto_with_model(self):
-        from transcription import resolved_transcriber
 
         self.model_dir.mkdir(parents=True)
         with self._runtime(installed=True):
             self.assertEqual(resolved_transcriber("auto", self.model_dir), "openvino")
 
+    def test_accepts_str_model_dir(self):
+        # Una str è il tipo naturale con cui il percorso arriva da argparse.
+        # Chiamare .exists() su una str crashava con AttributeError, quindi qui
+        # il risultato è verificato anche quando il percorso NON esiste: era
+        # esattamente quel ramo a mandare in crash.
+
+        self.model_dir.mkdir(parents=True)
+        with self._runtime(installed=True):
+            self.assertEqual(resolved_transcriber("auto", str(self.model_dir)), "openvino")
+            self.assertEqual(resolved_transcriber("auto", str(self.model_dir / "no")), "whisper")
+            self.assertEqual(resolved_transcriber("auto", None), "whisper")
+
     def test_openvino_explicit_without_model_stays_openvino(self):
         # Il modello verrà scaricato da transcribe_audio: la scelta è comunque
         # OpenVINO, e la cache deve saperlo prima del download.
-        from transcription import resolved_transcriber
 
         with self._runtime(installed=True):
             self.assertEqual(resolved_transcriber("openvino", self.model_dir), "openvino")

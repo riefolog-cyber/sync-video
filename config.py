@@ -277,6 +277,42 @@ def _mirror_system_tessdata(system_dir: Path, local_dir: Path) -> int:
 _TESSERACT_DOWNLOAD_URL = "https://github.com/UB-Mannheim/tesseract/wiki"
 _FFMPEG_DOWNLOAD_URL = "https://ffmpeg.org/download.html"
 
+
+# =====================================================================
+# PROBE DI DISPONIBILITA' (hardware accelerabile)
+# =====================================================================
+# Vivono qui, e non in machine_setup, per una ragione precisa: sono usate sia
+# da machine_setup sia da transcription, e machine_setup importa transcription
+# (per scaricare il modello OpenVINO). Mettendole in config, che non importa
+# nessuno dei due, il grafo degli import resta aciclico: senza questo i due
+# moduli si importavano a vicenda e il ciclo reggeva solo grazie a un import
+# differito dentro una funzione, fragile a ogni refactor futuro.
+def cuda_available() -> bool:
+    """True se CTranslate2 vede almeno una GPU CUDA utilizzabile."""
+    try:
+        import ctranslate2
+
+        return bool(ctranslate2.get_cuda_device_count() > 0)
+    except Exception:  # noqa: BLE001 - nessun CTranslate2, build senza CUDA, driver assente: qui significa la stessa cosa
+        # Nessun CTranslate2, build senza CUDA, driver assente: tutte cose che
+        # qui significano la stessa cosa, cioe' "CUDA non e' un canale valido".
+        return False
+
+
+def openvino_device_available() -> bool:
+    """True se il runtime OpenVINO espone un device 'GPU' (iGPU Intel).
+
+    La sola CPU non basta: su AMD/ARM OpenVINO vede al piu' la CPU, e usarla
+    non da' guadagno di velocita' rispetto a faster-whisper.
+    """
+    try:
+        from openvino import Core
+
+        return "GPU" in Core().available_devices
+    except Exception:  # noqa: BLE001 - runtime assente o rotto: su macchine diverse fallisce in modi diversi
+        return False
+
+
 # Timeout per l'installazione di uno strumento di sistema. Tesseract (~40 MB) e
 # ffmpeg (~80 MB) su una connessione lenta superano facilmente 120s: un timeout
 # scaduto viene letto come "installazione fallita" anche se il pacchetto sta per

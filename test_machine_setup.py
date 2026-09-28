@@ -257,7 +257,7 @@ class TestValidate(unittest.TestCase):
 
     def test_cuda_without_cuda_device_falls_back_to_cpu(self):
         # Il caso reale: lista GPU stale che raccomanda CUDA dove CUDA non esiste.
-        with mock.patch("machine_setup._cuda_available", return_value=False):
+        with mock.patch("machine_setup.cuda_available", return_value=False):
             out = _validate(dict(self._CUDA), None)
         self.assertEqual(out["transcriber"], "whisper")
         self.assertEqual(out["whisper_device"], "cpu")
@@ -265,7 +265,7 @@ class TestValidate(unittest.TestCase):
 
     def test_cuda_with_cuda_device_is_kept(self):
         with (
-            mock.patch("machine_setup._cuda_available", return_value=True),
+            mock.patch("machine_setup.cuda_available", return_value=True),
             mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
         ):
             out = _validate(dict(self._CUDA), None)
@@ -287,7 +287,7 @@ class TestValidate(unittest.TestCase):
         # OpenVINO, solo su CPU. Non e' un ripiego su faster-whisper.
         with (
             mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
-            mock.patch("machine_setup.openvino_gpu_available", return_value=False),
+            mock.patch("machine_setup.openvino_device_available", return_value=False),
         ):
             out = _validate(dict(self._OPENVINO), Path(tempfile.gettempdir()))
         self.assertEqual(out["transcriber"], "openvino")
@@ -296,7 +296,7 @@ class TestValidate(unittest.TestCase):
     def test_valid_openvino_is_untouched(self):
         with (
             mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
-            mock.patch("machine_setup.openvino_gpu_available", return_value=True),
+            mock.patch("machine_setup.openvino_device_available", return_value=True),
         ):
             out = _validate(dict(self._OPENVINO), Path(tempfile.gettempdir()))
         self.assertEqual(out["transcriber"], "openvino")

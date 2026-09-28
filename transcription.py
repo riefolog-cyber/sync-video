@@ -9,7 +9,6 @@ Due motori disponibili:
 - faster-whisper (fallback): CTranslate2 su CPU.
 """
 
-import json
 import re
 from pathlib import Path
 from typing import Any, cast
@@ -26,8 +25,8 @@ from config import (
     TRANSITION_WORDS_ITA,
     get_stopwords,
     log,
+    openvino_device_available,
 )
-from machine_setup import MACHINE_CONFIG_PATH, openvino_gpu_available
 
 
 # =====================================================================
@@ -260,33 +259,35 @@ def transcribe_with_openvino(
 # =====================================================================
 # TRASCRIZIONE CON FASTER-WHISPER
 # =====================================================================
-def openvino_usable() -> bool:
+def openvino_usable(openvino_model_dir: Path | str | None = None) -> bool:
     """True se su questo PC OpenVINO è una via realmente percorribile.
 
-    Il suggerimento "installa openvino-genai per usare la iGPU" ha senso solo
-    se il rilevamento hardware (``machine_setup.json``) ha scelto OpenVINO
-    (iGPU Intel presente), oppure se il runtime OpenVINO è installato ed
-    espone un device GPU reale. La sola CPU non basta: senza iGPU non c'è
-    alcun guadagno di velocità, quindi su macchine AMD/ARM (dove OpenVINO
-    vede al più la CPU) l'avviso viene soppresso.
+    Tre condizioni, tutte necessarie:
+
+    - il runtime ``openvino_genai`` è importabile;
+    - il modello IR è presente (senza, ogni run lo riscaricherebbe);
+    - il runtime espone un device **GPU** reale. La sola CPU non basta: senza
+      iGPU non c'è guadagno di velocità, quindi su AMD/ARM (dove OpenVINO vede
+      al più la CPU) l'avviso "usa OpenVINO" sarebbe rumore.
+
+    Non legge la decisione di ``machine_setup``: quella non viene più persistita
+    (vedi ``machine_setup``) e, comunque, sarebbe derivata da esattamente queste
+    condizioni. Rileggere il file aggiungeva un quarto stato possibile — "una
+    decisione salvata che il runtime non conferma" — e produceva un avviso
+    contraddittorio: la pipeline su faster-whisper che invitava a installare
+    OpenVINO dopo che il setup aveva già provato a installarlo e non era riuscito.
     """
     try:
-        rec = json.loads(MACHINE_CONFIG_PATH.read_text(encoding="utf-8"))
-        transcriber = rec.get("transcriber")
-        if transcriber == "openvino":
-            return True
-        if transcriber == "whisper":
-            return False
-    except Exception:
-        pass  # nessun machine_setup.json: si procede col probe runtime
-
-    # Solo una iGPU Intel (device "GPU") giustifica il consiglio "usa la
-    # iGPU": la CPU OpenVINO non è più veloce di faster-whisper. Il probe
-    # è condiviso con machine_setup.openvino_gpu_available().
-    return openvino_gpu_available()
+        import openvino_genai  # noqa: F401
+    except ImportError:
+        return False
+    model_dir = Path(openvino_model_dir) if openvino_model_dir is not None else Path(DEFAULT_OPENVINO_MODEL_DIR)
+    if not model_dir.exists():
+        return False
+    return openvino_device_available()
 
 
-def resolved_transcriber(transcriber: str, openvino_model_dir: Path | None) -> str:
+def resolved_transcriber(transcriber: str, openvino_model_dir: Path | str | None) -> str:
     """Nome del motore che ``transcribe_audio`` userà DAVVERO: 'openvino' o 'whisper'.
 
     ``auto`` significa "OpenVINO se è percorribile, altrimenti faster-whisper":
@@ -297,6 +298,10 @@ def resolved_transcriber(transcriber: str, openvino_model_dir: Path | None) -> s
 
     Il download del modello (richiesto da ``openvino`` esplicito) avviene solo
     dentro ``transcribe_audio``: qui la funzione resta senza effetti.
+
+    Accetta anche una ``str`` per il percorso: è il tipo naturale con cui
+    arriva da argparse, e chiamare ``.exists()`` su una ``str`` sollevava
+    ``AttributeError`` invece di rispondere semplicemente "whisper".
     """
     if transcriber == "whisper":
         return "whisper"
@@ -307,7 +312,7 @@ def resolved_transcriber(transcriber: str, openvino_model_dir: Path | None) -> s
     if transcriber == "openvino":
         # Motore esplicito: se il modello manca, transcribe_audio lo scarica.
         return "openvino"
-    if openvino_model_dir is not None and openvino_model_dir.exists():
+    if openvino_model_dir is not None and Path(openvino_model_dir).exists():
         return "openvino"
     return "whisper"
 
@@ -379,6 +384,11 @@ def transcribe_audio(
         language=language,
         device=whisper_device,
         compute_type=whisper_compute_type,
+        # Il model dir reale, non il default: con --openvino-model-dir
+        # personalizzato il probe deve guardare lo stesso percorso che verrà
+        # usato davvero, altrimenti l'avviso "usa OpenVINO" valuterebbe una
+        # cartella diversa da quella della pipeline.
+        openvino_available=openvino_usable(openvino_model_dir),
         beam_size=whisper_beam,
         batch_size=whisper_batch,
         device_explicit=whisper_device_explicit,

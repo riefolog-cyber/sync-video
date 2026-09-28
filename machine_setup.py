@@ -11,6 +11,11 @@ Sceglie il motore di trascrizione più adatto alla configurazione del PC:
 - GPU AMD                          -> faster-whisper su CPU (OpenVINO supporta solo Intel)
 - GPU Qualcomm Adreno (Snapdragon) -> faster-whisper su CPU (niente CUDA/OpenVINO su ARM)
 
+Questa è la *raccomandazione*, data la GPU. Non è la scelta finale: una GPU
+NVIDIA con CTranslate2 compilato senza CUDA, o una iGPU Intel senza driver,
+vengono corrette da `_validate` a CPU (vedi sotto). La tabella dice "cosa
+vorrebbe", non "cosa succede".
+
 Che cosa viene persistito, e che cosa no
 -----------------------------------------
 In ``.cache/machine_setup.json`` si salvano i FATTI hardware (``fingerprint`` +
@@ -51,7 +56,7 @@ import sys
 from pathlib import Path
 from typing import Protocol
 
-from config import CACHE_DIR, log
+from config import CACHE_DIR, cuda_available, log, openvino_device_available
 
 MACHINE_CONFIG_PATH = CACHE_DIR / "machine_setup.json"
 
@@ -116,26 +121,6 @@ def _classify_gpu(name: str) -> str:
     return "unknown"
 
 
-def _cuda_available() -> bool:
-    """True se CTranslate2 vede una GPU CUDA utilizzabile."""
-    try:
-        import ctranslate2
-
-        return bool(ctranslate2.get_cuda_device_count() > 0)
-    except Exception:
-        return False
-
-
-def openvino_gpu_available() -> bool:
-    """True se il runtime OpenVINO espone un device 'GPU' (iGPU Intel)."""
-    try:
-        from openvino import Core
-
-        return "GPU" in Core().available_devices
-    except Exception:
-        return False
-
-
 def recommend(gpus: list[str]) -> dict:
     """Consiglia il motore migliore per l'hardware rilevato."""
     has_nvidia = any(_classify_gpu(g) == "nvidia" for g in gpus)
@@ -154,7 +139,7 @@ def recommend(gpus: list[str]) -> dict:
             "transcriber": "openvino",
             "whisper_device": "cpu",
             "whisper_compute_type": "int8",
-            "openvino_device": "GPU" if openvino_gpu_available() else "CPU",
+            "openvino_device": "GPU" if openvino_device_available() else "CPU",
             "reason": "iGPU Intel rilevata: OpenVINO GenAI",
         }
     has_qualcomm = any(_classify_gpu(g) == "qualcomm" for g in gpus)
@@ -199,6 +184,14 @@ def _provision_openvino(model_dir: Path) -> bool:
     except ImportError:
         if not _pip_install("openvino-genai"):
             return False
+        # Riverifica: `pip install` avvenuto DOPO il tentativo di import in
+        # questa run, quindi il modulo puo' non essere ancora importabile (il
+        # finder lo aveva gia' messo in cache negativa, e comunque siamo già
+        # dentro il bootstrap). Senza questo controllo si dichiarava pronto un
+        # motore che poi falliva in trascrizione.
+        if importlib.util.find_spec("openvino_genai") is None:
+            log.warning("   ⚠️ openvino-genai installato ma non importabile in questa run.")
+            return False
     if not model_dir.exists():
         from transcription import download_openvino_model
 
@@ -216,7 +209,7 @@ def _provision(rec: dict, model_dir: Path) -> dict:
         if not _provision_openvino(model_dir):
             log.warning("   ⚠️ OpenVINO non pronto, ripiego su faster-whisper su CPU.")
             return dict(_CPU_FALLBACK)
-    elif rec["whisper_device"] == "cuda" and not _cuda_available():
+    elif rec["whisper_device"] == "cuda" and not cuda_available():
         log.warning("   ⚠️ CUDA non disponibile, uso faster-whisper su CPU.")
         return dict(_CPU_FALLBACK)
     return rec
@@ -253,7 +246,7 @@ def _validate(rec: dict, model_dir: Path | None) -> dict:
             return _downgrade(rec, f"modello OpenVINO assente in {model_dir}")
         # La GPU Intel c'e' ma il runtime potrebbe esporre solo la CPU (es.
         # driver non installato): si usa comunque OpenVINO, ma su CPU.
-        if rec.get("openvino_device") == "GPU" and not openvino_gpu_available():
+        if rec.get("openvino_device") == "GPU" and not openvino_device_available():
             log.warning(
                 "   ⚠️ iGPU Intel presente ma il runtime OpenVINO non espone un device GPU: uso OpenVINO su CPU."
             )
@@ -268,7 +261,7 @@ def _validate(rec: dict, model_dir: Path | None) -> dict:
     if rec.get("whisper_device") == "cuda":
         if importlib.util.find_spec("faster_whisper") is None:
             return _downgrade(rec, "faster-whisper non e' installato")
-        if not _cuda_available():
+        if not cuda_available():
             return _downgrade(rec, "nessun device CUDA utilizzabile")
     return rec
 
@@ -364,17 +357,21 @@ def _apply(args: _TranscriberArgs, rec: dict) -> None:
 # ENTRY POINT
 # =====================================================================
 def _engine_note(rec: dict) -> str:
-    """Messaggio esplicito se il motore scelto non e utilizzabile qui.
+    """Messaggio esplicito se il motore scelto non e' utilizzabile qui.
 
-    Su ARM faster-whisper non e installabile (CTranslate2 non pubblica wheel
-    win_arm64) e OpenVINO e x86-only: il progetto si avvia e fa tutto il resto
-    (PDF, OCR, embeddings, video), ma la trascrizione audio non e disponibile.
-    Meglio dirlo esplicitamente che fallire piu' avanti con un ImportError.
+    Copre solo il caso che `_validate` NON puo' risolvere: su ARM
+    faster-whisper non e' installabile (CTranslate2 non pubblica wheel
+    win_arm64) e OpenVINO e' x86-only, quindi non esiste un percorso percorribile.
+    Il progetto si avvia e fa tutto il resto (PDF, OCR, embedding, video), ma la
+    trascrizione audio non e' disponibile: meglio dirlo che fallire piu' avanti con
+    un ImportError.
+
+    Non ricontrolla qui se openvino-genai o CUDA sono utilizzabili: quello e'
+    compito di `_validate`, che in quel caso ripiega su CPU. Un secondo check qui
+    sarebbe una terza fonte di verita' sullo stesso fatto, e una terza copia e'
+    gia' stato il bug che ha fatto leggere a `openvino_usable()` una decisione dal
+    file invece di guardare il runtime vero.
     """
-    if (rec.get("transcriber") == "openvino"
-            and importlib.util.find_spec("openvino_genai") is None):
-        return ("OpenVINO GenAI non installabile su questa CPU: e x86-only "
-                "(su ARM anche l'Adreno non e accelerabile da OpenVINO).")
     if importlib.util.find_spec("faster_whisper") is None:
         return ("faster-whisper non installabile su questa CPU: CTranslate2 non "
                 "pubblica wheel ARM. La trascrizione audio non sara disponibile.")
