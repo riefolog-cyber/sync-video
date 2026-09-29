@@ -196,6 +196,439 @@ class TestSlideAudioFlow(unittest.TestCase):
         anchors = extract_slide_anchors(words, total_slides=5, flow="slide-audio")
         self.assertEqual(anchors, {2: 30.6, 4: 130.6, 5: 180.6})
 
+    def test_content_number_does_not_displace_real_anchor(self):
+        # Regressione (podcast reale 29/09): un numero di CONTENTO letto come
+        # riferimento ("i tre concetti della slide", "la slide spiega il ciclo
+        # in quattro fasi") finiva per pilotare il LIS, che scartava l'annuncio
+        # vero e faceva durare 0.5s la slide 3 con 21s di ritardo sulla 5.
+        # Una menzione vale come transizione solo se, al suo tempo, nessuna slide
+        # di numero maggiore era già stata annunciata.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 93.0),
+                ("alla", 93.2),
+                ("slide", 93.3),
+                ("2", 93.5),
+                ("passiamo", 161.0),
+                ("alla", 161.2),
+                ("slide", 161.3),
+                ("3", 161.7),
+                ("passiamo", 283.0),
+                ("alla", 283.2),
+                ("slide", 283.3),
+                ("5", 284.0),
+                ("i", 295.4),
+                ("tre", 295.5),
+                ("concetti", 295.7),
+                ("della", 296.1),
+                ("slide", 296.3),
+                ("sono", 296.7),
+                ("perfetti", 296.9),
+                ("qui.", 297.4),
+                ("la", 416.6),
+                ("slide", 416.8),
+                ("spiega", 417.1),
+                ("questo", 417.9),
+                ("ciclo", 418.2),
+                ("in", 418.5),
+                ("quattro", 418.6),
+                ("fasi.", 419.1),
+                ("passiamo", 464.0),
+                ("alla", 464.1),
+                ("slide", 464.2),
+                ("8", 464.3),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=8, flow="slide-audio")
+        # Le due ancore fantasma non rubano il posto a quelle vere e la slide 4,
+        # mai annunciata, resta l'unica senza ancora.
+        self.assertEqual(anchors, {2: 93.5, 3: 161.7, 5: 284.0, 8: 464.3})
+
+    def test_content_number_discarded_is_logged_with_its_time(self):
+        # Il tempo scartato è la diagnosi del danno: senza di esso un confine
+        # spostato di minuti sembra un difetto del motore embeddings.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("alla", 30.2),
+                ("slide", 30.3),
+                ("5", 30.6),
+                ("la", 45.0),
+                ("stanza", 45.05),
+                ("senza", 45.1),
+                ("porte,", 45.2),
+                ("i", 45.3),
+                ("gruppi", 45.35),
+                ("whatsapp.", 45.4),
+                ("qualcuno", 45.45),
+                ("chiede", 45.5),
+                ("e", 45.55),
+                ("tre", 45.6),
+                ("concetti", 45.8),
+                ("della", 46.1),
+                ("slide", 46.3),
+                ("sono", 46.7),
+            ]
+        )
+        with self.assertLogs("slide2video", level="WARNING") as logs:
+            extract_slide_anchors(words, total_slides=5, flow="slide-audio")
+        self.assertIn("slide 3 a 46.7s", "\n".join(logs.output))
+
+    def test_displaced_citation_is_logged_with_its_time(self):
+        # Qui la slide 3 esiste anche come transizione: la citazione più avanti
+        # è la menzione fantasma e va segnalata con il suo tempo.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("alla", 30.2),
+                ("slide", 30.3),
+                ("3", 30.6),
+                ("passiamo", 80.0),
+                ("alla", 80.2),
+                ("slide", 80.3),
+                ("5", 80.6),
+                ("la", 95.0),
+                ("stanza", 95.05),
+                ("senza", 95.1),
+                ("porte,", 95.2),
+                ("i", 95.3),
+                ("gruppi", 95.35),
+                ("whatsapp.", 95.4),
+                ("qualcuno", 95.45),
+                ("chiede", 95.5),
+                ("e", 95.55),
+                ("tre", 95.6),
+                ("concetti", 95.8),
+                ("della", 96.1),
+                ("slide", 96.3),
+                ("sono", 96.7),
+            ]
+        )
+        with self.assertLogs("slide2video", level="WARNING") as logs:
+            anchors = extract_slide_anchors(words, total_slides=5, flow="slide-audio")
+        self.assertEqual(anchors, {3: 30.6, 5: 80.6})
+        self.assertIn("'slide 3' a 96.7s", "\n".join(logs.output))
+
+    def test_italian_sl_words_are_not_slide_references(self):
+        # "slitta", "slogan", ... iniziano davvero per "sl" e passerebbero il
+        # fuzzy fonetico: senza l'elenco di esclusione "la slitta ha tre ruote"
+        # diventerebbe l'ancora "slide 3".
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("alla", 30.2),
+                ("slide", 30.3),
+                ("2", 30.6),
+                ("la", 60.0),
+                ("slitta", 60.2),
+                ("ha", 60.5),
+                ("tre", 60.7),
+                ("ruote", 60.9),
+                ("lo", 80.0),
+                ("slogan", 80.2),
+                ("costa", 80.5),
+                ("cinque", 80.7),
+                ("euro", 80.9),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=5, flow="slide-audio")
+        self.assertEqual(anchors, {2: 30.6})
+
+    def test_discarded_citations_are_reported_with_their_time(self):
+        # Il tempo della citazione scartata finisce nel report: è l'unico modo
+        # di collegare un confine di timeline spostato di minuti alla sua causa.
+        from timeline import discarded_citations, extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 93.0),
+                ("alla", 93.2),
+                ("slide", 93.3),
+                ("2", 93.5),
+                ("passiamo", 160.0),
+                ("alla", 160.2),
+                ("slide", 160.3),
+                ("4", 160.6),
+                ("la", 200.0),
+                ("stanza", 200.05),
+                ("senza", 200.1),
+                ("porte,", 200.2),
+                ("i", 200.3),
+                ("gruppi", 200.35),
+                ("whatsapp.", 200.4),
+                ("qualcuno", 200.45),
+                ("chiede", 200.5),
+                ("e", 200.55),
+                ("tre", 200.6),
+                ("concetti", 200.8),
+                ("della", 201.1),
+                ("slide", 201.3),
+                ("sono", 201.7),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=4, flow="slide-audio")
+        self.assertEqual(anchors, {2: 93.5, 4: 160.6})
+        self.assertEqual(discarded_citations(words, 4, anchors), [{"slide": 3, "time": 201.7}])
+
+    def test_discarded_citations_survive_a_renumbered_mapping(self):
+        # Dopo il rimappaggio del mapping i numeri parlati e quelli del PDF
+        # non coincidono: il confronto deve essere sui TEMPI, o tutte le ancore
+        # legittime verrebbero segnalate come citazioni scartate.
+        from timeline import discarded_citations
+
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("alla", 30.2),
+                ("slide", 30.3),
+                ("4", 30.6),
+                ("passiamo", 200.0),
+                ("alla", 200.2),
+                ("slide", 200.3),
+                ("5", 200.6),
+            ]
+        )
+        # Il mapping ha spostato "slide 5" (200.6s) sulla slide 4 del PDF.
+        corrected = {3: 30.6, 4: 200.6}
+        self.assertEqual(discarded_citations(words, 5, corrected), [])
+
+    def test_out_of_range_tail_anchor_recovers_last_transition(self):
+        # Deck da 14 slide, podcast che annuncia "slide 15": la menzione è fuori
+        # portata, ma il tempo è la misura dello speaker e senza di esso l'ultima
+        # slide resta posizionata a tentativi (confine spostato di 17s nel caso
+        # reale del 29/09).
+        from timeline import extract_slide_anchors, out_of_range_tail_anchor
+
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("alla", 30.2),
+                ("slide", 30.3),
+                ("4", 30.6),
+                ("passiamo", 200.0),
+                ("alla", 200.2),
+                ("slide", 200.3),
+                ("14", 200.6),
+                ("passiamo", 300.0),
+                ("alla", 300.2),
+                ("slide", 300.3),
+                ("15", 300.6),
+                ("abitare", 300.9),
+                ("la", 301.0),
+                ("maschera", 301.2),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=14, flow="slide-audio")
+        self.assertEqual(anchors, {4: 30.6, 14: 200.6})
+        # Caso reale: la verifica del mapping ha già corretto l'offset -1, quindi
+        # l'annuncio "slide 14" ora pinza la slide 13 e la 14 (ultima) è libera.
+        corrected = {4: 30.6, 13: 200.6}
+        # L'ancora cade DOPO la parola numero (300.9s), non dentro la frase.
+        self.assertEqual(out_of_range_tail_anchor(words, 14, corrected), {14: 300.9})
+
+    def test_out_of_range_tail_anchor_not_used_when_last_slide_anchored(self):
+        from timeline import out_of_range_tail_anchor
+
+        words = _words(
+            [
+                ("passiamo", 200.0),
+                ("alla", 200.2),
+                ("slide", 200.3),
+                ("14", 200.6),
+                ("passiamo", 300.0),
+                ("alla", 300.2),
+                ("slide", 300.3),
+                ("15", 300.6),
+            ]
+        )
+        self.assertEqual(out_of_range_tail_anchor(words, 14, {14: 200.6}), {})
+
+    def test_out_of_range_tail_anchor_ignores_early_count(self):
+        # "le 20 slide di questo documento" all'inizio non è l'ultima
+        # transizione: la regola accetta solo numeri appena oltre l'ultimo
+        # annuncio valido.
+        from timeline import out_of_range_tail_anchor
+
+        words = _words(
+            [
+                ("questa", 5.0),
+                ("puntata", 5.2),
+                ("copre", 5.4),
+                ("le", 5.6),
+                ("20", 5.8),
+                ("slide", 6.0),
+                ("del", 6.2),
+                ("documento", 6.4),
+                ("passiamo", 30.0),
+                ("alla", 30.2),
+                ("slide", 30.3),
+                ("4", 30.6),
+            ]
+        )
+        self.assertEqual(out_of_range_tail_anchor(words, 14, {4: 30.6}), {})
+
+    def test_count_phrase_in_opening_does_not_wipe_the_anchors(self):
+        # Regressione: "questa puntata copre le 13 slide" è la PRIMA menzione,
+        # quindi la regola "in ordine" la scambia per una transizione e alza il
+        # tetto a 13. Tutte le transizioni reali (2, 3, 4) diventavano citazioni
+        # fuori ordine e il recupero non le poteva riprendere (la finestra era
+        # chiusa dal conteggio): restava UNA sola ancora, la slide 13 a 6.6s.
+        # Quando il set "in ordine" regge su una non-transizione, la catena del
+        # LIS classico è più lunga e prova che il set è sbagliato.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("questa", 5.0),
+                ("puntata", 5.3),
+                ("copre", 5.6),
+                ("le", 5.8),
+                ("13", 6.0),
+                ("slide", 6.3),
+                ("del", 6.6),
+                ("documento", 6.9),
+                ("passiamo", 93.0),
+                ("alla", 93.2),
+                ("slide", 93.3),
+                ("2", 93.5),
+                ("passiamo", 161.0),
+                ("alla", 161.2),
+                ("slide", 161.3),
+                ("3", 161.7),
+                ("passiamo", 250.0),
+                ("alla", 250.2),
+                ("slide", 250.3),
+                ("4", 250.6),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=13, flow="slide-audio")
+        self.assertEqual(anchors, {2: 93.5, 3: 161.7, 4: 250.6})
+
+    def test_order_filter_still_wins_when_it_finds_more_anchors(self):
+        # L'inverso: qui le menzioni in ordine sono tutte transizioni vere e il
+        # LIS classico (last-wins) ne trova meno, perché una citazione ruberebbe
+        # il posto all'annuncio reale. La catena più lunga resta quella giusta.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("alla", 30.2),
+                ("slide", 30.3),
+                ("3", 30.6),
+                ("passiamo", 80.0),
+                ("alla", 80.2),
+                ("slide", 80.3),
+                ("5", 80.6),
+                ("la", 120.0),
+                ("stanza", 120.05),
+                ("senza", 120.1),
+                ("porte,", 120.2),
+                ("i", 120.3),
+                ("gruppi", 120.35),
+                ("whatsapp.", 120.4),
+                ("qualcuno", 120.45),
+                ("chiede", 120.5),
+                ("e", 120.55),
+                ("tre", 120.6),
+                ("concetti", 120.8),
+                ("della", 121.1),
+                ("slide", 121.3),
+                ("sono", 121.7),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=5, flow="slide-audio")
+        self.assertEqual(anchors, {3: 30.6, 5: 80.6})
+
+    def test_discarded_citations_are_not_reported_twice(self):
+        # "le 13 slide del documento" followed by "passiamo alla slide 2": the
+        # "slide" of the count grabs the number of the next phrase within 7
+        # words, so the same mention is collected twice. It does not change the
+        # anchors, but the report must not list it twice.
+        from timeline import discarded_citations
+
+        words = _words(
+            [
+                ("questa", 5.0),
+                ("puntata", 5.3),
+                ("copre", 5.6),
+                ("le", 5.8),
+                ("13", 6.0),
+                ("slide", 6.3),
+                ("del", 6.6),
+                ("documento", 6.9),
+                ("passiamo", 93.0),
+                ("alla", 93.2),
+                ("slide", 93.3),
+                ("2", 93.5),
+            ]
+        )
+        out = discarded_citations(words, 13, {2: 93.5})
+        self.assertEqual(out, [{"slide": 13, "time": 6.6}])
+
+    def test_total_count_opening_does_not_steal_the_last_anchor(self):
+        # Regressione: "questa puntata copre le quindici slide del documento" su
+        # un deck da 15 pagine. Il numero del totale e' l'ultima pagina, quindi
+        # il suo tempo veniva scambiato con quello della vera transizione (le
+        # due menzioni arrivano in ordine inverso perche' le raggiungono due
+        # pattern diversi) e la slide 15 restava senza ancora, con tutte le
+        # altre iniziali a cascata. La lista delle menzioni va ordinata.
+        from timeline import _collect_slide_mentions, extract_slide_anchors
+
+        numeri = {
+            2: "due", 3: "tre", 4: "quattro", 5: "cinque", 6: "sei", 7: "sette",
+            8: "otto", 9: "nove", 10: "dieci", 11: "undici", 12: "dodici",
+            13: "tredici", 14: "quattordici", 15: "quindici",
+        }
+        pairs = [
+            ("questa", 1.0), ("puntata", 1.3), ("copre", 1.6), ("le", 1.8),
+            ("quindici", 2.0), ("slide", 2.3), ("del", 2.6), ("documento", 2.9),
+        ]
+        tempi = {}
+        t = 6.0
+        for s in range(2, 16):
+            pairs += [("passiamo", t), ("alla", t + 0.2), ("slide", t + 0.3), (numeri[s], t + 0.5)]
+            tempi[s] = t + 1.0
+            pairs.append(("contenuto", t + 1.0))
+            t += 40.0
+        words = _words(pairs)
+
+        # L'ordine cronologico e' garantito, non incidentale.
+        for s, times in _collect_slide_mentions(words, 15).items():
+            self.assertEqual(times, sorted(times), f"menzioni di {s} fuori ordine")
+
+        anchors = extract_slide_anchors(words, total_slides=15, flow="slide-audio")
+        self.assertEqual(anchors, {s: tempi[s] for s in range(2, 16)})
+
+    def test_recall_after_the_real_anchor_is_named_as_such(self):
+        # "torniamo alla slide 7" a meta' percorso: l'annuncio vero e' una
+        # transizione, non una citazione, e la diagnostica deve dirlo (e' un
+        # difetto dell'audio, non dell'estrazione).
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 10.0), ("alla", 10.2), ("slide", 10.3), ("due", 10.5),
+                ("passiamo", 100.0), ("alla", 100.2), ("slide", 100.3), ("sette", 100.5),
+                ("torniamo", 150.0), ("alla", 150.2), ("slide", 150.3), ("sette", 150.5),
+                ("passiamo", 200.0), ("alla", 200.2), ("slide", 200.3), ("otto", 200.5),
+            ]
+        )
+        with self.assertLogs("slide2video", level="WARNING") as logs:
+            anchors = extract_slide_anchors(words, total_slides=8, flow="slide-audio")
+        # Il richiamo vince (difetto dell'audio) ma la diagnosi e' corretta.
+        self.assertEqual(anchors[7], 150.5)
+        self.assertIn("superate da un richiamo", "\n".join(logs.output))
+        self.assertNotIn("citazioni (dopo un numero", "\n".join(logs.output))
+
     def test_italian_number_words(self):
         words = _words(
             [
@@ -1080,10 +1513,16 @@ class TestSemanticSync(unittest.TestCase):
             )
             self.assertGreater(tl[s], block_time, f"Slide {s}: first_time {tl[s]} > time {block_time}")
 
-    def test_quality_guard_rejects_noise(self):
+    def test_low_normalized_peak_is_reported_not_discarded(self):
+        # Il presidio reale è lo z-score, non la cosine grezza. Su blocchi di
+        # rumore (nessun tema, similarity ~0 ovunque) le colonne hanno std ~0,
+        # quindi lo z-score è neutro: non si "scarta" niente, si SEGALA con
+        # `weak_signal` e la pipeline continua con la timeline stimata.
+        from semantic_sync import reset_weak_signal_flag, weak_signal_seen
+
         themes = ["alfa", "beta", "gamma", "delta"]
-        # Blocchi di rumore: nessuna parola tema -> similarità zero
         blocks = [{"time": i * 5.0, "text": "zappa qwerty nullo"} for i in range(8)]
+        reset_weak_signal_flag()
         tl = semantic_timeline_from_texts(
             [f"{t} slide" for t in themes],
             blocks,
@@ -1092,7 +1531,18 @@ class TestSemanticSync(unittest.TestCase):
             embed_fn=self._fake_embed(themes),
             options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
         )
-        self.assertIsNone(tl)
+        self.assertIsNotNone(tl)
+        self.assertTrue(weak_signal_seen())
+
+    def test_no_guard_exists_on_the_raw_cosine_scale(self):
+        # La cosine grezza non può presidiare niente: con l'embedder finto i
+        # blocchi di rumore danno 0.0, ma con e5 reale anche un testo avverso
+        # dà ~0.75 (misurato). Una soglia su quella scala sarebbe un presidio
+        # finto: per questo non ne esiste una, e questo test lo fissa.
+        from semantic_sync import SemanticOptions
+
+        self.assertFalse(hasattr(SemanticOptions(), "min_avg_similarity"))
+
 
     def test_zscore_neutralizes_uniform_slide(self):
         # Slide riassuntiva con similarità uniformemente alta su tutti i
@@ -1455,7 +1905,6 @@ class TestFrameGuidedRepair(unittest.TestCase):
             mismatches,
             words,
             [f"{t} slide" for t in self.THEMES],
-            total_duration=120.0,
             embed_fn=TestSemanticSync._fake_embed(self.THEMES),
             **params,
         )
@@ -1743,6 +2192,70 @@ class TestPlainSummary(unittest.TestCase):
     def test_missing_check_is_stated(self):
         out = self._render()
         self.assertIn("Controllo del video finito: non eseguito", out)
+
+    def test_anchor_coverage_is_stated(self):
+        # La misura del motore dice quanto è stato MISURATO: con le transizioni
+        # inchiodate dalle ancore la copertura va detta insieme, altrimenti un
+        # "alta" fiducia sembra una garanzia su confini che non sono stati misurati.
+        out = self._render(
+            total_duration=600.0,
+            slide_ids=[1, 2, 3, 4, 5],
+            durations=[120.0, 120.0, 120.0, 120.0, 120.0],
+            quality={"avg_sim": 0.84, "avg_z": 0.69, "min_avg_z": 0.45},
+            anchors={
+                "anchored": 4,
+                "transitions": 4,
+                "unanchored_slides": [3],
+                "unconfirmed": [],
+                "mapping_suspicious": False,
+            },
+        )
+        self.assertIn("Confini ancorati: 4 su 4", out)
+        self.assertIn("tutti i cambi di slide sono quelli dichiarati nel podcast", out)
+
+    def test_partial_anchor_coverage_names_the_missing_slide(self):
+        out = self._render(
+            total_duration=600.0,
+            slide_ids=[1, 2, 3, 4, 5],
+            durations=[120.0, 120.0, 120.0, 120.0, 120.0],
+            anchors={
+                "anchored": 3,
+                "transitions": 4,
+                "unanchored_slides": [3],
+                "unconfirmed": [],
+                "mapping_suspicious": False,
+            },
+        )
+        self.assertIn("Confini ancorati: 3 su 4", out)
+        self.assertIn("l'altra transizione è posizionata dal contenuto", out)
+        self.assertIn("Senza ancora esplicita: la slide 3", out)
+
+    def test_unconfirmed_anchor_becomes_a_doubt(self):
+        # Il video può essere perfino rispetto a una numerazione parlata
+        # sbagliata: se il parlato non conferma l'annuncio, va detto.
+        out = self._render(
+            anchors={
+                "anchored": 4,
+                "transitions": 4,
+                "unanchored_slides": [],
+                "unconfirmed": [{"slide": 3, "time": 296.7, "points_to": 5}],
+                "mapping_suspicious": False,
+            },
+        )
+        self.assertIn("per la slide 3 il parlato che segue l'annuncio", out)
+        self.assertIn("anchors.unconfirmed", out)
+
+    def test_suspicious_mapping_becomes_a_doubt(self):
+        out = self._render(
+            anchors={
+                "anchored": 4,
+                "transitions": 4,
+                "unanchored_slides": [],
+                "unconfirmed": [],
+                "mapping_suspicious": True,
+            },
+        )
+        self.assertIn("non è uniforme rispetto alla presentazione", out)
 
     def test_automatic_repairs_are_shown(self):
         # Una correzione automatica deve essere visibile in chiaro: l'utente ha
@@ -2111,12 +2624,22 @@ class TestFreeOrderSelection(unittest.TestCase):
         self.assertIsNotNone(segs)
         self.assertEqual(float(segs[0]["start"]), 0.0)
 
-    def test_quality_guard_rejects_noise(self):
-        # Blocchi di rumore (nessun tema): similarità zero -> None
-        from semantic_sync import free_order_segments_from_texts
+    def test_low_normalized_peak_is_signalled_not_discarded(self):
+        # Come nel flusso ordinato: nessuna guardia può "scartare" sulla scala
+        # grezza dei coseni (su dati reali è sempre >0.75, anche con rumore), e
+        # la selezione libera non la renderebbe inutilizzabile. Si segnala.
+        from semantic_sync import (
+            free_order_segments_from_texts,
+            reset_weak_signal_flag,
+            weak_signal_seen,
+        )
 
         themes = ["alfa", "beta", "gamma", "delta"]
-        blocks = [{"time": i * 5.0, "first_time": i * 5.0 + 0.5, "text": "zappa qwerty nullo"} for i in range(10)]
+        blocks = [
+            {"time": i * 5.0, "first_time": i * 5.0 + 0.5, "text": "zappa qwerty nullo"}
+            for i in range(10)
+        ]
+        reset_weak_signal_flag()
         segs = free_order_segments_from_texts(
             [f"{t} slide" for t in themes],
             blocks,
@@ -2125,7 +2648,9 @@ class TestFreeOrderSelection(unittest.TestCase):
             embed_fn=self._fake_embed(themes),
             options=SemanticOptions(window_seconds=5.0),
         )
-        self.assertIsNone(segs)
+        self.assertIsNotNone(segs)
+        self.assertTrue(weak_signal_seen())
+
 
 
 class TestEmbedModelFallback(unittest.TestCase):
@@ -2527,6 +3052,51 @@ class TestSemanticAnchorInvariants(unittest.TestCase):
         self.assertAlmostEqual(tl[3], 12.8, places=3)
         self.assertTrue(any("spostata" in m for m in captured.output))
 
+    def test_slides_between_two_anchors_cannot_collapse_on_one_block(self):
+        # Ancore a 100s e 110s con tre slide non ancorate in mezzo: senza il
+        # vincolo fra ancore la similarità può assegnare a tutte e tre lo stesso
+        # blocco e produrre segmenti di mezzo secondo, con confini che il
+        # pavimento anti-flicker non può spostare (entrambi i vicini ancorati).
+        from semantic_sync import build_candidates
+
+        blocks = [{"time": i * 5.0, "text": "x"} for i in range(20)]
+        cands = build_candidates(
+            20, 6, 1, blocks=blocks, anchors={2: 100.0, 6: 110.0}
+        )
+        self.assertIsNotNone(cands)
+        # slide 2 -> blocco 20, slide 6 -> blocco 22: le slide 3, 4, 5 devono
+        # stare dentro l'intervallo (20, 22)... che non ha spazio: il vincolo
+        # non viene applicato e i candidati restano quelli globali.
+        self.assertGreater(len(cands[2]), 1)
+
+    def test_unanchored_slides_are_confined_between_anchors(self):
+        from semantic_sync import build_candidates
+
+        blocks = [{"time": i * 5.0, "text": "x"} for i in range(40)]
+        cands = build_candidates(
+            40, 6, 1, blocks=blocks, anchors={2: 20.0, 6: 140.0}
+        )
+        self.assertIsNotNone(cands)
+        lo = 4  # blocco di 20.0s
+        hi = 28  # blocco di 140.0s
+        for s in (3, 4, 5):
+            self.assertTrue(cands[s - 1])
+            self.assertGreaterEqual(min(cands[s - 1]), lo + 1)
+            self.assertLessEqual(max(cands[s - 1]), hi - 1)
+
+    def test_anchor_gap_vincolo_never_empties_a_candidate_set(self):
+        # Due ancore troppo vicine per le slide in mezzo: stringere i candidati
+        # lascerebbe la slide senza opzioni, cioè peggio di non vincolare.
+        from semantic_sync import build_candidates
+
+        blocks = [{"time": i * 5.0, "text": "x"} for i in range(20)]
+        cands = build_candidates(
+            20, 8, 1, blocks=blocks, anchors={2: 20.0, 8: 35.0}
+        )
+        self.assertIsNotNone(cands)
+        for s in range(3, 8):
+            self.assertTrue(cands[s - 1])
+
 
 class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
     """Verifica deterministica del mapping ancore (offset numerazione parlata)."""
@@ -2548,6 +3118,52 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
             return np.array(out)
 
         return _embed
+
+    def test_systematic_offset_detected_even_with_every_slide_anchored(self):
+        # Il caso che il gating saltava: TUTTE le transizioni annunciate, quindi
+        # nessuna slide senza ancora. È proprio lì che uno sfasamento di
+        # numerazione resta invisibile (niente da completare, l'LLM non avrebbe
+        # niente da fare), eppure sposta l'intero video di una slide.
+        slides = [f"tema{i} slide" for i in range(1, 6)]
+        words = []
+        for s in range(1, 6):
+            start = 100.0 * s
+            # Dopo l'annuncio di "slide s" il parlato e' gia' quello di s+1.
+            words += [{"word": f"tema{s + 1}", "start": start + i} for i in range(5)]
+        anchors = {2: 200.0, 3: 300.0, 4: 400.0, 5: 500.0}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=5,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(5),
+        )
+        # Ogni ancora slitta di +1, tranne l'ultima fuori range: nessuna
+        # correzione possibile, ma il caso deve restare ispezionabile.
+        self.assertIsNone(out)
+
+    def test_full_anchor_set_aligned_is_left_alone(self):
+        # Con tutte le transizioni ancorate e la numerazione corretta, la
+        # verifica non deve toccare nulla (è la base per poterla eseguire
+        # sempre senza costo per le run già allineate).
+        slides = [f"tema{i} slide" for i in range(1, 6)]
+        words = []
+        for s in range(1, 6):
+            start = 100.0 * s
+            words += [{"word": f"tema{s}", "start": start + i} for i in range(5)]
+        anchors = {2: 200.0, 3: 300.0, 4: 400.0, 5: 500.0}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=5,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(5),
+        )
+        self.assertIsNone(out)
 
     def test_systematic_plus_one_offset(self):
         # 4 slide PDF; lo speaker dice "slide 1..4" ma la finestra dopo ogni
@@ -2606,6 +3222,31 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
             embed_fn=self._embed_fn(4),
         )
         self.assertIsNone(out)
+
+    def test_report_lists_anchors_not_confirmed_by_content(self):
+        # Il segnale che resta sull'artefatto: quale ancora il parlato non
+        # conferma. Serve a distinguere un allineamento misurato da una
+        # numerazione parlata sbagliata quando quasi tutto è ancorato.
+        slides = [f"tema{i} slide" for i in range(1, 5)]
+        words = [{"word": "tema2", "start": 100.0}, {"word": "tema2", "start": 102.0}]
+        words += [{"word": "tema2", "start": 200.0}, {"word": "tema3", "start": 202.0}]
+        words += [{"word": "tema3", "start": 300.0}, {"word": "tema4", "start": 302.0}]
+        anchors = {1: 100.0, 2: 200.0, 3: 300.0}
+
+        report: dict = {}
+        verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=4,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(4),
+            report=report,
+        )
+        # "slide 1" a 100s è seguita dal parlato di tema 2, quindi non confermata.
+        self.assertEqual(
+            report["unconfirmed"], [{"slide": 1, "time": 100.0, "points_to": 2}]
+        )
 
     def test_few_anchors_returns_none(self):
         # Serve almeno 1 ancora valutabile (minimo 2 riferimenti richiesti).

@@ -131,10 +131,7 @@ def setup_debug_logging() -> None:
 # ---------------------------------------------------------------------------
 try:
     from tqdm import tqdm
-
-    HAS_TQDM = True
 except ImportError:
-    HAS_TQDM = False
 
     def tqdm(iterable: Any, desc: str = "", **kwargs: Any) -> Any:  # type: ignore[no-redef]
         """Fallback se tqdm non è installato.
@@ -519,19 +516,10 @@ def bootstrap() -> None:
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 pass
 
-    if not tesseract_found:
-        # Installazioni WinGet possono aggiornare il PATH solo nelle nuove shell.
-        # Cerca comunque l'eseguibile nella posizione standard di Tesseract.
-        for c in (
-            r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
-            r"C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe",
-        ):
-            if os.path.exists(c):
-                pytesseract.pytesseract.tesseract_cmd = c
-                tesseract_found = True
-                log.info("   ✅ Tesseract trovato: %s", c)
-                break
-
+    # Il vecchio re-scan delle due directory Windows standard è stato rimosso:
+    # sono già in _CANDIDATES e arrivare a questo punto prova che nessuna delle
+    # due esiste. Le stringhe usavano anche backslash raddoppiati in raw string,
+    # quindi avrebbero cercato un path diverso da quello reale.
     if not tesseract_found:
         log.error(
             "\n❌ TESSERACT OCR NON TROVATO — necessario per estrarre il testo dalle slide.\n"
@@ -651,9 +639,14 @@ DEFAULT_EMBED_THREADS = _env_int("EMBED_THREADS", min(8, os.cpu_count() or 4))
 
 DEFAULT_SEMANTIC_WINDOW = _env_float("SEMANTIC_WINDOW", 4.0)  # secondi per blocco
 DEFAULT_SEMANTIC_MIN_DURATION = _env_float("SEMANTIC_MIN_DURATION", 3.0)  # durata minima slide
-DEFAULT_SEMANTIC_MIN_SIM = _env_float("SEMANTIC_MIN_SIM", 0.10)  # soglia qualità (scala grezza)
+# L'unica soglia di qualità. Sulla scala grezza dei coseni la soglia sarebbe un
+# presidio finto: misurata su dati reali, anche un testo senza senso dà 0.75
+# contro una slide e il parlato reale non scende mai sotto 0.75, quindi una
+# soglia a 0.10 non può mai scattare. (Il flag --semantic-min-sim e il relativo
+# ramo di guardia sono stati rimossi: non esisteva una soglia grezza che
+# discriminasse, e fingere di averne una era peggio che non averla.)
 # Guard-rail sulla scala NORMALIZZATA (z-score per slide, la stessa usata dal
-# posizionamento): è l'unica delle due che discrimina davvero.
+# posizionamento).
 # Misurato su podcast reale (120 allineamenti plausibili per variante):
 #   allineamento giusto        0.61-0.75
 #   slide mescolate            0.30-0.43
@@ -1099,6 +1092,10 @@ Esempi:
     parser.add_argument(
         "--no-free-ordered-fallback",
         action="store_true",
+        # Default preso dalla variabile d'ambiente: senza questo default=True
+        # della costante era irrilevante e FREE_ORDERED_FALLBACK=0 non faceva
+        # nulla (costante mai letta).
+        default=not DEFAULT_FREE_ORDERED_FALLBACK,
         help="Disattiva il fallback automatico al flusso ordinato "
         "quando il flusso auto-rilevato è 'free' (nessuna ancora "
         "'slide N'). Default: attivo (vedi config.py), così un "
@@ -1164,13 +1161,6 @@ Esempi:
         default=DEFAULT_SEMANTIC_MIN_DURATION,
         help=f"Durata minima di una slide nella sincronizzazione "
         f"semantica, in secondi (default: {DEFAULT_SEMANTIC_MIN_DURATION})",
-    )
-    parser.add_argument(
-        "--semantic-min-sim",
-        type=float,
-        default=DEFAULT_SEMANTIC_MIN_SIM,
-        help=f"Soglia di similarità media sotto cui la sincronizzazione "
-        f"semantica viene scartata (default: {DEFAULT_SEMANTIC_MIN_SIM})",
     )
     parser.add_argument(
         "--no-auto-repair",

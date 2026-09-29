@@ -23,6 +23,30 @@ from config import log
 # ``_is_slide_word``.
 _SLIDE_WORDS = frozenset({"slide", "diapositiva", "sla", "asl", "sallay", "slaib"})
 
+# Parole italiane che iniziano davvero per "sl" e passerebbero il fuzzy fonetico
+# ("slitta" -> scheletro "slt", "slogan" -> "slgn"): non sono varianti di
+# "slide", ma senza questo elenco diventerebbero la parola slide di una falsa
+# ancora ("la slitta ha tre ruote" -> "slide 3"). Elenco per esclusione: non
+# contiene nessuna variante reale di "slide" ("slaib", "slaidotto", ...), quindi
+# non può far perdere un richiamo vero.
+_NOT_SLIDE_WORDS = frozenset(
+    {
+        "slitta",
+        "slittino",
+        "slitta2",
+        "slittata",
+        "slancio",
+        "slanci",
+        "slanciare",
+        "slanc1",
+        "slogan",
+        "slavoro",
+        "slavori",
+        "slip",
+        "sloop",
+    }
+)
+
 # Parole di CHIUSURA/riepilogo finale (es. "e chiudiamo con la slide 14").
 # Un "slide N" preceduto da queste parole non è una transizione di inizio
 # sezione: è un riferimento a posteriori che, usato come ancora, sposterebbe
@@ -120,14 +144,32 @@ def extract_slide_anchors(
         transitions = _collect_transitions(words, window_seconds)
         return {i + 2: t for i, t in enumerate(transitions[: max(0, total_slides - 1)])}
     mentions = _collect_slide_mentions(words, total_slides)
-    refs = {s: times[-1] for s, times in mentions.items()}
-    anchors = _lis_anchors(refs)
+    ordered, deferred = split_ordered_mentions(mentions)
+    # Le menzioni in ordine sono già coerenti fra loro (per costruzione non
+    # scendono mai di numero): il LIS resta come rete di sicurezza.
+    anchors = _lis_anchors(ordered)
+    # La regola "in ordine" ha un difetto: un CONTEGGIO in apertura ("questa
+    # puntata copre le 13 slide") è la prima menzione, quindi sembra una
+    # transizione e alza il tetto a 13: tutte le transizioni reali (2, 3, 4...)
+    # diventano citazioni fuori ordine e il recupero non le può recuperare,
+    # perché la loro finestra è chiusa dal conteggio. In quel caso la catena del
+    # LIS classico, che scarta il conteggio, è più lunga: è la prova che il set
+    # "in ordine" poggia su una menzione che non è una transizione.
+    classic = _lis_anchors({s: times[-1] for s, times in mentions.items()})
+    if len(classic) > len(anchors):
+        log.info(
+            "   [Ancore] Il set di menzioni in ordine poggia su un numero che non è "
+            "una transizione (conteggio in apertura?): uso la catena più lunga "
+            "(%d ancore invece di %d).",
+            len(classic),
+            len(anchors),
+        )
+        anchors = classic
     if mentions:
-        # Recupero delle citazioni a posteriori (recap): se l'ultima menzione
-        # di una slide cade fuori ordine (es. "come dicevamo nella slide 3"
-        # dopo la slide 4) e la sua PRIMA menzione è invece in ordine, quella
-        # prima menzione diventa l'ancora al posto di scartare la slide.
-        recovered = _recover_first_in_order(anchors, mentions)
+        # Recupero delle citazioni a posteriori (recap): una slide citata ma
+        # mai annunciata in ordine ("come dicevamo nella slide 3", detto dopo
+        # la 4) rientra solo se la sua menzione cade fra le ancore vicine.
+        recovered = _recover_first_in_order(anchors, deferred)
         if recovered:
             log.info(
                 "   [Ancore] %d ancora/e recuperata/e dalla prima menzione "
@@ -138,16 +180,60 @@ def extract_slide_anchors(
             anchors = {**anchors, **recovered}
         dropped = sorted(s for s in mentions if s not in anchors)
         if dropped:
+            # Il tempo della menzione scartata è la diagnosi del danno che
+            # avrebbe fatto: un confine spostato di minuti sembra altrimenti un
+            # difetto del motore embeddings.
             log.warning(
                 "   [Ancore] Riferimenti scartati (fuori ordine cronologico, "
                 "nessuna menzione in ordine): %s.",
-                ", ".join(f"slide {s}" for s in dropped),
+                ", ".join(
+                    f"slide {s} a {t:.1f}s"
+                    for s, t in sorted(
+                        (
+                            (s, t)
+                            for s in dropped
+                            for t in mentions[s]
+                        ),
+                        key=lambda p: p[1],
+                    )
+                ),
             )
+        # Una slide annunciata in ordine ma CITATA anche più avanti ("i tre
+        # concetti della slide", "la slide spiega il ciclo in quattro fasi"):
+        # quel numero è una quantità di contenuto, non una transizione.
+        displaced = sorted(
+            ((s, t) for s, times in mentions.items() for t in times if anchors.get(s) != t),
+            key=lambda p: p[1],
+        )
+        if displaced:
+            # Due cause diverse, e distinguerle è il punto: la stessa menzione
+            # perduta cambia significato a seconda del motivo, e il confine
+            # spostato dipende da quale delle due è vera.
+            superseded = sorted(
+                ((s, t) for s, t in displaced if anchors.get(s, -1.0) > t), key=lambda p: p[1]
+            )
+            out_of_order = [(s, t) for s, t in displaced if anchors.get(s, -1.0) <= t]
+            if out_of_order:
+                log.warning(
+                    "   [Ancore] Menzioni scartate come citazioni (dopo un numero di "
+                    "slide più grande, quindi non sono transizioni): %s.",
+                    ", ".join(f"'slide {s}' a {t:.1f}s" for s, t in out_of_order),
+                )
+            if superseded:
+                # Qui la menzione era una TRANSIZIONE vera, persa a favore di un
+                # richiamo successivo alla stessa slide ("torniamo alla slide 7"):
+                # l'ancora finisce sul richiamo e la slide resta senza il suo
+                # confine reale. È un difetto dell'audio, non dell'estrazione.
+                log.warning(
+                    "   [Ancore] Transizioni superate da un richiamo alla stessa "
+                    "slide (l'ancora finisce sul richiamo): %s.",
+                    ", ".join(f"'slide {s}' a {t:.1f}s" for s, t in superseded),
+                )
         missing = sorted(s for s in range(2, total_slides + 1) if s not in anchors)
         if missing:
             log.info(
                 "   [Ancore] %d riferimenti trovati, %d usati come ancore; slide senza riferimento esplicito: %s.",
-                len(refs),
+                len(mentions),
                 len(anchors),
                 ", ".join(str(s) for s in missing) or "nessuna",
             )
@@ -182,6 +268,51 @@ def _recover_first_in_order(
                 current[s] = t
                 break
     return recovered
+
+
+def split_ordered_mentions(mentions: dict[int, list[float]]) -> tuple[dict[int, float], dict[int, list[float]]]:
+    """Separa le menzioni 'slide N' che sono TRANSIZIONI da quelle che sono citazioni.
+
+    Una menzione è *in ordine* se, al suo tempo, nessuna slide di numero maggiore
+    era già stata annunciata: è l'ingresso in una slide nuova. È *fuori ordine*
+    altrimenti (richiamo a posteriori, "come dicevamo nella slide 3", oppure un
+    numero che NON è un riferimento: "i tre concetti della slide", "la slide
+    spiega il ciclo in quattro fasi").
+
+    Il problema che risolve: la finestra di poche parole che circonda la parola
+    "slide" non distingue un riferimento da una quantità di contenuto, e il
+    last-wins fidava sulla menzione più recente. Su un podcast reale la menzione
+    fantasma di "i tre concetti della slide" (296.7s) pilotava il LIS, che
+    scartava l'annuncio vero di "passiamo alla slide 5" (284.0s): la slide 3
+    durava 0.5s e la 5 partiva 21s in ritardo.
+
+    Le menzioni in ordine sono coerenti fra loro per costruzione (non scendono
+    mai di numero), quindi sono le ancore; quelle fuori ordine restano a
+    disposizione di ``_recover_first_in_order``, che le riammette solo se cadono
+    fra le ancore vicine. Non entrano nel LIS: altrimenti un pareggio nel
+    conteggio delle ancore lascerebbe vincere una citazione a una transizione
+    vera (è successo con "la slide spiega il ciclo in quattro fasi", che
+    occupava la slide 4 e faceva perdere la slide 5).
+
+    Fra le menzioni in ordine di una slide vale l'ULTIMA: così una citazione di
+    anticipazione ("le 13 slide di questo documento") non occupa la slide al
+    posto della vera transizione pronunciata dopo.
+
+    Returns:
+        ``(ordinate, differite)``: le transizioni (``{slide: tempo}``) e le
+        citazioni, che possono ancora essere recuperate
+        (``{slide: [tempi in ordine cronologico]}``).
+    """
+    ordered: dict[int, float] = {}
+    deferred: dict[int, list[float]] = {}
+    highest = 0
+    for t, s in sorted((t, s) for s, times in mentions.items() for t in times):
+        if s >= highest:
+            highest = s
+            ordered[s] = t  # last-wins fra le menzioni in ordine
+        else:
+            deferred.setdefault(s, []).append(t)
+    return ordered, deferred
 
 
 # =====================================================================
@@ -409,6 +540,14 @@ def _collect_slide_mentions(
     (l'ultima per l'anticipazione, la prima per il recupero dei recap).
     Le citazioni di chiusura/ripasso finale sono sempre scartate.
 
+    L'ordine cronologico è garantito, non incidentale: un numero può essere
+    raggiunto da due pattern diversi (numero poi "slide" e "slide" poi numero) e
+    quello che aggancia la stessa slide puo' arrivare in ordine inverso rispetto
+    all'altro — tipico con un conteggio in apertura ("le quindici slide del
+    documento") seguito dalla vera transizione sulla stessa pagina. Se le liste
+    non fossero ordinate, ``times[-1]`` prenderebbe il conteggio al posto
+    dell'annuncio e l'ultima pagina perderebbe l'ancora.
+
     Con ``include_slide_one=True`` raccoglie anche la "slide 1" parlata: serve
     alla verifica LLM del mapping (la numerazione dello speaker può essere
     sfasata, es. "slide 1" mentre mostra la slide 2 del PDF). La slide 1 reale
@@ -488,7 +627,7 @@ def _collect_slide_mentions(
                                 words[j]["start"],
                             )
                         break
-    return refs
+    return {num: sorted(times) for num, times in refs.items()}
 
 
 def _reference_boundary(words: list[Word], last_word_idx: int, max_gap: float = 2.0) -> float:
@@ -529,6 +668,82 @@ def extract_slide_one_references(
     mentions = _collect_slide_mentions(words, total_slides, include_slide_one=True)
     # Prima menzione: è il momento reale della transizione alla slide 1.
     return {1: mentions[1][0]} if 1 in mentions else {}
+
+
+def discarded_citations(
+    words: list[Word],
+    total_slides: int,
+    anchors: Mapping[int, float],
+) -> list[dict[str, float | int]]:
+    """Menzioni 'slide N' NON usate come ancora, con il loro tempo.
+
+    Sono i numeri che il parlato contiene ma che non sono un riferimento di
+    transizione: quantità di contenuto ("i tre concetti della slide") o citazioni
+    a posteriori. Il tempo è la diagnosi: un confine di timeline spostato di
+    minuti corrisponde a una di queste menzioni, e senza di essa un difetto di
+    estrazione sembra un difetto del motore embeddings.
+
+    Il confronto è fatto sui TEMPI, non sui numeri: se la verifica del mapping ha
+    rimappato le ancore (deck con una pagina in meno, copertina esclusa), i
+    numeri parlati e quelli del PDF non coincidono più e un confronto per numero
+    segnalerebbe come scartate tutte le ancore legittime.
+
+    Costa una seconda scansione delle parole (nessun embedding): viene usata solo
+    per il report e per il riepilogo finale.
+    """
+    mentions = _collect_slide_mentions(words, total_slides + 2)
+    used_times = [float(t) for t in anchors.values()]
+    out: list[dict[str, float | int]] = []
+    seen: set[tuple[int, float]] = set()
+    for s, times in mentions.items():
+        for t in times:
+            if any(abs(t - u) <= 0.05 for u in used_times):
+                continue
+            # Una stessa menzione può essere raccolta due volte: il "slide" di un
+            # conteggio ("le 13 slide del documento") cattura il numero della frase
+            # successiva se è entro 7 parole. Non cambia le ancore (stesso tempo),
+            # ma nel report la stessa voce deve comparire una volta sola.
+            key = (s, round(t, 1))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"slide": s, "time": round(t, 1)})
+    return sorted(out, key=lambda d: float(d["time"]))
+
+
+def out_of_range_tail_anchor(
+    words: list[Word],
+    total_slides: int,
+    anchors: Mapping[int, float],
+) -> dict[int, float]:
+    """Ultima ancora, perduta solo perché il numero detto è più grande del deck.
+
+    Se lo speaker annuncia "passiamo alla slide 15" mentre il PDF ha 14 slide
+    (una pagina in meno, copertina esclusa, deck rigenerato), la menzione è
+    fuori portata e ``_collect_slide_mentions`` la scarta: la transizione
+    finale sparisce e l'ultima slide resta da posizionare a tentativi, con
+    confini che il motore può spostare di decine di secondi.
+
+    La si riammette solo quando non può essere altro che l'ultima slide: numero
+    di uno o due oltre l'ultimo annuncio valido, pronunciato DOPO tutte le
+    ancore già note, e ultima slide ancora senza ancora. La verifica del
+    mapping resta il posto giusto per correggere i NUMERI: qui si recupera il
+    solo TEMPO, che è la misura reale dello speaker.
+
+    Returns:
+        ``{total_slides: tempo}`` se la menzione è utilizzabile, altrimenti ``{}``.
+    """
+    if total_slides < 2 or total_slides in anchors or not anchors:
+        return {}
+    last_known = max(anchors.values())
+    top_announced = max(anchors)
+    for n, times in _collect_slide_mentions(words, total_slides + 2).items():
+        if n <= total_slides or n > top_announced + 2:
+            continue
+        after = [t for t in times if t > last_known]
+        if after:
+            return {total_slides: min(after)}
+    return {}
 
 
 def filter_anchor_remaps(
@@ -898,9 +1113,11 @@ def _is_slide_word(word: str) -> bool:
     riconosce le varianti che iniziano letteralmente per "sl" (la grafia
     della pronuncia all'italiana di "slide" è sempre "sl..."): questo
     esclude le parole comuni tipo "solo"/"salvo"/"sale" che contengono la
-    sottosequenza consonantica "sl" ma non iniziano con essa. Il falso
-    positivo residuo è mitigato dal chiamante, che richiede sempre un
-    numero di slide adiacente (o incorporato, es. "slaib6").
+    sottosequenza consonantica "sl" ma non iniziano con essa, e
+    ``_NOT_SLIDE_WORDS`` esclude le parole che iniziano davvero per "sl"
+    ("slitta", "slogan", ...). Il falso positivo residuo è mitigato dal
+    chiamante, che richiede sempre un numero di slide adiacente (o incorporato,
+    es. "slaib6").
 
     Riconosce anche le varianti FUSE con numero italiano: "Slaidotto"
     ("slide otto"), "Slaidue", "Slaitre", ... (Whisper fonde numero e
@@ -909,6 +1126,8 @@ def _is_slide_word(word: str) -> bool:
     """
     w = _normalize(word)
     if not w:
+        return False
+    if w in _NOT_SLIDE_WORDS:
         return False
     if w in _SLIDE_WORDS:
         return True

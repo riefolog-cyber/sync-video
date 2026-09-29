@@ -68,9 +68,11 @@ from semantic_sync import (
 )
 from timeline import (
     detect_flow_from_words,
+    discarded_citations,
     enforce_min_durations,
     extract_slide_anchors,
     extract_slide_one_references,
+    out_of_range_tail_anchor,
     reconcile_timeline,
 )
 from transcription import correct_transcript_names, resolved_transcriber, transcribe_audio
@@ -209,7 +211,6 @@ def _format_time(seconds: float) -> str:
 
 def _save_final_timeline(
     timeline: dict[int, float],
-    total_slides: int,
     total_duration: float,
 ) -> None:
     """Persiste la timeline finale validata come ``llm_timeline_finale.json``.
@@ -339,6 +340,7 @@ def _log_plain_summary(
     review_diffs: int = 0,
     repairs: Sequence[dict[str, object]] = (),
     floor_report: dict[str, object] | None = None,
+    anchors: dict[str, object] | None = None,
     title: str = "IL VIDEO È PRONTO — COSA C'È DENTRO",
 ) -> None:
     """Riepilogo finale in parole semplici (quello che l'utente vuole sapere).
@@ -347,7 +349,8 @@ def _log_plain_summary(
     slide e quanto durano, se il video finito mostra la slide giusta, cosa è
     stato corretto da solo, cosa conviene controllare a mano. I dubbi sono
     raccolti da TUTTI i segnali della run (verdetto di contenuto, verifica
-    frame, fiducia del motore embedding, revisione LLM) invece che da uno solo.
+    frame, fiducia del motore embedding, revisione LLM, copertura delle ancore)
+    invece che da uno solo.
     """
     verdicts = verdicts or {}
     log.info("\n" + "=" * 70)
@@ -419,6 +422,42 @@ def _log_plain_summary(
             floor_min,
         )
 
+    # --- Copertura delle ancore: dice COSA la fiducia del motore sta misurando ---
+    # Un confine ancorato non è una misura: è il tempo in cui lo speaker ha detto
+    # "slide N". Con tutte le transizioni ancorate la qualità del motore non
+    # distingue un allineamento corretto da una numerazione parlata sbagliata,
+    # quindi il numero va detto insieme alla misura, non al posto suo.
+    anchor_info = anchors or {}
+    anchored = int(cast("int", anchor_info.get("anchored") or 0))
+    transitions = int(cast("int", anchor_info.get("transitions") or 0))
+    mapping_suspicious = bool(anchor_info.get("mapping_suspicious", False))
+    unconfirmed = sorted(
+        int(cast("int", u.get("slide") or 0))
+        for u in cast("Sequence[dict[str, object]]", anchor_info.get("unconfirmed") or [])
+    )
+    if transitions:
+        missing_anchor = sorted(
+            int(s) for s in cast("Sequence[int]", anchor_info.get("unanchored_slides") or [])
+        )
+        unstitched = transitions - anchored
+        log.info(
+            "   Confini ancorati: %d su %d (%s).",
+            anchored,
+            transitions,
+            (
+                f"le altre {unstitched} transizioni sono posizionate dal contenuto"
+                if unstitched > 1
+                else "l'altra transizione è posizionata dal contenuto"
+            )
+            if unstitched
+            else "tutti i cambi di slide sono quelli dichiarati nel podcast",
+        )
+        if missing_anchor:
+            log.info(
+                "   Senza ancora esplicita: %s (posizionata/e per contenuto).",
+                _slide_list_text(missing_anchor),
+            )
+
     # --- Dubbi da verificare a mano ---
     doubts: list[str] = []
     misaligned = sorted(s for s, v in verdicts.items() if v == "disallineata")
@@ -458,6 +497,22 @@ def _log_plain_summary(
         doubts.append(
             f"la revisione automatica contesta {review_diffs} scelte di slide: "
             "dettagli in .cache/sync_report.json (review_diffs)"
+        )
+    if unconfirmed:
+        # Il segnale più insidioso: con quasi tutte le transizioni ancorate, il
+        # video può essere perfino rispetto a una numerazione parlata sbagliata,
+        # e la sola fiducia del motore non lo distingue.
+        doubts.append(
+            f"per {_slide_list_text(unconfirmed)} il parlato che segue l'annuncio "
+            "somiglia di più a un'altra slide: il numero detto ad alta voce e la "
+            "slide mostrata potrebbero non coincidere (dettagli in "
+            ".cache/sync_report.json, anchors.unconfirmed)"
+        )
+    if mapping_suspicious:
+        doubts.append(
+            "la numerazione delle slide dette ad alta voce non è uniforme rispetto "
+            "alla presentazione, e non è stato possibile correggerla da solo: "
+            "ricontrolla i cambi di slide nel video"
         )
 
     log.info("")
@@ -1061,7 +1116,6 @@ def _compare_transcript_alignment(
         cache_dir=args.semantic_cache_dir,
         window_seconds=args.semantic_window,
         min_slide_duration=args.semantic_min_duration,
-        min_avg_similarity=args.semantic_min_sim,
         min_avg_z=args.semantic_min_z,
         temperature=args.semantic_temperature,
     )
@@ -1705,7 +1759,6 @@ def main(argv: list | None = None) -> None:
                         cache_dir=args.semantic_cache_dir,
                         window_seconds=args.semantic_window,
                         min_segment_seconds=max(8.0, 2 * args.semantic_min_duration),
-                        min_avg_similarity=args.semantic_min_sim,
                         min_avg_z=args.semantic_min_z,
                     ),
                 )
@@ -1804,17 +1857,25 @@ def main(argv: list | None = None) -> None:
             # sistematici; l'LLM legge invece il contenuto del parlato dopo ogni
             # riferimento "slide N" e corregge il numero di slide, mantenendo i
             # TEMPI esatti. Fallback: ancore originali.
-            # Gira SOLO se serve davvero (slide senza ancora, come il flusso ibrido):
-            # con ancore complete l'LLM non aggiunge nulla e 9Router non va toccato.
+            # L'euristica DETERMINISTICA gira SEMPRE (offline, ~2s con cache): è
+            # l'unico controllo che nota uno sfasamento di numerazione anche quando
+            # tutte le slide sono annunciate, cioè proprio quando non manca nulla
+            # e l'LLM non avrebbe niente da aggiungere. La verifica LLM resta
+            # sotto la soglia delle slide senza ancora.
             verify_anchors = {**semantic_anchors, **slide_one_refs}
-            if verify_anchors and (
-                len(semantic_anchors) < total_slides - 1 or slide_one_refs
-            ):
-                # 1) Euristica DETERMINISTICA (embeddings locali, offline):
-                #    se la numerazione parlata è sistematicamente sfasata (es.
-                #    copertina esclusa: "slide 1" -> slide 2 del PDF) la corregge
-                #    senza chiamare 9Router. Sempre attiva (anche con --llm off).
-                _anchor_report: dict[str, bool] = {}
+            # Esito della verifica del mapping: `suspicious` (offset non
+            # correggibile in modo affidabile) e `unconfirmed` (ancore che il
+            # parlato non conferma). Finiscono nel report anche se la verifica
+            # non viene eseguita, per non dover distinguere i due casi a valle.
+            _anchor_report: dict[str, Any] = {}
+            _mapping_corrected = False
+            _mapping_checked = False
+            # 1) Euristica DETERMINISTICA (embeddings locali, offline):
+            #    se la numerazione parlata è sistematicamente sfasata (es.
+            #    copertina esclusa: "slide 1" -> slide 2 del PDF) la corregge
+            #    senza chiamare 9Router. Funziona anche con --llm off.
+            if len(verify_anchors) >= 2:
+                _mapping_checked = True
                 verified = verify_anchor_mapping_embedding(
                     slide_texts,
                     words_raw,
@@ -1837,6 +1898,7 @@ def main(argv: list | None = None) -> None:
                         len(verified),
                     )
                     semantic_anchors = verified
+                    _mapping_corrected = True
                 elif args.llm != "off":
                     # Salto la verifica LLM SOLO quando il mapping è coerente: una
                     # sola slide senza ancora (caso più comune: 13/14 annunciate) e
@@ -1901,12 +1963,28 @@ def main(argv: list | None = None) -> None:
                                 len(verified),
                             )
                             semantic_anchors = verified
+                            _mapping_corrected = True
                     else:
                         log.info(
                             "   [Ancore] Una sola slide senza ancora e mapping coerente "
                             "(nessun offset sospetto): salto la verifica LLM del mapping "
                             "(le ancore restano quelle deterministiche) e risparmio ~1 min."
                         )
+
+            # Ultima transizione detta con un numero più grande del deck ("slide 15"
+            # su un PDF da 14): la menzione è fuori portata, quindi la verifica del
+            # mapping non la vede. Il TEMPO però è la misura dello speaker, e senza
+            # di esso l'ultima slide resta posizionata a tentativi.
+            _tail = out_of_range_tail_anchor(words_raw, total_slides, semantic_anchors)
+            if _tail:
+                for _s, _t in _tail.items():
+                    log.info(
+                        "   [Ancore] L'ultimo annuncio supera il numero di slide del "
+                        "PDF: la transizione finale è riammessa sulla slide %d a %.1fs.",
+                        _s,
+                        _t,
+                    )
+                semantic_anchors = {**semantic_anchors, **_tail}
 
             # Log diagnostico condiviso (stato finale ancore, post-verifica):
             # le slide senza ancora esplicita sono quelle che il flusso ibrido
@@ -1920,6 +1998,32 @@ def main(argv: list | None = None) -> None:
                     len(_missing_anchors),
                     ", ".join(str(s) for s in _missing_anchors),
                 )
+
+            # Diagnosi delle ancore sull'artefatto: con quasi tutte le transizioni
+            # inchiodate dai riferimenti parlati, la misura di qualità del motore
+            # non distingue più "allineamento misurato" da "ancora sbagliata".
+            # Copertura, ancore non confermate dal parlato e citazioni scartate
+            # sono i tre dati che rendono la timeline ispezionabile a posteriori.
+            sync_notes["anchors"] = {
+                "anchored": len(semantic_anchors),
+                "transitions": total_slides - 1,
+                "unanchored_slides": _missing_anchors,
+                "mapping_checked": _mapping_checked,
+                "mapping_suspicious": bool(_anchor_report.get("suspicious", False)),
+                "mapping_corrected": _mapping_corrected,
+                # Le ancore "non confermate" sono calcolate sul NUMERO PARLATO:
+                # se il mapping è stato corretto, il disaccordo è spiegato e
+                # rivolerlo come dubbio sarebbe un falso allarme su tutte le
+                # ancore rimappate (è il caso normale del deck con una pagina in
+                # meno). Restano sull'artefatto per l'ispezione, ma senza generare
+                # un dubbio che l'utente non può agire.
+                "unconfirmed": (
+                    []
+                    if _mapping_corrected
+                    else list(_anchor_report.get("unconfirmed") or [])
+                ),
+                "discarded_citations": discarded_citations(words_raw, total_slides, semantic_anchors),
+            }
 
             # --- Pulizia cache LLM orfane ---
             # Con podcast/presentazione nuovi le chiavi contenuto-specifiche
@@ -1985,7 +2089,6 @@ def main(argv: list | None = None) -> None:
                             cache_dir=args.semantic_cache_dir,
                             window_seconds=args.semantic_window,
                             min_slide_duration=args.semantic_min_duration,
-                            min_avg_similarity=args.semantic_min_sim,
                             min_avg_z=args.semantic_min_z,
                             temperature=args.semantic_temperature,
                         ),
@@ -2113,7 +2216,6 @@ def main(argv: list | None = None) -> None:
                         cache_dir=args.semantic_cache_dir,
                         window_seconds=args.semantic_window,
                         min_slide_duration=args.semantic_min_duration,
-                        min_avg_similarity=args.semantic_min_sim,
                         min_avg_z=args.semantic_min_z,
                         temperature=args.semantic_temperature,
                     ),
@@ -2142,7 +2244,7 @@ def main(argv: list | None = None) -> None:
                 timeline_before_floor, timeline, total_duration, min_slide_seconds
             )
             sync_notes["anti_flicker"] = floor_note
-            floor_guaranteed, floor_unguaranteed, _floor_min = _floor_split(floor_note)
+            floor_guaranteed, floor_unguaranteed, _ = _floor_split(floor_note)
             if _moved:
                 log.info(
                     "   Anti-flicker: %d confini non ancorati spostati per garantire "
@@ -2193,7 +2295,7 @@ def main(argv: list | None = None) -> None:
             # prefisso llm_ per sopravvivere alla pulizia delle cache orfane e
             # viene sovrascritto a ogni run con gli start/end validati.
             try:
-                _save_final_timeline(timeline, total_slides, total_duration)
+                _save_final_timeline(timeline, total_duration)
             except OSError:
                 log.debug("   Impossibile salvare la timeline finale in cache (ignorato).")
 
@@ -2411,6 +2513,7 @@ def main(argv: list | None = None) -> None:
                 quality=quality,
                 review_diffs=len(review_diffs),
                 floor_report=floor_note,
+                anchors=cast("dict[str, object] | None", sync_notes.get("anchors")),
                 title="TIMELINE PRONTA — COSA CONTERRÀ IL VIDEO",
             )
             log.info("\n" + "=" * 70)
@@ -2518,7 +2621,7 @@ def main(argv: list | None = None) -> None:
                         for slide, d in zip(slide_ids, durations, strict=True):
                             repaired_timeline[int(slide)] = t_cursor
                             t_cursor += float(d)
-                        _save_final_timeline(repaired_timeline, total_slides, total_duration)
+                        _save_final_timeline(repaired_timeline, total_duration)
                     frame_check = _frame_check_video(
                         args.output_video, slide_ids, durations, all_slide_files
                     )
@@ -2568,6 +2671,7 @@ def main(argv: list | None = None) -> None:
             review_diffs=len(review_diffs),
             repairs=repairs,
             floor_report=floor_note,
+            anchors=cast("dict[str, object] | None", sync_notes.get("anchors")),
         )
 
     finally:

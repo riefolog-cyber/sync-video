@@ -506,7 +506,6 @@ class TestBeamAbReport(unittest.TestCase):
             "semantic_cache_dir": str(Path(tempfile.gettempdir()) / "emb"),
             "semantic_window": 4.0,
             "semantic_min_duration": 3.0,
-            "semantic_min_sim": 0.10,
             "semantic_min_z": 0.45,
             "semantic_temperature": 0.15,
             "no_cache": False,

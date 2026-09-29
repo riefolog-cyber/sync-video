@@ -33,6 +33,7 @@ import re
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
 
@@ -171,9 +172,10 @@ class SemanticOptions:
 
     window_seconds: float = 4.0
     min_slide_duration: float = 3.0
-    min_avg_similarity: float = 0.10
     # Guard-rail sulla scala normalizzata (z-score per slide): un picco medio
     # sotto questa soglia significa allineamento dubbio (vedi _mean_pair_scores).
+    # È l'unica soglia di qualità: sulla scala grezza dei coseni la soglia
+    # sarebbe un presidio finto (tutto sta sopra 0.75, anche con testi avversi).
     min_avg_z: float = DEFAULT_SEMANTIC_MIN_Z
     temperature: float = DEFAULT_SEMANTIC_TEMPERATURE
     min_segment_seconds: float = 8.0
@@ -651,8 +653,17 @@ def build_candidates(
     Se è disponibile un'ancona esatta per una slide (timestamp reale trovato
     deterministicamente), i candidati vengono ristretti al blocco più vicino
     (±1) per rispettare i segnali reali.
+
+    Fra due ancore consecutive le slide intermedie vengono richiuste nei blocchi
+    strettamente compresi fra le due: senza questo vincolo la DP può infilare
+    cinque slide in due blocchi (una durata di 0.5s) se il contenuto di quei
+    blocchi somiglia di più a una di loro. Il vincolo si applica solo quando è
+    fattibile: se non c'è spazio si lascia la decisione alla DP e al pavimento
+    anti-flicker, che sanno ancora spostare un confine libero.
     """
     cands: list[list[int]] = []
+    times: np.ndarray | None = None
+    anchor_block: dict[int, int] = {}
     for s in range(1, total_slides + 1):
         lo = (s - 1) * min_gap
         hi = num_blocks - 1 - (total_slides - s) * min_gap
@@ -661,8 +672,10 @@ def build_candidates(
         free = list(range(lo, hi + 1))
         chosen = free
         if blocks and anchors and s in anchors:
-            times = np.array([float(b["time"]) for b in blocks], dtype=np.float64)
+            if times is None:
+                times = np.array([float(b["time"]) for b in blocks], dtype=np.float64)
             k = int(np.argmin(np.abs(times - anchors[s])))
+            anchor_block[s] = k
             constrained = [i for i in (k - 1, k, k + 1) if lo <= i <= hi]
             # Se nessuno dei tre blocchi è fattibile (l'ancora cade fuori dalla
             # finestra [lo, hi] imposta da `min_gap`) si usa il blocco fattibile
@@ -679,7 +692,48 @@ def build_candidates(
         cands.append(chosen)
     if cands:
         cands[0] = [0]
+    if len(anchor_block) >= 2:
+        narrowed = _close_anchor_gaps(cands, anchor_block)
+        if narrowed:
+            log.debug(
+                "   [Semantico] Vincolo fra ancore: %d slide non ancorate richiuste "
+                "fra le ancore vicine.",
+                narrowed,
+            )
     return cands
+
+
+def _close_anchor_gaps(
+    cands: list[list[int]],
+    anchor_block: Mapping[int, int],
+) -> int:
+    """Richiude le slide non ancorate fra due ancore consecutive nei blocchi compresi.
+
+    Una transizione annunciata a 300s e la successiva a 340s con quattro slide
+    non ancorate in mezzo non possono significare "quattro slide in quaranta
+    secondi": senza questo vincolo la similarità può assegnare a tutte e quattro
+    lo stesso blocco e produrre segmenti di mezzo secondo, con confini che il
+    pavimento anti-flicker non può spostare (entrambi i vicini sono ancorati).
+
+    Non applica il vincolo quando i due ancore non hanno abbastanza blocchi
+    intermedi: in quel caso la segnaletica è semplicemente incompatibile e
+    stringere i candidati lascerebbe la slide senza opzioni, cioè peggio.
+
+    Returns:
+        Il numero di slide i cui candidati sono stati ristretti.
+    """
+    ordered = sorted(anchor_block)
+    narrowed = 0
+    for left, right in pairwise(ordered):
+        lo, hi = anchor_block[left], anchor_block[right]
+        if hi - lo < right - left:
+            continue
+        for s in range(left + 1, right):
+            inside = [k for k in cands[s - 1] if lo < k < hi]
+            if inside and len(inside) < len(cands[s - 1]):
+                cands[s - 1] = inside
+                narrowed += 1
+    return narrowed
 
 
 # =====================================================================
@@ -803,7 +857,6 @@ def semantic_timeline_from_texts(
     opts = options or SemanticOptions()
     window_seconds = opts.window_seconds
     min_slide_duration = opts.min_slide_duration
-    min_avg_similarity = opts.min_avg_similarity
     min_avg_z = opts.min_avg_z
     temperature = opts.temperature
 
@@ -868,23 +921,17 @@ def semantic_timeline_from_texts(
 
     # --- Guardia di qualità: quanto i segmenti assegnati sono "picchi" ---
     # La cosine grezza non discrimina nulla (vedi _mean_pair_scores): si misura
-    # la STESSA matrice normalizzata usata dal posizionamento. La vecchia
-    # soglia sulla scala grezza resta nella sua semantica documentata, ma coi
-    # valori reali (0.80+) non può mai scattare: è lo z-score a decidere.
+    # la STESSA matrice normalizzata usata dal posizionamento. Una soglia sulla
+    # scala grezza sarebbe qui un presidio finto: misurata su dati reali, anche
+    # un testo senza senso dà 0.75 contro una slide e il parlato reale non scende
+    # mai sotto 0.75, quindi una soglia a 0.10 non può mai scattare. Decide lo
+    # z-score, che è libero da scala.
     pairs = [
         (blk, s - 1) for s in range(1, total_slides) for blk in range(starts[s - 1], starts[s])
     ]
     avg_sim, avg_z = _mean_pair_scores(sim, sim_norm, pairs)
     _LAST_QUALITY.clear()
     _LAST_QUALITY.update({"avg_sim": avg_sim, "avg_z": avg_z, "min_avg_z": min_avg_z})
-
-    if avg_sim < min_avg_similarity:
-        log.warning(
-            "   [Semantico] Similarità media troppo bassa (%.3f < %.2f): sincronizzazione impossibile.",
-            avg_sim,
-            min_avg_similarity,
-        )
-        return None
 
     if avg_z < min_avg_z:
         # Segnale, NON verdetto: un picco medio basso dice "allineamento
@@ -1133,12 +1180,19 @@ def verify_anchor_mapping_embedding(
     """Corregge la numerazione parlata sistematicamente sfasata usando gli
     embeddings locali (nessuna chiamata LLM).
 
-    ``report`` (opzionale): se fornito, riceve ``{"suspicious": bool}`` —
-    True quando l'euristica ha visto almeno un'ancora il cui contenuto NON
-    conferma il numero parlato ma non può correggere in modo affidabile
-    (offset misti senza run correggibile, offset uniforme fuori range, ...).
-    Il chiamante usa il segnale per decidere se vale la pena la verifica LLM
-    anche quando di solito la salterebbe (una sola slide senza ancora).
+    ``report`` (opzionale): se fornito, riceve
+
+    - ``{"suspicious": bool}`` — True quando l'euristica ha visto almeno un'ancora
+      il cui contenuto NON conferma il numero parlato ma non può correggere in
+      modo affidabile (offset misti senza run correggibile, offset uniforme fuori
+      range, ...). Il chiamante usa il segnale per decidere se vale la pena la
+      verifica LLM anche quando di solito la salterebbe.
+    - ``{"unconfirmed": [{"slide", "time", "points_to"}]}`` — le ancore che il
+      PARLATO non conferma: subito dopo l'annuncio il testo somiglia di più a
+      un'altra slide del PDF. Non è un errore (il bridge verso la slide
+      successiva è normale) ma è l'unico indizio per distinguere un numero
+      parlato sbagliato da un semplice ponte: restava nei log, ora resta
+      sull'artefatto e nel riepilogo.
 
     Se lo speaker numera le slide escludendo la copertina (dice "slide 1"
     mostrando la slide 2 del PDF), TUTTI i riferimenti sono sfasati dello
@@ -1179,7 +1233,10 @@ def verify_anchor_mapping_embedding(
         """Imposta il report (se richiesto) e restituisce il valore."""
         if report is not None:
             report["suspicious"] = suspicious
+            report["unconfirmed"] = list(unconfirmed)
         return value
+
+    unconfirmed: list[dict[str, Any]] = []
 
     if not words_raw or len(anchors) < 2:
         return _done(None, False)
@@ -1217,6 +1274,16 @@ def verify_anchor_mapping_embedding(
         pairs.append((s, t, best - s))
 
     offsets = [off for _, _, off in pairs]
+    # Ancore che il parlato NON conferma: subito dopo "passiamo alla slide N" il
+    # testo somiglia spesso di più alla slide N+1 (il bridge è normale), quindi
+    # è un indizio e non un verdetto. Resta sull'artefatto perché con molte
+    # ancore inchiodate la sola misura di qualità del motore non distingue una
+    # numerazione parlata sbagliata da un allineamento perfetto.
+    unconfirmed[:] = [
+        {"slide": s, "time": round(t, 1), "points_to": s + off}
+        for s, t, off in pairs
+        if off != 0
+    ]
     if len(offsets) < 2:
         # Troppo poco segnale per un giudizio: non sospetto (evita chiamate
         # LLM spurie quando la verifica non può valutare nulla).
@@ -1240,8 +1307,6 @@ def verify_anchor_mapping_embedding(
                 return _done(None, True)
 
         corrected = {s + offset: t for s, t in anchors.items()}
-        if not corrected:
-            return _done(None, True)
 
         log.info(
             "   [Ancore] Offset sistematico %+d rilevato dagli embeddings: "
@@ -1539,14 +1604,6 @@ def free_order_segments_from_texts(
     avg_sim, avg_z = _mean_pair_scores(sim, znorm, pairs)
     _LAST_QUALITY.clear()
     _LAST_QUALITY.update({"avg_sim": avg_sim, "avg_z": avg_z, "min_avg_z": opts.min_avg_z})
-
-    if avg_sim < opts.min_avg_similarity:
-        log.warning(
-            "   [Libero] Similarità media troppo bassa (%.3f < %.2f): nessuna slide affidabile da mostrare.",
-            avg_sim,
-            opts.min_avg_similarity,
-        )
-        return None
 
     if avg_z < opts.min_avg_z:
         # Segnale, non verdetto (vedi il flusso ordinato): la selezione libera
@@ -2065,7 +2122,6 @@ def repair_segments_from_frame_mismatches(
     mismatches: Sequence[Mapping[str, Any]],
     words: Sequence[Word],
     slide_texts: Sequence[str],
-    total_duration: float,
     embed_fn: EmbedFn,
     min_segment_seconds: float = 8.0,
     context_seconds: float = 12.0,
@@ -2250,7 +2306,6 @@ def repair_segments_from_frames_from_words(
         mismatches,
         words_raw,
         slide_texts,
-        total_duration,
         _make_embed_fn(model),
         min_segment_seconds=max(5.0, opts.min_slide_duration),
         context_seconds=context_seconds,

@@ -50,8 +50,6 @@ from semantic_sync import _clean_slide_text, _load_embed_model, _make_embed_fn, 
 
 TIMELINE_FILE = None
 ANCHORS_FILE = None
-SLIDES_FILE = None
-TRANSCRIPT_FILE = None
 
 # Auto-rilevamento dei file piu recenti della run corrente.
 # Il file "timeline" ha voci con la chiave "end"; il file "ancore" ha voci
