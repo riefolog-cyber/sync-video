@@ -7,6 +7,7 @@ Verifica che i dati grezzi siano identici a quelli che producevano
 Esegui con: python -m unittest test_chunks -v
 """
 
+import threading
 import unittest
 
 from chunks import build_windows
@@ -28,6 +29,42 @@ class TestBuildWindows(unittest.TestCase):
         self.assertEqual(len(windows), 4)
         self.assertEqual(windows[0]["start"], 0.0)
         self.assertAlmostEqual(windows[-1]["end"], 100.0)
+
+    def test_non_positive_window_terminates(self):
+        """Con window <= 0 il ciclo non terminava MAI.
+
+        `end = start + 0` non avanza, il while non esce e ad ogni giro appende
+        una finestra vuota: CPU al 100% e memoria che cresce senza limite, senza
+        via d'uscita. Raggiungibile da `SEMANTIC_WINDOW=0` nel .env o da
+        `--semantic-window 0`, che non validavano nulla. Il clamp porta la
+        finestra al minimo invece di far terminare male l'utente: una finestra
+        da 1s degrada la qualita' dell'allineamento ma produce comunque una
+        timeline, mentre un'eccezione uccide la run su un refuso.
+
+        Il test gira in un thread con join: se il clamp mancasse, il test
+        penderebbe per sempre invece di fallire in modo leggibile.
+        """
+        for bad in (0.0, -1.0, -4.0, -100.0):
+            with self.subTest(window=bad):
+                result: list[int] = []
+                error: list[BaseException] = []
+
+                def run(bad=bad, result=result, error=error):
+                    try:
+                        result.append(len(build_windows(_words([("a", 0.0)]), total_duration=40.0, window_seconds=bad)))
+                    except BaseException as e:
+                        # BLE001 e' gia' ignorato per i test in ruff.toml: qui
+                        # l'eccezione va catturata per essere riportata
+                        # nell'assert, non per essere ignorata.
+                        error.append(e)
+
+                t = threading.Thread(target=run, daemon=True)
+                t.start()
+                t.join(10.0)
+                self.assertFalse(t.is_alive(), f"build_windows non termina con window_seconds={bad}")
+                self.assertEqual(error, [], f"build_windows ha sollevato con window_seconds={bad}")
+                # con il clamp al minimo, la durata e' coperta in modo finito
+                self.assertTrue(0 < result[0] <= 60, f"numero di finestre implausibile: {result[0]}")
 
     def test_first_time_is_first_real_word(self):
         words = _words([("uno", 0.7), ("due", 1.2), ("tre", 5.3)])

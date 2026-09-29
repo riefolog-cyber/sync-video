@@ -80,6 +80,33 @@ def _open_slide_retry(slide_path: str, attempts: int = 4, delay: float = 0.75) -
     ) from last
 
 
+def _canvas_size(fitted: Sequence[tuple[int, int]]) -> tuple[int, int]:
+    """Canvas del concat: quanto la slide adattata più larga e più alta."""
+    return max(w for w, _ in fitted), max(h for _, h in fitted)
+
+
+def _letterbox(img: Image.Image, canvas_w: int, canvas_h: int) -> Image.Image:
+    """Centra `img` su un canvas nero di `canvas_w` x `canvas_h`.
+
+    Unica definizione del letterbox dell'encoder, riusata dalla verifica
+    frame-vs-slide: se i due lati applicassero trasformi diversi, ogni slide
+    non allineata al canvas (4:3 in un deck 16:9, una pagina verticale, una
+    slide con tabella larga) verrebbe confrontata contro un'immagine con barre
+    nere in una posizione e l'altra senza, e la similarita' crollava sotto
+    soglia: il segmento finiva fra i mismatches e, con la riparazione
+    automatica attiva, il confine veniva spostato su rumore.
+    """
+    w, h = img.size
+    if w > canvas_w or h > canvas_h:
+        scale = min(canvas_w / w, canvas_h / h)
+        w, h = int(w * scale), int(h * scale)
+    w, h = w - w % 2, h - h % 2
+    resized = img.resize((w, h), Image.Resampling.LANCZOS) if (w, h) != img.size else img
+    canvas = Image.new("RGB", (canvas_w, canvas_h), (0, 0, 0))
+    canvas.paste(resized, ((canvas_w - w) // 2, (canvas_h - h) // 2))
+    return canvas
+
+
 def _prepare_slides_for_concat(slide_files: Sequence[str], workdir: Path) -> list[Path]:
     """Prepara i PNG delle slide per il concat demuxer di ffmpeg.
 
@@ -95,20 +122,45 @@ def _prepare_slides_for_concat(slide_files: Sequence[str], workdir: Path) -> lis
             img = _open_slide_retry(slide_path)
             images.append(img)
             fitted.append(_fitted_size(img))
-        canvas_w = max(w for w, _ in fitted)
-        canvas_h = max(h for _, h in fitted)
+        canvas_w, canvas_h = _canvas_size(fitted)
+        workdir.mkdir(parents=True, exist_ok=True)
 
         prepared: list[Path] = []
         for i, (img, (w, h)) in enumerate(zip(images, fitted, strict=True)):
             if (w, h) != img.size:
                 log.debug("   Resize %s: %dx%d -> %dx%d", Path(str(slide_files[i])).name, *img.size, w, h)
-            resized = img.resize((w, h), Image.Resampling.LANCZOS) if (w, h) != img.size else img
-            canvas = Image.new("RGB", (canvas_w, canvas_h), (0, 0, 0))
-            canvas.paste(resized, ((canvas_w - w) // 2, (canvas_h - h) // 2))
             out_png = workdir / f"seg_{i:04d}.png"
-            canvas.save(out_png, format="PNG")
+            _letterbox(img, canvas_w, canvas_h).save(out_png, format="PNG")
             prepared.append(out_png)
         return prepared
+    finally:
+        for img in images:
+            img.close()
+
+
+def _letterbox_references(slide_files: Sequence[str], workdir: Path) -> list[Path] | None:
+    """Ricostruisce le slide come l'encoder le mette nel video.
+
+    Serve al confronto frame-vs-slide: il frame estratto dal video ha il
+    letterbox, il PNG originale no, quindi vanno normalizzati allo stesso modo
+    prima di misurare la similarita'. Restituisce None se una slide non e'
+    leggibile, cosi' il chiamante puo' saltare la verifica invece di produrre
+    un referto inventato.
+    """
+    try:
+        images = [_open_slide_retry(str(sf)) for sf in slide_files]
+    except RuntimeError:
+        return None
+    try:
+        fitted = [_fitted_size(img) for img in images]
+        canvas_w, canvas_h = _canvas_size(fitted)
+        workdir.mkdir(parents=True, exist_ok=True)
+        refs: list[Path] = []
+        for i, img in enumerate(images):
+            out_png = workdir / f"ref_{i:04d}.png"
+            _letterbox(img, canvas_w, canvas_h).save(out_png, format="PNG")
+            refs.append(out_png)
+        return refs
     finally:
         for img in images:
             img.close()
@@ -437,7 +489,16 @@ def _extract_frame(video_path: Path, t: float, out: Path) -> bool:
                 str(out),
             ],
             check=False,
+            # Timeout: senza, un ffmpeg bloccato (percorso di rete, container
+            # corrotto) tiene la pipeline ferma per sempre e in silenzio, senza
+            # sapere che sta aspettando li'. Un singolo frame di un video già
+            # renderizzato ci mette meno di un secondo: 60s e' un margine
+            # enorme, e oltre e' un'anomalia.
+            timeout=60,
         )
+    except subprocess.TimeoutExpired:
+        log.warning("   [Verifica] Estrazione frame a %.1fs: timeout dopo 60s.", t)
+        return False
     except OSError as e:  # ffmpeg non installato
         log.debug("   [Verifica] ffmpeg non eseguibile: %s", e)
         return False
@@ -486,28 +547,40 @@ def frame_consistency_check(
     checked = 0
     coherent = 0
     mismatches: list[dict[str, object]] = []
-    slide_paths = [Path(sf) for sf in slide_files]
-    for i, (slide, start, end) in enumerate(segments):
-        if not 1 <= int(slide) <= len(slide_paths):
-            continue
-        t = (float(start) + float(end)) / 2
-        frame = frames_dir / f"seg{i:02d}_t{t:07.1f}_slide{int(slide):02d}.png"
-        if not _extract_frame(video, t, frame):
-            log.debug("   [Verifica] Frame non estratto a %.1fs (segmento %d).", t, i)
-            continue
-        checked += 1
-        sims = [image_similarity(frame, sp) for sp in slide_paths]
-        shown = int(np.argmax(sims)) + 1
-        best = float(max(sims))
-        if shown == int(slide) and best >= min_similarity:
-            coherent += 1
-        else:
-            mismatches.append(
-                {
-                    "slide": int(slide),
-                    "shown": shown,
-                    "similarity": round(best, 3),
-                    "time": round(t, 1),
-                }
-            )
+    # I confronti vanno fatti contro le slide COSI' COME SONO NEL VIDEO, cioe'
+    # con il letterbox dell'encoder. Confrontare il frame (che ha le barre
+    # nere) con il PNG originale (che non le ha) produceva similarita' negative
+    # (-0.55 misurato su una slide 4:3 in un deck 16:9) contro una soglia di
+    # 0.85: ogni segmento non allineato al canvas finiva fra i mismatches, e con
+    # la riparazione automatica attiva il confine veniva spostato su rumore,
+    # peggio che non verificare. Le reference si ricostruiscono in una cartella
+    # temporanea: frames_dir deve contenere solo i frame dell'artefatto.
+    with tempfile.TemporaryDirectory(prefix="syncvideo_ref_") as refdir:
+        slide_paths = _letterbox_references(slide_files, Path(refdir))
+        if slide_paths is None:
+            log.warning("   [Verifica] Slide non leggibili: confronto frame-vs-slide saltato.")
+            return {"checked": 0, "coherent": 0, "mismatches": []}
+        for i, (slide, start, end) in enumerate(segments):
+            if not 1 <= int(slide) <= len(slide_paths):
+                continue
+            t = (float(start) + float(end)) / 2
+            frame = frames_dir / f"seg{i:02d}_t{t:07.1f}_slide{int(slide):02d}.png"
+            if not _extract_frame(video, t, frame):
+                log.debug("   [Verifica] Frame non estratto a %.1fs (segmento %d).", t, i)
+                continue
+            checked += 1
+            sims = [image_similarity(frame, sp) for sp in slide_paths]
+            shown = int(np.argmax(sims)) + 1
+            best = float(max(sims))
+            if shown == int(slide) and best >= min_similarity:
+                coherent += 1
+            else:
+                mismatches.append(
+                    {
+                        "slide": int(slide),
+                        "shown": shown,
+                        "similarity": round(best, 3),
+                        "time": round(t, 1),
+                    }
+                )
     return {"checked": checked, "coherent": coherent, "mismatches": mismatches}

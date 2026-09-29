@@ -66,6 +66,68 @@ class TestCheckUpdates(_TempCacheMixin, unittest.TestCase):
         self.assertEqual(result[0]["name"], "numpy")
         self.assertEqual(result[0]["latest"], "9.9.9")
 
+    def test_network_down_is_not_cached_as_all_updated(self):
+        """PyPI irraggiungibile non può diventare "tutti aggiornati" in cache.
+
+        Prima: ogni pacchetto dava None, la lista restava vuota, la cache
+        veniva scritta comunque e la run successiva (entro TTL) stampava
+        "tutti aggiornati" — per 6 ore, indistinguibile dal caso in cui la rete
+        funziona davvero. Ora la cache non viene scritta e l'avviso dice
+        perché non è stato possibile verificare.
+        """
+        self.cache_path.write_text(json.dumps({"ts": 0, "outdated": []}), encoding="utf-8")
+        prima = self.cache_path.read_text(encoding="utf-8")
+        with mock.patch("updates._latest_version_pypi", return_value=None), mock.patch(
+            "updates._installed_version", return_value="1.0.0"
+        ):
+            result = updates.check_updates(ttl_hours=6)
+        self.assertEqual(result, [])
+        # la cache NON deve essere stata riscritta: il TTL non consuma il check,
+        # quindi la run successiva ritenta invece di fidarsi di un "tutto
+        # aggiornato" che non e' mai stato verificato
+        self.assertEqual(self.cache_path.read_text(encoding="utf-8"), prima)
+
+    def test_partial_network_failure_still_reports_real_updates(self):
+        # Se qualcuno risponde, il report e' utilizzabile: i pacchetti senza
+        # risposta vengono solo scartati (con un debug), non tuteliamo tutto.
+        self.cache_path.write_text(json.dumps({"ts": 0, "outdated": []}), encoding="utf-8")
+        with mock.patch(
+            "updates._latest_version_pypi",
+            side_effect=lambda p: "9.9.9" if p == "numpy" else None,
+        ), mock.patch("updates._installed_version", return_value="1.0.0"):
+            result = updates.check_updates(ttl_hours=6)
+        self.assertEqual([d["name"] for d in result], ["numpy"])
+        self.assertTrue(self.cache_path.exists())
+
+
+class TestIsNewer(unittest.TestCase):
+    """Confronto delle versioni per ORDINE, non per disuguaglianza di stringhe.
+
+    `latest != installed` segnalava come outdated anche un downgrade e ogni
+    versione con suffisso locale, quindi pacchetti gia' aggiornati finivano in
+    _upgradable e l'utente veniva invitato a reinstallarli a ogni run.
+    """
+
+    def test_real_upgrades(self):
+        for latest, installed in [("1.28.0", "1.27.0"), ("2.5.1", "2.5.0"), ("0.5.1", "0.4.9"), ("1.10.0", "1.9.0")]:
+            with self.subTest(latest=latest, installed=installed):
+                self.assertTrue(updates._is_newer(latest, installed))
+
+    def test_downgrade_is_not_an_upgrade(self):
+        self.assertFalse(updates._is_newer("1.26.3", "1.27.0"))
+
+    def test_local_version_is_not_an_upgrade(self):
+        # 2.5.0+cu124 e' piu' recente di 2.5.0: va lasciata stare (succede
+        # con torch/cuda, openvino e pacchetti vendorizzati).
+        self.assertFalse(updates._is_newer("2.5.0", "2.5.0+cu124"))
+
+    def test_same_version(self):
+        self.assertFalse(updates._is_newer("1.0.0", "1.0.0"))
+
+    def test_unparseable_is_treated_as_newer(self):
+        # Meglio segnalare un aggiornamento reale che perderlo.
+        self.assertTrue(updates._is_newer("qualcosa", "1.0.0"))
+
 
 class TestPrintUpdates(unittest.TestCase):
     def test_no_updates(self):

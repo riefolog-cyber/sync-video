@@ -43,18 +43,41 @@ Il programma funziona anche col Python di sistema, ma quel Python è **condiviso
 
 ```bash
 # Una volta sola: crea la cartella .venv e installa i pacchetti del progetto
-crea_venv.bat
+crea_venv.bat          # Windows
+./crea_venv.sh         # macOS e Linux (stesso scopo, script shell)
 ```
 
-Da quel momento `genera_video.bat`, `aggiornamenti.bat`, `prova.bat` e `check_embedding_models.bat` usano `.venv` da soli: non serve cambiare nulla a mano.
+> I due script sono gemelli: `crea_venv.bat` per Windows, `crea_venv.sh` per
+> macOS/Linux. Usa quello del tuo sistema — i `.bat` non esistono su macOS/Linux
+> e i `.sh` su Windows.
+
+Da quel momento `genera_video.bat`, `aggiornamenti.bat`, `prova.bat` e `check_embedding_models.bat` usano `.venv` da soli: non serve cambiare nulla a mano. Su macOS/Linux il comando è `.venv/bin/python main.py`.
 
 | Comando | Cosa fa |
 |---|---|
-| `crea_venv.bat` | Crea `.venv` (o completa i pacchetti mancanti se esiste) |
-| `crea_venv.bat --ricrea` | Cancella `.venv` e la ricrea da zero |
-| `set SYNC_VIDEO_NO_VENV=1` | Usa il Python di sistema, ignorando `.venv` |
+| `crea_venv.bat` / `./crea_venv.sh` | Crea `.venv` (o completa i pacchetti mancanti se esiste) |
+| `crea_venv.bat --ricrea` / `./crea_venv.sh --ricrea` | Cancella `.venv` e la ricrea da zero |
+| `set SYNC_VIDEO_NO_VENV=1` | Usa il Python di sistema, ignorando `.venv` (Windows) |
 
 La venv **riusa i modelli già scaricati** (cartella `.cache` e cache di HuggingFace): non riscarica nulla, e la prima run resta veloce. Dentro `.venv` `pip check` non segnala conflitti; nel Python globale ne convivono diversi (pacchetti di altri progetti).
+
+> **Cambio di PC / hardware**: il motore di trascrizione **non viene mai
+> ripreso da disco**. In `.cache/machine_setup.json` si salvano solo i *fatti*
+> hardware (impronta della macchina + lista delle GPU), che sono lenti da
+> ottenere ma stabili; la *decisione* ("usa CUDA", "usa OpenVINO") è ricalcolata
+> a ogni run e poi **validata contro il runtime reale** (il device esiste? il
+> pacchetto è installato? il modello c'è?). Se non regge, ripiega su CPU
+> avvisando. Perché: la decisione dipende da fatti che cambiano (che pacchetti
+> sono installati, che device espone il runtime *adesso*), mentre l'hardware no.
+> Persistendola, copiare la cartella da un PC con GPU NVIDIA a uno senza chiudeva
+> la run con `CUDA driver version is insufficient` **dopo** OCR e rendering, senza
+> che nulla avesse notato che la GPU non c'era più.
+>
+> Come difesa aggiuntiva, se faster-whisper non riesce a costruire il modello su
+> CUDA, ripiega da solo su CPU (int8) e la pipeline prosegue; se però avevi
+> chiesto `--whisper-device cuda` esplicitamente, non lo fa di nascosto e ti
+> avvisa. `.env` resta per gli override espliciti tuoi (che hanno precedenza);
+> se cambi GPU restando sullo stesso sistema, `--force-setup` rileva di nuovo.
 
 > **Precisione assoluta**: il programma non distribuisce mai le slide uniformemente. La timeline viene costruita dal **solo** allineamento semantico (embeddings offline, senza LLM), vincolato dai riferimenti espliciti "slide N" nella trascrizione. Se non è generabile → **interruzione con avviso**.
 
@@ -84,8 +107,8 @@ Due ricette pronte, in base al punto di partenza:
 
 | Prompt | Flusso | Quando usarlo |
 |---|---|---|
-| [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE%20%28DA%20PREFERIRE%29.md) | **A**: deck → podcast con ancore `slide N` | Default: massima precisione di allineamento (ancore esatte), podcast più strutturato |
-| [`PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PODCAST.md) | **B**: podcast libero → deck derivato dal parlato | Podcast più naturale; anche come piano B quando appare l'avviso "segnale debole" (slide troppo simili tra loro) |
+| [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](<PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md>) | **A**: deck → podcast con ancore `slide N` | Default: massima precisione di allineamento (ancore esatte), podcast più strutturato |
+| [`PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md`](<PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md>) | **B**: podcast libero → deck derivato dal parlato | Podcast più naturale; anche come piano B quando appare l'avviso "segnale debole" (slide troppo simili tra loro) |
 
 Il flusso A sfrutta le ancore esplicite (flusso ordinato + ibrido LLM); il
 flusso B produce slide che rispecchiano 1:1 il parlato e funziona bene col
@@ -137,7 +160,7 @@ python main.py --llm auto --preview     # valuta senza generare video
 python main.py --llm 9router           # forza 9Router online
 ```
 
-> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto. Prompt ottimale per NotebookLM: [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE%20%28DA%20PREFERIRE%29.md) — vedi "Quale prompt usare".
+> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto. Prompt ottimale per NotebookLM: [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](<PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md>) — vedi "Quale prompt usare".
 
 #### Manutenzione 9Router (`9router-maintenance/`)
 
@@ -313,9 +336,25 @@ e veloce il router lato server.
 >   + download modello IR inclusi automaticamente)
 > - altrimenti → faster-whisper su CPU
 >
-> La scelta è persistita in `.cache/machine_setup.json` + `.env`; le run
-> successive la riusano senza rifare il rilevamento. Controlla con
-> `--force-setup` (rileva di nuovo) o disabilita con `--no-auto-setup`.
+> La scelta è ricalcolata a ogni run a partire dall'hardware rilevato e
+> validata contro il runtime (vedi "Cambio di PC / hardware" qui sotto); i fatti
+> hardware restano in `.cache/machine_setup.json` con l'impronta della macchina.
+> Controlla con `--force-setup` (rileva di nuovo) o disabilita con
+> `--no-auto-setup`.
+>
+> **Su un PC nuovo, scarica i modelli prima.** Al primo avvio i modelli (~3 GB:
+> embedding e5-large 2.2 GB, pesi Whisper, modello OpenVINO IR 930 MB) vengono
+> scaricati *dentro* la run reale, mescolati al lavoro: un timeout di rete tronca
+> tutto a metà e il log non distingue "modello mancante" da "download fallito".
+> Meglio tenerli separati:
+>
+> ```bash
+> python main.py --prefetch-models   # scarica tutto e esce (~3 GB, una tantum)
+> python main.py                     # ora la prima run non scarica nulla
+> ```
+>
+> Ogni modello è indipendente: quello non installabile su quella CPU viene
+> saltato con una nota, senza far fallire gli altri.
 >
 > Fallback automatico a faster-whisper se OpenVINO non è installato o il
 > modello manca. Seleziona il motore con `--transcriber {auto,openvino,whisper}`
@@ -477,8 +516,30 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `AUTO_BEAM_AB_MARGIN` (env) | `0.0` | Quanto deve vincere la decodifica **accurata** (in `avg_z`) per essere preferita alla veloce. `0.0` = basta non perdere. La **risoluzione misurata** del punteggio è ~`0.05-0.10` (vedi sotto): con `AUTO_BEAM_AB_MARGIN=0.05` la veloce subentra solo se il vantaggio è fuori dalla banda di rumore |
 | `--whisper-batch` | `8` | Segmenti decodificati insieme (stesso modello e stessa decodifica: cambia solo il throughput). `0` = sequenziale. Ripiega da solo se il decoder a batch non è disponibile |
 | `WHISPER_BEAM` / `WHISPER_BATCH` (env) | `1` / `8` | Override dei due parametri senza toccare la riga di comando |
+| `EMBED_THREADS` (env) | `min(8, cpu_count)` | Thread ONNX per gli embedding |
+| `WHISPER_THREADS` (env) | `min(8, cpu_count)` | Thread per faster-whisper |
+| `VIDEO_THREADS` (env) | `min(8, cpu_count)` | Thread di encoding del video |
+
+> **I tre parametri di thread hanno lo stesso default, `min(8, cpu_count())`,**
+> perché nasce tutti dalla stessa misura: sullo **Snapdragon X Elite** 12 thread
+> erano *più lenti* di 8 (saturazione della banda memoria). Su una CPU Intel/AMD
+> con più core fisici quel tetto è però una scelta conservativa ereditata, non un
+> muro, e i thread non vengono agganciati ai core P. Se la trascrizione è il
+> collo di bottiglia della tua run, conviene misurare:
+>
+> ```powershell
+> $env:WHISPER_THREADS="14"   # 14 = core fisici della i7-12700H (6P+8E)
+> $env:EMBED_THREADS="14"
+> $env:VIDEO_THREADS="14"
+> .\.venv\Scripts\python.exe main.py --no-cache
+> ```
+>
+> Misura tempo e qualità (`--whisper-beam 1` veloce vs `5` accurato): il beam
+> influenza la timeline, i thread no. Tieni il valore che misuri migliore in
+> `.env`.
 | `--openvino-device` | `GPU` | Device OpenVINO (`GPU` iGPU o `CPU`) |
 | `--openvino-download` | — | Scarica modello OpenVINO IR (una tantum) |
+| `--prefetch-models` | — | Scarica **tutti** i modelli ML (embedding, pesi Whisper, OpenVINO IR) e esce, senza toccare PDF o audio. Utile dopo un clone o un cambio di macchina: tiene i download fuori dalla prima run reale |
 | `--semantic-model` | e5-large | Modello embedding |
 | `--semantic-window` | `4.0` | Secondi per blocco |
 | `--semantic-min-duration` | `3.0` | Durata minima slide (s) |
@@ -495,6 +556,22 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--strict-sync` | — | Modalità "non consegnare un video sospetto". Blocca PRIMA della generazione se un segmento di durata anomala risulta disallineato dal contenuto (il parlato somiglia a un'altra slide) o se la revisione LLM (`--llm-review`) contesta la mappa chunk→slide; blocca DOPO la generazione (il video resta su disco, ma l'esito è un errore) se la verifica frame vs slide trova segmenti con la slide sbagliata. Attiva automaticamente `--verify-video`. Default: avviso soltanto. Il report dei segmenti è salvato comunque in `.cache/sync_report.json` |
 | `--verify-video` | — | Dopo la generazione estrae un frame a metà di ogni segmento e lo confronta con la slide attesa: è l'unico controllo sull'ARTEFATTO (la timeline può essere coerente e il video comunque sbagliato). I frame restano in `.cache/verify_frames/` e l'esito finisce in `sync_report.json`. `genera_video.bat` lo attiva di default (pochi secondi in più) |
 | `--no-auto-repair` | — | Disattiva la **riparazione automatica**. Quando la verifica del video trova un segmento con la slide sbagliata, la pipeline sposta da sola quel confine (motore embedding, solo nella direzione indicata dall'evidenza) e rigenera il video, poi lo ricontrolla. Con questo flag l'esito resta un avviso e il video non viene rifatto |
+| `--force-setup` | — | Rileva l'hardware da capo e riscrive i fatti in `.cache/machine_setup.json` (utile se hai cambiato GPU o spostato la cartella). La *decisione* sul motore viene comunque ricalcolata a ogni run |
+| `--no-auto-setup` | — | Salta il rilevamento hardware: il motore è solo quello passato con `--transcriber` |
+| `--whisper-device` | `cpu` | Device faster-whisper (`cpu`/`cuda`). **Sceglilo a mano solo se sai cosa fai**: in quel caso un fallimento di CUDA non viene ripiegato su CPU in silenzio, perché un fallback non richiesto sarebbe una sorpresa |
+| `--whisper-compute-type` | `int8` | Precisione faster-whisper (`int8` CPU, `float16` CUDA) |
+| `--openvino-model-dir` | `.cache/whisper_openvino_small` | Cartella del modello OpenVINO IR |
+| `--engine` | `ffmpeg` | Motore di rendering video (`ffmpeg` veloce, `moviepy` richiesto per `--transitions`) |
+| `--ocr-workers` | `min(4, cpu_count)` | Thread per l'OCR (sovrappone `OCR_WORKERS`) |
+| `--dpi` | `300` | Risoluzione di rendering delle slide per l'OCR |
+| `--slides-dir` | `temp_slides` | Cartella delle slide renderizzate |
+| `--skip-slides` | — | Esclude un elenco di slide (indici 1-based, es. `1,4,9`) dal flusso |
+| `--no-free-ordered-fallback` | — | Nel flusso libero, non ripiegare sull'allineamento ordinato quando la selezione semantica fallisce: interrompi |
+| `--no-confirm` | — | Non chiedere conferma interattiva (per batch/CI) |
+| `--no-update` | — | Al controllo aggiornamenti: notifica senza installare |
+| `--no-update-check` | — | Non controllare gli aggiornamenti su PyPI (default di `genera_video.bat`) |
+| `--semantic-cache-dir` | `.cache/embedding_model` | Cartella dei modelli embedding |
+| `--log-file` | — | Scrivi anche il log su file |
 
 ---
 
@@ -613,6 +690,10 @@ inutilmente:
   - premi **`S`** → salta l'LLM e usa subito l'embedding locale;
   - oppure imposta `--llm-wait-timeout <secondi>` → fallback embedding automatico
     allo scadere (0 = illimitato).
+- **9Router non è installato** (il comando `9router` non è nel PATH) → lo
+  programma lo dice esplicitamente e propone le due uscite (`--llm off`,
+  `--llm-wait-timeout`): l'attesa automatica è impossibile, quindi conviene
+  scegliere prima di lanciare.
 - **Flusso libero senza terminale** (es. CI, automazione): il fallback embedding
   non basta (tetto di precisione ed è lento su audio lunghi), quindi il programma si
   **interrompe subito con un errore chiaro** invece di produrre un video
@@ -623,6 +704,13 @@ python main.py --llm auto                 # pausa + ripresa automatica (consigli
 python main.py --llm auto --llm-wait-timeout 60   # fallback embedding dopo 60s
 python main.py --llm off                  # solo embedding, nessuna attesa
 ```
+
+> **PC senza 9Router**: il programma funziona comunque, purché il podcast
+> segua il prompt con le ancore esplicite "slide N" (flusso `slide-audio`): in
+> quel caso 9Router non viene mai chiamato. Se il podcast non ha ancore si passa
+> al flusso libero, dove l'LLM serve: usa `--llm off` (funziona sempre, qualità
+> leggermente inferiore) oppure `--flow slide-audio --llm off` per forzare
+> l'allineamento ordinato deterministico.
 
 ---
 
@@ -642,7 +730,9 @@ test_sync.py             ← Suite di test unitari
 test_llm_sync.py         ← Test modulo LLM
 test_chunks.py           ← Test finestre temporali condivise
 test_integration.py      ← Test di integrazione
-genera_video.bat         ← Launcher 1-click
+genera_video.bat         ← Launcher 1-click (Windows)
+crea_venv.bat            ← Crea .venv (Windows)
+crea_venv.sh             ← Crea .venv (macOS/Linux)
 requirements.txt         ← Dipendenze pip
 ruff.toml                ← Configurazione lint (guardrail di stile)
 mypy.ini                 ← Configurazione type-check
@@ -781,7 +871,7 @@ pronunciare le ancore "slide N" **in cifre** a ogni sezione: senza ancore il
 pipeline non può sapere dove cambia la slide e passa al flusso libero (che usa
 l'LLM — un avviso in console lo segnala).
 
-Il prompt [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](PROMPT_NOTEBOOKLM_%20PRIMA%20PRESENTAZIONE%20%28DA%20PREFERIRE%29.md)
+Il prompt [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](<PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md>)
 guida sia la generazione della presentazione (Studio → Slide Deck, dalle tue
 fonti) sia il podcast che la segue nell'ordine, arricchendola con le altre
 fonti. Ancore strette: cifre, "slide" chiara, mai "la slide successiva",

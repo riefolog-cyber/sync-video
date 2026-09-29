@@ -9,8 +9,6 @@ Due motori disponibili:
 - faster-whisper (fallback): CTranslate2 su CPU.
 """
 
-import json
-import os
 import re
 from pathlib import Path
 from typing import Any, cast
@@ -23,11 +21,12 @@ from config import (
     DEFAULT_TRANSCRIPT_WINDOW,
     DEFAULT_WHISPER_BATCH,
     DEFAULT_WHISPER_BEAM,
+    DEFAULT_WHISPER_THREADS,
     TRANSITION_WORDS_ITA,
     get_stopwords,
     log,
+    openvino_device_available,
 )
-from machine_setup import MACHINE_CONFIG_PATH, openvino_gpu_available
 
 
 # =====================================================================
@@ -260,33 +259,35 @@ def transcribe_with_openvino(
 # =====================================================================
 # TRASCRIZIONE CON FASTER-WHISPER
 # =====================================================================
-def openvino_usable() -> bool:
+def openvino_usable(openvino_model_dir: Path | str | None = None) -> bool:
     """True se su questo PC OpenVINO è una via realmente percorribile.
 
-    Il suggerimento "installa openvino-genai per usare la iGPU" ha senso solo
-    se il rilevamento hardware (``machine_setup.json``) ha scelto OpenVINO
-    (iGPU Intel presente), oppure se il runtime OpenVINO è installato ed
-    espone un device GPU reale. La sola CPU non basta: senza iGPU non c'è
-    alcun guadagno di velocità, quindi su macchine AMD/ARM (dove OpenVINO
-    vede al più la CPU) l'avviso viene soppresso.
+    Tre condizioni, tutte necessarie:
+
+    - il runtime ``openvino_genai`` è importabile;
+    - il modello IR è presente (senza, ogni run lo riscaricherebbe);
+    - il runtime espone un device **GPU** reale. La sola CPU non basta: senza
+      iGPU non c'è guadagno di velocità, quindi su AMD/ARM (dove OpenVINO vede
+      al più la CPU) l'avviso "usa OpenVINO" sarebbe rumore.
+
+    Non legge la decisione di ``machine_setup``: quella non viene più persistita
+    (vedi ``machine_setup``) e, comunque, sarebbe derivata da esattamente queste
+    condizioni. Rileggere il file aggiungeva un quarto stato possibile — "una
+    decisione salvata che il runtime non conferma" — e produceva un avviso
+    contraddittorio: la pipeline su faster-whisper che invitava a installare
+    OpenVINO dopo che il setup aveva già provato a installarlo e non era riuscito.
     """
     try:
-        rec = json.loads(MACHINE_CONFIG_PATH.read_text(encoding="utf-8"))
-        transcriber = rec.get("transcriber")
-        if transcriber == "openvino":
-            return True
-        if transcriber == "whisper":
-            return False
-    except Exception:
-        pass  # nessun machine_setup.json: si procede col probe runtime
-
-    # Solo una iGPU Intel (device "GPU") giustifica il consiglio "usa la
-    # iGPU": la CPU OpenVINO non è più veloce di faster-whisper. Il probe
-    # è condiviso con machine_setup.openvino_gpu_available().
-    return openvino_gpu_available()
+        import openvino_genai  # noqa: F401
+    except ImportError:
+        return False
+    model_dir = Path(openvino_model_dir) if openvino_model_dir is not None else Path(DEFAULT_OPENVINO_MODEL_DIR)
+    if not model_dir.exists():
+        return False
+    return openvino_device_available()
 
 
-def resolved_transcriber(transcriber: str, openvino_model_dir: Path | None) -> str:
+def resolved_transcriber(transcriber: str, openvino_model_dir: Path | str | None) -> str:
     """Nome del motore che ``transcribe_audio`` userà DAVVERO: 'openvino' o 'whisper'.
 
     ``auto`` significa "OpenVINO se è percorribile, altrimenti faster-whisper":
@@ -297,6 +298,10 @@ def resolved_transcriber(transcriber: str, openvino_model_dir: Path | None) -> s
 
     Il download del modello (richiesto da ``openvino`` esplicito) avviene solo
     dentro ``transcribe_audio``: qui la funzione resta senza effetti.
+
+    Accetta anche una ``str`` per il percorso: è il tipo naturale con cui
+    arriva da argparse, e chiamare ``.exists()`` su una ``str`` sollevava
+    ``AttributeError`` invece di rispondere semplicemente "whisper".
     """
     if transcriber == "whisper":
         return "whisper"
@@ -307,7 +312,7 @@ def resolved_transcriber(transcriber: str, openvino_model_dir: Path | None) -> s
     if transcriber == "openvino":
         # Motore esplicito: se il modello manca, transcribe_audio lo scarica.
         return "openvino"
-    if openvino_model_dir is not None and openvino_model_dir.exists():
+    if openvino_model_dir is not None and Path(openvino_model_dir).exists():
         return "openvino"
     return "whisper"
 
@@ -323,6 +328,7 @@ def transcribe_audio(
     whisper_compute_type: str = "int8",
     whisper_beam: int = DEFAULT_WHISPER_BEAM,
     whisper_batch: int = DEFAULT_WHISPER_BATCH,
+    whisper_device_explicit: bool = False,
 ) -> tuple[str, list[Word]]:
     """
     Dispatcher trascrizione: sceglie il motore più veloce disponibile.
@@ -378,8 +384,14 @@ def transcribe_audio(
         language=language,
         device=whisper_device,
         compute_type=whisper_compute_type,
+        # Il model dir reale, non il default: con --openvino-model-dir
+        # personalizzato il probe deve guardare lo stesso percorso che verrà
+        # usato davvero, altrimenti l'avviso "usa OpenVINO" valuterebbe una
+        # cartella diversa da quella della pipeline.
+        openvino_available=openvino_usable(openvino_model_dir),
         beam_size=whisper_beam,
         batch_size=whisper_batch,
+        device_explicit=whisper_device_explicit,
     )
 
 
@@ -471,6 +483,7 @@ def transcribe_with_whisper(
     openvino_available: bool | None = None,
     cpu_threads: int | None = None,
     batch_size: int = DEFAULT_WHISPER_BATCH,
+    device_explicit: bool = False,
 ) -> tuple[str, list[Word]]:
     """
     Trascrizione audio con faster-whisper.
@@ -480,11 +493,16 @@ def transcribe_with_whisper(
         resto della pipeline; viene mappato su ISO 639-1 per Whisper.
         `batch_size > 1` abilita il decoding a batch (stesso modello, solo
         più throughput); 0 o 1 lo disattivano.
+        `device_explicit` True se il device è arrivato da una scelta esplicita
+        dell'utente: in quel caso un fallimento di CUDA non viene nascosto con
+        un ripiego silenzioso su CPU.
 
     Returns:
         (trascrizione compressa, lista parole raw con timestamp)
     """
     from faster_whisper import WhisperModel
+
+    _device_was_explicit = device_explicit
 
     log.info(
         "2. Trascrizione con faster-whisper (%s, %s, %s, beam=%d, batch=%d)...",
@@ -511,16 +529,46 @@ def transcribe_with_whisper(
         )
 
     # Carica modello. cpu_threads esplicito: il default di faster-whisper
-    # sottoutilizza CPU con più core (misurato su Snapdragon X Elite: 8
-    # thread ~27% più veloci di 4 su clip da 60s). Cap a 8 per non saturare.
-    n_threads = cpu_threads if cpu_threads else min(os.cpu_count() or 4, 8)
-    model = WhisperModel(
-        model_size,
-        device=device,
-        compute_type=compute_type,
-        cpu_threads=n_threads,
-    )
-    log.debug("   Modello Whisper caricato.")
+    # sottoutilizza CPU con piu' core (misurato su Snapdragon X Elite: 8
+    # thread ~27% piu' veloci di 4 su clip da 60s). Il cap a 8 evita di
+    # saturare la banda memoria; resta pero' esposto via WHISPER_THREADS
+    # perche' il cap nasce dalla misura su una sola CPU.
+    n_threads = cpu_threads if cpu_threads else DEFAULT_WHISPER_THREADS
+    # Rete di sicurezza: se l'accelerazione richiesta fallisce alla COSTRUZIONE
+    # del modello, si ripiega su CPU invece di far morire la pipeline. Il
+    # fallimento qui e' istantaneo (nessuna decodifica e' iniziata), quindi il
+    # ripiego non costa il doppio del runtime.
+    #
+    # Motori di fallimento osservati: driver NVIDIA troppo vecchio per la
+    # runtime CUDA ("CUDA driver version is insufficient for CUDA runtime
+    # version"), CTranslate2 compilato senza supporto CUDA, GPU non visibile
+    # dopo un suspend/riavvio del driver. Sono tutti indistinguibili dall'alto,
+    # e tutti risolti dal ripiego: la trascrizione e' piu' lenta ma esce.
+    #
+    # Se invece e' l'utente ad aver chiesto CUDA esplicitamente, il fallback
+    # silenzioso sarebbe una sorpresa: si avvisa e si lascia morire.
+    try:
+        model = WhisperModel(
+            model_size,
+            device=device,
+            compute_type=compute_type,
+            cpu_threads=n_threads,
+        )
+    except (RuntimeError, OSError) as e:
+        if device != "cuda":
+            raise
+        log.warning("   ⚠️  CUDA non utilizzabile (%s)", e)
+        if _device_was_explicit:
+            log.error(
+                "   Hai chiesto esplicitamente --whisper-device cuda, quindi non ripiego "
+                "silenziosamente: usa --whisper-device cpu (oppure lascia --transcriber auto)."
+            )
+            raise
+        log.warning("   Ripiego su faster-whisper su CPU (int8): piu' lento, ma la run prosegue.")
+        device = "cpu"
+        compute_type = "int8"
+        model = WhisperModel(model_size, device=device, compute_type=compute_type, cpu_threads=n_threads)
+    log.debug("   Modello Whisper caricato (device=%s).", device)
 
     # Parametri VAD
     vad_params = vad_parameters or {

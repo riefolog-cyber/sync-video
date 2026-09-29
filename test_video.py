@@ -16,6 +16,7 @@ from PIL import Image, UnidentifiedImageError
 from video import (
     _build_video_ffmpeg,
     _concat_quote,
+    _letterbox_references,
     _open_slide_retry,
     _prepare_slides_for_concat,
     _run_ffmpeg,
@@ -103,6 +104,58 @@ class TestPrepareSlides(unittest.TestCase):
             self.assertEqual(len(sizes), 1)
             # Il canvas è la slide adattata più grande (640x480, già pari)
             self.assertEqual(sizes.pop(), (640, 480))
+
+    def test_letterbox_references_match_what_the_encoder_produces(self):
+        """La reference della verifica deve essere IDENTICA all'output dell'encoder.
+
+        Prima le reference erano i PNG originali, mentre il frame estratto dal
+        video aveva il letterbox: su una slide 4:3 in un deck 16:9 la
+        similarità scendeva a -0.55 contro una soglia di 0.85, cioè ogni
+        segmento non allineato al canvas finiva fra i mismatches e la
+        riparazione automatica spostava il confine su rumore.
+        """
+        from PIL import Image, ImageDraw
+
+        def slide(size, color):
+            # Contenuto non uniforme: su un'immagine a colore piatto il vettore
+            # di _gray_vector ha norma zero e image_similarity restituisce 0.0
+            # per definizione, quindi il confronto non significherebbe nulla.
+            img = Image.new("RGB", size, (245, 245, 245))
+            d = ImageDraw.Draw(img)
+            d.rectangle([size[0] // 8, size[1] // 8, size[0] * 7 // 8, size[1] * 7 // 8], fill=color)
+            return img
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            wide = td_path / "wide.png"
+            four_three = td_path / "four_three.png"
+            slide((1920, 1080), (40, 80, 180)).save(wide)
+            slide((1024, 768), (200, 60, 40)).save(four_three)
+            slides = [str(wide), str(four_three)]
+
+            prepared = _prepare_slides_for_concat(slides, td_path / "enc")
+            refs = _letterbox_references(slides, td_path / "ref")
+            self.assertIsNotNone(refs)
+            assert refs is not None
+            self.assertEqual(len(refs), len(prepared))
+
+            # Ogni reference deve corrispondere a ciò che l'encoder mette nel
+            # video: è la condizione perché il confronto valga. La soglia è
+            # 0.999 e non 1.0 perché il vettore è float32 (norma e prodotto
+            # accumulano errore di arrotondamento).
+            for enc, ref in zip(prepared, refs, strict=True):
+                self.assertGreaterEqual(image_similarity(enc, ref), 0.999)
+                with Image.open(enc) as a, Image.open(ref) as b:
+                    self.assertEqual(a.size, b.size)
+
+    def test_letterbox_references_survive_unreadable_slide(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            good = td_path / "good.png"
+            Image.new("RGB", (320, 200), (0, 0, 0)).save(good)
+            self.assertIsNone(_letterbox_references([str(good), str(td_path / "no.png")], td_path / "ref"))
 
 
 class TestRunFfmpeg(unittest.TestCase):

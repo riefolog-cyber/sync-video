@@ -235,7 +235,7 @@ def extract_slide_anchors(
                 "   [Ancore] %d riferimenti trovati, %d usati come ancore; slide senza riferimento esplicito: %s.",
                 len(mentions),
                 len(anchors),
-                ", ".join(str(s) for s in missing) or "nessuna",
+                ", ".join(str(s) for s in missing),
             )
     return anchors
 
@@ -844,12 +844,14 @@ def _lis_anchors(refs: dict[int, float]) -> dict[int, float]:
             tails[pos] = s
             tails_idx[pos] = i
     ordered: list[tuple[int, float]] = []
-    if tails_idx:
-        k = tails_idx[-1]
-        while k != -1:
-            ordered.append(items[k])
-            k = prev[k]
-        ordered.reverse()
+    # `if tails_idx:` era un guard morto: sopra si esce gia' se refs e' vuoto,
+    # quindi n >= 1 e tails_idx ha almeno un elemento (il primo item entra
+    # sempre con pos == len(tails) == 0, cioe' in append).
+    k = tails_idx[-1]
+    while k != -1:
+        ordered.append(items[k])
+        k = prev[k]
+    ordered.reverse()
     return {s: t for s, t in ordered}
 
 
@@ -1195,7 +1197,14 @@ def detect_flow_from_words(
         if _is_slide_word(w["word"]):
             if _embedded_slide_number(w_norm) is not None:
                 return "slide-audio"
-            for j in range(i + 1, min(i + 4, len(words))):
+            # Finestra di 8 parole, non 4: `_collect_slide_mentions` guarda
+            # finche' 8 per riconoscere "slide, come potete vedere, la numero
+            # tre" (cfr. il commento di quel punto). Con 4 la detection non
+            # riconosceva la stessa frase, il flusso restava "auto" e la
+            # regex sulla trascrizione compatta — che conosce solo le cifre —
+            # non trovava "numero tre": si finiva nel flusso libero e le ancore
+            # deterministiche, che erano li', non venivano mai usate.
+            for j in range(i + 1, min(i + 8, len(words))):
                 if _number_from_word(_normalize(words[j]["word"])) is not None:
                     return "slide-audio"
 
