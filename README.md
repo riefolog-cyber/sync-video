@@ -404,6 +404,22 @@ La presentazione esiste prima e il podcast deve **annunciare ogni slide**
 - Riferimenti fuori ordine (es. "come dicevamo nella slide 3" dopo la
   slide 4) non fanno più perdere l'ancora: viene recuperata la prima
   menzione in ordine cronologico.
+- Un numero vicino alla parola "slide" che **non** è un riferimento ("i tre
+  concetti della slide", "la slide spiega il ciclo in quattro fasi") non crea
+  più un'ancora fantasma: una menzione vale come transizione solo se, al suo
+  tempo, nessuna slide di numero maggiore era già stata annunciata. Le
+  citazioni scartate sono elencate con il loro tempo nel riepilogo e in
+  `sync_report.json` (`anchors.discarded_citations`): un confine spostato di
+  minuti ha lì la sua spiegazione.
+- La numerazione detta ad alta voce è verificata **a ogni run**, anche quando
+  tutte le slide sono annunciate: uno sfasamento uniforme (deck con una pagina
+  in meno, copertina esclusa dalla numerazione) sposta l'intero video di una
+  slide senza che manchi alcuna ancora. È un controllo offline (~2s con cache).
+- Fra due ancore consecutive le slide non ancorate restano dentro i blocchi
+  compresi fra le due: senza questo vincolo la somiglianza del contenuto
+  potrebbe assegnare a cinque slide lo stesso blocco, producendo segmenti di
+  mezzo secondo che il pavimento anti-flicker non può spostare (i due vicini
+  sono ancorati).
 
 ---
 
@@ -468,7 +484,7 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--semantic-min-duration` | `3.0` | Durata minima slide (s) |
 | `--semantic-temperature` | `0.15` | Competizione softmax (più bassa = picchi più netti) |
 | `--semantic-min-z` | `0.45` | Soglia sul **picco medio normalizzato** (z-score per slide, la stessa matrice usata dal posizionamento): è la misura che distingue un allineamento giusto da slide mescolate. Sotto soglia la timeline **non** viene scartata: viene segnalata (escalation al LLM, gate `--strict-sync`, report e riepilogo finale). Tarata su dati reali: ordine giusto 0.61-0.75, slide mescolate 0.30-0.43, invertite 0.18, non correlate ≤0.09, quasi-duplicate 0.006 |
-| `--semantic-min-sim` | `0.10` | Soglia storica sulla similarità media **grezza**. Coi valori reali (0.80+) non può mai scattare: e5 dà ~0.84 tra due testi italiani qualsiasi, quindi il valore assoluto non dice nulla sull'allineamento. Resta solo per compatibilità; la decisione è su `--semantic-min-z` |
+| ~~`--semantic-min-sim`~~ | — | **Rimosso.** Era una soglia sulla similarità media *grezza* e non poteva mai scattare: misurata sui dati reali, anche un testo senza senso dà 0.75 di coseno contro una slide e il parlato reale non scende mai sotto 0.75, quindi la soglia (0.10) era fuori scala di un fattore ~7. Un presidio che non presidia è peggio di non averlo. La decisione è su `--semantic-min-z`, che è libero da scala. Se hai lo `--semantic-min-sim` in uno script, toglilo: il flag non esiste più |
 | `--llm` | `auto` | Selezione slide con LLM: `off` (solo embedding locale), `auto` e `9router` (**oggi equivalenti**: l'unico provider è 9Router, quindi entrambi usano la stessa cascata e ripiegano sull'embedding locale). Libero: slide per chunk. Ordinato: solo le slide senza ancora esplicita |
 | `--llm-model` | — | Override modello LLM (es. `comboact`, `cf/@cf/mistralai/mistral-small-3.1-24b-instruct`) |
 | `--llm-chunk` | `30.0` | Secondi per chunk inviato all'LLM |
@@ -506,6 +522,26 @@ misurata** dal motore (`quality`: `avg_sim` grezza, `avg_z` normalizzata,
 soglia usata) e il verdetto `weak_signal`, le discrepanze della revisione LLM
 e — con `--verify-video` — l'esito del confronto frame vs slide. Così la
 sincronizzazione resta verificabile a posteriori senza rigenerare il video.
+
+Nel flusso ordinato il report contiene anche **`anchors`**, che è la parte da
+leggere per prima quando un confine sembra sbagliato:
+
+- `anchored` / `transitions` — quanti cambi di slide vengono dai "slide N"
+  pronunciati e quanti ne servirebbero. Con `anchored == transitions` la misura
+  di qualità del motore **non** sta misurando i confini: sono quelli dichiarati
+  dagli speaker. Per questo la copertura è stampata anche nel riepilogo finale.
+- `discarded_citations` — i numeri che il parlato contiene ma che **non** erano
+  un riferimento ("i tre concetti della slide", "la slide spiega il ciclo in
+  quattro fasi"), con il loro tempo. È la diagnosi diretta di un confine
+  spostato di minuti: un difetto di estrazione, non del motore embeddings.
+- `unconfirmed` — ancore che il **parlato** non conferma (subito dopo
+  l'annuncio il testo somiglia di più a un'altra slide). Non è un errore: il
+  bridge verso la slide successiva è normale. Diventa un dubbio nel riepilogo
+  solo se il mapping non è stato corretto (`mapping_corrected`), altrimenti è
+  solo un dato di ispezione.
+- `mapping_suspicious` / `mapping_corrected` — la numerazione detta ad alta voce
+  era disallineata rispetto al PDF: o è stata corretta in automatico, o è
+  rimasta sospetta e va controllata a mano.
 
 Quando la scelta automatica del beam entra in gioco, il report contiene anche
 `beam`: la trascrizione **usata** (`chosen`: `greedy` o `accurate`), il motivo

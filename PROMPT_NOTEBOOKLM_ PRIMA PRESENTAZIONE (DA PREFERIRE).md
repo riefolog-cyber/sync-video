@@ -2,48 +2,42 @@
 
 ## 0\. Preparazione (obbligatoria)
 
-1. Seleziona TUTTE le fonti che vuoi usare.
-2. Genera la presentazione con NotebookLM (**Studio → Slide Deck**) incollando questo prompt:
+1. Seleziona TUTTE le fonti che ti servono.
+2. Genera la presentazione da **Studio → Slide Deck** con questo prompt:
 
 
 
-"Crea una presentazione strutturata in sezioni/argomenti, una slide per argomento, in ordine logico; ogni slide con titolo chiaro e contenuti distinti dalle altre. NUMERA OGNI SLIDE (1, 2, 3...) in un piccolo angolo in basso a sinistra, nell'ordine delle pagine. TESTO RIGOROSAMENTE SOLO IN ITALIANO."
+> Crea una presentazione in italiano: una slide per argomento, senza dividere un argomento in due slide né accorparne due in una. Numera ogni slide nell'ordine delle pagine. Testo rigorosamente solo in italiano.
 
 
 
-NotebookLM sintetizza le fonti selezionate e sceglie il numero di slide più adatto: ogni slide sarà una sezione annunciata dal podcast.
-3. Scarica la presentazione generata e mettila nelle fonti come **PRESENTAZIONE**.
+3. Scarica la presentazione generata e ricaricala nelle fonti come **PRESENTAZIONE**.
 
-## 1\. Da incollare in "Personalizza" → "Istruzioni" per generare audio (con TUTTE le fonti selezionate)
-
-
-
-Segui l'ordine del file presentazione.pdf nelle fonti: procedi per slide e per ognuna non limitarti a rileggere o parafrasare: cita le altre fonti, collega le sezioni e aggiungi esempi concreti. La presentazione resta la spina dorsale.
-
-Le altre fonti servono SOLO come approfondimento della slide corrente: non introdurre argomenti di altre slide né cambiare l'ordine.
-
-ANCORE E STRUTTURA (OBBLIGATORIO):
-
-* Una sezione = una slide del PDF. Il numero che pronunci DEV'ESSERE il numero di pagina della slide nel PDF (la prima pagina è la slide 1). Segui tutte le slide in ordine rigoroso, senza saltarne.
-* PRIMA di scrivere: elenca TUTTE le slide del PDF (numero di pagina + titolo). Quel piano è lo scheletro del podcast: segui ogni voce in ordine, senza unirne due in un'unica sezione.
-* Anche se una slide ti sembra breve o simile alla precedente, annunciala comunque con "passiamo alla slide N" e dedicale almeno 2-3 frasi che spiegano cosa aggiunge rispetto alla precedente. Non inglobarla nella sezione precedente.
-* All'inizio di ogni sezione (dalla seconda in poi) pronuncia UNA sola volta "passiamo alla slide N": il numero va detto per esteso e chiaramente, subito dopo la parola "slide" (es. "slide cinque"), senza altre parole in mezzo. Mai "slide di dieci", "la slide numero", parafrasi o preposizioni tra "slide" e il numero (l'audio non ha "cifre": conta solo la pronuncia chiara). Prima di announcements, controlla il numero della pagina successiva del PDF.
-* Quando announce una slide, pronuncia anche il suo titolo o le parole chiave come compaiono nella presentazione.
-* Mai sinonimi ("sezione 3", "capitolo", "punto 2", "diapositiva") né "slide"+ numero in altri contesti.
-
-Per ogni sezione:
-
-1. announce "passiamo alla slide N"
-2. spiega i punti e le parole chiave della slide
-3. chiudi con una domanda aperta e poi con una frase riassuntiva. (non ripetere ogni volta "in sintesi")
+## 1\. Da incollare in "Personalizza" → "Istruzioni" per generare l'audio
 
 
 
-TONO E STILE DEL DIBATTITO
+La presentazione è la spina dorsale: segui le sue pagine in ordine. Non rileggere il testo delle slide: sintetizzalo e arricchiscilo con le altre fonti, con collegamenti ed esempi concreti. Le altre fonti servono SOLO ad approfondire la pagina corrente — non introdurre argomenti di altre pagine né cambiarne l'ordine.
+
+## ANCORE — da rispettare alla lettera
+
+Una sezione = una pagina del PDF, e ogni sezione si apre con la sua frase. Il video si sincronizza sulle frasi in cui dichiari il numero di pagina: una pagina senza la sua frase non può essere mostrata nel punto giusto, quindi queste regole valgono più della fluidità del testo.
+
+- **Una frase per pagina, dalla seconda in poi, identica ogni volta:** *«Passiamo alla slide [numero della pagina].»* — la parola "slide" col suo numero (mai segnaposto, mai un esempio ripreso alla lettera), e subito dopo il contenuto di quella pagina. Sempre "slide N", mai "sezione N" o "capitolo N".
+
+- **In ordine, una volta sola.** Se le pagine sono N, gli annunci sono N-1 dal 2 a N: niente salti, niente ripetizioni, niente ritorni a una pagina già trattata ("torniamo a questa idea", non "torniamo alla slide sette").
+
+- **Un numero vicino a "slide" solo se apre la sezione**, altrimenti almeno una frase di distanza: "qui i tre concetti sono chiari" e non "i tre concetti della slide"; "il ciclo ha quattro fasi" e non "la slide spiega il ciclo in quattro fasi"; niente ordinali ("il primo punto") accanto a "slide"; mai il numero totale di pagine o sezioni.
+
+- **Numeri di slide solo in quella frase:** intro, passaggi e chiusura non nominano le pagine.
+
+Controlla, prima di generare, di avere una frase di apertura per ogni pagina dalla 2 all'ultima.
+
+## TONO E STILE
 ══════════════════════════════════════════════════════════
-▸ TARGET: Classe di scuola secondaria di secondo grado (14-19 anni), lezione di IRC.
-▸ TONO: Frasi corte, linguaggio fresco e immediato, esempi dalla quotidianità dei giovani (scuola, amicizia, famiglia, social); zero tecnicismi e termini stranieri non spiegati.
-▸ DINAMICA: Due conduttori in scambio rapido, senza monologhi; uno solleva dubbi da studente, l'altro chiarisce senza giudicare. Rivolgiti sempre direttamente agli studenti.
-▸ FOCUS: Nodi con valenza educativa, etica, esistenziale o culturale; niente tono moralistico: proponi i concetti come domande, non come verità.
-▸ INTRO: Breve (30-40 s) e già parte della prima sezione, senza annunciare una scaletta.
-
+▸ TARGET: classe di scuola secondaria di secondo grado (14-19 anni), lezione di IRC.
+▸ TONO: frasi corte, linguaggio fresco, esempi dalla quotidianità dei ragazzi (scuola, amicizia, famiglia, social); niente tecnicismi, niente termini stranieri non spiegati.
+▸ DINAMICA: due conduttori in scambio rapido, senza monologhi; uno solleva dubbi da studente, l'altro chiarisce senza giudicare. Rivolgiti sempre direttamente agli studenti.
+▸ FOCUS: nodi con valenza educativa, etica, esistenziale o culturale; niente tono moralistico — proponi i concetti come domande, non come verità.
+▸ CHIUSURA DI SEZIONE: una domanda aperta e poi una frase riassuntiva (senza "in sintesi" a ogni giro).
+▸ INTRO: breve, già dentro la prima sezione, senza annunciare una scaletta.
