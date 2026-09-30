@@ -1223,12 +1223,12 @@ def _timeline_from_cached(
         if timeline is None:
             return None
         # Come nel percorso live (``llm_ordered_timeline``): le ancore
-        # esplicite non devono MAI essere spostate dall'interpolazione. Il
-        # clamp di ``_complete_from_anchors`` può scalare TUTTI i tempi
-        # (ancore incluse) quando l'estrapolazione dell'ultima slide supera la
-        # durata audio: le ancore vengono ripristinate ai loro timestamp esatti
-        # e la timeline riconciliata, così cache e run diretta producono
-        # risultati identici.
+        # esplicite non devono MAI essere spostate dall'interpolazione.
+        # ``_complete_from_anchors`` accorcia solo l'inventato quando
+        # l'estrapolazione dell'ultima slide supera la durata audio, quindi
+        # questo ripristino è una rete di sicurezza: se un giorno quel clamp
+        # tornasse a toccare i tempi, la timeline dichiarata resterebbe
+        # comunque allineata ai timestamp parlati.
         for s, t in anchors.items():
             timeline[s] = float(t)
         try:

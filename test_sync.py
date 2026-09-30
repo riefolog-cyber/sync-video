@@ -629,6 +629,35 @@ class TestSlideAudioFlow(unittest.TestCase):
         self.assertIn("superate da un richiamo", "\n".join(logs.output))
         self.assertNotIn("citazioni (dopo un numero", "\n".join(logs.output))
 
+    def test_completion_clamp_never_moves_an_anchor(self):
+        # L'estrapolazione dell'ultima slide senza ancora supera la durata
+        # audio: il clamp accorcia l'INVENTATO e lascia le ancore ai tempi
+        # pronunciati dallo speaker. Prima il clamp scalava tutto in
+        # proporzione, spostando qui 300s -> 250s e 600s -> 500s senza
+        # dichiararlo: la verifica frame passava lo stesso, perché confronta
+        # i fotogrammi con una timeline dichiarata coerente ma sbagliata.
+        from timeline import _complete_from_anchors
+
+        out = _complete_from_anchors(
+            {2: 300.0, 3: 600.0, 5: 900.0}, total_slides=6, total_duration=1000.0
+        )
+        self.assertIsNotNone(out)
+        assert out is not None
+        for slide, spoken in ((2, 300.0), (3, 600.0), (5, 900.0)):
+            self.assertEqual(out[slide], spoken, f"ancora della slide {slide} spostata")
+        self.assertLessEqual(out[6], 1000.0)
+        self.assertGreater(out[6], out[5])
+
+    def test_completion_declines_when_an_anchor_exceeds_the_audio(self):
+        # Un'ancora oltre la durata dell'audio non ha risposta corretta:
+        # spostarla falserebbe la misura dello speaker, ignorarla romperebbe la
+        # monotonia. La funzione rinuncia e il chiamante ripiega.
+        from timeline import _complete_from_anchors
+
+        self.assertIsNone(
+            _complete_from_anchors({2: 300.0, 3: 1200.0}, total_slides=4, total_duration=1000.0)
+        )
+
     def test_italian_number_words(self):
         words = _words(
             [
@@ -2145,7 +2174,7 @@ class TestPlainSummary(unittest.TestCase):
         self.assertIn("3 slide", out)
         self.assertIn("slide  1", out)
         self.assertIn("1m00s", out)
-        self.assertIn("tutte le 3 slide sono", out)
+        self.assertIn("OK, 3 segmenti su 3 mostrano", out)
         self.assertIn("nessuno, la sincronizzazione è", out)
         self.assertIn("alta (picco medio 0.69", out)
 
@@ -2192,6 +2221,28 @@ class TestPlainSummary(unittest.TestCase):
     def test_missing_check_is_stated(self):
         out = self._render()
         self.assertIn("Controllo del video finito: non eseguito", out)
+
+    def test_frame_check_states_how_many_were_verified(self):
+        # "tutte le 8 slide" si legge come se il video fosse tutto verificato,
+        # mentre 8 era il numero dei segmenti ESTRATTI. Il totale lo dice il
+        # numero di segmenti: devono comparire entrambi.
+        out = self._render(
+            total_duration=600.0,
+            slide_ids=[1, 2, 3, 4, 5],
+            durations=[120.0, 120.0, 120.0, 120.0, 120.0],
+            frame_check={"checked": 5, "coherent": 5, "mismatches": []},
+        )
+        self.assertIn("OK, 5 segmenti su 5 mostrano la slide prevista", out)
+        self.assertNotIn("tutte le", out)
+
+    def test_partial_frame_check_is_flagged(self):
+        out = self._render(
+            total_duration=600.0,
+            slide_ids=[1, 2, 3, 4, 5],
+            durations=[120.0, 120.0, 120.0, 120.0, 120.0],
+            frame_check={"checked": 2, "coherent": 2, "mismatches": []},
+        )
+        self.assertIn("PARZIALE, 2 segmenti su 5 controllati", out)
 
     def test_anchor_coverage_is_stated(self):
         # La misura del motore dice quanto è stato MISURATO: con le transizioni

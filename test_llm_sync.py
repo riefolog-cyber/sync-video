@@ -508,10 +508,10 @@ class TestTimelineFromCached(unittest.TestCase):
 
     def test_anchors_restored_after_completion_clamp(self):
         # L'estrapolazione dell'ultima slide senza ancora supera la durata
-        # audio: il clamp di ``_complete_from_anchors`` scalerebbe TUTTI i
-        # tempi (ancore incluse), spostando la slide 4 dal suo timestamp
-        # parlato (95s) a ~74s. Il percorso cache deve ripristinare le ancore
-        # come il percorso live: la slide 4 resta a 95.0s.
+        # audio: il clamp accorcia solo l'inventato e le ancore restano ai
+        # loro timestamp. Il percorso cache le ripristina comunque, quindi il
+        # risultato deve essere lo stesso del percorso live: la slide 4 resta
+        # a 95.0s e non a ~74s.
         cached = [{"slide": 2, "start": 30.0}, {"slide": 3, "start": 40.0}]
         anchors = {1: 0.0, 4: 95.0}
         out = _timeline_from_cached(cached, anchors, total_slides=5, total_duration=100.0)

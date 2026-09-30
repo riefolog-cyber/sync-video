@@ -894,12 +894,36 @@ def _complete_from_anchors(
         if completed[s] <= completed[s - 1]:
             completed[s] = completed[s - 1] + max(1.0, total_duration * 0.001)
 
-    # Clamp finale: se l'ultima slide supera la durata, scala tutto
+    # Clamp finale: se l'ultima slide supera la durata dell'audio, si accorcia
+    # solo l'INVENTATO. Le ancore sono tempi pronunciati dallo speaker: sono
+    # l'unica misura reale della timeline, e riscalarle (come faceva questo
+    # codice) sposta l'intero video in silenzio — la verifica frame passerebbe
+    # uguale, perché confronta i fotogrammi con una timeline dichiarata che a
+    # quel punto è coerente ma sbagliata. I tempi interpolati, invece, sono
+    # stime: sono gli unici che si possono accorciare.
     if completed[total_slides] > total_duration:
-        scale = (total_duration - 1.0) / completed[total_slides] if completed[total_slides] > 0 else 1.0
-        if 0 < scale < 1.0:
-            for s in completed:
-                completed[s] *= scale
+        for s in sorted((x for x in completed if x not in anchors), reverse=True):
+            # Non si accorcia oltre l'inizio precedente, altrimenti il confine
+            # si rovescia e l'interpolazione perde senso.
+            prev_start = completed.get(s - 1, 0.0)
+            room = total_duration - prev_start
+            if room <= 0:
+                return None  # nessuno spazio: lascia decidere reconcile_timeline
+            if completed[s] > total_duration:
+                completed[s] = max(prev_start, total_duration - min(room, 1.0))
+        # Ricostruisce la crescenza stretta sui confini appena accorciati. Può
+        # riportare l'ultima slide oltre la durata: in quel caso reconcile non
+        # valida la timeline e la funzione rinuncia, che è la risposta giusta
+        # (meglio nessuna timeline che una timeline spostata).
+        for s in range(2, total_slides + 1):
+            if completed[s] <= completed[s - 1]:
+                completed[s] = completed[s - 1] + 1e-3
+        for s in sorted(completed, reverse=True):
+            if s in anchors and completed[s] > total_duration:
+                # Un'ancora oltre la durata dell'audio non ha risposta corretta:
+                # spostarla falserebbe la misura dello speaker, ignorarla
+                # renderebbe la timeline monotona. Si rinuncia.
+                return None
 
     try:
         reconcile_timeline(completed, total_slides, total_duration)

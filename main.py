@@ -386,11 +386,23 @@ def _log_plain_summary(
     else:
         checked = int(cast("int", frame_check.get("checked") or 0))
         coherent = int(cast("int", frame_check.get("coherent") or 0))
+        total = len(durations)
+        if checked < total:
+            # Un frame non estratto viene scartato con un log di DEBUG, quindi
+            # senza questo avviso "OK, tutte le 8 slide" si leggerebbe come se
+            # il video fosse stato tutto verificato: qui si dice cosa manca.
+            log.warning(
+                "   Controllo del video finito: PARZIALE, %d segmenti su %d "
+                "controllati (frame non estratti: vedi .cache/verify_frames/).",
+                checked,
+                total,
+            )
         if checked and coherent == checked:
             log.info(
-                "   Controllo del video finito: OK, tutte le %d slide sono "
-                "comparse quando previsto.",
+                "   Controllo del video finito: OK, %d segmenti su %d mostrano "
+                "la slide prevista.",
                 checked,
+                total,
             )
         else:
             log.warning(
