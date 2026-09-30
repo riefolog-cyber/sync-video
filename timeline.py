@@ -143,8 +143,8 @@ def extract_slide_anchors(
         # numero reale di slide del PDF (ignorate dal DP, ma confondono i log).
         transitions = _collect_transitions(words, window_seconds)
         return {i + 2: t for i, t in enumerate(transitions[: max(0, total_slides - 1)])}
-    mentions = _collect_slide_mentions(words, total_slides)
-    ordered, deferred = split_ordered_mentions(mentions)
+    mention_kinds = _collect_slide_mention_kinds(words, total_slides)
+    ordered, deferred = split_ordered_mentions(mention_kinds)
     # Le menzioni in ordine sono già coerenti fra loro (per costruzione non
     # scendono mai di numero): il LIS resta come rete di sicurezza.
     anchors = _lis_anchors(ordered)
@@ -155,7 +155,7 @@ def extract_slide_anchors(
     # perché la loro finestra è chiusa dal conteggio. In quel caso la catena del
     # LIS classico, che scarta il conteggio, è più lunga: è la prova che il set
     # "in ordine" poggia su una menzione che non è una transizione.
-    classic = _lis_anchors({s: times[-1] for s, times in mentions.items()})
+    classic = _lis_anchors(_first_transition_per_slide(dict(mention_kinds)))
     if len(classic) > len(anchors):
         log.info(
             "   [Ancore] Il set di menzioni in ordine poggia su un numero che non è "
@@ -165,7 +165,11 @@ def extract_slide_anchors(
             len(anchors),
         )
         anchors = classic
-    if mentions:
+    if mention_kinds:
+        # Da qui in poi la diagnostica ragiona sui TEMPI delle menzioni, non
+        # sulle tuple qualificate: l'etichetta conteggio serve alla scelta della
+        # transizione (sopra), non al report delle citazioni scartate.
+        mentions = {s: [t for t, _ in items] for s, items in mention_kinds.items()}
         # Recupero delle citazioni a posteriori (recap): una slide citata ma
         # mai annunciata in ordine ("come dicevamo nella slide 3", detto dopo
         # la 4) rientra solo se la sua menzione cade fra le ancore vicine.
@@ -206,28 +210,28 @@ def extract_slide_anchors(
             key=lambda p: p[1],
         )
         if displaced:
-            # Due cause diverse, e distinguerle è il punto: la stessa menzione
-            # perduta cambia significato a seconda del motivo, e il confine
-            # spostato dipende da quale delle due è vera.
-            superseded = sorted(
-                ((s, t) for s, t in displaced if anchors.get(s, -1.0) > t), key=lambda p: p[1]
-            )
-            out_of_order = [(s, t) for s, t in displaced if anchors.get(s, -1.0) <= t]
-            if out_of_order:
+            # Una menzione DOPO l'ancora scelta è un richiamo ("guarda sempre
+            # slide 3") o una quantità di contenuto: non è più un errore, perché
+            # l'ancora resta sulla transizione (prima menzione non-conteggio).
+            # Si segnala a INFO perché è la traccia del difetto dell'AUDIO, su
+            # cui il prompt NotebookLM ha una regola dedicata.
+            # Una menzione PRIMA dell'ancora scelta è il caso opposto: l'ancora
+            # è stata alzata (anticipazione o LIS) e la menzione precoce è stata
+            # scartata, quindi il confine può essere troppo tardi: qui il WARNING
+            # resta giustificato.
+            late = sorted((s, t) for s, t in displaced if anchors.get(s, -1.0) <= t)
+            early = sorted((s, t) for s, t in displaced if anchors.get(s, -1.0) > t)
+            if early:
                 log.warning(
                     "   [Ancore] Menzioni scartate come citazioni (dopo un numero di "
                     "slide più grande, quindi non sono transizioni): %s.",
-                    ", ".join(f"'slide {s}' a {t:.1f}s" for s, t in out_of_order),
+                    ", ".join(f"'slide {s}' a {t:.1f}s" for s, t in early),
                 )
-            if superseded:
-                # Qui la menzione era una TRANSIZIONE vera, persa a favore di un
-                # richiamo successivo alla stessa slide ("torniamo alla slide 7"):
-                # l'ancora finisce sul richiamo e la slide resta senza il suo
-                # confine reale. È un difetto dell'audio, non dell'estrazione.
-                log.warning(
-                    "   [Ancore] Transizioni superate da un richiamo alla stessa "
-                    "slide (l'ancora finisce sul richiamo): %s.",
-                    ", ".join(f"'slide {s}' a {t:.1f}s" for s, t in superseded),
+            if late:
+                log.info(
+                    "   [Ancore] Slide richiamate più volte (richiamo ignorato, "
+                    "l'ancora resta sulla transizione): %s.",
+                    ", ".join(f"'slide {s}' a {t:.1f}s" for s, t in late),
                 )
         missing = sorted(s for s in range(2, total_slides + 1) if s not in anchors)
         if missing:
@@ -270,7 +274,53 @@ def _recover_first_in_order(
     return recovered
 
 
-def split_ordered_mentions(mentions: dict[int, list[float]]) -> tuple[dict[int, float], dict[int, list[float]]]:
+def _first_transition_per_slide(
+    candidates: dict[int, list[tuple[float, bool]]],
+) -> dict[int, float]:
+    """Per ogni slide, la PRIMA menzione di transizione ancora valida.
+
+    "Prima" e non "ultima" perché l'ultima menzione di una pagina quasi sempre è
+    un richiamo a posteriori ("guarda sempre slide 3"), che sposta il confine in
+    avanti di decine di secondi e lascia la pagina mostrata insieme alla
+    precedente: sul podcast d'esempio tre ancore su otto erano finite così, con
+    scarti di 74s, 85s e 53s.
+
+    I conteggi ("le 13 slide di questo documento") sono esclusi: non sono
+    transizioni e occuperebbero il posto dell'annuncio vero. Restano però come
+    ripiego: se una slide ha SOLO conteggi si prende l'ultimo disponibile, perché
+    una slide priva di confine verrebbe comunque assegnata per contenuto e
+    l'avviso sulle slide senza ancora deve restare leggibile.
+
+    La passeggiata segue l'ordine dei numeri di slide e ogni transizione deve
+    cadere dopo l'ancora già accettata per la slide precedente: il risultato è
+    quindi monotono crescente per costruzione (il LIS resta rete di sicurezza e non
+    dovrebbe più scartare nulla).
+
+    Args:
+        candidates: ``{slide: [(tempo, e_conteggio), ...]}`` in ordine
+            cronologico, già filtrate alle menzioni in ordine.
+
+    Returns:
+        ``{slide: tempo}``.
+    """
+    chosen: dict[int, float] = {}
+    previous = 0.0
+    for slide in sorted(candidates):
+        usable = [t for t, is_count in candidates[slide] if not is_count]
+        if not usable:
+            usable = [t for t, _ in candidates[slide]]
+        if not usable:
+            continue
+        after = [t for t in usable if t > previous]
+        picked = min(after) if after else max(usable)
+        chosen[slide] = picked
+        previous = picked
+    return chosen
+
+
+def split_ordered_mentions(
+    mentions: dict[int, list[tuple[float, bool]]],
+) -> tuple[dict[int, float], dict[int, list[float]]]:
     """Separa le menzioni 'slide N' che sono TRANSIZIONI da quelle che sono citazioni.
 
     Una menzione è *in ordine* se, al suo tempo, nessuna slide di numero maggiore
@@ -294,25 +344,39 @@ def split_ordered_mentions(mentions: dict[int, list[float]]) -> tuple[dict[int, 
     vera (è successo con "la slide spiega il ciclo in quattro fasi", che
     occupava la slide 4 e faceva perdere la slide 5).
 
-    Fra le menzioni in ordine di una slide vale l'ULTIMA: così una citazione di
-    anticipazione ("le 13 slide di questo documento") non occupa la slide al
-    posto della vera transizione pronunciata dopo.
+    Fra le menzioni in ordine di una slide vale la PRIMA che cada dopo l'ancora
+    già accettata, non l'ultima: l'ultima è il richiamo a posteriori ("guarda
+    sempre slide 3"), che sposta il confine della pagina in avanti di decine di
+    secondi e la lascia mostrata insieme alla precedente. Misurato sul podcast
+    d'esempio: 3 ancore su 8 erano sbagliate di 74s, 85s e 53s.
+
+    Il last-wins esisteva per l'ANTICIPAZIONE ("le 13 slide di questo documento"
+    prima della transizione sulla 13): i due casi sono indistinguibili sul solo
+    tempo, perché entrambe sono due menzioni dello stesso numero. Li separa la
+    qualificazione di ``_collect_slide_mention_kinds``: i conteggi sono marcati
+    e NON entrano nella scelta della transizione. Se una slide ha menzioni solo
+    di conteggio non resta senza ancora (si prende l'ultima, come prima): non si
+    inventa mai un confine.
 
     Returns:
         ``(ordinate, differite)``: le transizioni (``{slide: tempo}``) e le
         citazioni, che possono ancora essere recuperate
         (``{slide: [tempi in ordine cronologico]}``).
     """
-    ordered: dict[int, float] = {}
+    in_order: dict[int, list[tuple[float, bool]]] = {}
     deferred: dict[int, list[float]] = {}
     highest = 0
-    for t, s in sorted((t, s) for s, times in mentions.items() for t in times):
+    for t, s, is_count in sorted(
+        (t, s, is_count)
+        for s, items in mentions.items()
+        for t, is_count in items
+    ):
         if s >= highest:
             highest = s
-            ordered[s] = t  # last-wins fra le menzioni in ordine
+            in_order.setdefault(s, []).append((t, is_count))
         else:
             deferred.setdefault(s, []).append(t)
-    return ordered, deferred
+    return _first_transition_per_slide(in_order), deferred
 
 
 # =====================================================================
@@ -527,34 +591,64 @@ def _collect_slide_references(
     return {s: times[-1] for s, times in mentions.items()}
 
 
-def _collect_slide_mentions(
+# Determinanti e quantificatori che, precedendo un numero, lo rendono un CONTEGGIO
+# ("le 13 slide di questo documento") e non un riferimento di transizione.
+#
+# È il segnale che distingue le due menzioni che altrimenti sono identiche:
+#   - "le 13 slide" (120s) → poi "passiamo alla slide 13" (2058s)   -> vale la 2a
+#   - "passiamo alla slide 2" (112s) → poi "guarda slide 2" (186s)  -> vale la 1a
+# Entrambe sono "slide N" ripetuta, ma la prima vuole l'ultima menzione (il
+# conteggio non è una transizione) e la seconda la prima (il richiamo non è una
+# transizione). Un determinante davanti al numero distingue i due casi senza
+# euristiche sul tempo.
+_COUNT_DETERMINERS = frozenset(
+    {
+        "le", "la", "i", "gli", "delle", "della", "dei", "degli",
+        "questo", "questa", "questi", "queste",
+        "tutto", "tutta", "tutti", "tutte",
+        "un", "una", "uno", "quel", "quella",
+    }
+)
+
+# Separatori che interrompono la ricerca del determinante all'indietro: oltre
+# questi, il determinante non governa più il numero ("e poi le 13 slide" conta).
+_COUNT_BREAKS = frozenset({",", ".", "?", "!", "e", "ma", "però", "poi", "quando", "se"})
+
+
+def _preceded_by_determiner(words: list[Word], num_idx: int, lookback: int = 3) -> bool:
+    """True se il numero all'indice ``num_idx`` è quantificato ("LE 13 slide").
+
+    Si guarda indietro di poche parole (``lookback``) per coprire anche
+    "tutte le 13 slide", dove il determinante è due parole prima. La ricerca si
+    ferma al primo separatore forte: un determinante lontano non governa più il
+    numero, quindi non lo rende un conteggio.
+    """
+    for k in range(num_idx - 1, max(num_idx - lookback - 1, -1), -1):
+        w = _normalize(words[k]["word"])
+        if not w:
+            continue
+        if w in _COUNT_BREAKS:
+            return False
+        if w in _COUNT_DETERMINERS:
+            return True
+    return False
+
+
+def _collect_slide_mention_kinds(
     words: list[Word],
     total_slides: int,
     include_slide_one: bool = False,
-) -> dict[int, list[float]]:
-    """Raccoglie TUTTE le menzioni 'slide N' / 'N ... slide' trovate,
-    incluso quelle fuori ordine cronologico (gestite dal chiamante).
+) -> dict[int, list[tuple[float, bool]]]:
+    """Raccoglie le menzioni 'slide N' qualificando ciascuna come CONTEGGIO
+    o come riferimento.
 
-    Per ogni numero di slide conserva la LISTA delle occorrenze temporali in
-    ordine cronologico (nessun last-wins): il chiamante decide quale usare
-    (l'ultima per l'anticipazione, la prima per il recupero dei recap).
-    Le citazioni di chiusura/ripasso finale sono sempre scartate.
-
-    L'ordine cronologico è garantito, non incidentale: un numero può essere
-    raggiunto da due pattern diversi (numero poi "slide" e "slide" poi numero) e
-    quello che aggancia la stessa slide puo' arrivare in ordine inverso rispetto
-    all'altro — tipico con un conteggio in apertura ("le quindici slide del
-    documento") seguito dalla vera transizione sulla stessa pagina. Se le liste
-    non fossero ordinate, ``times[-1]`` prenderebbe il conteggio al posto
-    dell'annuncio e l'ultima pagina perderebbe l'ancora.
-
-    Con ``include_slide_one=True`` raccoglie anche la "slide 1" parlata: serve
-    alla verifica LLM del mapping (la numerazione dello speaker può essere
-    sfasata, es. "slide 1" mentre mostra la slide 2 del PDF). La slide 1 reale
-    resta comunque SEMPRE a 0.0 e non viene mai vincolata come ancora.
+    Returns:
+        ``{slide: [(tempo, e_conteggio), ...]}`` in ordine cronologico. Il flag
+        è True per i conteggi ("le 13 slide di questo documento"), che non sono
+        transizioni; False per i riferimenti veri, richiami compresi.
     """
     min_slide = 1 if include_slide_one else 2
-    refs: dict[int, list[float]] = {}
+    refs: dict[int, list[tuple[float, bool]]] = {}
     for i, w in enumerate(words):
         w_norm = _normalize(w["word"])
         if _is_slide_word(w["word"]):
@@ -572,7 +666,8 @@ def _collect_slide_mentions(
                         w["start"],
                     )
                     continue
-                refs.setdefault(embedded, []).append(_reference_boundary(words, i))
+                # "slide N" è un riferimento deittico: non un conteggio.
+                refs.setdefault(embedded, []).append((_reference_boundary(words, i), False))
                 log.debug(
                     "   [Deterministico] Trovato '%s' con numero incorporato a %.1fs",
                     w["word"],
@@ -590,7 +685,10 @@ def _collect_slide_mentions(
                                 w["start"],
                             )
                         else:
-                            refs.setdefault(slide_num, []).append(_reference_boundary(words, j))
+                            # "slide N": riferimento, mai conteggio.
+                            refs.setdefault(slide_num, []).append(
+                                (_reference_boundary(words, j), False)
+                            )
                             log.debug(
                                 "   [Deterministico] Trovato 'slide %d' a %.1fs",
                                 slide_num,
@@ -620,14 +718,43 @@ def _collect_slide_mentions(
                                 words[j]["start"],
                             )
                         else:
-                            refs.setdefault(num, []).append(_reference_boundary(words, j))
+                            # È l'UNICA forma in cui può comparire un conteggio:
+                            # "le 13 slide di questo documento". Un numero
+                            # quantificato non è una transizione, quindi va
+                            # marcato: il chiamante non lo scambierà per l'inizio
+                            # della pagina.
+                            is_count = _preceded_by_determiner(words, i)
+                            refs.setdefault(num, []).append(
+                                (_reference_boundary(words, j), is_count)
+                            )
                             log.debug(
-                                "   [Deterministico] Trovato '%s ... slide' a %.1fs",
+                                "   [Deterministico] Trovato '%s ... slide' a %.1fs%s",
                                 w["word"],
                                 words[j]["start"],
+                                " (conteggio)" if is_count else "",
                             )
                         break
-    return {num: sorted(times) for num, times in refs.items()}
+    return {
+        num: [item for item in sorted(times, key=lambda x: x[0])]
+        for num, times in refs.items()
+    }
+
+
+def _collect_slide_mentions(
+    words: list[Word],
+    total_slides: int,
+    include_slide_one: bool = False,
+) -> dict[int, list[float]]:
+    """Tempi di tutte le menzioni 'slide N', senza la qualificazione conteggio.
+
+    Comodo per i chiamanti che trattano ogni menzione allo stesso modo (la
+    verifica LLM del mapping, il report delle citazioni scartate, la ricerca
+    delle "slide 1" parlate). Chi deve scegliere QUALE menzione è la transizione
+    usa ``_collect_slide_mention_kinds``: perderebbe la distinzione fra un
+    conteggio e un richiamo, che è l'unico caso in cui la scelta cambia.
+    """
+    kinds = _collect_slide_mention_kinds(words, total_slides, include_slide_one)
+    return {num: [t for t, _ in items] for num, items in kinds.items()}
 
 
 def _reference_boundary(words: list[Word], last_word_idx: int, max_gap: float = 2.0) -> float:

@@ -160,10 +160,17 @@ def _endpoints() -> list[dict[str, Any]]:
          free nel caso i primi due non siano disponibili.
     """
     endpoints: list[dict[str, Any]] = []
-    # Timeout di richiesta configurabile: default 120s. Abbassalo (es. 60) per
-    # run più reattive quando 9Router è lento; alzalo se i modelli reasoning
-    # della combo faticano a finire in tempo (LLM_9ROUTER_TIMEOUT).
-    timeout = _env_int("LLM_9ROUTER_TIMEOUT", 120)
+    # Timeout di richiesta configurabile: default 45s, NON 120s.
+    #
+    # Tarato sui dati reali di `comboact-state.json`: su 37 modelli della combo la
+    # latenza ha p50 3.2s e max 10.9s. Un timeout di 120s era quindi ~35x il p50:
+    # nella pratica non scattava mai per davvero, e quando scattava (modello morto)
+    # la run pagava 120s + 60s di retry = 180s per scoprire che il backup
+    # rispondeva in 14s. 45s resta 4x il max osservato e 14x il p50: un modello
+    # che non risponde in 45s è morto, non lento.
+    # Alzalo (es. LLM_9ROUTER_TIMEOUT=300) per i modelli "reasoning", che
+    # consumano il budget interno prima di emettere il JSON.
+    timeout = _env_int("LLM_9ROUTER_TIMEOUT", 45)
 
     # 9Router (gateway multi-provider, es. http://localhost:20128/v1)
     r_url = os.environ.get("LLM_9ROUTER_URL", "http://localhost:20128/v1")
@@ -417,6 +424,27 @@ def _as_slide_number(value: Any) -> int | None:
 # =====================================================================
 # CHIAMATA LLM (con cascata di fallback)
 # =====================================================================
+# Endpoint già morti in QUESTA run, per nome+modello.
+#
+# Senza questa memoria il retry del flusso ordinato (riapertura con le ancore
+# forzate) ripartiva da capo dalla stessa cascata e ripagava i timeout del
+# modello che aveva appena fallito: nel run del 25/09 comboact era morto (120s+
+# 60s), il backup rispondeva in 14.5s, e il retry ha ripagato altri 120s su
+# comboact PRIMA di arrivare allo stesso backup che già sapeva rispondere.
+# Con la memoria il retry va dritto al primo endpoint ancora vivo.
+_DEAD_ENDPOINTS: set[str] = set()
+
+
+def reset_dead_endpoints() -> None:
+    """Dimentica gli endpoint morti (nuova run / nuovo contesto di test)."""
+    _DEAD_ENDPOINTS.clear()
+
+
+def _endpoint_key(endpoint: dict[str, Any]) -> str:
+    """Identità di un endpoint nella memoria dei fallimenti (nome + modello)."""
+    return f"{endpoint.get('name', '?')}::{endpoint.get('model', '?')}"
+
+
 def _call_endpoint(
     endpoint: dict[str, Any],
     messages: list[dict[str, str]],
@@ -440,13 +468,13 @@ def _call_endpoint(
         # "length" senza content interpretabile. 8192 copre anche quelli.
         "max_tokens": 8192,
     }
-    # Retry di rete (timeout/connessione) LIMITATI: un Read timed out dopo ~120s
-    # è quasi sempre sistemico (modello lento o router in errore), non transitorio.
-    # Un solo retry col timeout DIMEZZATO, poi si passa subito al fallback: prima
-    # 3 tentativi da 120s = fino a ~6 minuti sprecati prima del backup esplicito.
+    # Retry di rete (timeout/connessione) LIMITATI: un timeout è quasi sempre
+    # sistemico (modello lento o router in errore), non transitorio. Con il
+    # timeout a 45s un solo retry col timeout DIMEZZATO lascia il fallback
+    # esplicito raggiungibile in 45+22 = 67s, invece dei vecchi 180s.
     max_attempts = 3  # solo il rate-limit HTTP 429 beneficia del backoff completo
     network_max = 2  # tentativi totali concessi agli errori di rete
-    timeout = float(endpoint.get("timeout", 120))
+    timeout = float(endpoint.get("timeout", 45))
     for attempt in range(max_attempts):
         try:
             resp = requests.post(
@@ -465,11 +493,15 @@ def _call_endpoint(
                     e,
                 )
                 # Il retry dopo un timeout intero raramente riesce: dimezza il
-                # timeout così il fallback al backup arriva prima (120+60=180s max).
+                # timeout così il fallback al backup arriva prima (45+22=67s max).
                 timeout = max(20.0, timeout / 2)
                 time.sleep(2 * (attempt + 1))
                 continue
             log.warning("   [LLM] %s non raggiungibile: %s", endpoint["name"], e)
+            # Errore di rete esaurito: questo endpoint è morto per il resto della
+            # run. Senza questo marchio la prossima cascata (o il retry del flusso
+            # ordinato) ripagherebbe gli stessi timeout.
+            _DEAD_ENDPOINTS.add(_endpoint_key(endpoint))
             return None
 
         if resp.status_code == HTTP_TOO_MANY_REQUESTS and attempt < max_attempts - 1:
@@ -512,6 +544,26 @@ def _call_endpoint(
     return None
 
 
+# Tempo cumulato delle chiamate LLM (attesa di rete + generazione).
+#
+# Esposto al chiamante per il riepilogo tempi di main.py. Senza questa voce il
+# costo dell'LLM finiva dentro "Sincronizzaz." senza attribuzione: è la stessa
+# classe di difetto già corretto per l'embedding (la riga mostrava il
+# caricamento del modello invece dei ~30s di embedding veri).
+_LLM_SECONDS = 0.0
+
+
+def llm_seconds() -> float:
+    """Secondi cumulati passati nelle chiamate LLM (solo attesa di rete)."""
+    return _LLM_SECONDS
+
+
+def reset_llm_seconds() -> None:
+    """Azzera il cronometro LLM (nuova run / nuovo contesto di test)."""
+    global _LLM_SECONDS
+    _LLM_SECONDS = 0.0
+
+
 def _call_cascade(
     endpoints: Sequence[dict[str, Any]],
     messages: list[dict[str, str]],
@@ -522,11 +574,27 @@ def _call_cascade(
     Returns:
         (content, used_endpoint, used_model) del primo endpoint che risponde,
         oppure (None, None, None) se tutti falliscono.
+
+    Gli endpoint già marcati morti in questa run (errori di rete esauriti) sono
+    saltati senza ripetere i loro timeout: la cascata riparte dal primo
+    endpoint ancora vivo.
     """
+    global _LLM_SECONDS
     for ep in endpoints:
+        if _endpoint_key(ep) in _DEAD_ENDPOINTS:
+            log.info(
+                "   %s Salto %s (modello %s): già risultato irraggiungibile in questa run.",
+                prefix,
+                ep["name"],
+                ep["model"],
+            )
+            continue
         t0 = time.time()
         log.info("   %s Provo %s (modello %s)...", prefix, ep["name"], ep["model"])
         content = _call_endpoint(ep, messages)
+        # Il tempo di attesa resta conteggiato anche quando la chiamata fallisce:
+        # è proprio in quel caso che è il costo che il riepilogo deve mostrare.
+        _LLM_SECONDS += time.time() - t0
         if content is not None:
             log.info(
                 "   %s %s [%s] ha risposto in %.1fs.",
@@ -1038,10 +1106,21 @@ def llm_ordered_timeline(
         log.info("   [LLM/Ordinato] Timeline recuperata dalla cache (hash %s).", cache_key[:12])
         return _timeline_from_cached(cached, anchors, total_slides, total_duration)
 
+    # Cache NEGATIVA: l'LLM ha già provato questo input ed è fallito di recente.
+    # Ripetere la cascata costerebbe di nuovo minuti per arrivare allo stesso
+    # fallback locale, quindi si va diretti al motore locale.
+    if _load_llm_failure(cache_key):
+        log.info(
+            "   [LLM/Ordinato] L'LLM aveva già fallito su questo input "
+            "(cache negativa valida): passo al motore locale senza riprovare.",
+        )
+        return None
+
     # Health-check: se 9Router è spento, avvio automatico + PAUSA con avviso
     # e ripresa automatica appena torna online (o 'S' per il fallback MiniLM).
     # In modalità strict (senza terminale): errore chiaro, niente fallback.
     if not wait_for_router(eps, wait_timeout=wait_timeout, context="le slide senza ancora", strict=strict):
+        _save_llm_failure(cache_key)
         return None
 
     system, user = build_ordered_prompt(slide_texts[:total_slides], chunks, anchors)
@@ -1053,11 +1132,13 @@ def llm_ordered_timeline(
     content, used_endpoint, used_model = _call_cascade(eps, messages, "[LLM/Ordinato]")
     if content is None:
         log.warning("   [LLM/Ordinato] Nessun endpoint disponibile: fallback al motore locale.")
+        _save_llm_failure(cache_key)
         return None
 
     slides = parse_llm_response(content, len(chunks), total_slides=total_slides)
     if slides is None or all(s is None for s in slides):
         log.warning("   [LLM/Ordinato] Risposta non interpretabile: fallback al motore locale.")
+        _save_llm_failure(cache_key)
         return None
 
     # Le ancore esplicite sono vincoli ESATTI e inviolabili: nessuna posizione
@@ -1094,6 +1175,7 @@ def llm_ordered_timeline(
             "   [LLM/Ordinato] Vincoli insoddisfacibili anche dopo il secondo tentativo: "
             "fallback al motore locale (qualità inferiore).",
         )
+        _save_llm_failure(cache_key)
         return None
 
     # Le ancore esplicite non devono MAI essere spostate dall'interpolazione.
@@ -1110,6 +1192,7 @@ def llm_ordered_timeline(
             "   [LLM/Ordinato] Timeline non valida dopo il ripristino delle ancore: "
             "fallback al motore locale."
         )
+        _save_llm_failure(cache_key)
         return None
 
     log.info(
@@ -1967,4 +2050,61 @@ def _save_llm_cache(key: str, segments: list[dict[str, object]]) -> None:
         atomic_write_text(
             path,
             json.dumps(segments, ensure_ascii=False),
+        )
+
+
+# =====================================================================
+# CACHE NEGATIVA: ricordare che l'LLM ha FALLITO per questa chiave
+# =====================================================================
+# Finora la cache LLM ricordava solo i SUCCESSI: il file veniva scritto solo
+# dopo una timeline valida. Un fallimento quindi non lasciava traccia e ogni
+# rerun ripagava l'intera cascata (nel run del 25/09: ~328s per arrivare
+# esattamente allo stesso fallback locale).
+#
+# La chiave è un hash del CONTENUTO (slide + parlato + ancore + endpoint), quindi
+# un insuccesso marcato vale solo per quell'input: cambiando input la chiave
+# cambia e il tentativo viene rifatto. Il TTL è breve per non trasformare la
+# cache in un "non riprovare mai": il router può tornare su, e in quel caso il
+# fallimento scaduto va ricalcolato.
+#
+# TTL default 30 minuti, override con LLM_FAILURE_TTL_SECONDS (0 = disattiva).
+def _failure_ttl() -> float:
+    raw = os.environ.get("LLM_FAILURE_TTL_SECONDS", "1800")
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 1800.0
+
+
+def _load_llm_failure(key: str) -> bool:
+    """True se l'LLM è già fallito per questa chiave e il TTL non è scaduto."""
+    ttl = _failure_ttl()
+    if ttl <= 0:
+        return False
+    path = CACHE_DIR / f"llm_{key}.json"
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(data, dict) or data.get("failed") is not True:
+        return False
+    try:
+        age = time.time() - float(data.get("ts") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return 0.0 <= age < ttl
+
+
+def _save_llm_failure(key: str) -> None:
+    """Memorizza che l'LLM ha fallito per questa chiave (cache negativa)."""
+    if _failure_ttl() <= 0:
+        return
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = CACHE_DIR / f"llm_{key}.json"
+    with suppress(OSError):
+        atomic_write_text(
+            path,
+            json.dumps({"failed": True, "ts": time.time()}, ensure_ascii=False),
         )

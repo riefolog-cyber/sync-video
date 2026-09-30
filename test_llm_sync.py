@@ -1209,6 +1209,239 @@ class TestOrderedTimeline(unittest.TestCase):
         self.assertAlmostEqual(timeline[6], 40.0)
 
 
+class TestCascadeResilience(unittest.TestCase):
+    """Costo della cascata: endpoint morti e cronometro LLM.
+
+    Caso reale (run del 25/09): ``comboact`` morì di timeout (120s + 60s), il
+    backup rispose in 14.5s ma le posizioni erano in conflitto con le ancore,
+    e il retry ripagò altri 120s su ``comboact`` per arrivare di nuovo allo
+    stesso backup. Totale ~328s per un fallback locale che costava 2s.
+    """
+
+    def setUp(self):
+        import llm_sync
+
+        self.llm_sync = llm_sync
+        llm_sync.reset_dead_endpoints()
+        llm_sync.reset_llm_seconds()
+        self.addCleanup(llm_sync.reset_dead_endpoints)
+        self.addCleanup(llm_sync.reset_llm_seconds)
+
+    @staticmethod
+    def _ep(model, timeout=45):
+        return {
+            "name": "9router",
+            "url": "http://localhost:20128/v1/chat/completions",
+            "model": model,
+            "api_key": "",
+            "timeout": timeout,
+        }
+
+    def test_network_failure_marks_the_endpoint_dead(self):
+        # Un timeout esaurito dichiara l'endpoint morto per il resto della run.
+        with patch.object(
+            self.llm_sync.requests, "post", side_effect=OSError("read timeout")
+        ):
+            self.assertIsNone(self.llm_sync._call_endpoint(self._ep("morto"), []))
+        self.assertIn("9router::morto", self.llm_sync._DEAD_ENDPOINTS)
+
+    def test_cascade_skips_the_dead_endpoint_on_the_next_pass(self):
+        # Il punto del fix: la seconda cascata (o il retry del flusso ordinato)
+        # non deve ripagare il timeout dell'endpoint già morto.
+        dead, alive = self._ep("morto"), self._ep("vivo")
+        self.llm_sync._DEAD_ENDPOINTS.add("9router::morto")
+        called: list[str] = []
+
+        def fake_call(ep, messages, temperature=0.0):
+            called.append(ep["model"])
+            return "risposta"
+
+        with patch.object(self.llm_sync, "_call_endpoint", side_effect=fake_call):
+            content, _name, model = self.llm_sync._call_cascade([dead, alive], [], "[test]")
+        self.assertEqual(content, "risposta")
+        # L'endpoint morto non è stato nemmeno chiamato.
+        self.assertEqual(called, ["vivo"])
+        self.assertEqual(model, "vivo")
+
+    def test_reset_dead_endpoints_forgets_them(self):
+        self.llm_sync._DEAD_ENDPOINTS.add("9router::morto")
+        self.llm_sync.reset_dead_endpoints()
+        self.assertEqual(self.llm_sync._DEAD_ENDPOINTS, set())
+
+    def test_cascade_measures_the_wait_including_failures(self):
+        # Il tempo che conta nel riepilogo è quello SPESO, anche quando la
+        # chiamata fallisce: è proprio in quel caso che lo spreco va mostrato.
+        import time as _time
+
+        def slow(ep, messages, temperature=0.0):
+            _time.sleep(0.01)
+            return None  # fallisce: il tempo speso resta conteggiato
+
+        with patch.object(self.llm_sync, "_call_endpoint", side_effect=slow):
+            self.llm_sync._call_cascade([self._ep("a")], [], "[test]")
+        self.assertGreater(self.llm_sync.llm_seconds(), 0.0)
+
+    def test_default_timeout_is_proportional_to_observed_latency(self):
+        # 45s: ~14x il p50 (3.2s) e ~4x il max (10.9s) misurati sulla combo.
+        # I vecchi 120s non scattavano mai davvero e costavano 180s col retry.
+        with patch.dict("os.environ", {}, clear=False):
+            self.llm_sync.os.environ.pop("LLM_9ROUTER_TIMEOUT", None)
+            eps = self.llm_sync._endpoints()
+        self.assertTrue(eps)
+        for ep in eps:
+            self.assertEqual(ep["timeout"], 45)
+
+    def test_timeout_is_still_overridable_for_reasoning_models(self):
+        with patch.dict("os.environ", {"LLM_9ROUTER_TIMEOUT": "300"}):
+            eps = self.llm_sync._endpoints()
+        self.assertEqual(eps[0]["timeout"], 300)
+
+
+class TestNegativeFailureCache(unittest.TestCase):
+    """La cache LLM ricorda anche i FALLIMENTI, con TTL breve.
+
+    Prima la cache ricordava solo i successi (il file veniva scritto solo dopo
+    una timeline valida): un fallimento non lasciava traccia e ogni rerun
+    ripagava l'intera cascata (~328s nel caso del 25/09).
+    """
+
+    def setUp(self):
+        import llm_sync
+
+        self.llm_sync = llm_sync
+        llm_sync.reset_dead_endpoints()
+        self.addCleanup(llm_sync.reset_dead_endpoints)
+
+    @staticmethod
+    def _ep(model):
+        return {
+            "name": "9router",
+            "url": "http://localhost:20128/v1/chat/completions",
+            "model": model,
+            "api_key": "",
+            "timeout": 45,
+        }
+
+    def _tmp_cache(self):
+        import shutil
+        import tempfile
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        return tmp
+
+    def test_failure_is_cached_so_a_rerun_does_not_pay_again(self):
+        tmp = self._tmp_cache()
+        with patch.object(self.llm_sync, "CACHE_DIR", tmp):
+            self.llm_sync._save_llm_failure("abc123")
+            self.assertTrue(self.llm_sync._load_llm_failure("abc123"))
+            # Un'altra chiave (input diverso) non è condannata.
+            self.assertFalse(self.llm_sync._load_llm_failure("altra"))
+
+    def test_failure_cache_expires(self):
+        import time as _time
+
+        tmp = self._tmp_cache()
+        with patch.object(self.llm_sync, "CACHE_DIR", tmp):
+            self.llm_sync._save_llm_failure("vecchia")
+            # TTL scaduto: il router può essere tornato su, si deve riprovare.
+            with patch.dict("os.environ", {"LLM_FAILURE_TTL_SECONDS": "0.001"}):
+                _time.sleep(0.01)
+                self.assertFalse(self.llm_sync._load_llm_failure("vecchia"))
+
+    def test_failure_cache_can_be_disabled(self):
+        tmp = self._tmp_cache()
+        with (
+            patch.object(self.llm_sync, "CACHE_DIR", tmp),
+            patch.dict("os.environ", {"LLM_FAILURE_TTL_SECONDS": "0"}),
+        ):
+            self.llm_sync._save_llm_failure("chiave")
+            self.assertFalse((tmp / "llm_chiave.json").exists())
+            self.assertFalse(self.llm_sync._load_llm_failure("chiave"))
+
+    def test_saved_timeline_is_not_mistaken_for_a_failure(self):
+        # Il file di successo e quello di fallimento condividono il nome: i due
+        # contenuti non devono confondersi, o un successo verrebbe perso.
+        tmp = self._tmp_cache()
+        with patch.object(self.llm_sync, "CACHE_DIR", tmp):
+            self.llm_sync._save_llm_cache("ok", [{"slide": 1, "start": 0.0}])
+            self.assertFalse(self.llm_sync._load_llm_failure("ok"))
+            self.assertIsNotNone(self.llm_sync._load_llm_cache("ok"))
+
+    def test_ordered_timeline_short_circuits_on_a_known_failure(self):
+        # Il rerun entro la finestra di TTL non richiama l'LLM: va dritto al
+        # fallback locale invece di ripagare la cascata.
+        words = [{"word": "a", "start": 5.0}, {"word": "b", "start": 35.0}]
+        with (
+            patch("llm_sync._load_llm_cache", return_value=None),
+            patch("llm_sync._load_llm_failure", return_value=True),
+            patch("llm_sync._call_cascade") as cascade,
+        ):
+            result = llm_ordered_timeline(
+                ["s1", "s2", "s3"],
+                words,
+                total_slides=3,
+                total_duration=60.0,
+                anchors={2: 20.0},
+                endpoints=[self._ep("m")],
+            )
+        self.assertIsNone(result)
+        cascade.assert_not_called()
+
+    def test_ordered_timeline_marks_its_own_failure(self):
+        # Quando la cascata fallisce davvero il fallimento va memorizzato,
+        # altrimenti il rerun ripaga l'intera cascata da capo.
+        words = [{"word": "a", "start": 5.0}, {"word": "b", "start": 35.0}]
+        with (
+            patch("llm_sync._load_llm_cache", return_value=None),
+            patch("llm_sync._load_llm_failure", return_value=False),
+            patch("llm_sync.router_alive", return_value=True),
+            patch("llm_sync._call_cascade", return_value=(None, None, None)),
+            patch("llm_sync._save_llm_failure") as mark,
+        ):
+            result = llm_ordered_timeline(
+                ["s1", "s2", "s3"],
+                words,
+                total_slides=3,
+                total_duration=60.0,
+                anchors={2: 20.0},
+                endpoints=[self._ep("m")],
+            )
+        self.assertIsNone(result)
+        mark.assert_called_once()
+
+    def test_ordered_timeline_does_not_mark_failure_on_success(self):
+        # Una timeline valida non deve mai essere sovrascritta da un marchio di
+        # fallimento: altrimenti il successo andrebbe perso al rerun.
+        words = [
+            {"word": "a", "start": 5.0},
+            {"word": "b", "start": 35.0},
+            {"word": "c", "start": 65.0},
+        ]
+        resp = (
+            '[{"chunk": 1, "slide": 1}, {"chunk": 2, "slide": 3}, '
+            '{"chunk": 3, "slide": 3}]'
+        )
+        with (
+            patch("llm_sync._load_llm_cache", return_value=None),
+            patch("llm_sync._load_llm_failure", return_value=False),
+            patch("llm_sync.router_alive", return_value=True),
+            patch("llm_sync._call_cascade", return_value=(resp, "ep", "m")),
+            patch("llm_sync._save_llm_cache"),
+            patch("llm_sync._save_llm_failure") as mark,
+        ):
+            result = llm_ordered_timeline(
+                ["s1", "s2", "s3"],
+                words,
+                total_slides=3,
+                total_duration=90.0,
+                anchors={2: 20.0},
+                endpoints=[self._ep("m")],
+            )
+        self.assertIsNotNone(result)
+        mark.assert_not_called()
+
+
 class TestAnchorVerification(unittest.TestCase):
     """Verifica mapping ancore: numero parlato -> slide reale del PDF.
 

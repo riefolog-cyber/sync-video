@@ -44,8 +44,11 @@ from llm_sync import (
     is_interactive,
     llm_cache_keys_for,
     llm_ordered_timeline,
+    llm_seconds,
     llm_timeline_segments,
     llm_verify_anchor_mapping,
+    reset_dead_endpoints,
+    reset_llm_seconds,
     review_diffs_seen,
 )
 from machine_setup import machine_setup
@@ -249,6 +252,7 @@ def _print_timing(
     t_model: float,
     t_video: float,
     t_total: float,
+    t_llm: float = 0.0,
 ) -> None:
     """Stampa il riepilogo dei tempi di ogni fase e lo salva nello storico.
 
@@ -256,6 +260,11 @@ def _print_timing(
     sincronizzazione), ``t_model`` è il caricamento dei pesi: confonderli
     nascondeva il costo vero (la riga "Embedding" mostrava pochi secondi di
     caricamento invece dei ~30s di embedding).
+
+    ``t_llm`` è l'attesa delle chiamate all'LLM. Va dichiarata per la stessa
+    ragione che ha fatto correggere la riga Embedding: senza, una cascata LLM
+    costata 328s finiva dentro "Sincronizzaz." senza attribuzione e lo spreco
+    restava invisibile finché non si leggevano i log riga per riga.
     """
     log.info("\n" + "─" * 50)
     log.info(" ⏱️  RIEPILOGO TEMPI")
@@ -267,16 +276,19 @@ def _print_timing(
         log.info("     └ Embedding │ %s", _format_time(t_embed))
     if t_model > 0:
         log.info("     └ Modello   │ %s", _format_time(t_model))
+    if t_llm > 0:
+        log.info("     └ LLM       │ %s", _format_time(t_llm))
     if t_video > 0:
         log.info("   Encoding Video│ %s", _format_time(t_video))
     log.info("   ─────────────────────────")
     log.info("   TOTALE         │ %s", _format_time(t_total))
     log.info("─" * 50)
-    _append_timing_history(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total)
+    _append_timing_history(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total, t_llm)
 
 
 def _append_timing_history(
-    t_ocr: float, t_transcribe: float, t_sync: float, t_embed: float, t_video: float, t_total: float
+    t_ocr: float, t_transcribe: float, t_sync: float, t_embed: float, t_video: float, t_total: float,
+    t_llm: float = 0.0,
 ) -> None:
     """Persiste lo storico dei tempi per fase in ``.cache/timing_history.jsonl``.
 
@@ -292,6 +304,7 @@ def _append_timing_history(
             "transcribe": round(t_transcribe, 1),
             "sync": round(t_sync, 1),
             "embed": round(t_embed, 1),
+            "llm": round(t_llm, 1),
             "video": round(t_video, 1),
             "total": round(t_total, 1),
         }
@@ -327,7 +340,10 @@ def _warn_sync_uncertainty() -> None:
         "garantite 1:1. Se il podcast segue davvero l'ordine della "
         "presentazione il video è corretto; per un allineamento certo "
         "rigenera la presentazione dal podcast o fai pronunciare le "
-        "ancore 'slide N' alle transizioni."
+        "ancore 'slide N' alle transizioni.\n"
+        "   Se queste condizioni sono IMPOSTE (batch/CI), aggiungi "
+        "--require-full-anchors: la run si ferma invece di produrre un video "
+        "con durate stimate."
     )
 
 
@@ -434,6 +450,18 @@ def _log_plain_summary(
             "di %.0fs di leggibilità, non una misura del parlato.",
             _slide_list_text(sorted(floor_guaranteed)),
             floor_min,
+        )
+    # Le VITTIME del pavimento hanno perso tempo per farne respirare una vicina:
+    # anche la loro durata è un effetto dell'anti-flicker, non una misura, quindi
+    # va detta. Prima queste slide non comparivano da nessuna parte: non erano
+    # né "garantite" né anomale né "thin", cioè erano state alterate in silenzio.
+    floor_shortened = _floor_shortened(floor_report)
+    if floor_shortened:
+        log.info(
+            "   L'anti-flicker ha accorciato %s per dare il minimo di lettibilità "
+            "alle vicine: la loro durata è influenzata dal pavimento, non è una "
+            "misura del parlato.",
+            _slide_list_text(sorted(floor_shortened)),
         )
 
     # --- Copertura delle ancore: dice COSA la fiducia del motore sta misurando ---
@@ -666,11 +694,26 @@ def _find_anomalous_durations(
     slide_ids: Sequence[int],
     long_ratio: float = 3.0,
     short_ratio: float = 0.25,
+    min_seconds: float = 0.0,
 ) -> list[tuple[int, float]]:
     """Slide con durata molto fuori dalla mediana delle altre (possibile
-    errore di sincronizzazione). Return: lista di (slide, durata)."""
+    errore di sincronizzazione). Return: lista di (slide, durata).
+
+    ``min_seconds`` è il pavimento anti-flicker in vigore. Una slide ferma a
+    quel pavimento non è un errore di allineamento: la sua durata è una scelta
+    di leggibilità, non una misura del parlato, quindi viene esclusa. Senza
+    questa esclusione la soglia "breve" (0.25 * mediana) e il pavimento si
+    toccano e la stessa durata veniva dichiarata anomala o no a seconda di
+    0.05s (run del 25/09: 8.0s flaggata, 8.1s no). Passare 0.0 (o non
+    passarlo) conserva il comportamento storico.
+    """
     if len(durations) < 3:
         return []
+    # Il pavimento esclude solo le durate che il pavimento ha CONCESSO, cioè
+    # quelle che stanno sul minimo. Una durata SOTTO il minimo è il caso
+    # opposto: il pavimento non è riuscito a salvarla (incastrata fra due
+    # ancore pronunciate) ed è proprio l'anomalia che va segnalata.
+    at_floor = min_seconds + _FLOOR_TOLERANCE_SECONDS if min_seconds > 0 else 0.0
     ordered = sorted(durations)
     n = len(ordered)
     median = ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2
@@ -679,13 +722,27 @@ def _find_anomalous_durations(
     return [
         (int(s), float(d))
         for s, d in zip(slide_ids, durations, strict=True)
-        if d > long_ratio * median or d < short_ratio * median
+        if d > long_ratio * median
+        or (
+            d < short_ratio * median
+            and (at_floor <= 0.0 or d < at_floor - _FLOOR_TOLERANCE_SECONDS)
+        )
     ]
 
 
 # Tolleranza nel confronto con il pavimento anti-flicker: i confini arrivano
 # da medie di similarità, quindi "esattamente 8s" significa "8s ± rumore".
 _FLOOR_TOLERANCE_SECONDS = 0.05
+
+# Sotto questa durata una slide è "al minimo" per costruzione, non per misura:
+# il pavimento anti-flicker non può scendere sotto `min_slide_seconds` (8s) se
+# non è incastrata fra due ancore. Le durate che nascono dal pavimento sono
+# scelte di leggibilità, quindi non sono anomalie da attribuire all'allineamento:
+# senza questa tolleranza la soglia "breve" (0.25 * mediana) e il pavimento (8s)
+# si toccano e la stessa slide veniva segnalata o no a seconda di 0.05s di
+# arrotondamento (run del 25/09: slide 6/12/13 a 8.0s flaggate, slide 11 a
+# 8.1s no). Il confronto usa la stessa tolleranza del pavimento, così le due
+# soglie non possono più contraddirsi.
 
 
 def _timeline_durations(
@@ -717,19 +774,35 @@ def _floor_report(
     Distingue il caso in cui il pavimento NON è riuscito a salvare la slide
     (incastrata tra due ancore pronunciate): lì sì che serve un intervento.
 
+    Registra anche le VITTIME del pavimento (``shortened``): il pavimento è a
+    risorse nulle, allunga una slide STACCANDO tempo dalla vicina. Una slide
+    che ha perso 4.8s per farne respirare un'altra ha una durata influenzata
+    dall'anti-flicker quanto quella allungata, quindi va dichiarata per quello
+    che è. Senza questo, una slide che finiva a 8.1s non compariva né fra le
+    garantite né fra le anomale né fra le "thin": alterata ma non dichiarata.
+
     Returns:
         ``{"min_seconds", "guaranteed": [{slide, before, duration}],
-        "unguaranteed": [{slide, duration}]}``
+        "shortened": [{slide, before, duration}], "unguaranteed": [{slide, duration}]}``
     """
     before_durations = _timeline_durations(before, total_duration)
     after_durations = _timeline_durations(after, total_duration)
     guaranteed: list[dict[str, object]] = []
+    shortened: list[dict[str, object]] = []
     unguaranteed: list[dict[str, object]] = []
     for s in sorted(after_durations):
         was = before_durations.get(s, 0.0)
-        if was >= min_seconds - _FLOOR_TOLERANCE_SECONDS:
-            continue  # lunga di suo: il pavimento non l'ha toccata
         now = after_durations[s]
+        if was >= min_seconds - _FLOOR_TOLERANCE_SECONDS:
+            # Il pavimento non l'ha allungata, ma può averle SCAVATO tempo: una
+            # durata che diminuisce è comunque frutto del pavimento, non una
+            # misura del parlato. Solo il caso in cui la perdita è apprezzabile
+            # (oltre la tolleranza sul confronto numerico) viene dichiarato.
+            if was - now > max(_FLOOR_TOLERANCE_SECONDS, 0.01) * 2:
+                shortened.append(
+                    {"slide": s, "before": round(was, 1), "duration": round(now, 1)}
+                )
+            continue  # lunga di suo: il pavimento non l'ha allungata
         if now < min_seconds - _FLOOR_TOLERANCE_SECONDS:
             unguaranteed.append({"slide": s, "duration": round(now, 1)})
         else:
@@ -737,6 +810,7 @@ def _floor_report(
     return {
         "min_seconds": round(min_seconds, 1),
         "guaranteed": guaranteed,
+        "shortened": shortened,
         "unguaranteed": unguaranteed,
     }
 
@@ -768,6 +842,29 @@ def _floor_split(
                     cast(float, entry.get("duration") or 0.0)
                 )
     return guaranteed, unguaranteed, min_seconds
+
+
+def _floor_shortened(floor_report: dict[str, object] | None) -> dict[int, float]:
+    """Slide che hanno PERSO tempo per il pavimento anti-flicker delle vicine.
+
+    Il pavimento è a risorse nulle: allunga una slide staccando tempo dalla
+    vicina, quindi anche la durata della vittima è influenzata dall'anti-flicker
+    e va dichiarata come tale. Tollerante per costruzione come ``_floor_split``.
+    """
+    shortened: dict[int, float] = {}
+    if not isinstance(floor_report, dict):
+        return shortened
+    entries = floor_report.get("shortened")
+    if not isinstance(entries, list):
+        return shortened
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        with suppress(TypeError, ValueError):
+            shortened[int(cast(int, entry.get("slide")))] = float(
+                cast(float, entry.get("duration") or 0.0)
+            )
+    return shortened
 
 
 def _slide_tokens(text: str) -> list[str]:
@@ -873,6 +970,44 @@ def _should_escalate_weak_signal(
     i timestamp sono già dichiarati dal parlato.
     """
     return weak_signal and missing_count > 0 and llm_enabled
+
+
+def _needs_llm_escalation(
+    local_failed: bool,
+    weak_local: bool,
+    missing_count: int,
+    llm_local_threshold: int,
+    llm_enabled: bool = True,
+) -> bool:
+    """Serve l'LLM dopo che il motore embedding locale ha girato per primo?
+
+    Il motore locale costa pochi secondi (embedding in cache) e produce sempre
+    una timeline utilizzabile, quindi viene SEMPRE provato per primo e l'LLM è
+    un ESCALATION, non un prerequisito. Prima l'ordine era inverso: oltre
+    ``llm_local_threshold`` slide senza ancora si saltava dritto all'LLM e, se
+    falliva, si ricalcolava da capo il motore locale. Nel run del 25/09 (12
+    slide senza ancora) questo costava ~328s di cascata LLM per arrivare
+    esattamente al fallback locale che si aveva a portata di mano in 2s.
+
+    L'LLM viene comunque coinvolto, quindi, quando:
+      * il motore locale non ha prodotto nulla;
+      * le slide senza ancora sono troppe perché il raffinamento locale basti;
+      * il motore stesso dichiara il segnale inaffidabile.
+
+    Args:
+        local_failed: il motore locale non ha restituito timeline.
+        weak_local: il motore ha dichiarato segnale debole.
+        missing_count: slide senza ancora esplicita.
+        llm_local_threshold: soglia oltre cui il solo raffinamento locale non basta.
+        llm_enabled: ``False`` se l'LLM è spento (``--llm off``).
+    """
+    if not llm_enabled:
+        return False
+    return (
+        local_failed
+        or missing_count > llm_local_threshold
+        or _should_escalate_weak_signal(weak_local, missing_count, True)
+    )
 
 
 def _build_sync_report(
@@ -1494,6 +1629,11 @@ def main(argv: list | None = None) -> None:
     # è lavoro semantico, quindi viene attribuito alla sincronizzazione, così la
     # tabella dei tempi continua a sommare al totale.
     beam_ab_seconds = 0.0
+    # Cronometro LLM e memoria degli endpoint morti: sono per-run, quindi
+    # vanno azzerati qui. Senza, una seconda esecuzione in-process (test,
+    # chiamate ripetute) ripartirebbe con il tempo e i timeout gia' spesi.
+    reset_llm_seconds()
+    reset_dead_endpoints()
 
     # Strutture accumulate
     slide_files: list[str] | None = None
@@ -2167,85 +2307,94 @@ def main(argv: list | None = None) -> None:
             # Le ancore deterministiche sono vincoli ESATTI e inviolabili. Se
             # restano slide senza ancora esplicita (mai nominate o narrate fuori
             # posizione), serve posizionarle dove il loro contenuto è discusso.
-            # Con POCHE slide mancanti basta il raffinamento locale (embeddings)
-            # -- percorso A, veloce e senza 9Router --; solo oltre
-            # `--llm-local-threshold` si usa l'LLM cloud, e in tal caso
-            # 9Router viene AVVIATO automaticamente se spento (wait_for_router)
-            # e la pipeline riprende da sola appena è online. Fallback MiniLM.
+            #
+            # ORDINE DEI PERCORSI: il motore embedding locale gira PRIMA, sempre.
+            # Costa pochi secondi (embedding in cache) e produce una timeline
+            # valida, così l'LLM diventa un ESCALATION e non un prerequisito.
+            #
+            # Prima era il contrario: oltre `--llm-local-threshold` slide senza
+            # ancora si saltava dritto all'LLM e, se falliva, si ricalcolava da
+            # capo il motore locale. Nel run del 25/09 (12 slide senza ancora)
+            # questo costava ~328s di cascata LLM per arrivare esattamente al
+            # fallback locale che si sarebbe potuto avere in 2s. Ora la timeline
+            # locale esiste SEMPRE e viene RIUSATA se l'LLM non dà niente.
             timeline: dict[int, float] | None = None
+            # Timeline già calcolata dal motore locale: se l'LLM fallisce la si
+            # riusa invece di ricalcolarla (stessa funzione, embedding in cache,
+            # ma work doppio inutile).
+            local_timeline: dict[int, float] | None = None
             llm_hybrid_attempted = False
             if args.llm != "off" and semantic_anchors and len(semantic_anchors) < total_slides - 1:
                 missing_count = (total_slides - 1) - len(semantic_anchors)
-                use_local = missing_count <= args.llm_local_threshold
-                if use_local:
-                    # PERCORSO A: il raffinamento locale basta per poche slide
-                    # senza ancora. Nessuna chiamata LLM, nessun 9Router, nessuna
-                    # attesa di rete: la sincronizzazione passa da ~minuti a
-                    # secondi per queste slide.
-                    log.info(
-                        "   Flusso ibrido: %d slide senza ancora (<= soglia %d): uso il "
-                        "motore embedding locale (semantic + refine) al posto di 9Router.",
+                # Il flag di segnale debole è globale: azzerato qui per
+                # misurarlo SOLO su questa chiamata (altrimenti una
+                # rilevazione precedente della stessa run lo falserebbe).
+                reset_weak_signal_flag()
+                log.info(
+                    "   Flusso ibrido: %d slide senza ancora. Provo prima il motore "
+                    "embedding locale (semantic + refine, nessuna attesa di rete)...",
+                    missing_count,
+                )
+                local_timeline = semantic_timeline_from_words(
+                    slide_texts,
+                    words_raw,
+                    total_slides,
+                    total_duration,
+                    options=SemanticOptions(
+                        model_name=args.semantic_model,
+                        cache_dir=args.semantic_cache_dir,
+                        window_seconds=args.semantic_window,
+                        min_slide_duration=args.semantic_min_duration,
+                        min_avg_z=args.semantic_min_z,
+                        temperature=args.semantic_temperature,
+                    ),
+                    anchors=semantic_anchors,
+                )
+                weak_local = weak_signal_seen()
+                local_failed = local_timeline is None
+                # Serve l'LLM quando: il motore locale non ha prodotto nulla,
+                # OPPURE le slide senza ancora sono troppe per il raffinamento
+                # locale, OPPURE il motore stesso dichiara il segnale
+                # inaffidabile. La decisione è in `_needs_llm_escalation` (quindi
+                # è testabile da sola): il motore locale ha GIA' prodotto una
+                # timeline, l'LLM è solo un tentativo di migliorarla.
+                need_llm = _needs_llm_escalation(
+                    local_failed=local_failed,
+                    weak_local=weak_local,
+                    missing_count=missing_count,
+                    llm_local_threshold=args.llm_local_threshold,
+                    llm_enabled=args.llm != "off",
+                )
+                if weak_local and not local_failed:
+                    log.warning(
+                        "\n   [Fallback] Motore embedding locale con segnale DEBOLE: "
+                        "l'audio potrebbe non seguire l'ordine delle slide, quindi passo "
+                        "all'LLM per posizionare le %d slide senza ancora.",
                         missing_count,
-                        args.llm_local_threshold,
                     )
-                    # Il flag di segnale debole è globale: azzerato qui per
-                    # misurarlo SOLO su questa chiamata (altrimenti una
-                    # rilevazione precedente della stessa run lo falserebbe).
-                    reset_weak_signal_flag()
-                    timeline = semantic_timeline_from_words(
-                        slide_texts,
+                    sync_notes["engine"] = "llm_escalated_weak_signal"
+                if not need_llm and local_timeline is not None:
+                    # La timeline locale basta: raffinamento a livello di parola
+                    # SOLO delle slide senza ancora (stesso refine usato dopo
+                    # l'LLM: deterministico, zero chiamate di rete). Le ancore
+                    # esatte restano ai loro timestamp pronunciati.
+                    log.info(
+                        "   Post-elaborazione locale: raffinamento confini a "
+                        "livello di parola (solo slide senza ancora)..."
+                    )
+                    timeline = refine_llm_timeline_from_words(
+                        local_timeline,
+                        semantic_anchors,
                         words_raw,
-                        total_slides,
+                        slide_texts,
                         total_duration,
                         options=SemanticOptions(
                             model_name=args.semantic_model,
                             cache_dir=args.semantic_cache_dir,
-                            window_seconds=args.semantic_window,
-                            min_slide_duration=args.semantic_min_duration,
-                            min_avg_z=args.semantic_min_z,
-                            temperature=args.semantic_temperature,
                         ),
-                        anchors=semantic_anchors,
+                        window_seconds=min(args.llm_chunk, 30.0),
                     )
-                    if timeline is not None and _should_escalate_weak_signal(
-                        weak_signal_seen(), missing_count, args.llm != "off"
-                    ):
-                        # Il motore embedding stesso dichiara il segnale
-                        # inaffidabile (l'audio non segue l'ordine delle slide):
-                        # prima l'avviso finiva solo nel log e il video veniva
-                        # generato comunque. Qui si passa al percorso LLM, che
-                        # legge il contenuto dei chunk.
-                        log.warning(
-                            "\n   [Fallback] Motore embedding locale con segnale DEBOLE: "
-                            "passo all'LLM per posizionare le %d slide senza ancora, "
-                            "invece di generare un video potenzialmente disallineato.",
-                            missing_count,
-                        )
-                        sync_notes["engine"] = "llm_escalated_weak_signal"
-                        timeline = None
-                        use_local = False
-                    elif timeline is not None:
-                        # Raffinamento a livello di parola SOLO delle slide senza
-                        # ancora (stesso refine usato dopo l'LLM: deterministico,
-                        # zero chiamate di rete). Le ancore esatte restano ai loro
-                        # timestamp pronunciati.
-                        log.info(
-                            "   Post-elaborazione locale: raffinamento confini a "
-                            "livello di parola (solo slide senza ancora)..."
-                        )
-                        timeline = refine_llm_timeline_from_words(
-                            timeline,
-                            semantic_anchors,
-                            words_raw,
-                            slide_texts,
-                            total_duration,
-                            options=SemanticOptions(
-                                model_name=args.semantic_model,
-                                cache_dir=args.semantic_cache_dir,
-                            ),
-                            window_seconds=min(args.llm_chunk, 30.0),
-                        )
-                if not use_local:
+                if need_llm:
                     # Percorso B: molte slide senza ancora (oppure percorso A
                     # abbandonato per segnale debole). Serve l'LLM per capire dove
                     # viene discusso il contenuto: 9Router parte in automatico se
@@ -2318,22 +2467,35 @@ def main(argv: list | None = None) -> None:
                         "   Il problema nasce dal podcast: poche ancore 'slide N' "
                         "annunciate. Rigenera l'audio se possibile.\n"
                     )
-                log.info("   Sincronizzazione semantica (embeddings offline)...")
-                timeline = semantic_timeline_from_words(
-                    slide_texts,
-                    words_raw,
-                    total_slides,
-                    total_duration,
-                    options=SemanticOptions(
-                        model_name=args.semantic_model,
-                        cache_dir=args.semantic_cache_dir,
-                        window_seconds=args.semantic_window,
-                        min_slide_duration=args.semantic_min_duration,
-                        min_avg_z=args.semantic_min_z,
-                        temperature=args.semantic_temperature,
-                    ),
-                    anchors=semantic_anchors,
-                )
+                if local_timeline is not None:
+                    # Il motore locale ha GIA' prodotto questa timeline prima
+                    # dell'escalation all'LLM: si riusa il risultato invece di
+                    # ricalcolare da capo la stessa funzione con gli stessi
+                    # embedding. L'unica differenza rispetto al ramo precedente
+                    # sarebbe il refine, che qui non era stato applicato perche'
+                    # si stava andando all'LLM.
+                    log.info(
+                        "   Uso la timeline del motore embedding locale gia' calcolata "
+                        "prima dell'escalation all'LLM."
+                    )
+                    timeline = local_timeline
+                else:
+                    log.info("   Sincronizzazione semantica (embeddings offline)...")
+                    timeline = semantic_timeline_from_words(
+                        slide_texts,
+                        words_raw,
+                        total_slides,
+                        total_duration,
+                        options=SemanticOptions(
+                            model_name=args.semantic_model,
+                            cache_dir=args.semantic_cache_dir,
+                            window_seconds=args.semantic_window,
+                            min_slide_duration=args.semantic_min_duration,
+                            min_avg_z=args.semantic_min_z,
+                            temperature=args.semantic_temperature,
+                        ),
+                        anchors=semantic_anchors,
+                    )
 
             if timeline is None:
                 _abort("Sincronizzazione semantica fallita: nessuna timeline generabile da slide + trascrizione.")
@@ -2357,7 +2519,7 @@ def main(argv: list | None = None) -> None:
                 timeline_before_floor, timeline, total_duration, min_slide_seconds
             )
             sync_notes["anti_flicker"] = floor_note
-            floor_guaranteed, floor_unguaranteed, _ = _floor_split(floor_note)
+            floor_guaranteed, floor_unguaranteed, floor_min = _floor_split(floor_note)
             if _moved:
                 log.info(
                     "   Anti-flicker: %d confini non ancorati spostati per garantire "
@@ -2448,9 +2610,15 @@ def main(argv: list | None = None) -> None:
         # una misura, quindi non è un'anomalia da attribuire all'allineamento.
         # Finiscono in ``anti_flicker`` nel report, dichiarate per quello che
         # sono.
+        #
+        # Anche le slide fermi ESATTAMENTE al pavimento sono escluse, anche se il
+        # pavimento non le ha allungate (nessuna `floor_guaranteed`): sono comunque
+        # un tempo concesso, non una misura. Senza questo, la soglia "breve"
+        # (0.25 * mediana) e il pavimento si toccano e la stessa durata veniva
+        # segnalata o no a seconda di 0.05s (run del 25/09: 8.0s flaggata, 8.1s no).
         anomalous = [
             (s, d)
-            for s, d in _find_anomalous_durations(durations, slide_ids)
+            for s, d in _find_anomalous_durations(durations, slide_ids, min_seconds=floor_min)
             if s not in floor_guaranteed
         ]
         verdicts = (
@@ -2616,6 +2784,7 @@ def main(argv: list | None = None) -> None:
                 model_load_seconds(),
                 0.0,
                 t_total,
+                llm_seconds(),
             )
             _warn_sync_uncertainty()
             _log_plain_summary(
@@ -2761,6 +2930,7 @@ def main(argv: list | None = None) -> None:
             model_load_seconds(),
             t_video,
             t_total,
+            llm_seconds(),
         )
         _warn_sync_uncertainty()
 

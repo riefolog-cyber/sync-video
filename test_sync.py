@@ -131,6 +131,86 @@ class TestSlideAudioFlow(unittest.TestCase):
         anchors = extract_slide_anchors(words, total_slides=13, flow="slide-audio")
         self.assertEqual(anchors, {13: 2057.9})
 
+    def test_count_and_recall_on_the_same_slide(self):
+        # I due casi che il last-wins non poteva separare, sulla stessa slide:
+        # un conteggio quantificato ("le 5 slide") e un richiamo ("guarda slide 5")
+        # intorno alla transizione vera. La regola è: conteggi esclusi, e fra le
+        # transizioni vince la PRIMA.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 10.0), ("alla", 10.2), ("slide", 10.3), ("tre", 10.5),
+                ("le", 100.0), ("5", 100.3), ("slide", 100.6), ("del", 100.9),
+                ("documento", 101.2),
+                ("passiamo", 200.0), ("alla", 200.2), ("slide", 200.3), ("cinque", 200.5),
+                ("guarda", 260.0), ("slide", 260.3), ("cinque", 260.5),
+                ("passiamo", 300.0), ("alla", 300.2), ("slide", 300.3), ("sei", 300.5),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=6, flow="slide-audio")
+        # Il conteggio delle "5 slide" non occupa la 5, e il richiamo a 260s non
+        # sposta la transizione: l'ancora resta quella vera (200.5s, il numero).
+        self.assertEqual(anchors[5], 200.5)
+        self.assertEqual(anchors[3], 10.5)
+        self.assertEqual(anchors[6], 300.5)
+
+    def test_quantified_number_is_flagged_as_count(self):
+        # La qualificazione è ciò che separa i due casi: senza di lei la
+        # selezione non potrebbe scegliere.
+        from timeline import _collect_slide_mention_kinds
+
+        words = _words(
+            [
+                ("le", 100.0), ("13", 100.3), ("slide", 100.6),
+                ("passiamo", 200.0), ("alla", 200.2), ("slide", 200.3), ("13", 200.5),
+            ]
+        )
+        kinds = _collect_slide_mention_kinds(words, 13)
+        # "le 13 slide" -> conteggio; "slide 13" -> riferimento. La finestra del
+        # pattern 1 può rilevare due volte la stessa transizione (dalla parola
+        # "slide" del conteggio e da quella dell'annuncio), quindi non si conta
+        # la lunghezza: conta il FLAG del conteggio.
+        flags = [is_count for _t, is_count in kinds[13]]
+        self.assertIn(True, flags, "il conteggio quantificato deve essere marcato")
+        self.assertFalse(
+            all(flags), "le transizioni non devono essere marcate come conteggio"
+        )
+        # Il conteggio è anche il PRIMO: è quello che va escluso.
+        self.assertTrue(kinds[13][0][1])
+
+    def test_unquantified_number_before_slide_is_not_a_count(self):
+        # "passiamo alla slide 3" non ha determinante davanti: è un riferimento,
+        # anche se il numero arriva prima di "slide" (pattern 2).
+        from timeline import _collect_slide_mention_kinds
+
+        words = _words(
+            [
+                ("passiamo", 50.0), ("alla", 50.2), ("tre", 50.4), ("la", 50.6),
+                ("slide", 50.9),
+            ]
+        )
+        kinds = _collect_slide_mention_kinds(words, 5)
+        self.assertEqual([is_count for _t, is_count in kinds[3]], [False])
+
+    def test_slide_with_only_counts_is_not_left_without_anchor(self):
+        # Se una slide ha SOLO conteggi non resta senza ancora: si prende
+        # l'ultimo disponibile. Non si inventa un confine, ma non si abbandona
+        # nemmeno la slide all'assegnamento per contenuto senza dirlo.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 10.0), ("alla", 10.2), ("slide", 10.3), ("due", 10.5),
+                ("le", 100.0), ("4", 100.3), ("slide", 100.6),
+                ("tutte", 150.0), ("le", 150.2), ("4", 150.4), ("slide", 150.7),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=4, flow="slide-audio")
+        self.assertIn(4, anchors)
+        # Ultimo conteggio disponibile: 150.7s (la parola "slide" che lo chiude).
+        self.assertEqual(anchors[4], 150.7)
+
     def test_recap_out_of_order_recovered_from_first_mention(self):
         # "come dicevamo nella slide 3" pronunciata DOPO la slide 4: la
         # citazione a posteriori (last-wins) farebbe scartare la slide 3 dal
@@ -310,10 +390,14 @@ class TestSlideAudioFlow(unittest.TestCase):
                 ("sono", 96.7),
             ]
         )
-        with self.assertLogs("slide2video", level="WARNING") as logs:
+        with self.assertLogs("slide2video", level="INFO") as logs:
             anchors = extract_slide_anchors(words, total_slides=5, flow="slide-audio")
+        # Il confine resta quello vero (30.6s): la menzione fantasma non lo sposta.
         self.assertEqual(anchors, {3: 30.6, 5: 80.6})
+        # Resta però tracciata, per non perdere la diagnosi: è INFO, non WARNING,
+        # perché non è più un errore (l'ancora è corretta).
         self.assertIn("'slide 3' a 96.7s", "\n".join(logs.output))
+        self.assertIn("richiamate più volte", "\n".join(logs.output))
 
     def test_italian_sl_words_are_not_slide_references(self):
         # "slitta", "slogan", ... iniziano davvero per "sl" e passerebbero il
@@ -608,10 +692,11 @@ class TestSlideAudioFlow(unittest.TestCase):
         anchors = extract_slide_anchors(words, total_slides=15, flow="slide-audio")
         self.assertEqual(anchors, {s: tempi[s] for s in range(2, 16)})
 
-    def test_recall_after_the_real_anchor_is_named_as_such(self):
-        # "torniamo alla slide 7" a meta' percorso: l'annuncio vero e' una
-        # transizione, non una citazione, e la diagnostica deve dirlo (e' un
-        # difetto dell'audio, non dell'estrazione).
+    def test_recall_after_the_real_anchor_is_ignored(self):
+        # "torniamo alla slide 7" a meta' percorso: l'annuncio vero e' la
+        # transizione, quindi l'ancora deve restare li'. Prima l'ultima menzione
+        # vinceva (150.5s) e la slide 7 partiva 50s tardi, lasciando la 6 a
+        # schermo per tutto quel tempo.
         from timeline import extract_slide_anchors
 
         words = _words(
@@ -622,12 +707,14 @@ class TestSlideAudioFlow(unittest.TestCase):
                 ("passiamo", 200.0), ("alla", 200.2), ("slide", 200.3), ("otto", 200.5),
             ]
         )
-        with self.assertLogs("slide2video", level="WARNING") as logs:
+        with self.assertLogs("slide2video", level="INFO") as logs:
             anchors = extract_slide_anchors(words, total_slides=8, flow="slide-audio")
-        # Il richiamo vince (difetto dell'audio) ma la diagnosi e' corretta.
-        self.assertEqual(anchors[7], 150.5)
-        self.assertIn("superate da un richiamo", "\n".join(logs.output))
-        self.assertNotIn("citazioni (dopo un numero", "\n".join(logs.output))
+        # L'ancora resta sulla TRANSIZIONE: il richiamo non la sposta piu'.
+        self.assertEqual(anchors[7], 100.5)
+        # Il richiamo resta tracciato (e' il difetto dell'audio, su cui il prompt
+        # NotebookLM ha una regola dedicata), ma non e' piu' un errore.
+        self.assertIn("richiamate più volte", "\n".join(logs.output))
+        self.assertNotIn("superate da un richiamo", "\n".join(logs.output))
 
     def test_completion_clamp_never_moves_an_anchor(self):
         # L'estrapolazione dell'ultima slide senza ancora supera la durata
@@ -1409,6 +1496,41 @@ class TestTimingTable(unittest.TestCase):
         printed = "\n".join(r.getMessage() for r in cm.records)
         self.assertIn("Embedding │ 28s", printed)
         self.assertIn("Modello   │ 3s", printed)
+
+    def test_llm_time_is_shown(self):
+        # Stessa ragione che ha fatto correggere la riga Embedding: senza la
+        # voce LLM, 328s di cascata finivano dentro "Sincronizzaz." senza
+        # attribuzione e lo spreco restava invisibile.
+        import main
+
+        with (
+            mock.patch.object(main, "_append_timing_history"),
+            self.assertLogs(main.log, level="INFO") as cm,
+        ):
+            main._print_timing(1.0, 2.0, 330.0, 2.0, 5.0, 49.0, 400.0, 328.0)
+        printed = "\n".join(r.getMessage() for r in cm.records)
+        self.assertIn("LLM       │ 5m28s", printed)
+
+    def test_llm_row_absent_when_no_llm_was_called(self):
+        # Una run senza LLM non deve mostrare una riga a zero.
+        import main
+
+        with (
+            mock.patch.object(main, "_append_timing_history"),
+            self.assertLogs(main.log, level="INFO") as cm,
+        ):
+            main._print_timing(1.0, 2.0, 30.0, 28.0, 3.0, 5.0, 40.0)
+        printed = "\n".join(r.getMessage() for r in cm.records)
+        self.assertNotIn("LLM  ", printed)
+
+    def test_llm_time_is_persisted_in_the_history(self):
+        # Lo storico serve a monitorare le regressioni: senza la voce LLM il
+        # costo non era confrontabile fra una run e l'altra.
+        import main
+
+        with mock.patch.object(main, "_append_timing_history") as history:
+            main._print_timing(1.0, 2.0, 330.0, 2.0, 5.0, 49.0, 400.0, 328.0)
+        self.assertEqual(history.call_args.args[-1], 328.0)
 
 
 class TestSemanticSync(unittest.TestCase):
@@ -2364,6 +2486,24 @@ class TestPlainSummary(unittest.TestCase):
         self.assertEqual(_slide_list_text([2], di=True), "della slide 2")
         self.assertEqual(_slide_list_text([2, 5], di=True), "delle slide 2 e 5")
 
+    def test_slide_that_paid_for_the_floor_is_declared(self):
+        # Il pavimento è a risorse nulle: la slide 11 ha perso 4.8s per farne
+        # respirare la 12. Prima non compariva da nessuna parte (non era né
+        # "garantita" né anomala): alterata in silenzio.
+        out = self._render(
+            durations=[60.0, 8.1, 8.0, 60.0],
+            slide_ids=[1, 2, 3, 4],
+            total_duration=136.1,
+            floor_report={
+                "min_seconds": 8.0,
+                "guaranteed": [{"slide": 3, "before": 3.2, "duration": 8.0}],
+                "shortened": [{"slide": 2, "before": 12.9, "duration": 8.1}],
+                "unguaranteed": [],
+            },
+        )
+        self.assertIn("L'anti-flicker ha accorciato", out)
+        self.assertIn("la slide 2", out)
+
     def test_single_anomalous_slide_is_worded_in_the_singular(self):
         out = self._render(verdicts={2: "disallineata", 13: "incerto"})
         self.assertIn("il parlato della slide 2 somiglia", out)
@@ -2397,6 +2537,42 @@ class TestAnomalousDurations(unittest.TestCase):
 
     def test_too_few_slides_ignored(self):
         self.assertEqual(self._find([100.0, 400.0], [1, 2]), [])
+
+    def test_floor_duration_is_not_an_alignment_anomaly(self):
+        # Caso reale (25/09): la soglia "breve" (0.25 * mediana) e il pavimento
+        # anti-flicker (8s) si toccavano, e una durata di 8.0s veniva dichiarata
+        # anomala mentre una di 8.1s no. Il pavimento è conosciuto: passandolo,
+        # le due soglie non possono più contraddirsi.
+        from main import _find_anomalous_durations
+
+        # Durate reali della run: mediana 32.2s -> soglia breve 8.05s.
+        durations = [13.8, 62.6, 39.7, 52.1, 32.2, 8.0, 15.6, 127.0, 141.1, 27.9, 8.1, 8.0, 8.0, 58.9, 222.2]
+        slide_ids = list(range(1, 16))
+        without_floor = _find_anomalous_durations(durations, slide_ids)
+        with_floor = _find_anomalous_durations(durations, slide_ids, min_seconds=8.0)
+        # Le quattro slide fermi al pavimento (6, 12, 13 a 8.0s e 11 a 8.1s)
+        # spariscono: il loro tempo è concesso, non misurato.
+        self.assertEqual(
+            sorted(s for s, _ in without_floor), [6, 8, 9, 12, 13, 15]
+        )
+        self.assertEqual(sorted(s for s, _ in with_floor), [8, 9, 15])
+        # Le durate lunghe restano segnalate: quelle sono davvero da verificare.
+        self.assertIn((8, 127.0), with_floor)
+        self.assertIn((9, 141.1), with_floor)
+        self.assertIn((15, 222.2), with_floor)
+
+    def test_floor_exclusion_does_not_swallow_a_genuinely_short_slide(self):
+        # Escludere il pavimento non deve nascondere una slide VERAMENTE breve:
+        # una durata sotto il pavimento non è concessa, è un problema.
+        from main import _find_anomalous_durations
+
+        out = _find_anomalous_durations([100.0, 100.0, 100.0, 2.0], [1, 2, 3, 4], min_seconds=8.0)
+        self.assertEqual(out, [(4, 2.0)])
+
+    def test_floor_zero_keeps_the_historical_behaviour(self):
+        # Senza informazione sul pavimento il comportamento non cambia: la
+        # soglia corta resta quella storica.
+        self.assertEqual(self._find([100.0, 100.0, 100.0, 8.0], [1, 2, 3, 4]), [(4, 8.0)])
 
 
 class TestAnomalousContentValidation(unittest.TestCase):
@@ -2523,6 +2699,76 @@ class TestAnomalousContentValidation(unittest.TestCase):
         self.assertFalse(_should_escalate_weak_signal(True, 2, False))
         # Segnale buono: nessuna escalation.
         self.assertFalse(_should_escalate_weak_signal(False, 2, True))
+
+    def test_local_engine_runs_first_and_llm_is_only_an_escalation(self):
+        # Il caso reale del 25/09: 12 slide senza ancora, oltre la soglia (2).
+        # Prima l'LLM era un PREREQUISITO (si saltava il motore locale) e se
+        # falliva si ricalcolava da capo: ~328s per arrivare al fallback locale.
+        # Ora il motore locale gira SEMPRE per primo e l'LLM è un tentativo di
+        # migliorare una timeline che esiste già.
+        from main import _needs_llm_escalation
+
+        # Motore locale riuscito con segnale buono, poche slide mancanti:
+        # nessuna ragione di pagare l'LLM.
+        self.assertFalse(
+            _needs_llm_escalation(
+                local_failed=False,
+                weak_local=False,
+                missing_count=2,
+                llm_local_threshold=2,
+            )
+        )
+
+    def test_escalates_when_the_local_engine_failed(self):
+        from main import _needs_llm_escalation
+
+        self.assertTrue(
+            _needs_llm_escalation(
+                local_failed=True,
+                weak_local=False,
+                missing_count=1,
+                llm_local_threshold=2,
+            )
+        )
+
+    def test_escalates_when_too_many_slides_are_unanchored(self):
+        from main import _needs_llm_escalation
+
+        self.assertTrue(
+            _needs_llm_escalation(
+                local_failed=False,
+                weak_local=False,
+                missing_count=12,
+                llm_local_threshold=2,
+            )
+        )
+
+    def test_escalates_on_a_weak_signal(self):
+        from main import _needs_llm_escalation
+
+        self.assertTrue(
+            _needs_llm_escalation(
+                local_failed=False,
+                weak_local=True,
+                missing_count=3,
+                llm_local_threshold=10,
+            )
+        )
+
+    def test_llm_off_never_escalates(self):
+        # --llm off: la timeline locale è quella definitiva, per quanto debole
+        # sia il segnale.
+        from main import _needs_llm_escalation
+
+        self.assertFalse(
+            _needs_llm_escalation(
+                local_failed=True,
+                weak_local=True,
+                missing_count=12,
+                llm_local_threshold=2,
+                llm_enabled=False,
+            )
+        )
 
 
 class TestFreeOrderSelection(unittest.TestCase):
@@ -3933,3 +4179,40 @@ class TestFloorDurations(unittest.TestCase):
         self.assertEqual(guaranteed, {2: 8.0})
         self.assertEqual(unguaranteed, {})
         self.assertEqual(min_seconds, 8.0)
+
+    def test_slide_that_lost_time_to_the_floor_is_declared(self):
+        # Caso reale (25/09): il pavimento ha allungato la slide 12 a 8s
+        # STACCANDO 4.8s alla slide 11 (12.9s -> 8.1s). La slide 11 non era né
+        # "garantita" né anomala (8.1s > soglia 8.05s): alterata in silenzio.
+        from main import _floor_report, _floor_shortened
+
+        # Slide 11: 520.0 -> 532.9 (12.9s, perde 4.8s)
+        # Slide 12: 532.9 -> 536.1 (3.2s, viene allungata a 8.0s)
+        before = {1: 0.0, 2: 520.0, 3: 532.9, 4: 536.1}
+        after = {1: 0.0, 2: 520.0, 3: 528.1, 4: 536.1}
+        report = _floor_report(before, after, 544.1, 8.0)
+        # La 3 (slide 12) e' stata allungata: garantita.
+        self.assertEqual(
+            report["guaranteed"], [{"slide": 3, "before": 3.2, "duration": 8.0}]
+        )
+        # La 2 (slide 11) ha PAGATO: dichiarata come vittima, non come misura.
+        self.assertEqual(
+            report["shortened"], [{"slide": 2, "before": 12.9, "duration": 8.1}]
+        )
+        self.assertEqual(_floor_shortened(report), {2: 8.1})
+
+    def test_untouched_slides_are_neither_guaranteed_nor_shortened(self):
+        from main import _floor_report, _floor_shortened
+
+        before = {1: 0.0, 2: 60.0}
+        report = _floor_report(before, dict(before), 120.0, 8.0)
+        self.assertEqual(report["guaranteed"], [])
+        self.assertEqual(report["shortened"], [])
+        self.assertEqual(_floor_shortened(report), {})
+
+    def test_shortened_tolerates_a_broken_report(self):
+        from main import _floor_shortened
+
+        self.assertEqual(_floor_shortened(None), {})
+        self.assertEqual(_floor_shortened({"shortened": "non una lista"}), {})
+        self.assertEqual(_floor_shortened({"shortened": ["non un dict"]}), {})

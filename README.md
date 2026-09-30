@@ -161,6 +161,26 @@ python main.py --llm 9router           # forza 9Router online
 ```
 
 > **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto. Prompt ottimale per NotebookLM: [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](<PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md>) — vedi "Quale prompt usare".
+>
+> ⚠️ **Il nemico non è dimenticare la slide: è richiamarla.** Se il conduttore
+> torna su una pagina già trattata e ne ripete il numero (*"guarda sempre slide 3,
+> applicano mercato"*), la pagina viene mostrata in ritardo e resta "appiccicata"
+> alla precedente per tutto quel tempo. Misurato su un podcast reale: 3 confini su 8
+> spostati di **74s, 85s e 53s**.
+>
+> Oggi è risolto su due livelli. **Alla fonte**, il prompt dedicato vieta i
+> richiami e include un controllo prima di generare: è la soluzione vera, perché
+> previene il difetto invece di correggerlo. **In difesa**, l'estrattore qualifica
+> ogni menzione: distingue un conteggio quantificato (*"le 13 slide di questo
+> documento"*, che va ignorato) da un riferimento vero, e fra i riferimenti sceglie
+> la **prima** occorrenza, non l'ultima. Le due cose servono perché il semplice
+> "prima menzione" rotolava indietro il video di oltre un minuto nel caso del
+> conteggio, e su quel caso c'è un test dedicato
+> (`test_early_total_slide_count_does_not_poison_real_anchor`).
+>
+> Se vedi `Slide richiamate più volte (richiamo ignorato...)` è un'informazione,
+> non un allarme: segnala che il podcast richiama delle pagine e che il programma
+> ha scelto il confine giusto ignorando il richiamo.
 
 #### Manutenzione 9Router (`9router-maintenance/`)
 
@@ -315,6 +335,37 @@ e veloce il router lato server.
 > *caricamento del modello* (pochi secondi) e i ~25-30s di embedding veri non
 > comparivano da nessuna parte — per questo lo spreco non era mai emerso. Ora
 > `└ Embedding` è il calcolo dei vettori e `└ Modello` il caricamento, separati.
+>
+> Anche il tempo dell'LLM ha una riga sua (`└ LLM`), per lo stesso motivo: senza,
+> una cascata LLM da ~328s finiva dentro `Sincronizzaz.` senza attribuzione e il
+> costo restava invisibile finché non si leggevano i log riga per riga. Il tempo
+> è contato anche per le chiamate **fallite**, che sono proprio quelle da vedere.
+>
+> **Il motore locale gira SEMPRE per primo, l'LLM è un escalation.** Il motore
+> embedding costa pochi secondi (embedding in cache) e produce già una timeline
+> utilizzabile, quindi viene sempre provato per primo e l'LLM serve solo a
+> migliorarla. Prima l'ordine era inverso: oltre `--llm-local-threshold` slide
+> senza ancora si saltava dritto all'LLM e, se falliva, si ricalcolava da capo il
+> motore locale — nel run del 25/09 (12 slide senza ancora) questo costava ~328s
+> di cascata per arrivare esattamente al fallback locale che si aveva a portata di
+> mano in 2s. Ora la timeline locale viene **riusata** se l'LLM non dà niente.
+>
+> **Tre guardie sul costo dell'LLM**, nate dallo stesso run:
+>
+> 1. **Timeout 45s, non 120s.** Tarato sui dati reali di `comboact-state.json`
+>    (p50 3.2s, max 10.9s su 37 modelli): 120s erano ~35x il p50, quindi non
+>    scattavano mai per davvero e, quando scattavano, costavano 180s col retry
+>    per scoprire che il backup rispondeva in 14s. Alzalo con
+>    `LLM_9ROUTER_TIMEOUT` per i modelli "reasoning".
+> 2. **Gli endpoint morti restano morti nella run.** Un timeout esaurito marca
+>    l'endpoint come irraggiungibile: il retry non ripaga più gli stessi
+>    timeout e va dritto al primo backup ancora vivo.
+> 3. **I fallimenti vengono ricordati (cache negativa, TTL 30 min).** Prima la
+>    cache LLM ricordava solo i successi, quindi un rerun ripagava l'intera
+>    cascata per arrivare allo stesso fallback. Ora il rerun entro la finestra va
+>    diretto al motore locale. La chiave è un hash del contenuto, quindi un
+>    input diverso viene comunque ritentato. TTL con `LLM_FAILURE_TTL_SECONDS`
+>    (`0` = disattiva).
 >
 > **OpenVINO GenAI (solo iGPU Intel).** Su PC Intel con iGPU Iris Xe e senza
 > GPU NVIDIA è un'alternativa più veloce di faster-whisper su CPU (~5 min per 28
@@ -551,7 +602,7 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--llm-chunk` | `30.0` | Secondi per chunk inviato all'LLM |
 | `--llm-wait-timeout` | `0.0` | Se 9Router è necessario ma spento: secondi massimi di attesa prima del fallback embedding. `0` = attesa illimitata (pausa + avviso, riprende appena 9Router risponde) |
 | `--llm-review` | — | Dopo la timeline LLM nel flusso libero, secondo passaggio LLM che ri-verifica la selezione chunk→slide e avvisa (senza modificare la timeline) sui chunk sospetti. Risultato cachato. |
-| `--llm-local-threshold` | `2` | Nel flusso ordinato, numero massimo di slide senza ancora gestite dal raffinamento locale (embeddings, ~secondi, nessun 9Router) al posto dell'LLM cloud. Oltre questa soglia si usa 9Router (che si avvia da solo se spento). `0` = usa sempre 9Router |
+| `--llm-local-threshold` | `2` | Nel flusso ordinato, numero massimo di slide senza ancora che il **raffinamento locale** (embeddings, ~secondi, nessun 9Router) può gestire da solo. Il motore locale gira comunque **sempre per primo**; oltre questa soglia si chiede anche all'LLM (9Router, che si avvia da solo se spento) di migliorare la timeline, e se non riesce si usa quella locale già calcolata. `0` = chiedi sempre all'LLM |
 | `--require-full-anchors` | — | Nel flusso ordinato, **interrompi** se il podcast non annuncia TUTTE le slide (ancore `slide N` incomplete) invece di generare un video con durate stimate. Utile in batch/CI (`genera_video.bat`) |
 | `--strict-sync` | — | Modalità "non consegnare un video sospetto". Blocca PRIMA della generazione se un segmento di durata anomala risulta disallineato dal contenuto (il parlato somiglia a un'altra slide) o se la revisione LLM (`--llm-review`) contesta la mappa chunk→slide; blocca DOPO la generazione (il video resta su disco, ma l'esito è un errore) se la verifica frame vs slide trova segmenti con la slide sbagliata. Attiva automaticamente `--verify-video`. Default: avviso soltanto. Il report dei segmenti è salvato comunque in `.cache/sync_report.json` |
 | `--verify-video` | — | Dopo la generazione estrae un frame a metà di ogni segmento e lo confronta con la slide attesa: è l'unico controllo sull'ARTEFATTO (la timeline può essere coerente e il video comunque sbagliato). I frame restano in `.cache/verify_frames/` e l'esito finisce in `sync_report.json`. `genera_video.bat` lo attiva di default (pochi secondi in più) |
@@ -812,7 +863,7 @@ pipeline prende una strada diversa a seconda del segnale presente nell'audio.
 
 | Scenario | Segnale | Cosa fa |
 |---|---|---|
-| **A. `slide-audio`** | "Passiamo alla slide 3" | Estratte ancore deterministiche "slide N" (cifre, cardinali o **ordinali**: "la terza diapositiva") → vincoli ad alta precisione. Verifica mapping ancore: se la numerazione parlata è sfasata rispetto al PDF, l'**euristica deterministica** (embeddings locali, offline) corregge gli offset sistematici subito, senza 9Router; fallback LLM se l'offset non è sistematico. Sincronizzazione semantica (embedding e5-large offline): ogni blocco audio → slide più vicina, DP monotona. Con `--llm` attivo e slide SENZA ancora → **flusso ibrido**: fino a `--llm-local-threshold` slide mancanti (default 2) usa il **raffinamento locale** (embeddings, ~secondi, nessun 9Router); oltre la soglia l'**LLM** (9Router, che si avvia da solo se spento) le posiziona leggendo dove il contenuto è discusso; le ancore restano esatte. Riconciliazione (tempi crescenti, durate positive); se impossibile → **interruzione**. Slide in ordine 1→N. Un log diagnostico distingue riferimenti trovati/usati/scartati e segnala le slide senza ancora esplicita. |
+| **A. `slide-audio`** | "Passiamo alla slide 3" | Estratte ancore deterministiche "slide N" (cifre, cardinali o **ordinali**: "la terza diapositiva") → vincoli ad alta precisione. Verifica mapping ancore: se la numerazione parlata è sfasata rispetto al PDF, l'**euristica deterministica** (embeddings locali, offline) corregge gli offset sistematici subito, senza 9Router; fallback LLM se l'offset non è sistematico. Sincronizzazione semantica (embedding e5-large offline): ogni blocco audio → slide più vicina, DP monotona. Con `--llm` attivo e slide SENZA ancora → **flusso ibrido**: il **motore embedding locale gira sempre per primo** (pochi secondi, embedding in cache) e le ancore restano esatte; l'**LLM** (9Router, che si avvia da solo se spento) interviene solo come *escalation* per posizionare meglio le slide senza ancora, cioè oltre `--llm-local-threshold` slide mancanti (default 2) o quando il motore stesso dichiara il segnale debole. Se l'LLM non produce una timeline coerente si **riusa quella locale già calcolata** (nessun ricalcolo). Riconciliazione (tempi crescenti, durate positive); se impossibile → **interruzione**. Slide in ordine 1→N. Un log diagnostico distingue riferimenti trovati/usati/scartati e segnala le slide senza ancora esplicita. |
 | **B. `audio-slide`** | "Passiamo al blocco successivo" | Stesse ancore (numeriche o ordinali), stessa pipeline ordinata (+ flusso ibrido LLM come in A); la slide cambia sulle transizioni di blocco non numerate. |
 | **C. `free`** | nessuno | Riordino libero: la slide segue il contenuto del podcast, anche ripetuta, durata minima ~8s (anti-flicker). **Con LLM** (`--llm auto`): chunk 30s inviati a 9Router (combo `comboact` → Mistral 24B → Gemma 31B); se 9Router è spento il processo si mette in pausa con avviso e riprende da solo appena torna online (o premi `S` / `--llm-wait-timeout` per il fallback embedding; senza terminale interattivo si interrompe con errore chiaro). **Senza LLM** (`--llm off`): solo embedding locale in modalità libera. `--llm-review` ri-verifica e avvisa senza modificare la timeline. |
 
