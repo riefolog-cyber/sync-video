@@ -28,8 +28,11 @@ controllare la qualità della sincronizzazione.
 
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
@@ -47,6 +50,7 @@ from config import (
     STOPWORDS_ITA,
 )
 from semantic_sync import _clean_slide_text, _load_embed_model, _make_embed_fn, segment_verdict
+from video import _letterbox_references, _reference_matrix, _similarities
 
 TIMELINE_FILE = None
 ANCHORS_FILE = None
@@ -116,7 +120,11 @@ except Exception:
     tmp_tc = json.loads(TRANSCRIPT_FILE.read_text(encoding="utf-8"))
     AUDIO_DURATION = max(float(w["end"]) for w in tmp_tc["words_raw"]) + 5.0
 WORD_GAP_CUT = 0.4  # secondi: gap < soglia => taglio "a meta frase"
-IMAGE_SIZE = (96, 54)
+# Il confronto frame-vs-slide non usa una dimensione propria: riusa
+# `video._reference_matrix` / `_similarities`, così ha lo stesso metro (e lo
+# stesso letterbox) di `video.frame_consistency_check`. Due implementazioni
+# divergenti dello stesso confronto sono gia' state la causa di un falso mismatch
+# sui deck con rapporti misti.
 
 # ----------------------------------------------------------------------
 # Caricamento dati
@@ -284,17 +292,33 @@ cuts_pause = 0
 # di una parola e' di fatto un taglio su confine di parola, non META-PAROLA.
 BOUNDARY_SNAP_TOL = 0.05
 boundaries = starts[1:]
+# Indici e timestamp pre-calcolati: il ciclo sotto interpola TUTTE le parole a
+# ogni confine, quindi rifare gli start/fine a ogni iterazione costava un giro
+# completo del vocabolario per confine (con 20k parole e 60 confini: 1.2M di
+# conversioni float inutili). Inoltre `words.index(before[-1])` era un doppio
+# difetto: cercare il dict nell'intera lista è O(n), e `list.index` restituisce
+# il PRIMO elemento uguale, non quello trovato — con due parole identiche
+# (whisper ripete spesso la stessa parola, e il fallback `_parse_transcript_raw`
+# non scrive il campo "end") l'indice restituito è quello sbagliato e `word_end`
+# legge la parola successiva del posto sbagliato, gonfiando `gap_before`.
+# Misurato: un confine a 2.2s dentro una parola veniva riportato come "pausa"
+# (gap 2.20s) invece di "a meta frase" (gap 0.20s), cioè i tagli difettosi
+# sparivano dal referto. Si lavora quindi con gli indici veri, non con la
+# ricerca del valore.
+word_indices = list(range(len(words)))
+word_starts = [float(w["start"]) for w in words]
+word_ends = [word_end(w, i) for i, w in enumerate(words)]
 for b in boundaries:
     # parola a cavallo del confine? (con tolleranza di snap su confine di parola)
     straddle = [
         w
         for i, w in enumerate(words)
-        if float(w["start"]) + BOUNDARY_SNAP_TOL < b < word_end(w, i) - BOUNDARY_SNAP_TOL
+        if word_starts[i] + BOUNDARY_SNAP_TOL < b < word_ends[i] - BOUNDARY_SNAP_TOL
     ]
-    before = [w for i, w in enumerate(words) if word_end(w, i) <= b]
-    after = [w for i, w in enumerate(words) if float(w["start"]) >= b]
-    gap_before = b - word_end(before[-1], words.index(before[-1])) if before else 999.0
-    gap_after = float(after[0]["start"]) - b if after else 999.0
+    before_idx = [i for i in word_indices if word_ends[i] <= b]
+    after_idx = [i for i in word_indices if word_starts[i] >= b]
+    gap_before = b - word_ends[before_idx[-1]] if before_idx else 999.0
+    gap_after = word_starts[after_idx[0]] - b if after_idx else 999.0
     kind = "META-PAROLA" if straddle else ("pausa" if min(gap_before, gap_after) >= WORD_GAP_CUT else "a meta frase")
     if straddle:
         cuts_word += 1
@@ -302,8 +326,8 @@ for b in boundaries:
         cuts_pause += 1
     else:
         cuts_phrase += 1
-    prev_txt = " ".join(w["word"] for w in before[-8:])
-    next_txt = " ".join(w["word"] for w in after[:8])
+    prev_txt = " ".join(words[i]["word"] for i in before_idx[-8:])
+    next_txt = " ".join(words[i]["word"] for i in after_idx[:8])
     print(f"  confine {b:>8.1f}s : {kind:11s} | ...{prev_txt} | {next_txt}...")
 
 print(f"\nTagli a META PAROLA: {cuts_word} | a meta frase: {cuts_phrase} | su pausa naturale: {cuts_pause}")
@@ -318,6 +342,17 @@ print("=" * 100)
 for a_slide, a_time in sorted(anchors.items()):
     actual = next((s["start"] for s in segs if s["slide"] == a_slide), None)
     delta = (actual - a_time) if actual is not None else float("nan")
+    # Una ancora puo' non avere un segmento corrispondente (slide mai mostrata,
+    # o rimappata): `delta` e' gia' protetto, ma la riga va formattata senza
+    # crashare, altrimenti lo strumento muore PRIMA delle sezioni 4 e 5, cioe'
+    # proprio di quelle che servono a capire il video. Il caso e' reale: con un
+    # rimap di ancore la slide dichiarata puo' non comparire nella timeline.
+    if actual is None:
+        print(
+            f"  slide {a_slide:>2}: ancora {a_time:>8.1f}s | "
+            f"nessun segmento con questa slide (slide non mostrata o rimappata)"
+        )
+        continue
     print(f"  slide {a_slide:>2}: ancora {a_time:>8.1f}s | inizio segmento {actual:>8.1f}s | delta {delta:>+6.2f}s")
 
 # ----------------------------------------------------------------------
@@ -329,8 +364,6 @@ print("4. FRAME ESTRATTI (a meta segmento) vs SLIDE RENDERIZZATE (temp_slides)")
 print("=" * 100)
 
 FRAMES_DIR.mkdir(exist_ok=True)
-
-from PIL import Image
 
 
 def _extract_frame(out: Path, t: float) -> None:
@@ -361,25 +394,85 @@ def _extract_frame(out: Path, t: float) -> None:
     )
 
 
-def img_sim(a: Path, b: Path) -> float:
-    arr_a = np.asarray(Image.open(a).convert("L").resize(IMAGE_SIZE), dtype=np.float32).ravel()
-    arr_b = np.asarray(Image.open(b).convert("L").resize(IMAGE_SIZE), dtype=np.float32).ravel()
-    arr_a = arr_a - arr_a.mean()
-    arr_b = arr_b - arr_b.mean()
-    na, nb = np.linalg.norm(arr_a), np.linalg.norm(arr_b)
-    if na == 0 or nb == 0:
-        return 0.0
-    return float((arr_a @ arr_b) / (na * nb))
+def _build_slide_paths() -> list[Path]:
+    """Reference delle slide COSI' COME SONO NEL VIDEO (con letterbox).
 
+    Stessa normalizzazione di `video.frame_consistency_check`, riusata dalla
+    funzione condivisa invece di reimplementata: i due strumenti devono dare lo
+    stesso verdetto sugli stessi frame, o il riepilogo di `analysis_sync.py`
+    contraddirrebbe l'esito che la pipeline ha gia' scritto nel report.
+
+    Le reference stanno in una directory fuori da `FRAMES_DIR`, che deve
+    contenere solo i frame estratti dal video. Restituisce una lista VUOTA se una
+    slide non e' leggibile: il chiamante salta il confronto invece di produrre
+    un referto inventato.
+    """
+    with tempfile.TemporaryDirectory(prefix="analysis_refs_") as tmp:
+        built = _letterbox_references([str(sf) for sf in slide_files], Path(tmp))
+        if built is None:
+            return []
+        # La temporanea muore con il `with`: i PNG servono ancora, quindi si
+        # copiano in una directory che sopravvive allo script.
+        dest = FRAMES_DIR.parent / ".analysis_refs"
+        if dest.exists():
+            for stale in dest.glob("ref_*.png"):
+                with suppress(OSError):
+                    stale.unlink()
+        dest.mkdir(parents=True, exist_ok=True)
+        out: list[Path] = []
+        for src in built:
+            target = dest / src.name
+            shutil.copyfile(src, target)
+            out.append(target)
+        return out
+
+
+def _slide_matrix() -> np.ndarray:
+    """Matrice (slide, 64*64) dei vettori delle slide, gia' normalizzati.
+
+    Stessa ottimizzazione di `video._reference_matrix`: si legge ogni slide una
+    volta sola e ogni frame si confronta con un prodotto matriciale, invece di
+    riaprire e riconvertire ogni slide a ogni frame.
+
+    Le reference sono le slide COSI' COME SONO NEL VIDEO, cioe' con lo stesso
+    letterbox che applica l'encoder: `_letterbox_references` e' la funzione
+    condivisa che lo garantisce. Prima questo script confrontava il frame (con
+    le barre nere) contro il PNG originale (senza): su un deck con rapporti
+    diversi — una 4:3, una pagina verticale, una tabella larga — la similarita'
+    crollava sotto soglia e ogni segmento finiva fra i falsi mismatch. Misurato
+    su una slide 4:3 in un deck 16:9: 0.537 (falso mismatch) contro 1.000 di
+    `video.frame_consistency_check`, che applica il letterbox. Non e' solo un
+    falso allarme: con la riparazione automatica attiva il confine viene
+    spostato su rumore, cioe' una timeline buona viene corrotta.
+
+    Una slide illeggibile o uniforme diventa una riga di zeri -> 0.0.
+    """
+    return _reference_matrix(slide_paths)
+
+
+def _frame_sims(out: Path, slide_matrix: np.ndarray) -> np.ndarray:
+    """Coseno di un frame contro tutte le slide normalizzate (stesso metro di
+    `video.frame_consistency_check`, così i due strumenti non divergono)."""
+    return _similarities(out, slide_matrix)
+
+
+# Le slide vengono normalizzate con lo stesso letterbox dell'encoder: senza,
+# un deck con rapporti misti produce falsi mismatch (vedi _build_slide_paths).
+# Lista vuota = slide non leggibili: si salta il confronto, senza inventare un
+# referto. E` anche la forma che mypy riesce a restringere.
+slide_paths = _build_slide_paths()
+if not slide_paths:
+    print("AVVISO: slide non leggibili: confronto frame-vs-slide saltato.")
+SLIDE_MATRIX = _slide_matrix()
 
 frame_ok = 0
 mismatches: list[tuple[int, int, float]] = []
-for i, seg in enumerate(segs):
+for i, seg in enumerate(segs if slide_paths else []):
     s = seg["slide"]
     t = (seg["start"] + seg["end"]) / 2
     out = FRAMES_DIR / f"seg{i:02d}_t{t:07.1f}_slide{s:02d}.png"
     _extract_frame(out, t)
-    sims_img = [img_sim(out, sf) for sf in slide_files]
+    sims_img = _frame_sims(out, SLIDE_MATRIX)
     best_img = int(np.argmax(sims_img)) + 1
     best_sim_img = max(sims_img)
     ok = best_img == s and best_sim_img >= 0.85
@@ -405,14 +498,14 @@ print("=" * 100)
 # ri-raffina a ogni run i confini delle slide senza ancora esplicita, quindi
 # un confine segnalato come disallineato puo' essere atteso (video corretto).
 boundary_ok = 0
-for i, seg in enumerate(segs[1:], start=1):
+for i, seg in enumerate(segs[1:] if slide_paths else [], start=1):
     s = seg["slide"]
     t = seg["start"] + 1.0  # 1s dopo il taglio
     if t >= AUDIO_DURATION:
         continue
     out = FRAMES_DIR / f"bnd{i:02d}_t{t:07.1f}_slide{s:02d}.png"
     _extract_frame(out, t)
-    sims_img = [img_sim(out, sf) for sf in slide_files]
+    sims_img = _frame_sims(out, SLIDE_MATRIX)
     best_img = int(np.argmax(sims_img)) + 1
     best_sim_img = max(sims_img)
     ok = best_img == s and best_sim_img >= 0.85

@@ -27,6 +27,9 @@ llm_debug_output.txt
 # Log e frame di analisi post-run
 *.log
 .analysis_frames/
+# Reference delle slide ricostruite con il letterbox (analysis_sync.py):
+# rigenerate a ogni esecuzione, non sono un artefatto da conservare.
+.analysis_refs/
 
 # Modelli Vosk e Tesseract (troppo grandi per git)
 vosk-model-*/

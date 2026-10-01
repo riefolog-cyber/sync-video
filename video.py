@@ -10,6 +10,7 @@ import time
 from collections.abc import Sequence
 from contextlib import suppress
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 from moviepy import (
@@ -465,6 +466,49 @@ def image_similarity(a: Path, b: Path) -> float:
     return float(va @ vb / (na * nb))
 
 
+def _reference_matrix(paths: Sequence[Path]) -> np.ndarray:
+    """Matrice (N, 64*64) dei vettori di riferimento GIÀ NORMALIZZATI.
+
+    Il confronto frame-vs-slide è un coseno: ogni reference serve UNA volta
+    sola per costruire questa matrice, poi ogni frame si confronta con tutti i
+    reference con un solo prodotto matriciale.
+
+    Prima il confronto rifaceva `_gray_vector` (apertura PNG + conversione
+    grayscale + resize) per ogni (frame, slide): con 60 segmenti e 60 slide
+    erano 3600 aperture di immagine invece di 60, misurate in 79s contro 1.4s.
+    Il costo era quadratico proprio nella funzione che certifica l'artefatto.
+
+    Un reference illeggibile o a vettore nullo (immagine uniforme, senza
+    struttura) diventa una riga di zeri: il cosene vale 0.0 esattamente come
+    prima, quindi un difetto di lettura non viene più mascherato da uno 0.0
+    "casuale" né trasformato in un falso abbinamento.
+    """
+    dim = IMAGE_CHECK_SIZE[0] * IMAGE_CHECK_SIZE[1]
+    out = np.zeros((len(paths), dim), dtype=np.float32)
+    for i, p in enumerate(paths):
+        try:
+            v = _gray_vector(p)
+        except (UnidentifiedImageError, OSError):
+            continue  # riga di zeri -> similarità 0.0
+        n = float(np.linalg.norm(v))
+        if n == 0.0:
+            continue  # riga di zeri -> similarità 0.0
+        out[i] = v / n
+    return out
+
+
+def _similarities(frame: Path, ref_matrix: np.ndarray) -> np.ndarray:
+    """Coseno di un frame contro tutti i reference già normalizzati."""
+    try:
+        v = _gray_vector(frame)
+    except (UnidentifiedImageError, OSError):
+        return np.zeros(ref_matrix.shape[0], dtype=np.float32)
+    n = float(np.linalg.norm(v))
+    if n == 0.0:
+        return np.zeros(ref_matrix.shape[0], dtype=np.float32)
+    return cast(np.ndarray, ref_matrix @ (v / n))
+
+
 def _extract_frame(video_path: Path, t: float, out: Path) -> bool:
     """Estrae un frame al tempo ``t``. True se il file è stato scritto.
 
@@ -560,6 +604,10 @@ def frame_consistency_check(
         if slide_paths is None:
             log.warning("   [Verifica] Slide non leggibili: confronto frame-vs-slide saltato.")
             return {"checked": 0, "coherent": 0, "mismatches": []}
+        # I reference si embeddano UNA volta: da qui in poi ogni frame si
+        # confronta con la matrice (prodotto matriciale), senza più riaprire
+        # le PNG delle slide a ogni segmento.
+        ref_matrix = _reference_matrix(slide_paths)
         for i, (slide, start, end) in enumerate(segments):
             if not 1 <= int(slide) <= len(slide_paths):
                 continue
@@ -569,9 +617,9 @@ def frame_consistency_check(
                 log.debug("   [Verifica] Frame non estratto a %.1fs (segmento %d).", t, i)
                 continue
             checked += 1
-            sims = [image_similarity(frame, sp) for sp in slide_paths]
+            sims = _similarities(frame, ref_matrix)
             shown = int(np.argmax(sims)) + 1
-            best = float(max(sims))
+            best = float(max(sims)) if sims.size else 0.0
             if shown == int(slide) and best >= min_similarity:
                 coherent += 1
             else:

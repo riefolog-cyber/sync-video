@@ -15,11 +15,16 @@ from PIL import Image, UnidentifiedImageError
 
 from video import (
     _build_video_ffmpeg,
+    _canvas_size,
     _concat_quote,
+    _fitted_size,
+    _letterbox,
     _letterbox_references,
     _open_slide_retry,
     _prepare_slides_for_concat,
+    _reference_matrix,
     _run_ffmpeg,
+    _similarities,
     _write_concat_file,
     build_video,
     frame_consistency_check,
@@ -367,6 +372,136 @@ class TestFrameConsistencyCheck(unittest.TestCase):
             self.assertEqual(check["checked"], 0)
 
 
+class TestMixedAspectRatiosMatch(unittest.TestCase):
+    """Su un deck con rapporti misti il confronto deve reggere.
+
+    L'encoder applica il letterbox: una slide 4:3 in un canvas 16:9 appare
+    centrata con barre nere. Confrontare il frame (col letterbox) con il PNG
+    originale (senza) non trova la slide nemmeno quando è quella giusta: è il
+    difetto che produceva i falsi mismatch. Qui si verifica che la reference
+    sia ricostruita con lo stesso letterbox dell'encoder.
+    """
+
+    def _deck(self, tmp: Path) -> tuple[list[str], Image.Image]:
+        """Deck con una slide 16:9 e una 4:3; ritorna i path e il frame della 4:3."""
+        s1 = Image.new("RGB", (1920, 1080), (20, 60, 140))
+        s2 = Image.new("RGB", (1280, 1024), (200, 20, 20))
+        s2.paste(Image.new("RGB", (640, 1024), (250, 250, 250)), (0, 0))
+        files = []
+        for name, img in (("s1", s1), ("s2", s2)):
+            p = tmp / f"{name}.png"
+            img.save(p)
+            files.append(str(p))
+        # Il frame della slide 4:3 COSÌ COME la mette nel video l'encoder.
+        canvas = _canvas_size([_fitted_size(s1), _fitted_size(s2)])
+        frame = tmp / "frame4x3.png"
+        _letterbox(s2, *canvas).save(frame)
+        return files, frame
+
+    def test_letterboxed_reference_reaches_high_similarity(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            files, frame = self._deck(tmp)
+            # Senza letterbox la similarità crolla sotto soglia.
+            grezze = [
+                image_similarity(frame, Path(f)) for f in files
+            ]
+            massimo_grezzo = max(grezze)
+            self.assertLess(
+                massimo_grezzo,
+                0.85,
+                f"il caso di riferimento non riproduce il difetto (max {massimo_grezzo:.3f})",
+            )
+            # Con il letterbox dell'encoder la slide giusta viene riconosciuta.
+            refs = _letterbox_references(files, tmp / "ref")
+            self.assertIsNotNone(refs)
+            sims = _similarities(frame, _reference_matrix(refs))
+            migliore = int(max(range(len(sims)), key=lambda i: sims[i])) + 1
+            self.assertEqual(migliore, 2, "la slide 4:3 mostrata deve essere riconosciuta")
+            self.assertGreaterEqual(float(max(sims)), 0.85)
+
+    def test_letterbox_reference_is_what_encoder_produces(self):
+        # La reference deve essere identica a ciò che `_prepare_slides_for_concat`
+        # scrive per l'encoder: se i due divergono, i due strumenti contraddicono.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            files, _frame = self._deck(tmp)
+            encoder = _prepare_slides_for_concat(files, tmp / "enc")
+            refs = _letterbox_references(files, tmp / "ref")
+            for enc, ref in zip(encoder, refs, strict=True):
+                self.assertEqual(enc.read_bytes(), ref.read_bytes())
+
+
+class TestReferenceMatrix(unittest.TestCase):
+    """Il confronto vettoriale deve essere EQUIVALENTE a image_similarity.
+
+    Il percorso veloce pre-carica i reference e li confronta con un prodotto
+    matriciale: se i due percorsi divergessero, la verifica dell'artefatto
+    darebbe esiti diversi a seconda di quale dei due gira.
+    """
+
+    def _slides(self, tmp: Path, n: int = 5) -> list[str]:
+        slides = []
+        for i in range(n):
+            p = tmp / f"s{i}.png"
+            _half_image(80 + i * 7, 60 + i * 5, vertical=i % 2 == 0).save(p)
+            slides.append(str(p))
+        return slides
+
+    def test_matches_image_similarity_on_every_frame(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            refs = _letterbox_references(self._slides(tmp), tmp / "ref")
+            self.assertIsNotNone(refs)
+            ref_matrix = _reference_matrix(refs)
+            self.assertEqual(ref_matrix.shape[0], len(refs))
+            for slide_path in self._slides(tmp):
+                old = [image_similarity(Path(slide_path), r) for r in refs]
+                new = [float(x) for x in _similarities(Path(slide_path), ref_matrix)]
+                for a, b in zip(old, new, strict=True):
+                    self.assertAlmostEqual(a, b, places=5)
+                self.assertEqual(
+                    int(max(range(len(old)), key=lambda i: old[i])),
+                    int(max(range(len(new)), key=lambda i: new[i])),
+                )
+
+    def test_unreadable_reference_scores_zero(self):
+        # Una reference illeggibile non deve far crashare né "regalare" un
+        # abbinamento: la riga di zeri dà similarità 0.0 come prima.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            buona = tmp / "buona.png"
+            _half_image(80, 60, vertical=True).save(buona)
+            rotta = tmp / "rotta.png"
+            rotta.write_bytes(b"non e' un'immagine")
+            ref_matrix = _reference_matrix([buona, rotta])
+            sims = _similarities(buona, ref_matrix)
+            self.assertEqual(sims.shape[0], 2)
+            self.assertAlmostEqual(float(sims[1]), 0.0, places=6)
+            self.assertGreater(float(sims[0]), 0.99)
+
+    def test_uniform_reference_scores_zero(self):
+        # Immagine tutta uniforme: vettore nullo, similarità 0.0 (non NaN).
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            piatta = tmp / "piatta.png"
+            Image.new("L", (80, 60), 128).save(piatta)
+            dettagliata = tmp / "dettagliata.png"
+            _half_image(80, 60, vertical=True).save(dettagliata)
+            sims = _similarities(dettagliata, _reference_matrix([piatta]))
+            self.assertAlmostEqual(float(sims[0]), 0.0, places=6)
+
+    def test_unreadable_frame_scores_zero_against_every_reference(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            buona = tmp / "buona.png"
+            _half_image(80, 60, vertical=True).save(buona)
+            rotto = tmp / "rotto.png"
+            rotto.write_bytes(b"non e' un'immagine")
+            sims = _similarities(rotto, _reference_matrix([buona, buona]))
+            self.assertEqual(list(sims), [0.0, 0.0])
+
+
 class TestOpenSlideRetry(unittest.TestCase):
     def _make_png(self, td: Path) -> Path:
         p = td / "ok.png"
@@ -411,3 +546,4 @@ class TestOpenSlideRetry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
