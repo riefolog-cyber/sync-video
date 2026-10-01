@@ -2524,7 +2524,12 @@ class TestAnomalousDurations(unittest.TestCase):
     def _find(durations, slide_ids):
         from main import _find_anomalous_durations
 
-        return _find_anomalous_durations(durations, slide_ids)
+        # Il risultato porta anche la POSIZIZIONE del segmento: si verifica
+        # qui che le triple siano coerenti con l'input, così i test restano
+        # leggibili come "quale slide" senza rinunciare al dato posizionale.
+        out = _find_anomalous_durations(durations, slide_ids)
+        assert all(0 <= pos < len(slide_ids) for pos, _, _ in out), out
+        return [(s, d) for _, s, d in out]
 
     def test_long_slide_flagged(self):
         self.assertEqual(self._find([100.0, 100.0, 100.0, 400.0], [1, 2, 3, 4]), [(4, 400.0)])
@@ -2537,6 +2542,15 @@ class TestAnomalousDurations(unittest.TestCase):
 
     def test_too_few_slides_ignored(self):
         self.assertEqual(self._find([100.0, 400.0], [1, 2]), [])
+
+    def test_position_travels_with_the_result(self):
+        # La posizione è ciò che permette a chi consuma il risultato di sapere
+        # QUALE occorrenza della slide è anomala (la stessa slide può comparire
+        # più volte nel flusso free-order).
+        from main import _find_anomalous_durations
+
+        out = _find_anomalous_durations([100.0, 100.0, 100.0, 400.0], [1, 2, 3, 4])
+        self.assertEqual(out, [(3, 4, 400.0)])
 
     def test_floor_duration_is_not_an_alignment_anomaly(self):
         # Caso reale (25/09): la soglia "breve" (0.25 * mediana) e il pavimento
@@ -2553,13 +2567,13 @@ class TestAnomalousDurations(unittest.TestCase):
         # Le quattro slide fermi al pavimento (6, 12, 13 a 8.0s e 11 a 8.1s)
         # spariscono: il loro tempo è concesso, non misurato.
         self.assertEqual(
-            sorted(s for s, _ in without_floor), [6, 8, 9, 12, 13, 15]
+            sorted((s for _, s, _ in without_floor)), [6, 8, 9, 12, 13, 15]
         )
-        self.assertEqual(sorted(s for s, _ in with_floor), [8, 9, 15])
+        self.assertEqual(sorted((s for _, s, _ in with_floor)), [8, 9, 15])
         # Le durate lunghe restano segnalate: quelle sono davvero da verificare.
-        self.assertIn((8, 127.0), with_floor)
-        self.assertIn((9, 141.1), with_floor)
-        self.assertIn((15, 222.2), with_floor)
+        self.assertIn((8, 127.0), [(s, d) for _, s, d in with_floor])
+        self.assertIn((9, 141.1), [(s, d) for _, s, d in with_floor])
+        self.assertIn((15, 222.2), [(s, d) for _, s, d in with_floor])
 
     def test_floor_exclusion_does_not_swallow_a_genuinely_short_slide(self):
         # Escludere il pavimento non deve nascondere una slide VERAMENTE breve:
@@ -2567,7 +2581,7 @@ class TestAnomalousDurations(unittest.TestCase):
         from main import _find_anomalous_durations
 
         out = _find_anomalous_durations([100.0, 100.0, 100.0, 2.0], [1, 2, 3, 4], min_seconds=8.0)
-        self.assertEqual(out, [(4, 2.0)])
+        self.assertEqual(out, [(3, 4, 2.0)])
 
     def test_floor_zero_keeps_the_historical_behaviour(self):
         # Senza informazione sul pavimento il comportamento non cambia: la
@@ -2591,8 +2605,13 @@ class TestAnomalousContentValidation(unittest.TestCase):
     def _validate(anomalous, durations, slide_ids, words_raw):
         from main import _validate_anomalous_segments
 
+        # `anomalous` resta in forma (slide, durata) per leggibilità: la
+        # posizione si ricava cercando la slide nella sequenza mostrata.
+        positions = [
+            (slide_ids.index(s), s, d) for s, d in anomalous
+        ]
         return _validate_anomalous_segments(
-            anomalous, TestAnomalousContentValidation.SLIDES, words_raw, durations, slide_ids
+            positions, TestAnomalousContentValidation.SLIDES, words_raw, durations
         )
 
     def test_long_segment_with_coherent_content_downgraded(self):
@@ -2630,6 +2649,50 @@ class TestAnomalousContentValidation(unittest.TestCase):
         )
         verdicts = self._validate([(3, 400.0)], [100.0, 100.0, 400.0, 100.0], [1, 2, 3, 4], words)
         self.assertEqual(verdicts[3], "disallineata")
+
+    def test_repeated_slide_uses_the_right_occurrence(self):
+        # Nel flusso free-order la stessa slide può comparire più volte nella
+        # sequenza mostrata. Gli offset sono posizionali, quindi il verdetto va
+        # calcolato sulla POSIZIONE del segmento anomalo: prima si cercava la
+        # slide con `.index()`, che restituisce la prima occorrenza e faceva
+        # guardare al segmento sbagliato.
+        #
+        # I dati sono scelti perché le due posizioni DANO verdetti diversi:
+        # la durata anomala è breve (2s) e il parlato di ciascuna occorrenza è
+        # diverso. Leggendo il segmento 0 si concluderebbe "coerente" (parla di
+        # fisica, che è la slide 1) mentre il segmento 2 parla di newtoniana,
+        # cioè la slide 2: il verdetto vero è "disallineata". Il difetto non
+        # era solo "la posizione sbagliata": produceva un falso "tutto regola"
+        # su un allineamento errato, cioè nascondeva il difetto che il
+        # guard-rail esiste per trovare.
+        from main import (
+            _find_anomalous_durations,
+            _validate_anomalous_segments,
+        )
+
+        slides = ["Introduzione alla fisica quantistica", "Meccanica newtoniana"]
+        words = _words(
+            [
+                # segmento 0 (0-100s): parla di fisica -> la slide 1
+                ("fisica", 0.5),
+                ("quantistica", 1.0),
+                # segmento 2 (200-202s): parla di newtoniana -> la slide 2
+                ("meccanica", 200.5),
+                ("newtoniana", 201.0),
+            ]
+        )
+        durations = [100.0, 100.0, 2.0]
+        slide_ids = [1, 2, 1]  # la slide 1 ripresa
+        anomalous = _find_anomalous_durations(durations, slide_ids)
+        self.assertEqual(anomalous, [(2, 1, 2.0)])  # la 2a occorrenza della slide 1
+        verdicts = _validate_anomalous_segments(anomalous, slides, words, durations)
+        self.assertEqual(verdicts[1], "disallineata")
+        # Sanity: leggendo la posizione sbagliata il verdetto sarebbe l'altro,
+        # quindi il test distingue davvero le due finestre.
+        sbagliato = _validate_anomalous_segments(
+            [(0, 1, 2.0)], slides, words, durations
+        )
+        self.assertEqual(sbagliato[1], "coerente")
 
     def test_no_lexical_overlap_uncertain(self):
         # Parlato senza alcuna parola in comune con le slide: segnale debole,

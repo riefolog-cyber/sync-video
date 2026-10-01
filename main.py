@@ -230,12 +230,11 @@ def _save_final_timeline(
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     entries: list[dict[str, float]] = []
     ordered = sorted(timeline)
-    for s in ordered:
-        end = (
-            timeline[ordered[i + 1]]
-            if (i := ordered.index(s)) + 1 < len(ordered)
-            else total_duration
-        )
+    # `enumerate` invece di `ordered.index(s)`: quest'ultimo ripartiva dalla
+    # testa della lista a ogni slide, rendendo il salvataggio quadratico
+    # (irrilevante su 20 slide, ma la timeline può arrivare a centinaia).
+    for i, s in enumerate(ordered):
+        end = timeline[ordered[i + 1]] if i + 1 < len(ordered) else total_duration
         entries.append({"slide": s, "start": round(float(timeline[s]), 3), "end": round(float(end), 3)})
     atomic_write_text(
         CACHE_DIR / "llm_timeline_finale.json",
@@ -321,8 +320,16 @@ def _slide_list_text(slides: Sequence[int], *, di: bool = False) -> str:
     ``di=True`` gli articoli diventano "della/delle" (per frasi come "il parlato
     della slide 2"). Il riepilogo è testo per l'utente: "per le slide 13 la
     durata è anomala" è una frase sbagliata, non solo poco elegante.
+
+    Lista vuota -> stringa vuota: la funzione resta un formato, non un
+    assunzione sui dati. Oggi ogni chiamante controlla prima `if lista`, ma con
+    `numbers[0]` su una lista vuota il riepilogo finale — cioè l'ultima cosa
+    stampata, DOPO che il video è già stato prodotto — si sarebbe interrotto
+    con un IndexError e la run sarebbe sembrata fallita.
     """
     numbers = [str(s) for s in slides]
+    if not numbers:
+        return ""
     if len(numbers) == 1:
         return f"{'della' if di else 'la'} slide {numbers[0]}"
     joined = f"{numbers[0]} e {numbers[1]}" if len(numbers) == 2 else f"{', '.join(numbers[:-1])} e {numbers[-1]}"
@@ -695,9 +702,18 @@ def _find_anomalous_durations(
     long_ratio: float = 3.0,
     short_ratio: float = 0.25,
     min_seconds: float = 0.0,
-) -> list[tuple[int, float]]:
-    """Slide con durata molto fuori dalla mediana delle altre (possibile
-    errore di sincronizzazione). Return: lista di (slide, durata).
+) -> list[tuple[int, int, float]]:
+    """Segmenti con durata molto fuori dalla mediana delle altre (possibile
+    errore di sincronizzazione).
+
+    Returns: lista di triple ``(posizione, slide, durata)``.
+
+    La POSIZIONE è parte del risultato perché la stessa slide può comparire più
+    volte nella sequenza mostrata (flusso free-order): restituire solo il numero
+    di slide renderebbe indistinguibili due sue occorrenze, e chi consuma il
+    risultato non potrebbe più sapere quale finestra temporale guardare. Il
+    chiamante storico riceveva coppie ``(slide, durata)``: per compatibilità i
+    test e i log continuano a usare i primi due campi.
 
     ``min_seconds`` è il pavimento anti-flicker in vigore. Una slide ferma a
     quel pavimento non è un errore di allineamento: la sua durata è una scelta
@@ -720,8 +736,8 @@ def _find_anomalous_durations(
     if median <= 0:
         return []
     return [
-        (int(s), float(d))
-        for s, d in zip(slide_ids, durations, strict=True)
+        (pos, int(s), float(d))
+        for pos, (s, d) in enumerate(zip(slide_ids, durations, strict=True))
         if d > long_ratio * median
         or (
             d < short_ratio * median
@@ -927,30 +943,42 @@ def _segment_content_verdict(
 
 
 def _validate_anomalous_segments(
-    anomalous: Sequence[tuple[int, float]],
+    anomalous_positions: Sequence[tuple[int, int, float]],
     slide_texts: Sequence[str],
     words_raw: Sequence[Word],
     durations: Sequence[float],
-    slide_ids: Sequence[int],
 ) -> dict[int, str]:
     """Verifica di contenuto dei segmenti anomali (durata molto fuori mediana).
 
-    Per ogni slide anomala estrae il parlato nel suo intervallo temporale e
+    Per ogni segmento anomalo estrae il parlato nel suo intervallo temporale e
     lo confronta con l'OCR di tutte le slide (F1 lessicale). Ritorna
     ``{slide: 'coerente' | 'disallineata' | 'incerto'}`` così l'avviso può
     distinguere un segmento realmente lungo/corto da un allineamento errato.
+
+    ``anomalous_positions`` sono triple ``(posizione, slide, durata)``: la
+    posizione è necessaria perché la stessa slide può comparire più volte nella
+    sequenza mostrata (flusso free-order) e gli offset temporali sono posizionali.
+    Vedi il commento nel corpo: con il solo numero di slide si leggeva la
+    finestra sbagliata.
     """
     all_slide_tokens = [_slide_tokens(t) for t in slide_texts]
     verdicts: dict[int, str] = {}
     offsets = [0.0]
     for d in durations:
         offsets.append(offsets[-1] + d)
-    for s, d in anomalous:
-        try:
-            idx = slide_ids.index(s)
-        except ValueError:
+    # La stessa slide può comparire più volte nella sequenza mostrata (flusso
+    # free-order: la slide viene richiamata più avanti nella narrazione). Gli
+    # offset sono POSIZIONALI, quindi `slide_ids.index(s)` non basta: restituisce
+    # la PRIMA occorrenza e il segmento con durata anomala potrebbe essere una
+    # delle successive. Misurato: con slide_ids [1,2,1,3] e la seconda occorrenza
+    # anomala, il verdetto veniva calcolato sul segmento 0 invece del 2 — la
+    # finestra sbagliata, con dentro il parlato di un'altra parte del video, e il
+    # verdetto poteva essere "coerente" mentre il segmento vero era
+    # "disallineata". Qui si lavora sulle posizioni, non sui valori.
+    for pos, s, d in anomalous_positions:
+        if pos < 0 or pos >= len(offsets) - 1:
             continue
-        start = offsets[idx]
+        start = offsets[pos]
         speech = _speech_tokens_in_window(words_raw, start, start + d)
         verdicts[s] = _segment_content_verdict(speech, all_slide_tokens, s)
     return verdicts
@@ -2617,13 +2645,15 @@ def main(argv: list | None = None) -> None:
         # (0.25 * mediana) e il pavimento si toccano e la stessa durata veniva
         # segnalata o no a seconda di 0.05s (run del 25/09: 8.0s flaggata, 8.1s no).
         anomalous = [
-            (s, d)
-            for s, d in _find_anomalous_durations(durations, slide_ids, min_seconds=floor_min)
+            (pos, s, d)
+            for pos, s, d in _find_anomalous_durations(
+                durations, slide_ids, min_seconds=floor_min
+            )
             if s not in floor_guaranteed
         ]
         verdicts = (
             _validate_anomalous_segments(
-                anomalous, slide_texts, words_raw, durations, slide_ids
+                anomalous, slide_texts, words_raw, durations
             )
             if anomalous
             else {}
@@ -2652,10 +2682,10 @@ def main(argv: list | None = None) -> None:
         if anomalous:
             coherent = sorted(s for s, v in verdicts.items() if v == "coerente")
             misaligned = [
-                (s, d) for s, d in anomalous if verdicts.get(s) == "disallineata"
+                (s, d) for _, s, d in anomalous if verdicts.get(s) == "disallineata"
             ]
             uncertain = [
-                (s, d) for s, d in anomalous if verdicts.get(s) in (None, "incerto")
+                (s, d) for _, s, d in anomalous if verdicts.get(s) in (None, "incerto")
             ]
             if coherent:
                 log.info(
