@@ -73,7 +73,7 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from typing import Any, cast
 
-from chunks import Word, build_windows
+from chunks import Word, build_windows, words_text_in_window
 from config import CACHE_DIR, atomic_write_text, log
 from timeline import (
     _complete_from_anchors,
@@ -1364,7 +1364,7 @@ def build_anchor_verify_prompt(
     basandosi sul contenuto discusso subito dopo il riferimento."""
     lines = []
     for s, t in sorted(anchors.items(), key=lambda kv: kv[1]):
-        excerpt = " ".join(w["word"] for w in words_raw if t <= w["start"] < t + window_seconds).strip() or "..."
+        excerpt = words_text_in_window(words_raw, t, t + window_seconds) or "..."
         lines.append(f"- a {t:.1f}s (lo speaker dice 'slide {s}'): {excerpt}")
     excerpt_block = "\n".join(lines)
     system = (

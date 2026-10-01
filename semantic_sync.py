@@ -39,7 +39,7 @@ from typing import Any, cast
 
 import numpy as np
 
-from chunks import Segment, Word, build_windows
+from chunks import Segment, Word, build_windows, words_text_in_window
 from config import (
     CACHE_DIR,
     DEFAULT_EMBED_THREADS,
@@ -1261,7 +1261,7 @@ def verify_anchor_mapping_embedding(
 
     pairs: list[tuple[int, float, int]] = []  # (slide parlata, tempo, offset)
     for s, t in sorted(anchors.items(), key=lambda kv: kv[1]):
-        excerpt = " ".join(w["word"] for w in words_raw if t <= w["start"] < t + window_seconds).strip()
+        excerpt = words_text_in_window(words_raw, t, t + window_seconds)
         if not excerpt:
             continue
         try:
@@ -1465,9 +1465,7 @@ def make_anchor_remap_filter(
     def _validate(spoken_slide: int, t: float, new_slide: int) -> bool | None:
         exc = _excerpt_emb.get(round(t, 1))
         if exc is None:
-            excerpt = " ".join(
-                w["word"] for w in words_raw if t <= w["start"] < t + window_seconds
-            ).strip()
+            excerpt = words_text_in_window(words_raw, t, t + window_seconds)
             if not excerpt:
                 return None
             try:

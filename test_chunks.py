@@ -10,7 +10,7 @@ Esegui con: python -m unittest test_chunks -v
 import threading
 import unittest
 
-from chunks import build_windows
+from chunks import build_windows, words_in_window, words_text_in_window
 
 
 def _words(items):
@@ -89,6 +89,71 @@ class TestBuildWindows(unittest.TestCase):
         w1 = build_windows(_words([("x", 1.0)]), total_duration=10.0, window_seconds=4.0)
         w2 = build_windows(_words([("x", 1.0)]), total_duration=10.0, window_seconds=4.0)
         self.assertEqual(w1, w2)
+
+
+class TestWordsInWindow(unittest.TestCase):
+    """Lo stralcio di parlato dietro un'ancora deve restare IDENTICO.
+
+    La ricerca binaria sostituisce la scansione lineare: se il risultato
+    cambiasse, cambierebbe la verifica del mapping delle ancore, cioè
+    quali confini vengono corretti. Qui si confronta sempre con la
+    definizione originale, compresi i casi limite.
+    """
+
+    @staticmethod
+    def _reference(words, start, end):
+        return [str(w["word"]) for w in words if start <= float(w["start"]) < end]
+
+    def _assert_matches(self, words, start, end):
+        self.assertEqual(
+            words_in_window(words, start, end),
+            self._reference(words, start, end),
+        )
+
+    def test_matches_linear_scan_on_ordered_words(self):
+        words = _words([(f"w{i}", i * 0.5) for i in range(200)])
+        for start, end in [(0.0, 1.0), (3.0, 7.5), (0.0, 100.0), (99.0, 1000.0)]:
+            self._assert_matches(words, start, end)
+
+    def test_matches_linear_scan_on_random_windows(self):
+        import random
+
+        rng = random.Random(42)
+        words = _words([(f"w{i}", i * 0.37) for i in range(300)])
+        for _ in range(200):
+            a = rng.uniform(0, 110)
+            self._assert_matches(words, a, a + rng.uniform(0, 20))
+
+    def test_window_is_half_open(self):
+        # [start, end): la parola che inizia a `end` è esclusa.
+        words = _words([("a", 1.0), ("b", 2.0), ("c", 3.0)])
+        self.assertEqual(words_in_window(words, 1.0, 2.0), ["a"])
+        self.assertEqual(words_in_window(words, 1.0, 3.0), ["a", "b"])
+
+    def test_empty_and_inverted_windows(self):
+        words = _words([("a", 1.0), ("b", 2.0)])
+        self.assertEqual(words_in_window(words, 5.0, 5.0), [])
+        self.assertEqual(words_in_window(words, 9.0, 2.0), [])
+        self.assertEqual(words_in_window(words, 0.0, 1.0), [])
+
+    def test_unsorted_words_fall_back_to_linear_scan(self):
+        # Timestamp non crescenti: la ricerca binaria darebbe un risultato
+        # sbagliato, quindi il fallback deve riprodurre la definizione.
+        words = _words([("c", 5.0), ("a", 1.0), ("b", 3.0)])
+        self._assert_matches(words, 0.0, 4.0)
+        self._assert_matches(words, 2.0, 6.0)
+
+    def test_repeated_timestamps_are_all_included(self):
+        # Due parole con lo stesso start: la ricerca binaria (left/left)
+        # include TUTTE le parole del blocco, come la scansione lineare.
+        words = _words([("a", 1.0), ("b", 1.0), ("c", 1.0), ("d", 2.0)])
+        self._assert_matches(words, 1.0, 2.0)
+        self.assertEqual(words_in_window(words, 1.0, 2.0), ["a", "b", "c"])
+
+    def test_text_helper_joins_and_strips(self):
+        words = _words([("a", 1.0), ("b", 2.0), ("c", 9.0)])
+        self.assertEqual(words_text_in_window(words, 0.0, 5.0), "a b")
+        self.assertEqual(words_text_in_window(words, 100.0, 200.0), "")
 
 
 if __name__ == "__main__":
