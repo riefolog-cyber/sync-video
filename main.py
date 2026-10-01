@@ -471,6 +471,29 @@ def _log_plain_summary(
             _slide_list_text(sorted(floor_shortened)),
         )
 
+    # --- Slide "saziate": il sintomo del deck con piu' pagine delle sezioni ---
+    # Una slide che il pavimento ha portato al minimo partendo da quasi nulla non
+    # e' stata piu' corta perche' il podcast l'ha trattata in fretta: non e'
+    # stata trattata affatto. Il tempo per leggerla e' stato preso alle vicine,
+    # quindi a video scorre veloce. Prima questo dato finiva solo in una riga
+    # informativa e l'utente non aveva modo di capire che il rimedio non fosse
+    # "toccare i parametri" ma "rigenerare il deck".
+    starved = _starved_slides(floor_report, floor_min)
+    if starved:
+        log.warning(
+            "\n   [Avviso] %s non ha tempo proprio nel podcast: la durata minima "
+            "e' stata assegnata, non misurata (da %.1fs a %.1fs).\\n"
+            "   In pratica il podcast non sviluppa una sezione per queste pagine, "
+            "perche' le ha solo elencate o nominate di sfuggita: nel video "
+            "scorrono veloci.\\n"
+            "   Rimedi: nel flusso podcast -> slide rigenera la PRESENTAZIONE "
+            "chiedendo una sezione sviluppata per ciascuna pagina (l'audio si "
+            "riusa, costa poco); nel flusso slide -> podcast rigenera l'AUDIO.",
+            _slide_list_text(starved),
+            floor_min,
+            floor_min,
+        )
+
     # --- Copertura delle ancore: dice COSA la fiducia del motore sta misurando ---
     # Un confine ancorato non è una misura: è il tempo in cui lo speaker ha detto
     # "slide N". Con tutte le transizioni ancorate la qualità del motore non
@@ -829,6 +852,51 @@ def _floor_report(
         "shortened": shortened,
         "unguaranteed": unguaranteed,
     }
+
+
+def _floor_before(floor_report: dict[str, object] | None) -> dict[int, float]:
+    """Durata NATURALE delle slide che il pavimento ha allungato.
+
+    ``_floor_split`` restituisce solo la durata finale, cioè quella DOPO il
+    pavimento. Il dato che distingue "una slide un po' corta" da "una slide che
+    il podcast non ha trattato" è invece la durata di partenza: una a 7.8s su
+    un minimo di 8s il pavimento l'ha solo arrotondata, una a 3.7s non la
+    nasconde, la copre.
+    """
+    before: dict[int, float] = {}
+    if not isinstance(floor_report, dict):
+        return before
+    entries = floor_report.get("guaranteed")
+    if not isinstance(entries, list):
+        return before
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        with suppress(TypeError, ValueError):
+            before[int(cast(int, entry.get("slide")))] = float(
+                cast(float, entry.get("before") or 0.0)
+            )
+    return before
+
+
+def _starved_slides(floor_report: dict[str, object] | None, min_seconds: float) -> list[int]:
+    """Slide che il pavimento ha portato al minimo partendo da quasi nulla.
+
+    È il sintomo osservabile della differenza fra le pagine del deck e le
+    sezioni realmente sviluppate nel podcast: queste slide non hanno tempo
+    proprio, quello serve a leggerle è stato preso alle vicine. Nel flusso
+    podcast -> slide è l'unico controllo possibile, perché le sezioni del
+    podcast non hanno un marcatore (lì è proprio vietato nominare le slide, e
+    senza ancore non c'è nulla da contare).
+
+    Soglia: sotto metà del minimo. Una slide trattata per 7.8s su un minimo di
+    8s sta sopra e non viene segnalata — il pavimento ha corretto un
+    arrotondamento, ed è tutto. Una a 3.7s su 8s sta sotto: il contenuto non
+    c'era, e segnalarlo evita di scambiare il pavimento per una misura.
+    """
+    if min_seconds <= 0:
+        return []
+    return sorted(s for s, was in _floor_before(floor_report).items() if was < min_seconds * 0.5)
 
 
 def _floor_split(
@@ -2597,6 +2665,20 @@ def main(argv: list | None = None) -> None:
             )
             sync_notes["anti_flicker"] = floor_note
             floor_guaranteed, floor_unguaranteed, floor_min = _floor_split(floor_note)
+            # Slide senza tempo proprio nel podcast: il sintomo ispezionabile del
+            # deck con piu' pagine delle sezioni realmente sviluppate. Va nel
+            # report perche' spiega da solo le durate che altrimenti appaiono
+            # come misurate dal parlato.
+            starved_slides = _starved_slides(floor_note, floor_min)
+            if starved_slides:
+                sync_notes["starved_slides"] = {
+                    "slides": starved_slides,
+                    "natural_seconds": {
+                        str(s): _floor_before(floor_note).get(s, 0.0)
+                        for s in starved_slides
+                    },
+                    "floor_seconds": floor_min,
+                }
             if _moved:
                 log.info(
                     "   Anti-flicker: %d confini non ancorati spostati per garantire "

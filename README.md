@@ -680,6 +680,15 @@ leggere per prima quando un confine sembra sbagliato:
 - `mapping_suspicious` / `mapping_corrected` — la numerazione detta ad alta voce
   era disallineata rispetto al PDF: o è stata corretta in automatico, o è
   rimasta sospetta e va controllata a mano.
+- `starved_slides` — le slide che **non hanno tempo proprio nel podcast**: il
+  pavimento anti-flicker le ha portate al minimo partendo da quasi nulla, quindi
+  la loro durata è *costruita* per leggibilità, non misurata dal parlato. In
+  video scorrono veloce. È il sintomo del deck con più pagine delle sezioni
+  realmente sviluppate, e il rimedio dipende dal flusso: in podcast → slide si
+  rigenera la **presentazione** (l'audio si riusa), in slide → podcast si
+  rigenera l'audio. Non viene segnalata una slide che il podcast ha trattato per
+  pochi secondi ma che il pavimento ha solo arrotondato: la soglia è metà del
+  minimo, così l'avviso resta raro e quindi leggibile.
 
 Quando la scelta automatica del beam entra in gioco, il report contiene anche
 `beam`: la trascrizione **usata** (`chosen`: `greedy` o `accurate`), il motivo

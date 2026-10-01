@@ -1231,6 +1231,60 @@ class TestFlowRilevatoVsEffettivo(unittest.TestCase):
         self.assertIn("ancora esplicita", advice)
 
 
+class TestStarvedSlides(unittest.TestCase):
+    """Slide senza tempo proprio nel podcast (il caso "scorre velocemente").
+
+    Valori reali della run del 01/10 (15 slide, minimo 8s): la slide 2 partiva
+    da 3.7s e la 13 da 7.8s. La prima non aveva tempo proprio nel podcast, la
+    seconda era solo un arrotondamento: segnalarle insieme sarebbe stato un
+    falso allarme che avrebbe reso ignorabile l'avviso vero.
+    """
+
+    REPORT: ClassVar[dict[str, object]] = {
+        "min_seconds": 8.0,
+        "guaranteed": [
+            {"slide": 2, "before": 3.7, "duration": 8.0},
+            {"slide": 13, "before": 7.8, "duration": 8.0},
+            {"slide": 7, "before": 12.0, "duration": 8.0},
+        ],
+        "shortened": [{"slide": 1, "before": 76.4, "duration": 72.2}],
+        "unguaranteed": [],
+    }
+
+    def test_flags_only_the_slides_without_their_own_time(self):
+        from main import _starved_slides
+
+        # Solo la 2 (3.7s, sotto metà minimo). La 13 a 7.8s e la 7 a 12s no.
+        self.assertEqual(_starved_slides(self.REPORT, 8.0), [2])
+
+    def test_before_duration_is_recoverable(self):
+        # Il dato che spiega il difetto: la durata NATURALE, non quella finale.
+        from main import _floor_before
+
+        before = _floor_before(self.REPORT)
+        self.assertAlmostEqual(before[2], 3.7)
+        self.assertAlmostEqual(before[13], 7.8)
+
+    def test_no_floor_means_nothing_flagged(self):
+        from main import _starved_slides
+
+        self.assertEqual(_starved_slides(self.REPORT, 0.0), [])
+
+    def test_missing_or_malformed_report_is_survivable(self):
+        # Il report arriva da JSON: non deve far fallire la run.
+        from main import _starved_slides
+
+        for vuoto in (None, {}, {"guaranteed": None}, {"guaranteed": ["x", 3]}):
+            self.assertEqual(_starved_slides(vuoto, 8.0), [])
+
+    def test_slide_at_exactly_half_is_not_flagged(self):
+        # 4.0s su minimo 8.0: al limite, non "saziate". La soglia e' aperta.
+        from main import _starved_slides
+
+        report = {"min_seconds": 8.0, "guaranteed": [{"slide": 1, "before": 4.0, "duration": 8.0}]}
+        self.assertEqual(_starved_slides(report, 8.0), [])
+
+
 class TestReconcileTimeline(unittest.TestCase):
     """Riconciliazione: precisione assoluta, errore se non valida."""
 
