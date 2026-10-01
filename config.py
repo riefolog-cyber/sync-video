@@ -56,8 +56,19 @@ def _load_env_file(path: Path) -> None:
             quote = value[0]
             # Cerca la chiusura della virgoletta (prima di un eventuale commento)
             end_quote = value.find(quote, 1)
-            if end_quote != -1:
-                value = value[1:end_quote]
+            # Virgoletta di apertura SENZA chiusura: il valore è malformato. Prima
+            # si entrava nell'else e si tagliava al '#', restituendo anche
+            # l'apostrofo (`T_A="ciao # nota` -> `"ciao`): la variabile risultava
+            # valorizzata con spazi e virgolette, che un _env_int/_env_float
+            # rifiutava con un avviso fuorviante ("non numerica") invece di
+            # segnalare il .env rotto. Meglio togliere il commento come nel caso
+            # senza virgolette e lasciare che l'errore emerga sul valore, che è
+            # il vero contenuto scritto dall'utente.
+            value = (
+                value[1:end_quote]
+                if end_quote != -1
+                else value.split("#", 1)[0].strip().strip(quote)
+            )
         else:
             value = value.split("#")[0].strip()
         if key and key not in os.environ:

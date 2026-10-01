@@ -170,5 +170,76 @@ class TestEnsurePipPackages(unittest.TestCase):
         pip.assert_not_called()
 
 
+class TestLoadEnvFile(unittest.TestCase):
+    """Parser del .env: commenti, virgolette, `export`, BOM.
+
+    Il caso che motivò il test è la virgoletta di apertura SENZA chiusura:
+    il valore tornava con l'apostrofo dentro (`"ciao`) e un `_env_int`/
+    `_env_float` lo rifiutava con "non numerica", cioè un avviso che
+    puntava al numero invece che al .env malformato.
+    """
+
+    def _carica(self, testo: str) -> dict[str, str]:
+        import os
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / ".env"
+            p.write_text(testo, encoding="utf-8")
+            with mock.patch.dict(os.environ, {}, clear=False):
+                for k in list(os.environ):
+                    if k.startswith("S2VTEST_"):
+                        del os.environ[k]
+                config._load_env_file(p)
+                return {k: v for k, v in os.environ.items() if k.startswith("S2VTEST_")}
+
+    def test_unclosed_quote_does_not_swallow_comment(self):
+        env = self._carica('S2VTEST_A="ciao # nota\n')
+        self.assertEqual(env["S2VTEST_A"], "ciao")
+
+    def test_unclosed_quote_is_numeric_when_it_should_be(self):
+        # Il caso reale: SEMANTIC_WINDOW="4 # finestre" -> non deve diventare
+        # '"4', che _env_float rifiutava come "non numerica".
+        env = self._carica('S2VTEST_B="4 # quattro secondi\n')
+        self.assertEqual(env["S2VTEST_B"], "4")
+
+    def test_closed_quote_with_trailing_comment(self):
+        env = self._carica('S2VTEST_C="[a-z]+" # pattern\n')
+        self.assertEqual(env["S2VTEST_C"], "[a-z]+")
+
+    def test_single_quotes(self):
+        env = self._carica("S2VTEST_D='ciao mondo'\n")
+        self.assertEqual(env["S2VTEST_D"], "ciao mondo")
+
+    def test_hash_inside_closed_quotes_is_kept(self):
+        env = self._carica('S2VTEST_E="a#b"\n')
+        self.assertEqual(env["S2VTEST_E"], "a#b")
+
+    def test_unquoted_value_stops_at_hash(self):
+        env = self._carica("S2VTEST_F=ab # nota\n")
+        self.assertEqual(env["S2VTEST_F"], "ab")
+
+    def test_export_prefix_and_comments(self):
+        env = self._carica("# commento\nexport S2VTEST_G=7\n\n")
+        self.assertEqual(env["S2VTEST_G"], "7")
+
+    def test_line_without_equals_is_ignored(self):
+        env = self._carica("S2VTEST_H\n")
+        self.assertEqual(env, {})
+
+    def test_existing_env_is_not_overwritten(self):
+        import os
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / ".env"
+            p.write_text("S2VTEST_I=da_env_file\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"S2VTEST_I": "gia_impostata"}):
+                config._load_env_file(p)
+                self.assertEqual(os.environ["S2VTEST_I"], "gia_impostata")
+
+
 if __name__ == "__main__":
     unittest.main()
