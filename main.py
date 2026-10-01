@@ -1440,6 +1440,37 @@ def _detect_flow(transcript: str, words: list[Word] | None = None) -> str:
         return "free"
 
 
+def _anchor_gate_applies(flow_rilevato: str) -> bool:
+    """True se ``--require-full-anchors`` può legittimamente fermare la run.
+
+    Riguarda il flusso slide -> podcast, dove ogni pagina DEVE essere annunciata.
+    Nel flusso podcast -> slide le ancore sono escluse dal prompt per scelta:
+    l'assenza non è un difetto dell'audio, quindi il gate deve stare zitto.
+
+    Il parametro è il flusso RILEVATO, non quello effettivo: il fallback su
+    podcast senza ancore riscrive il flusso effettivo da "free" a "slide-audio",
+    e usare quello faceva scattare il gate in un flusso che le ancore le vieta.
+    """
+    return flow_rilevato != "free"
+
+
+def _thin_slide_advice(flow_rilevato: str) -> str:
+    """Rimedio per una slide con durata troppo breve.
+
+    Anche qui il flusso da usare è quello rilevato: nel podcast -> slide non ha
+    senso consigliare un'ancora "slide N", che quel prompt vieta esplicitamente.
+    """
+    if _anchor_gate_applies(flow_rilevato):
+        return (
+            "amplia l'audio su quei temi oppure fai pronunciare "
+            "un'ancora esplicita 'slide N' al momento della transizione"
+        )
+    return (
+        "amplia l'audio su quei temi (nel flusso podcast -> slide "
+        "le ancore 'slide N' sono escluse dal prompt)"
+    )
+
+
 # =====================================================================
 # MAIN ORCHESTRATOR
 # =====================================================================
@@ -1796,25 +1827,33 @@ def main(argv: list | None = None) -> None:
 
         # --- Auto-detection flusso (dopo trascrizione, prima della sincronizzazione) ---
         flow: str
+        flow_rilevato: str
         if args.flow is not None:
             flow = args.flow
+            flow_rilevato = args.flow
             log.info("   Flusso specificato manualmente: %s", flow)
         else:
             flow = _detect_flow(transcript, words_raw)
+            flow_rilevato = flow
             log.info("   Flusso auto-rilevato: %s (usa --flow per sovrascrivere)", flow)
             if flow == "free":
+                # I due avvisi seguenti descrivevano lo stesso momento e si
+                # contraddicevano: il primo annunciava il flusso libero come
+                # comportamento atteso del podcast -> slide, il secondo (tre
+                # righe dopo) annunciava che il programma lo stava abbandonando.
+                # Ora il primo dice cosa sta davvero per succedere, e il secondo
+                # spiega come ripristinare il flusso libero se lo si vuole.
                 log.warning(
                     "\n   [Avviso] Nessun riferimento 'slide N' né 'blocco successivo' "
-                    "rilevato nella trascrizione: flusso libero (le slide seguono il "
-                    "contenuto, senza ordine fisso).\n"
+                    "rilevato nella trascrizione.\n"
                     "   - Flusso podcast -> slide (podcast generato per primo, prompt "
-                    "'senza riferimenti alle slide'): comportamento ATTESO, nessuna "
-                    "azione necessaria.\n"
+                    "'senza riferimenti alle slide'): COMPORTAMENTO ATTESO. Le ancore "
+                    "'slide N' sono escluse dal prompt e non vanno aggiunte.\n"
                     "   - Flusso slide -> podcast: se il podcast doveva annunciare le "
                     "slide (es. 'passiamo alla slide 2'), le ancore mancano: "
                     "rigenera l'audio.\n"
-                    "   Per forzare comunque un allineamento ordinato senza LLM: "
-                    "--flow slide-audio --llm off (meno preciso senza ancore)."
+                    "   In entrambi i casi l'allineamento successivo e' quello "
+                    "ordinato per contenuto, come descritto sotto."
                 )
                 if not args.no_free_ordered_fallback:
                     # Fallback automatico: su podcast senza ancore la selezione
@@ -1853,7 +1892,17 @@ def main(argv: list | None = None) -> None:
             # non annuncia (tutte) le slide NON genera un video degradato (slide
             # stimate + micro-segmenti). Meglio fermarsi e rigenerare l'audio: il
             # prompt NotebookLM richiede l'annuncio di ogni slide.
-            if args.require_full_anchors and (not early_anchors or early_missing):
+            #
+            # Il gate riguarda il VERO flusso slide -> podcast. Nel podcast ->
+            # slide le ancore sono escluse dal prompt per scelta: l'assenza non
+            # e' un difetto dell'audio e chiedere di aggiungerle sarebbe
+            # contraddittorio (il fallback qui sopra ha gia' riscritto `flow` in
+            # "slide-audio", quindi il test va fatto su `flow_rilevato`).
+            if (
+                args.require_full_anchors
+                and _anchor_gate_applies(flow_rilevato)
+                and (not early_anchors or early_missing)
+            ):
                 _abort(
                     "Ancore 'slide N' incomplete: "
                     + (
@@ -2608,16 +2657,10 @@ def main(argv: list | None = None) -> None:
             # Il consiglio dell'ancora esplicita vale SOLO nel flusso
             # slide -> podcast: nel flusso podcast -> slide le ancore 'slide N'
             # sono escluse dal prompt, quindi l'unico rimedio è ampliare l'audio.
-            if flow != "free":
-                advice = (
-                    "amplia l'audio su quei temi oppure fai pronunciare "
-                    "un'ancora esplicita 'slide N' al momento della transizione"
-                )
-            else:
-                advice = (
-                    "amplia l'audio su quei temi (nel flusso podcast -> slide "
-                    "le ancore 'slide N' sono escluse dal prompt)"
-                )
+            # Il test va su `flow_rilevato` perché il fallback riscrive `flow` in
+            # "slide-audio": con `flow != "free"` questo ramo prometteva a un
+            # podcast -> slide di aggiungere l'ancora che il suo prompt vieta.
+            advice = _thin_slide_advice(flow_rilevato)
             log.warning(
                 "\n   [Avviso] Slide con durata minima (%s): il loro contenuto "
                 "sembra poco presente nella narrazione audio.\n"

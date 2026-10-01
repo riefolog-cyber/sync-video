@@ -467,6 +467,16 @@ riferimenti "slide N": l'assenza di ancore è il comportamento atteso.
 - Il pipeline ripiega sull'allineamento ordinato con soli embeddings (veloce,
   senza LLM) e posiziona le slide per contenuto.
 
+> **`--require-full-anchors` in questo flusso è ignorato**: serve al flusso B →
+> A (dove ogni pagina deve essere annunciata), qui le ancore sono escluse dal
+> prompt per scelta. L'opzione viene applicata solo se il flusso *rilevato* è
+> quello con ancore: il fallback interno riscrive il flusso effettivo da `free`
+  a `slide-audio`, ma la decisione guarda il flusso originale.
+>
+> **Prima di generare, conta le pagine del PDF e confrontale con le sezioni
+  del podcast**: è l'unico controllo che il programma non può fare al posto
+  tuo, ed è la condizione dell'allineamento 1:1 che questo flusso promette.
+
 > **Modello embedding**: il default è `intfloat/multilingual-e5-large`
 > (più preciso, ~2.2 GB, validato con test A/B). Nel solo flusso libero puoi
 > provare un modello più leggero e veloce con `--semantic-model

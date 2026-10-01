@@ -1189,6 +1189,48 @@ class TestDetectFlow(unittest.TestCase):
         self.assertIsNone(detect_flow_from_words([]))
 
 
+class TestFlowRilevatoVsEffettivo(unittest.TestCase):
+    """Il flusso RILEVATO va distinto da quello EFFETTIVO.
+
+    Sul podcast senza ancore il fallback riscrive il flusso effettivo da "free"
+    a "slide-audio". Usare quello efficace per decidere se ancore e rimedi sono
+    sensati prometteva a un podcast -> slide (che le ancore le vieta per scelta)
+    un'ancora da pronunciare, e faceva scattare --require-full-anchors sempre,
+    con un messaggio che chiedeva l'esatta cosa che il prompt vieta.
+    """
+
+    def test_gate_applies_to_slide_audio(self):
+        from main import _anchor_gate_applies
+
+        self.assertTrue(_anchor_gate_applies("slide-audio"))
+
+    def test_gate_applies_to_audio_slide(self):
+        from main import _anchor_gate_applies
+
+        self.assertTrue(_anchor_gate_applies("audio-slide"))
+
+    def test_gate_does_not_apply_to_podcast_first(self):
+        # Flusso podcast -> slide: le ancore sono escluse dal prompt.
+        from main import _anchor_gate_applies
+
+        self.assertFalse(_anchor_gate_applies("free"))
+
+    def test_advice_podcast_first_never_suggests_an_anchor(self):
+        # Il caso concreto del difetto: il podcast -> slide non deve mai
+        # ricevere il consiglio "fai pronunciare un'ancora 'slide N'".
+        from main import _thin_slide_advice
+
+        advice = _thin_slide_advice("free")
+        self.assertIn("escluse dal prompt", advice)
+        self.assertNotIn("ancora esplicita", advice)
+
+    def test_advice_slide_audio_suggests_the_anchor(self):
+        from main import _thin_slide_advice
+
+        advice = _thin_slide_advice("slide-audio")
+        self.assertIn("ancora esplicita", advice)
+
+
 class TestReconcileTimeline(unittest.TestCase):
     """Riconciliazione: precisione assoluta, errore se non valida."""
 
