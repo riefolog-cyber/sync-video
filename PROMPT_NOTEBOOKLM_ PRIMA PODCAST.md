@@ -9,7 +9,10 @@
 ## Fase 1 — Genera il podcast libero (senza vincoli di slide)
 
 1. Seleziona TUTTE le fonti che vuoi usare.
-2. In "Personalizza" → "Istruzioni" incolla:
+2. In "Personalizza" → "Istruzioni" incolla il blocco qui sotto.
+3. Scarica l'audio del podcast.
+
+<!-- INIZIO BLOCCO DA INCOLLARE (Fase 1: audio) -->
 
    Dibattito a due conduttori che copre TUTTI gli argomenti delle fonti in
    ordine logico, procedendo per SEZIONI tematiche ben distinte: una sezione =
@@ -34,20 +37,20 @@
    ▸ INTRO: Breve (30-40 s) e già parte della prima sezione, senza annunciare una scaletta.
    ▸ CHIUSA: Concludi l'ultima sezione con un saluto finale breve.
 
-3. Scarica l'audio del podcast.
+<!-- FINE BLOCCO DA INCOLLARE -->
 
 
-## Fase 3 — Genera la presentazione DERIVATA dal podcast
+## Fase 2 — Genera la presentazione DERIVATA dal podcast
 
-2. Genera la presentazione (**Studio → Slide Deck**) incollando:
-
-  
-
+1. In NotebookLM, **aggiungi il podcast (l'audio scaricato) come fonte** insieme
+   alle altre: senza la trascrizione la presentazione non può seguire le sezioni.
+2. Genera la presentazione (**Studio → Slide Deck**) incollando il blocco qui sotto.
 3. Scarica la presentazione e mettila nella cartella del progetto come
-   `presentazione.pdf` 
+   `presentazione.pdf`.
 
+<!-- INIZIO BLOCCO DA INCOLLARE (Fase 2: presentazione) -->
 
-"Crea una presentazione che segua ESATTAMENTE le sezioni della
+Crea una presentazione che segua ESATTAMENTE le sezioni della
    trascrizione del podcast nell'ordine in cui compaiono: UNA slide per
    sezione, con lo stesso numero di sezioni (niente fusioni, niente slide
    extra).
@@ -76,5 +79,48 @@
    (mai 'Introduzione', 'Conclusioni', 'Argomento 2'); stesso tono fresco e
    diretto del podcast, adatto a studenti 14-19 anni. NUMERA OGNI SLIDE
    (1, 2, 3...) in un piccolo angolo in basso a sinistra, nell'ordine delle
-   pagine. TESTO RIGOROSAMENTE SOLO IN ITALIANO."
+   pagine. TESTO RIGOROSAMENTE SOLO IN ITALIANO.
+
+<!-- FINE BLOCCO DA INCOLLARE -->
+
+<!-- =====================================================================
+     Da qui in giù NON va incollato in NotebookLM: sono note per te.
+     ===================================================================== -->
+
+## Controllo prima di generare (fallo davvero)
+
+Questo passaggio è quello che il programma **non** può fare al posto tuo.
+
+Apri il PDF e **conta le pagine**. Poi conta le sezioni del podcast (i cambi
+di argomento, non le frasi). Le due numerazioni devono coincidere: è da lì
+che nasce l'allineamento 1:1.
+
+- **Pagine in meno delle sezioni** → il deck non può essere 1:1; il
+  generatore ha fuso delle sezioni. Rigenera il deck chiedendo il conteggio.
+- **Pagine in più** → ci sono pagine senza contenuto: verranno mostrate con
+  durate brevi o spezzate. Rigenera.
+- **Il numero stampato in basso a sinistra è solo per te**: non è un punto
+  d'appoggio per il programma, serve a controllare a occhio l'ordine.
+
+## Note per te (non incollare questa parte)
+
+**L'assenza di "slide N" qui è attesa.** Il programma lo riconosce, avvisa
+"Nessun riferimento 'slide N'…" e prosegue: non è un errore e non va corretto
+rigenerando l'audio. L'allineamento che segue è **ordinato per contenuto**
+(embeddings), ed è la modalità giusta per questo flusso: il deck nasce dalle
+sezioni del podcast, quindi l'ordine coincide per costruzione.
+
+**Due avvertenze operative.**
+
+- **Non usare `--require-full-anchors`.** Serve al flusso A, dove ogni pagina
+  deve essere annunciata. Qui le ancore sono escluse dal prompt per scelta, e il
+  programma lo sa: l'opzione viene ignorata automaticamente in questo flusso.
+- **L'LLM è spento.** Si lavora con i soli embeddings: più in fretta e senza
+  9Router. Le durate sono quindi *stimate*, non misurate — approssimazione buona
+  nel 1:1 di un deck derivato dal podcast, ma non una garanzia.
+
+**Come leggere il referto.** In `.cache/sync_report.json` trovi
+`quality.avg_z` e `weak_signal`. Con `weak_signal: true` le slide sono troppo
+simili fra loro perché il solo contenuto le distingua: è il caso in cui questo
+flusso **non** è la scelta giusta e conviene tornare al flusso A."
 
