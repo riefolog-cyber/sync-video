@@ -37,6 +37,10 @@ Una sezione = una pagina del PDF, e ogni sezione si apre con la sua frase. Il vi
 
 - **Un numero solo nella frase che apre la sezione**, mai altrove: almeno una frase di distanza da "slide". "qui i tre concetti sono chiari" e non "i tre concetti della slide"; "il ciclo ha quattro fasi" e non "la slide spiega il ciclo in quattro fasi"; niente ordinali ("il primo punto") accanto a "slide"; mai il numero totale di pagine o sezioni. Intro, passaggi e chiusura non nominano le pagine, e mai "slide 1" in apertura (la prima pagina parte già a 0.0s).
 
+- **Ogni pagina deve avere una sezione che la sostenga.** Non limitarti ad annunciare la pagina e poi enunciarne il contenuto in una frase: sviluppalo con esempi concreti. Una sezione che si limita a pronunciare un elenco dura pochi secondi, e la pagina corrispondente nel video avrà una durata **costruita** dal pavimento di leggibilità, non misurata: si vedrà scorrere troppo veloce. Vale anche per le pagine "di indice" o "di schema": se la elenchi in tre secondi, o la allarghi con un punto che sviluppi davvero, o non la tratti come pagina autonoma.
+
+- **Sezioni di lunghezza simile.** Evita che una pagina resti due minuti e un'altra pochi secondi: se una pagina è un semplice elenco, accorpalo alla pagina che la introduce e libera una sezione lunga per un argomento che meritava più spazio.
+
 ### Controllo prima di generare (fallo davvero)
 
 Scorri tutte le frasi che contengono "slide" e conta quante volte compare ciascun numero: ogni numero da 2 a N deve comparire **una e una sola volta**, e subito prima del primo discorso su quella pagina. Se un numero manca o si ripete, correggi il testo e ricontrolla: è più economico che rigenerare tutto. Il totale non è un'ancora: "Le 14 slide di oggi" è un conteggio, dillo senza numero ("questa puntata copre tutti i passaggi").

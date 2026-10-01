@@ -24,7 +24,18 @@
    2. sviluppa con esempi concreti, citando le fonti;
    3. chiudi con una domanda aperta e poi con una frase riassuntiva
       (senza ripetere ogni volta "in sintesi").
-   
+
+   OGNI SEZIONE DEVE ESSERE SVILUPPATA, NON SOLO ELENCATA: non limitarti a
+   nominare gli elementi di una lista (le sette emozioni, le quattro fasi, i
+   tre concetti). Sviluppa almeno uno di quegli elementi con un esempio
+   concreto e una spiegazione, e cita gli altri. Una sezione che si limita a
+   pronunciare un elenco dura pochi secondi: la pagina corrispondente avrà
+   nel video una durata COSTRUITA invece che misurata, e scorrerà veloce.
+
+   Sezioni di lunghezza simile: evita che una sezione duri due minuti e un'altra
+   pochi secondi. Ogni pagina deve avere una sezione che la sostenga per un
+   tempo sufficiente a essere letta.
+
    NON usare riferimenti a slide, diapositive, capitoli o numeri di sezione:
    il podcast deve funzionare da solo, come conversazione libera.
 
@@ -62,6 +73,14 @@ Crea una presentazione che segua ESATTAMENTE le sezioni della
    3-4 punti molto brevi (max 6 parole ciascuno) con le parole chiave
    specifiche del parlato, evitando termini generici ripetuti sulle altre
    slide.
+
+   NON DEDICARE UNA PAGINA A UNA SEMPLICE ELENCAZIONE. Se una sezione del
+   podcast si limita a nominare degli elementi senza svilupparli (per esempio
+   enumera sette emozioni in pochi secondi), NON creare una pagina per quella
+   lista: accorpa quel contenuto alla pagina del tema che la introduce, o
+   scegli un aspetto da sviluppare davvero. Una pagina senza una sezione
+   sostanziale nel podcast non può avere una durata reale nel video e
+   scorrerà troppo veloce.
 
    VARA IL FORMATO tra le slide, alternando questi tipi (mai due uguali di
    seguito):
