@@ -107,13 +107,26 @@ Due ricette pronte, in base al punto di partenza:
 
 | Prompt | Flusso | Quando usarlo |
 |---|---|---|
-| [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](<PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md>) | **A**: deck → podcast con ancore `slide N` | Default: massima precisione di allineamento (ancore esatte), podcast più strutturato |
-| [`PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md`](<PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md>) | **B**: podcast libero → deck derivato dal parlato | Podcast più naturale; anche come piano B quando appare l'avviso "segnale debole" (slide troppo simili tra loro) |
+| [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](<PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md>) | **A**: deck → podcast con ancore `slide N` | Confini **misurati** (è lo speaker a dichiarare il tempo). Podcast più strutturato. Fragile a un errore operativo: se il deck cambia dopo il podcast, le ancore puntano a pagine che non esistono più |
+| [`PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md`](<PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md>) | **B**: podcast libero → deck derivato dal parlato | Più robusto: non c'è nulla da tenere allineato, e un errore si corregge rigenerando **solo il deck** (l'audio si riusa). Confini **stimati**; l'LLM è spento |
 
-Il flusso A sfrutta le ancore esplicite (flusso ordinato + ibrido LLM); il
-flusso B produce slide che rispecchiano 1:1 il parlato e funziona bene col
-riordino semantico (`free`/ordinato senza ancore), ma i confini sono stimati e
-meno precisi al secondo.
+**Come scegliere.** I due flussi non sono "uno giusto e uno di riserva": hanno
+vantaggi diversi e difetti diversi.
+
+- **Scegli A** se ti serve la massima precisione e sei disposto a mantenere
+  deck e podcast allineati. L'unico difetto è che un errore operativo
+  (rigenerare il deck dopo il podcast) si paga carissimo: nuova trascrizione.
+- **Scegli B** se preferisci la robustezza. Il deck nasce dal podcast, quindi
+  ordine e contenuto coincidono per costruzione: non c'è una scommessa da
+  fare. Il prezzo è che le durate sono stimate, non dichiarate.
+- **Passa da B ad A** se compare `weak_signal: true`: significa che le slide
+  sono troppo simili fra loro perché il solo contenuto le distingua, ed è
+  l'unico caso in cui le ancore esplicite danno un vantaggio che nient'altro
+  sostituisce.
+
+Entrambi richiedono che ogni pagina abbia una sezione di parlato **sviluppata**:
+una sezione che si limita a elencare produce una pagina che nel video scorre
+veloce (vedi `starved_slides` nel report).
 
 
 ### 🤖 Selezione con LLM (opzionale, supera il tetto dell'embedding)
@@ -160,7 +173,7 @@ python main.py --llm auto --preview     # valuta senza generare video
 python main.py --llm 9router           # forza 9Router online
 ```
 
-> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto. Prompt ottimale per NotebookLM: [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](<PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md>) — vedi "Quale prompt usare".
+> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto. Prompt NotebookLM: [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](<PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md>) — vedi "Come scegliere".
 >
 > ⚠️ **Il nemico non è dimenticare la slide: è richiamarla.** Se il conduttore
 > torna su una pagina già trattata e ne ripete il numero (*"guarda sempre slide 3,
@@ -486,7 +499,7 @@ riferimenti "slide N": l'assenza di ancore è il comportamento atteso.
 > motore resti **alta** (picco medio normalizzato sopra la soglia) e non
 > compaia l'avviso "segnale debole".
 
-### 2. Slide → Podcast (`PRIMA PRESENTAZIONE (DA PREFERIRE).md`)
+### 2. Slide → Podcast (`PRIMA PRESENTAZIONE.md`)
 
 La presentazione esiste prima e il podcast deve **annunciare ogni slide**
 ("passiamo alla slide N"): queste ancore vincolano la sincronizzazione.
@@ -806,7 +819,8 @@ crea_venv.sh             ← Crea .venv (macOS/Linux)
 requirements.txt         ← Dipendenze pip
 ruff.toml                ← Configurazione lint (guardrail di stile)
 mypy.ini                 ← Configurazione type-check
-PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md ← Prompt NotebookLM: presentazione → podcast (unico workflow)
+PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md ← Prompt NotebookLM: presentazione → podcast (flusso A)
+PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md       ← Prompt NotebookLM: podcast → presentazione (flusso B)
 tessdata/                ← Modelli lingua Tesseract portatili
 9router-maintenance/     ← Script manutenzione combo `comboact` di 9Router (vedi sotto)
 sync-video-architecture.json/html ← Diagramma architettura (generato con archify)
@@ -941,7 +955,7 @@ pronunciare le ancore "slide N" **in cifre** a ogni sezione: senza ancore il
 pipeline non può sapere dove cambia la slide e passa al flusso libero (che usa
 l'LLM — un avviso in console lo segnala).
 
-Il prompt [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md`](<PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE (DA PREFERIRE).md>)
+Il prompt [`PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md`](<PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md>)
 guida sia la generazione della presentazione (Studio → Slide Deck, dalle tue
 fonti) sia il podcast che la segue nell'ordine, arricchendola con le altre
 fonti. Ancore strette: cifre, "slide" chiara, mai "la slide successiva",
