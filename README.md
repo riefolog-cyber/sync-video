@@ -128,6 +128,20 @@ Entrambi richiedono che ogni pagina abbia una sezione di parlato **sviluppata**:
 una sezione che si limita a elencare produce una pagina che nel video scorre
 veloce (vedi `starved_slides` nel report).
 
+**Versioni minime.** Se le regole sopra ti sembrano troppe, esistono due
+file con il minimo indispensabile alla sincronizzazione (niente stile, niente
+formato, ~4 righe da incollare). Non sostituiscono i prompt lunghi quando
+qualcosa va storto: coprono il caso in cui il podcast segue il deck, che è
+quello normale.
+
+| Versione minima | Cosa toglie rispetto a quella lunga |
+|---|---|
+| [`PROMPT_MINIMO_PRESENTAZIONE.md`](<PROMPT_MINIMO_PRESENTAZIONE.md>) | Le regole sui richiami e sui numeri pronunciati per sbaglio: il codice le gestisce, ma male (un richiamo sposta la pagina di decine di secondi) |
+| [`PROMPT_MINIMO_PODCAST.md`](<PROMPT_MINIMO_PODCAST.md>) | Tutto: tono, formato delle slide, varietà dei layout. Tiene solo "una sezione sviluppata per argomento" e "una slide per sezione" |
+
+In entrambi i casi il **tono** della lezione non è incluso: aggiungi il blocco
+`TONO E STILE` del prompt lungo che preferisci.
+
 
 ### 🤖 Selezione con LLM (opzionale, supera il tetto dell'embedding)
 
@@ -821,6 +835,8 @@ ruff.toml                ← Configurazione lint (guardrail di stile)
 mypy.ini                 ← Configurazione type-check
 PROMPT_NOTEBOOKLM_ PRIMA PRESENTAZIONE.md ← Prompt NotebookLM: presentazione → podcast (flusso A)
 PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md       ← Prompt NotebookLM: podcast → presentazione (flusso B)
+PROMPT_MINIMO_PRESENTAZIONE.md          ← Versione minima del flusso A (solo sincronizzazione)
+PROMPT_MINIMO_PODCAST.md               ← Versione minima del flusso B (solo sincronizzazione)
 tessdata/                ← Modelli lingua Tesseract portatili
 9router-maintenance/     ← Script manutenzione combo `comboact` di 9Router (vedi sotto)
 sync-video-architecture.json/html ← Diagramma architettura (generato con archify)
