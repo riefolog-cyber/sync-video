@@ -336,9 +336,55 @@ def _slide_list_text(slides: Sequence[int], *, di: bool = False) -> str:
     return f"{'delle' if di else 'le'} slide {joined}"
 
 
-def _warn_sync_uncertainty() -> None:
-    """Avviso nel riepilogo finale se l'ultima sync semantica aveva segnale debole."""
+def _artifact_verified(frame_check: dict[str, object] | None, total_segments: int) -> bool:
+    """True se il frame check ha verificato TUTTI i segmenti, senza mismatch.
+
+    È l'unico controllo che gira sull'ARTEFATTO: fiducia del motore, similarità
+    e z-score misurano la TIMELINE, che può essere coerente mentre il video è
+    sbagliato — o il contrario. Quando il frame check dà il pieno, l'artefatto è
+    verificato per quanto riguarda le slide mostrate, e segnalare un dubbio
+    "da controllare a mano" sarebbe un falso allarme.
+
+    Il totale è obbligatorio: un frame check PARZIALE (un frame non estratto,
+    ffmpeg fallito) non dice niente sui segmenti non guardati, quindi non
+    basta che i segmenti controllati siano coerenti.
+
+    Cosa NON dimostra: che ogni confine sia al secondo giusto. Il frame viene
+    preso a metà segmento, quindi un errore di posizione uniforme passerebbe
+    comunque. Dimostra che ogni segmento mostra la slide che la timeline
+    dichiara — che è il difetto che questa verifica nasce per trovare.
+    """
+    if not isinstance(frame_check, dict) or total_segments <= 0:
+        return False
+    checked = int(cast("int", frame_check.get("checked") or 0))
+    coherent = int(cast("int", frame_check.get("coherent") or 0))
+    mismatches = cast("Sequence[dict[str, object]]", frame_check.get("mismatches") or [])
+    return checked >= total_segments and coherent >= checked and not mismatches
+
+
+def _warn_sync_uncertainty(
+    frame_check: dict[str, object] | None = None,
+    total_segments: int = 0,
+) -> None:
+    """Avviso nel riepilogo finale se l'ultima sync semantica aveva segnale debole.
+
+    Se il frame check ha verificato tutti i segmenti senza mismatch, l'avviso
+    non parte: non è che il motore si sia convinto, è che abbiamo guardato il
+    video e le slide sono quelle giuste. La regola vale anche viceversa (frame
+    check fallito -> l'avviso del motore basta, aggiunge niente).
+    """
     if not weak_signal_seen():
+        return
+    if _artifact_verified(frame_check, total_segments):
+        log.info(
+            "\n   [Attenzione, ma con rete di sicurezza] Il motore embedding era "
+            "scettico sulla qualità dell'allineamento, però la verifica dei "
+            "frame sul video finito ha controllato tutti i segmenti e le slide "
+            "mostrate sono quelle attese.\n"
+            "   Le durate restano STIMATE (non sono ancore dichiarate dallo "
+            "speaker): se in un punto il cambio di slide arriva tardi o presto, "
+            "solo guardandolo si può notare.\n"
+        )
         return
     log.warning(
         "\n   [Attenzione] Sincronizzazione a bassa fiducia: il segnale "
@@ -561,10 +607,21 @@ def _log_plain_summary(
                 f"{doubted} (frame in .cache/verify_frames/)"
             )
     if weak_signal_seen():
-        doubts.append(
-            "la somiglianza tra parlato e slide è risultata debole: le durate "
-            "sono stimate, non garantite (1:1 solo con le ancore 'slide N')"
-        )
+        # La fiducia del motore misura la timeline; il frame check misura
+        # l'artefatto. Se il secondo dà il pieno, il primo non genera un dubbio
+        # "da controllare a mano": sarebbe chiedere di verificare un video che
+        # è già stato verificato. Resta però il fatto, dichiarato sotto.
+        if _artifact_verified(frame_check, len(durations)):
+            log.info(
+                "   Il motore era scettico, ma il frame check sul video finito "
+                "ha verificato tutti i segmenti: le slide mostrate sono quelle "
+                "attese. Le durate restano stimate, non ancore dichiarate."
+            )
+        else:
+            doubts.append(
+                "la somiglianza tra parlato e slide è risultata debole: le durate "
+                "sono stimate, non garantite (1:1 solo con le ancore 'slide N')"
+            )
     if review_diffs:
         doubts.append(
             f"la revisione automatica contesta {review_diffs} scelte di slide: "
@@ -3087,7 +3144,10 @@ def main(argv: list | None = None) -> None:
             t_total,
             llm_seconds(),
         )
-        _warn_sync_uncertainty()
+        _warn_sync_uncertainty(
+            cast("dict[str, object] | None", sync_report.get("frame_check")),
+            len(durations),
+        )
 
         # Pulizia cache orfana
         cleaned = _clean_orphan_cache(active_cache_keys)

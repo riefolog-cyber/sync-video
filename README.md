@@ -936,6 +936,20 @@ sono simili e mostra quella slide in quel momento.
 > non garantita**, elencando cosa controllare a mano. Per un allineamento
 > certo, fai pronunciare le ancore esplicite "slide N" (vedi i workflow qui
 > sotto).
+>
+> **Il frame check ha la precedenza sulla fiducia del motore.** Se
+> `--verify-video` ha controllato *tutti* i segmenti e non ha trovato
+> mismatch, l'artefatto è verificato e l'avviso "da controllare a mano" non
+> viene aggiunto: sarebbe chiedere di controllare un video già guardato. Il
+> riepilogo lo dichiara comunque, perché le durate restano stimate.
+>
+> Attenzione: `avg_z` è un proxy, e diventa pessimista quando le slide sono
+> **poche e lunghe** (misurato: 8 slide su 30 minuti, ~226 s per slide →
+> `avg_z` 0.38 con frame check 8/8). Lo z-score di una slide è normalizzato su
+> tutta la linea temporale: più la slide è "a casa sua" a lungo, più il
+> parlato delle sezioni vicine le somiglia e il segnale di picchio si diluisce.
+> Per questo la soglia 0.45 non va ricalibrata sulla sola base di questi
+> casi: è il frame check a decidere, non il motore.
 
 ### Modello embedding
 

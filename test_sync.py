@@ -2362,6 +2362,94 @@ class TestAutoRepairFlag(unittest.TestCase):
         self.assertFalse(parse_args(["--no-auto-repair"]).auto_repair)
 
 
+class TestArtifactVerified(unittest.TestCase):
+    """Il frame check sul pieno vale più della fiducia del motore.
+
+    Caso reale del 02/10: 8 slide su 30 minuti, il motore dichiarava
+    segnale debole (avg_z 0.38 sotto la soglia 0.45) e il riepilogo avvisava
+    "sincronizzazione a bassa fiducia", mentre il frame check dava 8/8: il
+    video mostrava le slide giuste. L'avviso era un falso allarme su un
+    artefatto già verificato.
+    """
+
+    OK: ClassVar[dict[str, object]] = {"checked": 3, "coherent": 3, "mismatches": []}
+
+    def test_full_check_without_mismatch_verifies(self):
+        from main import _artifact_verified
+
+        self.assertTrue(_artifact_verified(self.OK, 3))
+
+    def test_no_check_does_not_verify(self):
+        from main import _artifact_verified
+
+        self.assertFalse(_artifact_verified(None, 3))
+
+    def test_zero_segments_does_not_verify(self):
+        # Un run senza segmenti non può essere "verificato": eviterebbe che
+        # l'avviso del motore spari del tutto.
+        from main import _artifact_verified
+
+        self.assertFalse(_artifact_verified(self.OK, 0))
+
+    def test_partial_check_does_not_verify(self):
+        # 2 segmenti controllati su 3: il terzo non è guardato, non importa
+        # che i due controllati siano coerenti.
+        from main import _artifact_verified
+
+        self.assertFalse(_artifact_verified({"checked": 2, "coherent": 2, "mismatches": []}, 3))
+
+    def test_mismatch_does_not_verify(self):
+        from main import _artifact_verified
+
+        check = {"checked": 3, "coherent": 2, "mismatches": [{"slide": 2}]}
+        self.assertFalse(_artifact_verified(check, 3))
+
+    def test_more_checked_than_total_still_verifies(self):
+        # Difesa: un frame check che copre piu' dei segmenti attesi resta valido.
+        from main import _artifact_verified
+
+        self.assertTrue(_artifact_verified({"checked": 5, "coherent": 5, "mismatches": []}, 3))
+
+
+class TestWeakSignalVetoedByFrameCheck(unittest.TestCase):
+    """Con l'artefatto verificato il dubbio del motore non va nei "da controllare"."""
+
+    def setUp(self):
+        from semantic_sync import _set_weak_signal, reset_weak_signal_flag
+
+        reset_weak_signal_flag()
+        _set_weak_signal()
+
+    def tearDown(self):
+        from semantic_sync import reset_weak_signal_flag
+
+        reset_weak_signal_flag()
+
+    def _render(self, **kwargs):
+        from main import _log_plain_summary
+
+        with self.assertLogs("slide2video", level="INFO") as logs:
+            _log_plain_summary([60.0, 60.0, 60.0], [1, 2, 3], 180.0, **kwargs)
+        return "\n".join(logs.output)
+
+    def test_weak_signal_is_a_doubt_when_artifact_not_verified(self):
+        out = self._render(quality={"avg_sim": 0.86, "avg_z": 0.38, "min_avg_z": 0.45})
+        self.assertIn("somiglianza tra parlato e slide", out)
+        self.assertIn("Da controllare a mano", out)
+
+    def test_weak_signal_is_not_a_doubt_when_artifact_verified(self):
+        out = self._render(
+            frame_check={"checked": 3, "coherent": 3, "mismatches": []},
+            quality={"avg_sim": 0.86, "avg_z": 0.38, "min_avg_z": 0.45},
+        )
+        # Il dubbio sparisce...
+        self.assertNotIn("somiglianza tra parlato e slide", out)
+        # ...ma il fatto resta dichiarato, con la prova che l'ha superato.
+        self.assertIn("motore era scettico", out)
+        self.assertIn("frame check", out)
+        self.assertIn("restano stimate", out)
+
+
 class TestPlainSummary(unittest.TestCase):
     """Riepilogo finale in parole semplici: cosa c'è nel video e cosa dubitare."""
 
