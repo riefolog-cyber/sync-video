@@ -31,7 +31,7 @@ deck non può seguire le sezioni.
 
 <!-- INIZIO BLOCCO DA INCOLLARE (Fase 2: presentazione) -->
 
-   Crea una presentazione che segua le sezioni della trascrizione
+   Crea una presentazione che segua le sezioni del podcast
    nell'ordine in cui compaiono: UNA slide per sezione, con lo stesso numero
    di sezioni (niente fusioni, niente slide extra).
 
