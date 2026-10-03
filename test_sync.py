@@ -2268,14 +2268,81 @@ class TestMinGapNonDistruggeLaTimeline(unittest.TestCase):
 
 
 class TestConfusabilityNelReport(unittest.TestCase):
-    """La causa della bassa fiducia deve finire nel report, non solo il sintomo.
+    """La causa della bassa fiducia deve finire nel report — ed essere vera.
 
     `avg_z` dice quanto i segmenti sono picchi; `confusability` dice PERCHÉ il
-    motore fatica (quante slide si somigliano fra loro). Prima di questa
-    modifica la causa stava solo dentro il confronto A/B del beam, quindi un
-    report senza beam automatico non portava nessuna traccia del problema
-    reale: 7 slide, tutte sullo stesso argomento.
+    motore fatica (quante slide si somigliano fra loro). Prima stava solo
+    dentro il confronto A/B del beam, quindi un report senza beam automatico
+    non portava traccia del problema.
+
+    Ma la misura stessa era rotta, ed è il caso reale a dirlo: su un deck di 7
+    slide tutte sullo stesso argomento, la cosine GREZZA fra due slide
+    qualsiasi sta a 0.85-0.91, e "Il gatto dorme sul divano" sta a 0.88 da
+    "L'Illusione della Telepatia". Con la soglia a 0.6 la misura valeva 1.0 per
+    QUALSIASI deck, e il riepilogo accusava l'utente di slide confondibili che
+    non aveva.
+
+    Qui si verifica che, tolto il basale comune, le slide del deck reale
+    risultino diverse: zero coppie duplicate.
     """
+
+    @staticmethod
+    def _deck_reale():
+        """Embedding con lo stesso difetto del modello vero: basale altissimo.
+
+        Non serve il modello: ciò che conta è che tutte le slide condividano
+        una componente dominante (il "testo italiano generico") e si
+        differenzino solo per una piccola parte. Sulla cosine grezza superano
+        tutte la soglia di duplicato, esattamente come sul deck reale.
+        """
+        rng = np.random.default_rng(20260903)
+        base = np.array([1.0] * 40)
+        v = []
+        for _ in range(7):
+            distintivo = rng.normal(size=40) * 0.06
+            x = base * 3.0 + distintivo
+            v.append(x / np.linalg.norm(x))
+        return np.array(v)
+
+    def test_il_basale_alto_non_trasforma_ogni_deck_in_duplicate(self):
+        from semantic_sync import signal_quality_report
+
+        slide_emb = self._deck_reale()
+        sim = np.eye(len(slide_emb))
+        # Precondizione: sulla metrica vecchia (cosine grezza) questo deck era
+        # 100% duplicati. È il difetto, non una proprietà del deck.
+        grezza = slide_emb @ slide_emb.T
+        iu = np.triu_indices(len(slide_emb), 1)
+        self.assertGreater(float(grezza[iu].min()), 0.6)
+
+        report = signal_quality_report(sim, slide_emb)
+        self.assertEqual(report["confusability"], 0.0)
+
+    def test_slide_identiche_restano_duplicate(self):
+        # Il centro non deve cancellare il caso peggiore: due slide identiche
+        # non hanno direzione propria e sono duplicati di tutto, anche dopo la
+        # normalizzazione (che altrimenti le renderebbe "diverse" per definizione).
+        from semantic_sync import signal_quality_report
+
+        slide_emb = np.array([[1.0, 0.0], [1.0, 0.0]], dtype=np.float64)
+        sim = np.array([[1.0, 0.2], [0.2, 1.0]], dtype=np.float64)
+        report = signal_quality_report(sim, slide_emb)
+        self.assertEqual(report["confusability"], 1.0)
+
+    def test_una_slide_identica_alle_altre_resta_il_legittimo_dubbio(self):
+        # Cinque slide diverse e una quasi identica a una delle altre: una sola
+        # coppia su quindici è duplicata, e la misura deve dirlo. Le
+        # dimensioni sono alte (24) perché dopo il centraggio due vettori
+        # casuali sono quasi ortogonali: l'unica similarità reale deve essere
+        # quella della copia.
+        from semantic_sync import signal_quality_report
+
+        rng = np.random.default_rng(7)
+        vettori = rng.normal(size=(6, 24))
+        vettori[5] = vettori[1] + 0.01 * rng.normal(size=24)
+        vettori /= np.linalg.norm(vettori, axis=1, keepdims=True)
+        report = signal_quality_report(np.eye(6), vettori)
+        self.assertAlmostEqual(report["confusability"], 1 / 15, places=6)
 
     def test_quality_contiene_la_causa(self):
         from semantic_sync import (
@@ -2297,11 +2364,11 @@ class TestConfusabilityNelReport(unittest.TestCase):
         q = last_quality()
         self.assertIn("confusability", q)
         self.assertIn("concordance", q)
-        self.assertGreater(q["confusability"], 0.5)
-        # Coerente con la geometria calcolata a mano nel fixture.
-        emb = fx.embed(fx.slide_texts())
-        atteso = float((emb @ emb.T)[np.triu_indices(fx.n, 1)].min() > 0.6)
-        self.assertEqual(q["confusability"], atteso)
+        # Il fixture ha tutte le slide sullo stesso tema: è il caso in cui il
+        # dubbio è legittimo, e i titoli sono già distinti. Quindi qui la misura
+        # deve confermare che sono DIVERSE (non duplicati), e il dubbio del
+        # riepilogo verrà da avg_z, non da confusability.
+        self.assertLessEqual(q["confusability"], 0.5)
 
 
 class TestCoperturaTimeline(unittest.TestCase):

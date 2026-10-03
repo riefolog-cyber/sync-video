@@ -594,9 +594,10 @@ def signal_quality_report(
       similarità nel parlato arriva in ordine crescente. 1.0 = l'audio segue
       l'ordine delle slide (flusso slide-derivate); ~0.5 = ordine casuale
       (slide indipendenti dalla stessa fonte).
-    - confusability: frazione di coppie di slide quasi-duplicati (cosine
-      oltre `duplicate_threshold`), indice di quanto il tema unico rende
-      debole la discriminazione.
+    - confusability: frazione di coppie di slide quasi-duplicati, indice di
+      quanto il tema unico rende debole la discriminazione. Il confronto è
+      fatto sugli embedding CENTRATI (vedi `_centered`): con la cosine grezza
+      la misura non significa nulla.
     """
     _, N = sim.shape
     peaks = [int(np.argmax(sim[:, s])) for s in range(N)]
@@ -610,11 +611,57 @@ def signal_quality_report(
 
     confusability = 0.0
     if slide_emb is not None and slide_emb.shape[0] == N and N > 1:
-        s2s = slide_emb @ slide_emb.T
-        np.fill_diagonal(s2s, 0.0)
-        confusability = float((s2s > duplicate_threshold).sum()) / (N * (N - 1))
+        s2s, senza_direzione = _centered(slide_emb)
+        coppie = N * (N - 1) // 2
+        duplicati = sum(
+            1
+            for i in range(N)
+            for j in range(i + 1, N)
+            if senza_direzione[i]
+            or senza_direzione[j]
+            or float(s2s[i, j]) > duplicate_threshold
+        )
+        confusability = duplicati / coppie if coppie else 0.0
 
     return {"concordance": concordance, "confusability": confusability}
+
+
+# Sotto questa norma un embedding centrato è nullo: la slide coincide con la
+# media delle altre, quindi non ha una direzione propria.
+_CENTRO_NULLO = 1e-9
+
+
+def _centered(vectors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Matrice di cosine sugli embedding CENTRATI, e flag delle slide senza direzione.
+
+    Perché centrare. La cosine grezza di un modello come multilingual-e5-large
+    ha un basale altissimo e costante: misurata sul deck reale (7 slide, un
+    podcast di 24 minuti) due slide diverse stanno a 0.85-0.91, ma anche "Il
+    gatto dorme sul divano" e "L'Illusione della Telepatia" stanno a 0.88-0.92.
+    Su una scala del genere una soglia a 0.6 dichiara duplicate TUTTE le coppie
+    di qualsiasi deck: `confusability` valeva 1.0 sempre, e la sua soglia in
+    `weak_signal` non poteva mai dire "no". Non era una misura, era una
+    costante — e il riepilogo la leggeva come "slide confondibili" e accusava
+    il deck dell'utente.
+
+    Centrando (togliendo la media, cioè la direzione "testo italiano
+    generico") rimane quello che distingue davvero. Sullo stesso deck: da
+    0.878 a -0.002 fra slide, con il testo fuori tema a -0.295, e zero coppie
+    oltre la soglia. Le slide erano sempre state diverse.
+
+    Le slide senza direzione propria (identiche alla media) restano duplicate
+    di tutto, e vengono segnalate: sono il caso in cui il centro non cancella
+    informazione ma la dice.
+
+    Returns:
+        (matrice di cosine NxN, booleani "slide senza direzione propria")
+    """
+    centered = vectors - vectors.mean(axis=0, keepdims=True)
+    norms = np.linalg.norm(centered, axis=1)
+    senza_direzione = norms <= _CENTRO_NULLO
+    sicuri = np.where(senza_direzione, 1.0, norms)
+    unit = centered / sicuri[:, None]
+    return unit @ unit.T, senza_direzione
 
 
 def weak_signal(
