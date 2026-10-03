@@ -56,22 +56,4 @@ Scorri tutte le frasi che contengono "slide" e conta quante volte compare ciascu
 
 <!-- FINE BLOCCO DA INCOLLARE -->
 
-<!-- =====================================================================
-     Da qui in giù NON va incollato in NotebookLM: sono note per te.
-     ===================================================================== -->
 
-## Note per te (non incollare questa parte)
-
-**Cosa fa il programma con le tue frasi.** La sincronizzazione fissa l'inizio di ogni pagina sull'**ultima** volta che ne sente il numero. È l'unico dato che usa, quindi è una buona cosa: se dici "slide N" una volta sola all'inizio di quella pagina, il confine è esatto al decimo di secondo. Ma è anche fragile: **un richiamo sposta la pagina in avanti**.
-
-**Il richiamo è il difetto più costoso, e va evitato alla fonte.** Nel podcast di esempio il conduttore tornava su concetti già trattati e ne ripeteva il numero (*"guarda sempre slide 3, applicano mercato"*). La pagina partiva oltre un minuto dopo di quando era stata annunciata, e per tutto quel tempo restava a schermo la precedente. Da allora l'estrattore riconosce i richiami e li scarta, ma la regola ⛔ qui sopra resta la soluzione vera: previene il difetto invece di correggerlo.
-
-**Cosa succede se sbagli comunque.** Non è un disastro, e il programma lo dice:
-
-- *Pochi riferimenti trovati* → i log mostrano `riferimenti trovati / usati` e l'elenco delle slide senza ancora. La sincronizzazione passa per contenuto: regge bene se il podcast segue l'ordine delle slide, peggio se lo salta.
-- *Richiami* → il log segnala `Slide richiamate più volte (richiamo ignorato...)`. È un'informazione, non un allarme: il confine resta quello giusto.
-- *Slide che durano troppo o troppo poco* → compaiono sotto "Da controllare a mano", col tempo prima e dopo.
-
-Nella run di riferimento, dopo questa revisione: 10 ancore su 11, fiducia alta, 12 segmenti su 12 corretti al frame, nessun dubbio. L'unica slide senza ancora era la 9, mai annunciata: un salto su undici.
-
-**Se vuoi più ancore**, il problema è quasi sempre nel podcast, non nel programma: una pagina di cui non si parla, o di cui si parla senza nominarne il numero. Nel secondo caso è il motore che la colloca per contenuto, con buona approssimazione ma senza garanzia.

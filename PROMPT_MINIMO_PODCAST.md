@@ -2,15 +2,7 @@
 
 > **Cos'è e cosa non è.** Qui c'è il minimo indispensabile perché il video
 > risulti sincronizzato. **Non è un prompt di stile**: non c'è tono, non
-> c'è formato delle slide, non c'è istruzione sulla lingua. Se ti serve la
-> lezione di IRC con il tono giusto, incolla questo e **aggiungi il blocco
-> TONO E STILE** della versione lunga
-> ([`PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md`](PROMPT_NOTEBOOKLM_ PRIMA PODCAST.md)).
->
-> **Perché la versione lunga esiste.** Ha più regole perché copre i casi in
-> cui il podcast non segue il deck (richiami, numeri pronunciati per
-> sbaglio, sezioni che si elencano). Se parti da qui e funziona, non ti
-> servono.
+> c'è formato delle slide, non c'è istruzione sulla lingua. 
 
 ## Fase 1 — Il podcast (incolla in "Personalizza" → "Istruzioni")
 
@@ -51,35 +43,3 @@ deck non può seguire le sezioni.
 
 Scarica il deck e mettilo nella cartella come `presentazione.pdf`.
 
----
-
-## Controllo prima di generare (2 minuti, fallo davvero)
-
-Questa è l'unica cosa che il programma **non** può fare al posto tuo.
-
-1. **Conta le pagine** del PDF.
-2. **Conta le sezioni** del podcast (i cambi di argomento, non le frasi).
-
-Se non coincidono, il video non può essere 1:1. Rigenera il deck: l'audio
-si riusa, quindi è veloce.
-
----
-
-## Note per te (non incollare)
-
-**Cosa fa il programma con un podcast senza "slide N".** L'assenza è
-**attesa**: il programma la riconosce, avvisa e prosegue. Non è un errore e
-non va corretto rigenerando l'audio. L'allineamento successivo è ordinato
-per contenuto, che è la modalità giusta qui: il deck nasce dalle sezioni
-del podcast, quindi l'ordine coincide per costruzione.
-
-**Due avvertenze.**
-
-- **Non usare `--require-full-anchors`**: qui le ancore sono escluse dal
-  prompt per scelta e il programma le ignora automaticamente.
-- **L'LLM è spento**: si lavora con i soli embeddings. Le durate sono
-  *stimate*, non misurate.
-
-**Se nel report compare `starved_slides`**, c'è una pagina senza tempo
-proprio nel podcast: rigenera il **deck** chiedendo una sezione sviluppata
-per quella pagina.
