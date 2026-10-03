@@ -30,7 +30,7 @@ ANCORE: valgono più della fluidità del testo. Il video si sincronizza sulle fr
 
 - In ordine, una volta sola: se le pagine sono N, gli annunci sono N-1 dal 2 al N, senza salti e senza ripetizioni.
 
-- MAI RICHIAMARE una pagina già trattata. Il video colloca ogni pagina nell'ultimo momento in cui ne sente il numero, quindi un richiamo la sposta in avanti anche di un minuto. Se torni su un concetto di una pagina precedente, non ne ripetere il numero, dillo con le parole. Non "guarda sempre slide 3" ma "come dicevamo, lo stesso schema".
+- MAI RICHIAMARE una pagina già trattata. Un richiamo crea un riferimento fuori ordine che il programma deve scartare, e in quel caso rischia di perdere anche la transizione vera. Se torni su un concetto di una pagina precedente, non ne ripetere il numero, dillo con le parole. Non "guarda sempre slide 3" ma "come dicevamo, lo stesso schema".
 
 - Un numero solo nella frase che apre la sezione, mai altrove, almeno una frase di distanza da "slide". Mai "slide 1" in apertura (la prima pagina parte già all'inizio), mai il numero totale di pagine.
 
@@ -45,18 +45,3 @@ CHIUSA: chiudi ogni sezione con una domanda aperta e una frase riassuntiva (senz
 ```
 
 Scarica l'audio.
-
-## Controllo prima di generare (fallo davvero)
-
-Fuori dal blocco: questo passaggio è per te, non per NotebookLM.
-
-Scorri le frasi che contengono "slide": ogni numero dalla 2 all'ultima pagina
-deve comparire **una e una sola volta**. Se un numero manca o si ripete,
-correggi il testo e ricontrolla — è più economico che rigenerare tutto.
-
-Poi guarda nel riepilogo del programma: `Confini ancorati: 6 su 6` per un deck
-da 7 pagine. Se è meno, qualche pagina non ha annunciato la propria frase:
-quel confine è una stima e va ascoltato.
-
-Non fidarti dei numeri stampati sulle pagine: se il generatore non li mette,
-diciamolo. Il dato che conta è quello nel riepilogo.

@@ -191,7 +191,7 @@ python main.py --llm 9router           # forza 9Router online
 > spostati di **74s, 85s e 53s**.
 >
 > Oggi è risolto su due livelli. **Alla fonte**, il prompt dedicato vieta i
-> richiami e include un controllo prima di generare: è la soluzione vera, perché
+> richiami e chiede di non ripetere mai un numero: è la soluzione vera, perché
 > previene il difetto invece di correggerlo. **In difesa**, l'estrattore qualifica
 > ogni menzione: distingue un conteggio quantificato (*"le 13 slide di questo
 > documento"*, che va ignorato) da un riferimento vero, e fra i riferimenti sceglie
