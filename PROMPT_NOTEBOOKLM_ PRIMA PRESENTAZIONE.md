@@ -7,7 +7,7 @@
 
 
 
-> Crea una presentazione in italiano: una slide per argomento, senza dividere un argomento in due slide né accorparne due in una. Numera ogni slide nell'ordine delle pagine. Testo rigorosamente solo in italiano.
+> Crea una presentazione in italiano: una slide per argomento, senza dividere un argomento in due slide né accorparne due in una. Numera ogni slide nell'ordine delle pagine. Testo rigorosamente solo in italiano. Titolo breve (max 8 parole) con il termine specifico dell'argomento. 3-4 punti molto brevi con le parole chiave del parlato, evitando termini generici ripetuti sulle altre pagine.
 
 
 3. Scarica la presentazione generata e ricaricala nelle fonti come **PRESENTAZIONE**.
@@ -41,10 +41,6 @@ Una sezione = una pagina del PDF, e ogni sezione si apre con la sua frase. Il vi
 
 - **Sezioni di lunghezza simile.** Evita che una pagina resti due minuti e un'altra pochi secondi: se una pagina è un semplice elenco, accorpalo alla pagina che la introduce e libera una sezione lunga per un argomento che meritava più spazio.
 
-### Controllo prima di generare (fallo davvero)
-
-Scorri tutte le frasi che contengono "slide" e conta quante volte compare ciascun numero: ogni numero da 2 a N deve comparire **una e una sola volta**, e subito prima del primo discorso su quella pagina. Se un numero manca o si ripete, correggi il testo e ricontrolla: è più economico che rigenerare tutto. Il totale non è un'ancora: "Le 14 slide di oggi" è un conteggio, dillo senza numero ("questa puntata copre tutti i passaggi").
-
 ## TONO E STILE
 ══════════════════════════════════════════════════════════
 ▸ TARGET: classe di scuola secondaria di secondo grado (14-19 anni), lezione di IRC.
@@ -55,5 +51,13 @@ Scorri tutte le frasi che contengono "slide" e conta quante volte compare ciascu
 ▸ INTRO: breve, già dentro la prima sezione, senza annunciare una scaletta.
 
 <!-- FINE BLOCCO DA INCOLLARE -->
+
+## Controllo prima di generare (fallo davvero)
+
+Fuori dal blocco: questo passaggio è per te, non per NotebookLM.
+
+Scorri tutte le frasi che contengono "slide" e conta quante volte compare ciascun numero: ogni numero da 2 a N deve comparire **una e una sola volta**, e subito prima del primo discorso su quella pagina. Se un numero manca o si ripete, correggi il testo e ricontrolla: è più economico che rigenerare tutto. Il totale non è un'ancora: "Le 14 slide di oggi" è un conteggio, dillo senza numero ("questa puntata copre tutti i passaggi").
+
+Poi guarda nel riepilogo del programma: `Confini ancorati: N-1 su N-1`. Se è meno, qualche pagina non ha annunciato la propria frase: quel confine è una stima, non una misura, e va ascoltato.
 
 

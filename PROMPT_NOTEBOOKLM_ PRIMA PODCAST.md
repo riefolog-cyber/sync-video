@@ -1,10 +1,12 @@
 # Prompt per NotebookLM — PODCAST → PRESENTAZIONE
 
 > **Quando usare questo flusso**: quando vuoi un podcast più naturale e meno
-> rigido, oppure quando il flusso A (presentazione → podcast) ha prodotto un
-> avviso "segnale debole" (slide troppo simili tra loro). Qui la presentazione
-> nasce DAL podcast: ogni slide corrisponde a una sezione realmente parlata,
-> nello stesso ordine → allineamento 1:1 anche senza ancore "slide N".
+> rigido, e sei disposto ad accettare che i cambi di slide siano **stimati**.
+> Qui la presentazione nasce DAL podcast: una slide per sezione, nello stesso
+> ordine. Ma senza le frasi "slide N" il tempo di ogni slide non è misurato,
+> è dedotto dal contenuto, e può cadere minuti fuori posto senza che nulla lo
+> segnali. Se vuoi i confini esatti, usa il flusso presentazione → podcast:
+> lì il conduttore dichiara il numero della pagina e il tempo è quello.
 
 ## Fase 1 — Genera il podcast libero (senza vincoli di slide)
 
@@ -61,10 +63,9 @@
 
 <!-- INIZIO BLOCCO DA INCOLLARE (Fase 2: presentazione) -->
 
-Crea una presentazione che segua ESATTAMENTE le sezioni della
-   trascrizione del podcast nell'ordine in cui compaiono: UNA slide per
-   sezione, con lo stesso numero di sezioni (niente fusioni, niente slide
-   extra).
+   Crea una presentazione che segua ESATTAMENTE le sezioni del podcast
+   nell'ordine in cui compaiono: UNA slide per sezione, con lo stesso numero
+   di sezioni (niente fusioni, niente slide extra).
 
    OGNI SLIDE COMUNICA UNA SOLA IDEA CENTRALE, non elenca gli argomenti
    della sezione: il testo della slide è la 'spalla' del parlato, non il
