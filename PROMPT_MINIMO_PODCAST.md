@@ -1,8 +1,9 @@
 # Prompt NotebookLM — versione MINIMA (podcast → presentazione)
 
-> **Cos'è e cosa non è.** Qui c'è il minimo indispensabile perché il video
-> risulti sincronizzato. **Non è un prompt di stile**: non c'è tono, non
-> c'è formato delle slide, non c'è istruzione sulla lingua.
+> **Cos'è e cosa non è.** Qui c'è tutto quello che serve perché il video
+> risulti sincronizzato: la struttura delle sezioni, le regole sulle parole
+> della presentazione e il tono del dibattito. Non c'è invece la scelta dei
+> formati grafici delle slide, che è di NotebookLM.
 
 ## Fase 1 — Il podcast (incolla in "Personalizza" → "Istruzioni")
 
@@ -10,7 +11,12 @@
 
    Dibattito a due conduttori che copre tutti gli argomenti delle fonti
    per SEZIONI: una sezione = un solo argomento, sviluppato con esempi
-   concreti e concluso prima di passare al successivo.
+   concreti e concluso prima di passare al successivo. Non tornare su
+   argomenti già trattati e non anticipare quelli successivi.
+
+   Ogni sezione si apre annunciando l'argomento con parole chiare (i
+   termini chiave delle fonti): il cambio di tema va detto, non solo
+   accennato.
 
    Non limitarti a ELENCARE gli elementi di un argomento (le sette
    emozioni, le quattro fasi): sviluppa almeno uno di quelli elementi con
@@ -26,6 +32,20 @@
    non può essere attribuito a nessuna pagina.
 
    Non usare riferimenti a slide, diapositive, capitoli o numeri di sezione.
+
+   TONO E STILE DEL DIBATTITO
+   TARGET: classe di scuola secondaria di secondo grado (14-19 anni), lezione di IRC.
+   TONO: frasi corte, linguaggio fresco e immediato, esempi dalla quotidianità
+   dei ragazzi (scuola, amicizia, famiglia, social); niente tecnicismi,
+   niente termini stranieri non spiegati.
+   DINAMICA: due conduttori in scambio rapido, senza monologhi; uno solleva
+   dubbi da studente, l'altro chiarisce senza giudicare. Rivolgiti sempre
+   direttamente agli studenti.
+   FOCUS: nodi con valenza educativa, etica, esistenziale o culturale; niente
+   tono moralistico: proponi i concetti come domande, non come verità.
+   CHIUSA: chiudi ogni sezione con una domanda aperta e una frase riassuntiva
+   (senza "in sintesi" a ogni giro); l'ultima sezione si conclude con un
+   saluto finale breve.
 
 <!-- FINE BLOCCO DA INCOLLARE -->
 
@@ -46,9 +66,16 @@ deck non può seguire le sezioni.
    nomina degli elementi senza svilupparli, accorpa quel contenuto alla
    pagina del tema che la introduce.
 
+   Ogni slide comunica UNA sola idea centrale: è la spalla del parlato, non
+   il copione.
+
    Titolo breve con il termine specifico della sezione, e 3-4 punti molto
    brevi con le parole chiave del parlato, evitando termini generici
-   ripetuti sulle altre pagine.
+   ripetuti sulle altre pagine. Titoli distintivi: mai "Introduzione",
+   "Conclusioni", "Argomento 2".
+
+   Numera ogni slide (1, 2, 3...) nell'ordine delle pagine. Testo
+   rigorosamente solo in italiano.
 
 <!-- FINE BLOCCO DA INCOLLARE -->
 
