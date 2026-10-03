@@ -821,6 +821,7 @@ video.py                 ← Fase 4: Assemblaggio MP4 (1080p)
 test_sync.py             ← Suite di test unitari
 test_llm_sync.py         ← Test modulo LLM
 test_chunks.py           ← Test finestre temporali condivise
+test_prompts.py          ← Test dei prompt e dei link del README
 test_integration.py      ← Test di integrazione
 genera_video.bat         ← Launcher 1-click (Windows)
 crea_venv.bat            ← Crea .venv (Windows)
