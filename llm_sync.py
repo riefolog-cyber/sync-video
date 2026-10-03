@@ -99,6 +99,12 @@ except ImportError:  # pragma: no cover
 # considerarlo irraggiungibile (il gateway node impiega qualche secondo).
 _AUTO_LAUNCH_WAIT = 90.0
 
+# Quota minima di chunk che l'LLM deve aver citato nella risposta, sotto la
+# quale la risposta è considerata troncata e non una selezione. 90% tollera un
+# modello che fonde qualche chunk in una riga, ma rifiuta il caso reale (7
+# citati su 50), in cui il modello si è fermato dopo i primi minuti.
+_COPERTURA_RISPOSTA_MINIMA = 0.9
+
 # Soglia minima di caratteri alfanumerici su una riga di testo OCR: sotto
 # questa frazione la riga è troppo corrotta (diagrammi/immagini) e va scartata.
 MIN_ALNUM_RATIO_PER_LINE = 0.35
@@ -373,17 +379,34 @@ def parse_llm_response(
     content: str,
     num_chunks: int,
     total_slides: int | None = None,
+    chunk_durations: Sequence[float] | None = None,
 ) -> list[int | None] | None:
     """Estrae la lista slide-per-chunk dalla risposta LLM.
 
     Tollerante: cerca il primo array JSON nel testo (anche dentro code fence),
     accetta oggetti con chiavi "chunk"/"slide", riempiendo i buchi con None.
     Se `total_slides` non è dato, accetta qualsiasi numero di slide >= 1.
+
+    Una risposta che non copre quasi tutto l'audio viene respinta (None): un
+    buco in coda non è un chunk senza slide, è una risposta finita a metà. Con
+    `chunk_durations` la copertura è pesata sui secondi, così una coda di pochi
+    secondi non viene scambiata per troncamento.
     """
     data = _extract_json_array(content)
     if not isinstance(data, list):
         return None
 
+    # Distingue "l'LLM ha detto che questo chunk non ha slide" (null esplicito,
+    # legittimo: transizioni, richiami) da "l'LLM non ha risposto a questo
+    # chunk" (oggetto mai citato). Sono cose diverse: la seconda significa
+    # che la risposta è TRONCATA, e una risposta troncata non è una selezione
+    # imperfetta — è una selezione che ha dimenticato metà dell'audio.
+    #
+    # Il caso reale: podcast di 24m34s diviso in 50 chunk, il modello ha
+    # risposto per i primi 7 e poi si è fermato. I 43 buchi riempiti con None
+    # passavano come selezione valida, e la slide 7 si prendeva gli ultimi 21
+    # minuti di parlato senza che nulla lo segnalasse.
+    citati: set[int] = set()
     slides: list[int | None] = [None] * num_chunks
     for item in data:
         if not isinstance(item, dict):
@@ -391,13 +414,68 @@ def parse_llm_response(
         c = item.get("chunk")
         s = item.get("slide")
         if isinstance(c, int) and 1 <= c <= num_chunks:
+            citati.add(c)
             slide_num = _as_slide_number(s)
             if slide_num is not None:
                 if slide_num >= 1 and (total_slides is None or slide_num <= total_slides):
                     slides[c - 1] = slide_num
             elif s is None:
                 slides[c - 1] = None
+    if not _risposta_copre_l_audio(citati, num_chunks, chunk_durations):
+        coperto = _frazione_coperta(citati, num_chunks, chunk_durations)
+        log.warning(
+            "   [LLM] Risposta troncata: il modello ha risposto per %d chunk su %d "
+            "(%s dell'audio), troppo pochi per essere una selezione. Una risposta "
+            "che copre una parte dell'audio non è usabile: verrebbe trattata come "
+            "se il resto non esistesse.",
+            len(citati),
+            num_chunks,
+            coperto,
+        )
+        return None
     return slides
+
+
+def _frazione_coperta(
+    citati: set[int],
+    num_chunks: int,
+    chunk_durations: Sequence[float] | None,
+) -> str:
+    """Quota di audio coperta dalla risposta, in percentuale leggibile."""
+    if chunk_durations:
+        totale = float(sum(chunk_durations))
+        secondi = sum(d for i, d in enumerate(chunk_durations) if i + 1 in citati)
+        quota = secondi / totale if totale > 0 else 0.0
+    else:
+        quota = len(citati) / num_chunks if num_chunks > 0 else 0.0
+    return f"{round(100 * quota)}%"
+
+
+def _risposta_copre_l_audio(
+    citati: set[int],
+    num_chunks: int,
+    chunk_durations: Sequence[float] | None = None,
+) -> bool:
+    """True se l'LLM ha risposto per (quasi) tutta la durata dell'audio.
+
+    La copertura si misura in secondi, non in chunk: l'ultimo chunk è quasi
+    sempre una scheggia (l'audio non finisce su una frontiera di 30s) e non
+    rispondere a una coda di 10s non rende la selezione invalida. Contare i
+    chunk, invece, faceva rifiutare risposte legittime sui podcast corti.
+
+    Soglia al 90% dell'audio: un modello può tralasciare qualche chunk, ma se
+    non ha citato più di un decimo della durata non sta scegliendo le slide,
+    sta troncando la risposta.
+    """
+    if num_chunks <= 0:
+        return False
+    if chunk_durations:
+        totale = float(sum(chunk_durations))
+        if totale <= 0:
+            return len(citati) >= num_chunks * _COPERTURA_RISPOSTA_MINIMA
+        coperto = sum(d for i, d in enumerate(chunk_durations) if i + 1 in citati)
+        return coperto >= totale * _COPERTURA_RISPOSTA_MINIMA
+    return len(citati) >= num_chunks * _COPERTURA_RISPOSTA_MINIMA
 
 
 def _as_slide_number(value: Any) -> int | None:
@@ -897,7 +975,12 @@ def llm_timeline_segments(
         log.warning("   [LLM] Nessun endpoint disponibile: fallback al motore locale.")
         return None
 
-    slides = parse_llm_response(content, len(chunks), total_slides=total_slides)
+    slides = parse_llm_response(
+        content,
+        len(chunks),
+        total_slides=total_slides,
+        chunk_durations=[float(x["end"]) - float(x["start"]) for x in chunks],
+    )
     if slides is None or all(s is None for s in slides):
         log.warning("   [LLM] Risposta non interpretabile: fallback al motore locale.")
         return None
@@ -1135,7 +1218,12 @@ def llm_ordered_timeline(
         _save_llm_failure(cache_key)
         return None
 
-    slides = parse_llm_response(content, len(chunks), total_slides=total_slides)
+    slides = parse_llm_response(
+        content,
+        len(chunks),
+        total_slides=total_slides,
+        chunk_durations=[float(x["end"]) - float(x["start"]) for x in chunks],
+    )
     if slides is None or all(s is None for s in slides):
         log.warning("   [LLM/Ordinato] Risposta non interpretabile: fallback al motore locale.")
         _save_llm_failure(cache_key)
@@ -1166,7 +1254,12 @@ def llm_ordered_timeline(
         ]
         content, used_endpoint, used_model = _call_cascade(eps, messages, "[LLM/Ordinato]")
         if content is not None:
-            slides = parse_llm_response(content, len(chunks), total_slides=total_slides)
+            slides = parse_llm_response(
+        content,
+        len(chunks),
+        total_slides=total_slides,
+        chunk_durations=[float(x["end"]) - float(x["start"]) for x in chunks],
+    )
             if slides is not None and not all(s is None for s in slides):
                 timeline = _build_ordered_timeline(slides, chunks, anchors, total_slides, total_duration)
 
@@ -1868,7 +1961,12 @@ def review_llm_timeline(
         log.warning("   [LLM/Review] Nessun endpoint disponibile: salto la revisione.")
         return None
 
-    reviewed = parse_llm_response(content, len(chunks), total_slides=total_slides)
+    reviewed = parse_llm_response(
+        content,
+        len(chunks),
+        total_slides=total_slides,
+        chunk_durations=[float(x["end"]) - float(x["start"]) for x in chunks],
+    )
     if reviewed is None:
         log.warning("   [LLM/Review] Risposta non interpretabile: salto la revisione.")
         return None

@@ -29,6 +29,7 @@ from __future__ import annotations
 import bisect
 import contextlib
 import hashlib
+import math
 import re
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -888,7 +889,29 @@ def semantic_timeline_from_texts(
             report["confusability"] * 100,
         )
 
-    min_gap = max(1, int(min_slide_duration / window_seconds))
+    # Il minimo di durata per slide, in blocchi. `int()` tronca: con una
+    # durata minima di 3s e finestre da 4s dava 0, poi corretto a 1 dalla
+    # `max`. La `ceil` dice la stessa cosa ma senza dipendere dalla scala:
+    # quello che si vuole è "un blocco ogni tot secondi", e troncando un
+    # rapporto fra 0 e 1 si ottiene sempre 0.
+    min_gap = max(1, math.ceil(min_slide_duration / window_seconds))
+    # Con più slide che blocchi lo spazio non basta: `build_candidates`
+    # ritornerebbe None e la run morirebbe con "sincronizzazione impossibile
+    # senza distribuzioni inventate", che è una diagnosi sbagliata (il problema
+    # è che il vincolo di minimo è più grande dell'audio, non che manchino
+    # informazioni). Meglio un blocco per slide, che è il minimo che la
+    # segmentazione può rappresentare, e dirlo.
+    if total_slides > len(blocks):
+        min_gap = 1
+    elif min_gap * total_slides > len(blocks):
+        log.warning(
+            "   [Semantico] Minimo di durata %.1fs non compatibile con %d blocchi "
+            "e %d slide: uso il minimo rappresentabile (1 blocco per slide).",
+            min_slide_duration,
+            len(blocks),
+            total_slides,
+        )
+        min_gap = max(1, len(blocks) // total_slides)
 
     candidates = build_candidates(
         len(blocks),
@@ -931,7 +954,21 @@ def semantic_timeline_from_texts(
     ]
     avg_sim, avg_z = _mean_pair_scores(sim, sim_norm, pairs)
     _LAST_QUALITY.clear()
-    _LAST_QUALITY.update({"avg_sim": avg_sim, "avg_z": avg_z, "min_avg_z": min_avg_z})
+    # `confusability` entra qui e non solo dentro il confronto A/B del beam:
+    # è la CAUSA (quante slide si somigliano fra loro), mentre avg_z è solo il
+    # sintomo. Senza questo campo un report senza beam automatico non aveva
+    # modo di dire perché la fiducia era bassa, e la run da cui è nata la
+    # modifica lo dimostra: quality con avg_z 0.36 e nessun accenno al 100% di
+    # slide quasi duplicate.
+    _LAST_QUALITY.update(
+        {
+            "avg_sim": avg_sim,
+            "avg_z": avg_z,
+            "min_avg_z": min_avg_z,
+            "confusability": float(report.get("confusability", 0.0)),
+            "concordance": float(report.get("concordance", 0.0)),
+        }
+    )
 
     if avg_z < min_avg_z:
         # Segnale, NON verdetto: un picco medio basso dice "allineamento
@@ -1713,6 +1750,7 @@ DEFAULT_LLM_MIN_SEGMENT_SECONDS = 15.0  # soglia sotto cui un segmento LLM va as
 def merge_short_segments(
     segments: list[dict[str, Any]],
     min_seconds: float = DEFAULT_LLM_MIN_SEGMENT_SECONDS,
+    assorbiti: list[float] | None = None,
 ) -> list[dict[str, Any]]:
     """Assorbe i segmenti più corti di ``min_seconds`` nel vicino più lungo.
 
@@ -1722,6 +1760,18 @@ def merge_short_segments(
     parziale di pochi secondi) viene assorbito dal precedente. I segmenti
     adiacenti che finiscono con la stessa slide vengono uniti in un'unica
     occorrenza.
+
+    Args:
+        segments: segmenti LLM, con ``slide``, ``start`` ed ``end``.
+        min_seconds: sotto questa durata il segmento viene assorbito.
+        assorbiti: se non None, viene riempito con la durata **naturale** di
+            ogni segmento assorbito. È il modo in cui il chiamante distingue
+            una durata misurata da una concessa: senza questo, il flusso
+            libero produceva segmenti senza lasciare traccia di quali durate
+            fossero state imposte, e il riepilogo non poteva segnalarlo
+            (``_starved_slides`` nel flusso ordinato legge proprio questo
+            tipo di dato). La lista si appende, non si azzera: il chiamante
+            decide se ripartire da zero.
 
     Returns:
         Nuova lista di segmenti (mai più lunga dell'originale).
@@ -1733,7 +1783,8 @@ def merge_short_segments(
     while changed and len(out) > 1:
         changed = False
         for i, seg in enumerate(out):
-            if float(seg["end"]) - float(seg["start"]) >= min_seconds:
+            durata = float(seg["end"]) - float(seg["start"])
+            if durata >= min_seconds:
                 continue
             # Scegli il vicino più lungo; il corto viene ASSORBITO da esso.
             if i == 0:
@@ -1752,12 +1803,14 @@ def merge_short_segments(
             }
             log.info(
                 "   [LLM] Segmento corto (%.1fs) assorbito: slide %s -> %s (%.1fs-%.1fs).",
-                float(seg["end"]) - float(seg["start"]),
+                durata,
                 seg["slide"],
                 out[n]["slide"],
                 float(merged["start"]),
                 float(merged["end"]),
             )
+            if assorbiti is not None:
+                assorbiti.append(durata)
             out = [*out[:lo], merged, *out[hi + 1 :]]
             changed = True
             break

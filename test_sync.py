@@ -2005,6 +2005,427 @@ class TestSemanticSync(unittest.TestCase):
         self.assertFalse(weak_signal_seen())
 
 
+class _FixtureConfondibile:
+    """Deck con tutte le slide sullo stesso tema, e parlato che lo segue.
+
+    È la situazione reale incontrata su un podcast di 24 minuti con 7 slide
+    tutte dedicate allo stesso argomento: la cosine fra le slide supera la
+    soglia di duplicato su ogni coppia, e il parlato di ogni sezione contiene
+    le stesse parole generiche piu' parole specifiche. La matrice di
+    similarita' resta quindi quasi piatta e l'argmax cade dove il vocabolario
+    per caso esplode, non dove la sezione inizia.
+
+    Un fixture del genere serve per una cosa sola: verificare che il programma
+    **dica** che non sa, invece di produrre confini sbagliati in silenzio. Il
+    caso felice (slide distinguibili, confini entro tolleranza) e' coperto da
+    ``TestSemanticSync``; quello che mancava e' il caso in cui la timeline non
+    e' sbagliata per caso ma perche' l'informazione non c'e', e li' la sola
+    cosa che il programma puo' fare e' dichiararlo.
+    """
+
+    # Quattro parole condivise da tutte le sezioni (il tema unico) e una parola
+    # specifica per sezione: il rapporto e' 4:1, quindi la cosine fra due slide
+    # diverse resta alta (oltre la soglia di 0.6) ma non identica.
+    COMUNE = ("prompt", "modello", "istruzioni", "contesto")
+    SEZIONI = ("teletpatia", "parrucchiere", "vincoli", "medico", "premortem")
+
+    # Le parole che NON stanno su nessuna slide. Nel parlato reale la sezione
+    # parla *attorno* al tema: quasi tutte le parole del blocco non sono sulla
+    # slide, e la differenza fra "parla di questo" e "parla di altro" si
+    # assottiglia fino a sparire. Sono il rumore di fondo che rende piatta la
+    # matrice di similarita'.
+    RUMORE = ("oggi", "secondo", "conversazione", "riguardo", "ascoltiamo", "tempo")
+
+    # Sezione -> sezione di cui l'ultimo blocco parla invece di chiudere la
+    # propria. In un dibattito succede ("prima di chiudere, un accenno a
+    # quello che verra"): e' la ragione per cui nella run vera l'ordine dei
+    # picchi non era monotono (concordanza 62%) e il motore non poteva sapere
+    # quale confine fosse giusto.
+    ANTICIPAZIONI: ClassVar[dict[int, int]] = {2: 4, 3: 5}
+
+    def __init__(self, *, window=4.0, blocchi_per_sezione=2):
+        self.window = window
+        self.n = len(self.SEZIONI)
+        self.blocchi_per_sezione = blocchi_per_sezione
+        self.durata_sezione = window * blocchi_per_sezione
+        self.durata_totale = self.n * self.durata_sezione
+
+    def slide_texts(self):
+        """Una slide per sezione: il tema unico piu' la parola che la distingue."""
+        return [" ".join((*self.COMUNE, sez)) for sez in self.SEZIONI]
+
+    def blocks(self):
+        """Il parlato segue l'ordine delle sezioni, ma non combacia mai.
+
+        Tre cose lo rendono realistico e insieme ambiguo:
+
+        1. ogni blocco contiene il rumore di fondo, quindi la cosine grezza
+           resta alta con tutte le slide (0.75-0.83 come sui dati reali);
+        2. la parola che distingue la sezione compare solo nell'ULTIMO blocco
+           della sezione, non all'inizio: il picco cade dove la sezione sta
+           per finire, non dove cambia. E' il difetto che sulla run vera ha
+           spostato il confine 1->2 di due minuti;
+        3. due sezioni anticipano il tema di una successiva (``ANTICIPAZIONI``),
+           quindi l'ordine dei picchi non e' monotono.
+        """
+        out = []
+        for i, sez in enumerate(self.SEZIONI, start=1):
+            anticipa = self.ANTICIPAZIONI.get(i)
+            for b in range(self.blocchi_per_sezione):
+                parole = list(self.COMUNE) + list(self.RUMORE)
+                if b == self.blocchi_per_sezione - 1:
+                    parole.append(self.SEZIONI[anticipa - 1] if anticipa else sez)
+                out.append({"time": len(out) * self.window, "text": " ".join(parole)})
+        return out
+
+    def confini_veri(self):
+        """Dove l'ascolto umano direbbe che la sezione cambia."""
+        return {i + 1: i * self.durata_sezione for i in range(1, self.n)}
+
+    def embed(self, testi):
+        """Embedder BoW deterministico sul vocabolario del fixture.
+
+        Non e' un trucco: il vocabolario contiene le parole comuni, quelle
+        distinctive e il rumore, quindi la geometria che ne esce e' proprio
+        quella che rende il deck confondibile -- l'unica cosa che
+        ``confusability`` misura.
+        """
+        vocabolario = (*self.COMUNE, *self.SEZIONI, *self.RUMORE)
+        out = np.zeros((len(testi), len(vocabolario)), dtype=np.float64)
+        for riga, testo in enumerate(testi):
+            parole = set(testo.lower().split())
+            for c, parola in enumerate(vocabolario):
+                if parola in parole:
+                    out[riga, c] = 1.0
+            norma = np.linalg.norm(out[riga])
+            if norma:
+                out[riga] /= norma
+        return out
+
+
+class TestFixtureConfondibile(unittest.TestCase):
+    """Il fixture di una run reale: cosa il programma promette e cosa fa.
+
+    La run da cui viene questo fixture ha prodotto un video in cui la slide 1
+    restava a schermo perdue minuti di contenuto della slide 2, e la slide 2
+    si beveva 56 secondi. Tutti i controlli automatici passavano: il frame
+    check diceva 7/7 segmenti corretti (perche' verifica che il video mostri
+    la timeline, non che la timeline sia giusta) e ``starved_slides`` non
+    scattava (la slide 2 non era troppo corta in assoluto: era troppo corta
+    rispetto al suo contenuto).
+
+    Qui si fissa il contratto che mancava, in due pezzi distinti:
+
+    1. il deck di questo fixture e' oggettivamente confondibile, e i confini
+       che il motore ne ricava NON coincidono con quelli che l'ascolto umano
+       riconoscerebbe: non e' un caso, e' la definizione del segnale debole;
+    2. quando il programma sa di non sapere, il riepilogo non annuncia
+       solidita'. Il secondo e' il test che dimostra il difetto: prima della
+       modifica fallisce, e non fallisce per caso.
+    """
+
+    def _timeline(self):
+        from semantic_sync import reset_weak_signal_flag, semantic_timeline_from_texts
+
+        reset_weak_signal_flag()
+        fx = _FixtureConfondibile()
+        tl = semantic_timeline_from_texts(
+            fx.slide_texts(),
+            fx.blocks(),
+            total_slides=fx.n,
+            total_duration=fx.durata_totale,
+            embed_fn=fx.embed,
+            options=SemanticOptions(window_seconds=fx.window, min_slide_duration=3.0),
+        )
+        return fx, tl
+
+    def test_il_deck_non_consente_di_determinare_i_confini(self):
+        # Parti dal fatto geometrico, non da una soglia: il fixture serve per
+        #che' il deck non distingue le sezioni, e questo e' un numero. Se un
+        # giorno questo test fallisce, il fixture ha smesso di riprodurre il
+        # caso reale e il test qui sotto non vale piu' niente.
+        fx, tl = self._timeline()
+        self.assertIsNotNone(tl)
+        emb = fx.embed(fx.slide_texts())
+        da_fare = emb @ emb.T
+        coppie = da_fare[np.triu_indices(fx.n, 1)]
+        # Ogni coppia di slide e' oltre la soglia di duplicato (0.6): il
+        # report lo deve dire, non solo che i due testi sono "un po'" simili.
+        self.assertGreater(float(coppie.min()), 0.6)
+
+        # E i confini del motore non sono quelli dell'ascolto umano: almeno
+        # una transizione cade una finestra piu' in la'. Non e' un bug da
+        # correggere qui: e' l'informazione che manca, ed e' il motivo per cui
+        # il riepilogo deve dichiararla.
+        veri = fx.confini_veri()
+        spostamenti = [abs(tl[s] - veri[s]) for s in veri if s in tl]
+        self.assertGreaterEqual(max(spostamenti), fx.window)
+
+    def test_il_report_non_dichiara_solidita_quando_non_sa(self):
+        # Il difetto, riprodotto sulla run vera: il frame check da' il pieno,
+        # il segnale e' debole, e il riepilogo scrive "nessuno, la
+        # sincronizzazione e' risultata solida" tre righe sopra "fiducia del
+        # motore: bassa".
+        #
+        # Il segnale debole qui viene impostato a mano e non calcolato: il
+        # difetto non e' che l'euristica scatta, e' che il riepilogo ignora
+        # il flag quando scatta. Legare il test all'euristica lo renderebbe
+        # fragile e gli darebbe un secondo compito che non e' suo.
+        import main
+        from semantic_sync import _set_weak_signal, reset_weak_signal_flag
+
+        reset_weak_signal_flag()
+        _set_weak_signal()
+        self.addCleanup(reset_weak_signal_flag)
+        fx = _FixtureConfondibile()
+        n = fx.n
+
+        with self.assertLogs(main.log, level="INFO") as cm:
+            main._log_plain_summary(
+                [fx.durata_sezione] * n,
+                list(range(1, n + 1)),
+                fx.durata_totale,
+                frame_check={"checked": n, "coherent": n, "mismatches": []},
+                quality={"avg_sim": 0.83, "avg_z": 0.36, "min_avg_z": 0.45},
+                anchors={
+                    "anchored": 0,
+                    "transitions": n - 1,
+                    "unanchored_slides": list(range(2, n + 1)),
+                },
+            )
+        testo = "\n".join(r.getMessage() for r in cm.records)
+
+        self.assertIn("somiglianza tra parlato e slide", testo)
+        self.assertNotIn("risultata solida", testo)
+
+
+class TestMinGapNonDistruggeLaTimeline(unittest.TestCase):
+    """Il minimo di durata per slide non può rendere impossibile la timeline.
+
+    `build_candidates` chiede, per ogni slide, una finestra di blocchi che
+    riservi `min_gap` alle slide successive. Se il minimo è più grande
+    dell'audio, la finestra si chiude e la funzione restituisce None: la run
+    muore con "sincronizzazione impossibile senza distribuzioni inventate", che
+    è una diagnosi falsa — il problema è il vincolo, non l'informazione mancante.
+
+    Nota sulla scala: con i default (minimo 3s, finestra 4s) il rapporto è 0.75
+    e il troncamento dava 0, corretto poi a 1: risultato identico a `ceil`.
+    Il clamp serve per le configurazioni in cui il rapporto supera davvero 1.
+    """
+
+    def _timeline(self, *, n_slides, n_blocks, min_slide_duration, window):
+        from semantic_sync import reset_weak_signal_flag, semantic_timeline_from_texts
+
+        reset_weak_signal_flag()
+        temi = [f"tema{i}" for i in range(n_slides)]
+        blocks = [
+            {"time": i * window, "text": (temi[min(i, n_slides - 1)] + " ") * 3}
+            for i in range(n_blocks)
+        ]
+        return semantic_timeline_from_texts(
+            [f"{t} slide" for t in temi],
+            blocks,
+            total_slides=n_slides,
+            total_duration=n_blocks * window,
+            embed_fn=_FakeThemedEmbed(temi),
+            options=SemanticOptions(window_seconds=window, min_slide_duration=min_slide_duration),
+        )
+
+    def test_minimo_piu_grande_del_blocco_non_produce_none(self):
+        # min_slide_duration (60s) > finestra (4s): il vincolo sarebbe 15
+        # blocchi per slide su 10 blocchi disponibili.
+        tl = self._timeline(
+            n_slides=3, n_blocks=10, min_slide_duration=60.0, window=4.0
+        )
+        self.assertIsNotNone(tl, "un minimo di durata irrealizzabile non deve far fallire la run")
+        self.assertEqual(sorted(tl), [1, 2, 3])
+
+    def test_la_clamp_cerca_un_minimo_piu_tardi_invece_di_silenzio(self):
+        tl = self._timeline(
+            n_slides=4, n_blocks=12, min_slide_duration=16.0, window=4.0
+        )
+        self.assertIsNotNone(tl)
+        # 16s / 4s = 4 blocchi per slide, 12 blocchi disponibili: il clamp
+        # porta il minimo a 3 blocchi (12 // 4), cioè il massimo che sta in
+        # piedi senza violare la durata totale.
+        for s in range(1, 4):
+            self.assertGreaterEqual(tl[s + 1] - tl[s], 12.0)
+
+    def test_i_default_restano_identici(self):
+        # Il caso di ogni giorno: qui il clamp non deve toccare niente, e la
+        # timeline deve restare quella di prima. Il minimo con i default è un
+        # blocco (3s su finestre da 4s), quindi l'unica cosa che si afferma è
+        # che la timeline resta valida e monotona: su questo input degenere la
+        # DP può scegliere confini diversi da quelli "naturali" e va bene,
+        # perché non c'è un confine giusto da rispettare.
+        tl = self._timeline(n_slides=4, n_blocks=20, min_slide_duration=3.0, window=4.0)
+        self.assertIsNotNone(tl)
+        self.assertEqual(tl[1], 0.0)
+        starts = [tl[s] for s in sorted(tl)]
+        self.assertEqual(starts, sorted(starts), "la timeline deve restare monotona")
+        for a, b in pairwise(starts):
+            self.assertGreaterEqual(b - a, 4.0)
+
+
+class TestConfusabilityNelReport(unittest.TestCase):
+    """La causa della bassa fiducia deve finire nel report, non solo il sintomo.
+
+    `avg_z` dice quanto i segmenti sono picchi; `confusability` dice PERCHÉ il
+    motore fatica (quante slide si somigliano fra loro). Prima di questa
+    modifica la causa stava solo dentro il confronto A/B del beam, quindi un
+    report senza beam automatico non portava nessuna traccia del problema
+    reale: 7 slide, tutte sullo stesso argomento.
+    """
+
+    def test_quality_contiene_la_causa(self):
+        from semantic_sync import (
+            last_quality,
+            reset_weak_signal_flag,
+            semantic_timeline_from_texts,
+        )
+
+        reset_weak_signal_flag()
+        fx = _FixtureConfondibile()
+        semantic_timeline_from_texts(
+            fx.slide_texts(),
+            fx.blocks(),
+            total_slides=fx.n,
+            total_duration=fx.durata_totale,
+            embed_fn=fx.embed,
+            options=SemanticOptions(window_seconds=fx.window, min_slide_duration=3.0),
+        )
+        q = last_quality()
+        self.assertIn("confusability", q)
+        self.assertIn("concordance", q)
+        self.assertGreater(q["confusability"], 0.5)
+        # Coerente con la geometria calcolata a mano nel fixture.
+        emb = fx.embed(fx.slide_texts())
+        atteso = float((emb @ emb.T)[np.triu_indices(fx.n, 1)].min() > 0.6)
+        self.assertEqual(q["confusability"], atteso)
+
+
+class TestCoperturaTimeline(unittest.TestCase):
+    """Una timeline che non copre l'audio è troncata, non imprecisa.
+
+    Il caso reale: 7 segmenti che coprivano i primi 210s di un podcast di
+    24m34s. Il video che ne sarebbe uscito è corto di 21 minuti, una slide non
+    compariva mai, un'altra compariva due volte, e il riepilogo finale diceva
+    "nessuno, la sincronizzazione è risultata solida". Nessun controllo lo
+    notava: si guardava WHICH slide mancavano, non SE l'audio fosse tutto
+    dentro.
+    """
+
+    def test_timeline_completa_non_perde_nulla(self):
+        from main import _frazione_non_coperta
+
+        segmenti = [
+            {"slide": 1, "start": 0.0, "end": 300.0},
+            {"slide": 2, "start": 300.0, "end": 900.0},
+            {"slide": 3, "start": 900.0, "end": 1474.33},
+        ]
+        self.assertAlmostEqual(_frazione_non_coperta(segmenti, 1474.33), 0.0, places=6)
+
+    def test_timeline_troncata_viene_rifiutata(self):
+        # I segmenti della run vera: coprono il 14% dell'audio.
+        from main import _COPERTURA_MINIMA, _frazione_non_coperta
+
+        segmenti = [
+            {"slide": 1, "start": 0.0, "end": 30.15},
+            {"slide": 2, "start": 30.15, "end": 60.04},
+            {"slide": 1, "start": 60.04, "end": 90.11},
+            {"slide": 4, "start": 90.11, "end": 120.19},
+            {"slide": 5, "start": 120.19, "end": 150.03},
+            {"slide": 6, "start": 150.03, "end": 180.23},
+            {"slide": 7, "start": 180.23, "end": 210.21},
+        ]
+        non_coperto = _frazione_non_coperta(segmenti, 1474.33)
+        self.assertGreater(non_coperto, _COPERTURA_MINIMA)
+        self.assertAlmostEqual(non_coperto, 0.857, places=2)
+
+    def test_chunk_parziale_alle_estremita_e_tollerato(self):
+        # L'audio non finisce su una frontiera di 30s: qualche secondo fuori dai
+        # segmenti all'inizio o alla fine è normale e non deve far scattare il
+        # fallback (l'audio dura 1474.33s, l'ultimo chunk chiude a 1470).
+        from main import _COPERTURA_MINIMA, _frazione_non_coperta
+
+        segmenti = [
+            {"slide": 1, "start": 2.0, "end": 700.0},
+            {"slide": 2, "start": 700.0, "end": 1470.0},
+        ]
+        self.assertLessEqual(_frazione_non_coperta(segmenti, 1474.33), _COPERTURA_MINIMA)
+
+    def test_buco_interno_e_rilevato(self):
+        # Non basta guardare l'estremità: un buco in mezzo taglia via un pezzo
+        # di parlato senza che l'estrema finale se ne accorga.
+        from main import _COPERTURA_MINIMA, _frazione_non_coperta
+
+        segmenti = [
+            {"slide": 1, "start": 0.0, "end": 300.0},
+            {"slide": 2, "start": 600.0, "end": 1474.33},
+        ]
+        self.assertGreater(_frazione_non_coperta(segmenti, 1474.33), _COPERTURA_MINIMA)
+
+    def test_nessun_segmento_e_tutto_non_coperto(self):
+        from main import _frazione_non_coperta
+
+        self.assertEqual(_frazione_non_coperta([], 1474.33), 1.0)
+
+
+class TestEscalationSenzaAncore(unittest.TestCase):
+    """Il flusso podcast -> slide deve poter escalare all'LLM.
+
+    Lì le ancore non esistono per progetto (il prompt le vieta), quindi il ramo
+    ibrido non entrava mai e l'escalation — l'unico meccanismo del progetto che
+    riposiziona le slide non ancorate — restava irraggiungibile proprio dove
+    serviva. Il messaggio di `semantic_sync` ("con l'LLM attivo le slide non
+    ancorate vengono riposizionate") era una promessa falsa per costruzione.
+
+    La regola qui è volutamente stretta: `missing_count` vale sempre
+    `total_slides - 1` in questo flusso, quindi riusare le soglie di
+    `_needs_llm_escalation` farebbe spendere ~16 min di LLM a ogni run.
+    """
+
+    def test_segnale_debole_escala(self):
+        from main import _escalate_senza_ancore
+
+        self.assertTrue(_escalate_senza_ancore(True, False, True))
+
+    def test_segnale_buono_non_escala_e_non_costa_niente(self):
+        from main import _escalate_senza_ancore
+
+        self.assertFalse(_escalate_senza_ancore(False, False, True))
+
+    def test_llm_spento_non_escala(self):
+        from main import _escalate_senza_ancore
+
+        self.assertFalse(_escalate_senza_ancore(True, False, False))
+
+    def test_motore_locale_fallito_non_è_questo_percorso(self):
+        # Non è il caso da cui la modifica nasce, e nel flusso libero l'LLM è
+        # già il motore principale: qui lascia il fallback com'è.
+        from main import _escalate_senza_ancore
+
+        self.assertFalse(_escalate_senza_ancore(True, True, True))
+
+    def test_la_regola_standard_avrebbe_spendo_l_llm_invece(self):
+        # Documenta PERCHÉ serve una funzione a parte: applicando la regola
+        # esistente a un podcast senza ancore si scala sempre.
+        from main import _needs_llm_escalation
+
+        # 6 transizioni, 3 slide senza ancora tollerate: le altre 3 fanno
+        # scattare la soglia. Ma in questo flusso 6 è il NUMERO FISSO delle
+        # transizioni, non un sintomo.
+        self.assertTrue(
+            _needs_llm_escalation(
+                local_failed=False,
+                weak_local=False,
+                missing_count=6,
+                llm_local_threshold=3,
+                llm_enabled=True,
+            )
+        )
+
+
 class TestNormalizedQualityGuard(unittest.TestCase):
     """Guard-rail di qualità sulla scala normalizzata (z-score per slide).
 
@@ -2116,7 +2537,16 @@ class TestNormalizedQualityGuard(unittest.TestCase):
         quality = last_quality()
         self.assertGreater(quality["avg_z"], quality["min_avg_z"])
         self.assertEqual(quality["min_avg_z"], DEFAULT_SEMANTIC_MIN_Z)
-        self.assertEqual(sorted(quality), ["avg_sim", "avg_z", "min_avg_z"])
+        # Lo schema porta anche la CAUSA (quante slide si somigliano fra loro)
+        # e non solo il sintomo: su un deck coerente devono essere entrambe
+        # buone, ed è il loro assenza che rendeva il report muto sul problema
+        # reale (7 slide tutte sullo stesso argomento, confusability 100%).
+        self.assertEqual(
+            sorted(quality),
+            ["avg_sim", "avg_z", "concordance", "confusability", "min_avg_z"],
+        )
+        self.assertLessEqual(quality["confusability"], 0.5)
+        self.assertGreaterEqual(quality["concordance"], 0.5)
 
 
 class TestFrameGuidedRepair(unittest.TestCase):
@@ -2411,8 +2841,21 @@ class TestArtifactVerified(unittest.TestCase):
         self.assertTrue(_artifact_verified({"checked": 5, "coherent": 5, "mismatches": []}, 3))
 
 
-class TestWeakSignalVetoedByFrameCheck(unittest.TestCase):
-    """Con l'artefatto verificato il dubbio del motore non va nei "da controllare"."""
+class TestWeakSignalSurvivesFrameCheck(unittest.TestCase):
+    """Il dubbio del motore resta anche con l'artefatto verificato.
+
+    Il frame check e la fiducia del motore rispondono a due domande diverse: il
+    primo verifica che il video mostri la timeline, il secondo se la timeline
+    sia giusta. Il frame viene preso a meta' segmento, quindi uno spostamento
+    uniforme dei confini — il difetto reale, minuti di ritardo — passa senza
+    essere visto. Per questo l'artefatto verificato non cancella il dubbio: lo
+    dichiara come fatto accanto, e il dubbio resta.
+
+    Qui sotto c'e' il test che dimostra il difetto: la run da cui viene questo
+    file aveva 7 slide con confusability 100%, zero ancore, un confine
+    sbagliato di due minuti, frame check 7/7 e riepilogo "nessuno, la
+    sincronizzazione e' risultata solida".
+    """
 
     def setUp(self):
         from semantic_sync import _set_weak_signal, reset_weak_signal_flag
@@ -2437,17 +2880,40 @@ class TestWeakSignalVetoedByFrameCheck(unittest.TestCase):
         self.assertIn("somiglianza tra parlato e slide", out)
         self.assertIn("Da controllare a mano", out)
 
-    def test_weak_signal_is_not_a_doubt_when_artifact_verified(self):
+    def test_artifact_verified_is_declared_as_a_fact(self):
         out = self._render(
             frame_check={"checked": 3, "coherent": 3, "mismatches": []},
             quality={"avg_sim": 0.86, "avg_z": 0.38, "min_avg_z": 0.45},
         )
-        # Il dubbio sparisce...
-        self.assertNotIn("somiglianza tra parlato e slide", out)
-        # ...ma il fatto resta dichiarato, con la prova che l'ha superato.
-        self.assertIn("motore era scettico", out)
-        self.assertIn("frame check", out)
-        self.assertIn("restano stimate", out)
+        # L'artefatto è davvero verificato, e va detto: è un fatto utile.
+        self.assertIn("video finito è stato verificato", out)
+        self.assertIn("ogni segmento mostra la slide", out)
+
+    def test_weak_signal_stays_a_doubt_when_artifact_verified(self):
+        out = self._render(
+            frame_check={"checked": 3, "coherent": 3, "mismatches": []},
+            anchors={"anchored": 0, "transitions": 2, "unanchored_slides": [2, 3]},
+            quality={"avg_sim": 0.86, "avg_z": 0.38, "min_avg_z": 0.45},
+        )
+        self.assertIn("somiglianza tra parlato e slide", out)
+        # E non si può scrivere che è tutto a posto: sarebbe falso.
+        self.assertNotIn("risultata solida", out)
+
+    def test_il_dubbio_riguarda_solo_i_confini_non_ancorati(self):
+        # Tutte le transizioni ancorate: la bassa fiducia viene dal deck
+        # confondibile, non dai confini, che sono fatti pronunciati. Il dubbio
+        # deve allora dire quello che c'è da fare (guardare i cambi di slide),
+        # non accusare stime che non ci sono.
+        out = self._render(
+            frame_check={"checked": 3, "coherent": 3, "mismatches": []},
+            anchors={"anchored": 2, "transitions": 2, "unanchored_slides": []},
+            quality={"avg_sim": 0.86, "avg_z": 0.38, "min_avg_z": 0.45},
+        )
+        self.assertIn("somiglianza tra parlato e slide", out)
+        self.assertIn("guarda a mano dove il parlato cambia tema", out)
+        self.assertIn("ancore 'slide N' restano esatte", out)
+        # Nessun riferimento a stime che in questo caso non esistono.
+        self.assertNotIn("sono stime, non misure", out)
 
 
 class TestPlainSummary(unittest.TestCase):
@@ -3325,6 +3791,47 @@ class TestLlmSegmentPostProcessing(unittest.TestCase):
         self.assertEqual([s["slide"] for s in out], [1])
         self.assertAlmostEqual(out[0]["start"], 0.0)
         self.assertAlmostEqual(out[0]["end"], 200.0)
+
+    def test_merge_records_what_it_absorbed(self):
+        # Il PARAMETRO out serve a una cosa sola: rendere visibile che una
+        # durata è concessa e non misurata. Senza questo, il flusso libero
+        # costruiva segmenti senza dire nulla da dove venissero, e il
+        # riepilogo non poteva distinguere "misurata" da "imposta".
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 100.0},
+            {"slide": 3, "start": 100.0, "end": 110.0},  # corto
+            {"slide": 2, "start": 110.0, "end": 300.0},
+        ]
+        assorbiti: list = []
+        merge_short_segments(segments, min_seconds=15.0, assorbiti=assorbiti)
+        self.assertEqual(len(assorbiti), 1)
+        # La durata naturale del segmento che è sparito, non quella del
+        # risultato: è il numero che distingue "troppo corto" da "durata vera".
+        self.assertAlmostEqual(assorbiti[0], 10.0)
+        self.assertNotIn(300.0, assorbiti)
+
+    def test_merge_records_every_absorption(self):
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 100.0},
+            {"slide": 2, "start": 100.0, "end": 108.0},  # corto
+            {"slide": 3, "start": 108.0, "end": 116.0},  # corto
+            {"slide": 4, "start": 116.0, "end": 300.0},
+        ]
+        assorbiti: list = []
+        out = merge_short_segments(segments, min_seconds=15.0, assorbiti=assorbiti)
+        self.assertEqual([s["slide"] for s in out], [1, 4])
+        self.assertEqual(sorted(assorbiti), [8.0, 8.0])
+
+    def test_merge_records_nothing_when_nothing_is_absorbed(self):
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 50.0},
+            {"slide": 2, "start": 50.0, "end": 100.0},
+        ]
+        assorbiti: list = []
+        self.assertEqual(
+            merge_short_segments(segments, min_seconds=15.0, assorbiti=assorbiti), segments
+        )
+        self.assertEqual(assorbiti, [])
 
     # ------------------------------------------------------------------
     # refine_llm_segment_boundaries

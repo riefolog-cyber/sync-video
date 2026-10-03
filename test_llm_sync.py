@@ -408,6 +408,74 @@ class TestReview(unittest.TestCase):
         self.assertEqual(slides_arg, [1, None, 3])
 
 
+class TestRispostaTroncata(unittest.TestCase):
+    """Una risposta che copre una parte dell'audio non è una selezione.
+
+    Il caso reale: podcast di 24m34s, 50 chunk da 30s. Il modello ha risposto
+    per i primi 7 e si è fermato. Il parser riempiva i 43 buchi con None e li
+    trattava come "nessuna slide per questo chunk", cioè come una scelta: la
+    slide 7 si prendeva gli ultimi 21 minuti di parlato e nulla lo segnalava.
+
+    I test sotto distinguono le due cose che il parser non distingueva: un
+    `null` esplicito (scelta legittima: quel chunk è una transizione) e un
+    chunk mai citato (risposta finita a metà).
+    """
+
+    def _risposta(self, n_citati, n_chunk, *, null_finali=0):
+        parti = [
+            f'{{"chunk": {i}, "slide": {(i % 3) + 1}}}'
+            for i in range(1, n_citati + 1)
+        ]
+        for _ in range(null_finali):
+            parti.append(f'{{"chunk": {n_citati}, "slide": null}}')
+        return "[" + ", ".join(parti) + "]"
+
+    def test_risposta_completa_va_accettata(self):
+        durate = [30.0] * 5
+        slides = parse_llm_response(
+            self._risposta(5, 5), 5, chunk_durations=durate
+        )
+        self.assertIsNotNone(slides)
+        self.assertEqual(len(slides), 5)
+
+    def test_risposta_troncata_va_respinta(self):
+        # 7 chunk citati su 50: copre il 14% dell'audio.
+        durate = [30.0] * 49 + [4.33]
+        self.assertIsNone(
+            parse_llm_response(self._risposta(7, 50), 50, chunk_durations=durate)
+        )
+
+    def test_null_espliciti_non_sono_troncamento(self):
+        # Tutti i chunk citati, molti senza slide: è una selezione che dice
+        # "qui non c'è contenuto", non una risposta finita.
+        durate = [30.0] * 10
+        risposta = "[" + ", ".join(
+            f'{{"chunk": {i}, "slide": {"null" if i % 2 else "2"}}}'
+            for i in range(1, 11)
+        ) + "]"
+        slides = parse_llm_response(risposta, 10, chunk_durations=durate)
+        self.assertIsNotNone(slides)
+        # Chunk 1, 3, 5... senza slide; chunk 2, 4, 6... slide 2.
+        self.assertEqual(slides[0], None)
+        self.assertEqual(slides[1], 2)
+        self.assertEqual(slides[2], None)
+
+    def test_coda_di_pochi_secondi_non_rifiuta_la_risposta(self):
+        # L'ultimo chunk è quasi sempre una scheggia (l'audio non finisce su una
+        # frontiera di 30s): non risponderle non deve invalidare tutto. Copre
+        # 120s su 130 = 92%.
+        durate = [30.0, 30.0, 30.0, 30.0, 10.0]
+        slides = parse_llm_response(
+            self._risposta(4, 5), 5, chunk_durations=durate
+        )
+        self.assertIsNotNone(slides)
+        self.assertEqual(slides[4], None)
+
+    def test_senza_durate_si_conta_sui_chunk(self):
+        # Il chiamante che non passa le durate mantiene il vecchio comportamento.
+        self.assertIsNone(parse_llm_response(self._risposta(7, 50), 50))
+
+
 class TestParseResponse(unittest.TestCase):
     """Parsing tollerante della risposta LLM."""
 

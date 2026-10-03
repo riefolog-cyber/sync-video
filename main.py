@@ -12,8 +12,9 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
@@ -336,6 +337,25 @@ def _slide_list_text(slides: Sequence[int], *, di: bool = False) -> str:
     return f"{'delle' if di else 'le'} slide {joined}"
 
 
+def _transizioni_senza_ancora(anchors: dict[str, object] | None) -> list[int]:
+    """Slide il cui inizio NON è fissato da un'ancora "slide N" pronunciata.
+
+    Sono le transizioni posizionate dal solo contenuto, quindi stimate: è su
+    queste che il dubbio di bassa fiducia ha senso. Il report le chiama
+    ``unanchored_slides``; se il dato non c'è non si indovina un numero, si
+    restituisce lista vuota e il chiamante usa la formulazione senza conteggio.
+    """
+    if not isinstance(anchors, dict):
+        return []
+    elencate = anchors.get("unanchored_slides")
+    if not isinstance(elencate, list) or not elencate:
+        return []
+    try:
+        return sorted({int(s) for s in elencate})
+    except (TypeError, ValueError):
+        return []
+
+
 def _artifact_verified(frame_check: dict[str, object] | None, total_segments: int) -> bool:
     """True se il frame check ha verificato TUTTI i segmenti, senza mismatch.
 
@@ -607,20 +627,38 @@ def _log_plain_summary(
                 f"{doubted} (frame in .cache/verify_frames/)"
             )
     if weak_signal_seen():
-        # La fiducia del motore misura la timeline; il frame check misura
-        # l'artefatto. Se il secondo dà il pieno, il primo non genera un dubbio
-        # "da controllare a mano": sarebbe chiedere di verificare un video che
-        # è già stato verificato. Resta però il fatto, dichiarato sotto.
+        # La fiducia del motore misura la TIMELINE, il frame check misura
+        # l'ARTEFATTO: sono due domande diverse e nessuna risponde all'altra.
+        # Il frame check può dare il pieno mentre un confine è sbagliato di
+        # minuti, perché il frame viene preso a metà segmento e uno spostamento
+        # uniforme non lo coglie — è scritto nel docstring di
+        # `_artifact_verified`. L'artefatto verificato resta un fatto utile e
+        # viene dichiarato come tale, ma non cancella il dubbio sulle durate:
+        # altrimenti il riepilogo scriveva "nessuno, la sincronizzazione è
+        # risultata solida" tre righe sopra "fiducia del motore: bassa", e il
+        # caso reale (7 slide con confusability 100%, confine 1->2 sbagliato di
+        # due minuti, 0 ancore) passava dichiarandosi solido.
         if _artifact_verified(frame_check, len(durations)):
             log.info(
-                "   Il motore era scettico, ma il frame check sul video finito "
-                "ha verificato tutti i segmenti: le slide mostrate sono quelle "
-                "attese. Le durate restano stimate, non ancore dichiarate."
+                "   Il video finito è stato verificato: ogni segmento mostra la "
+                "slide che la timeline prevede."
+            )
+        # Il dubbio riguarda i confini che NON sono ancorati, e solo quelli:
+        # un'ancora "slide N" pronunciata è un fatto, e dichiarare i fatti
+        # dubitabili è l'esatto difetto che questo progetto combatte.
+        senza_ancora = _transizioni_senza_ancora(anchors)
+        if senza_ancora:
+            doubts.append(
+                f"la somiglianza tra parlato e slide è risultata debole: i "
+                f"confini che danno il passo alle {_slide_list_text(senza_ancora, di=True)} "
+                f"sono stime, non misure, e su un deck confondibile possono cadere "
+                f"minuti fuori posto (1:1 solo con le ancore 'slide N')"
             )
         else:
             doubts.append(
-                "la somiglianza tra parlato e slide è risultata debole: le durate "
-                "sono stimate, non garantite (1:1 solo con le ancore 'slide N')"
+                "la somiglianza tra parlato e slide è risultata debole: le slide "
+                "si somigliano troppo fra loro, quindi guarda a mano dove il "
+                "parlato cambia tema (le ancore 'slide N' restano esatte)"
             )
     if review_diffs:
         doubts.append(
@@ -830,6 +868,11 @@ def _find_anomalous_durations(
 # da medie di similarità, quindi "esattamente 8s" significa "8s ± rumore".
 _FLOOR_TOLERANCE_SECONDS = 0.05
 
+# Quanta parte dell'audio può restare fuori dai segmenti prima di rifiutare la
+# timeline (flusso libero). 1% copre il chunk parziale a inizio/fine audio; il
+# caso reale che ha motivato la soglia perdeva il 86%.
+_COPERTURA_MINIMA = 0.01
+
 # Sotto questa durata una slide è "al minimo" per costruzione, non per misura:
 # il pavimento anti-flicker non può scendere sotto `min_slide_seconds` (8s) se
 # non è incastrata fra due ancore. Le durate che nascono dal pavimento sono
@@ -908,6 +951,69 @@ def _floor_report(
         "guaranteed": guaranteed,
         "shortened": shortened,
         "unguaranteed": unguaranteed,
+    }
+
+
+def _frazione_non_coperta(
+    segments: Sequence[dict[str, object]], total_duration: float
+) -> float:
+    """Quanta parte dell'audio NON è coperta dai segmenti, in frazione.
+
+    Una timeline che si ferma prima della fine non è imprecisa: è troncata, e il
+    video che ne esce è corto senza che nulla lo dichiari. Misura la somma delle
+    lacune fra un segmento e il successivo, normalizzata sulla durata totale.
+
+    Tolleranza di 1%: un chunk parziale all'inizio o alla fine è normale (l'audio
+    non inizia né finisce esattamente su una frontiera di 30s), ma 21 minuti
+    persi su 24 non lo sono.
+    """
+    if total_duration <= 0 or not segments:
+        return 1.0
+    ordinati = sorted(
+        (float(cast(float, s["start"])), float(cast(float, s["end"]))) for s in segments
+    )
+    lacuna = max(0.0, ordinati[0][0])
+    for (_, fine), (inizio, _) in pairwise(ordinati):
+        lacuna += max(0.0, inizio - fine)
+    lacuna += max(0.0, total_duration - ordinati[-1][1])
+    return min(1.0, lacuna / total_duration)
+
+
+def _absorbed_report(
+    durate_assorbite: Sequence[float],
+    segments: Sequence[dict[str, object]],
+    min_seconds: float,
+) -> dict[str, object]:
+    """Stessa forma di ``_floor_report``, per il merge del flusso libero.
+
+    Il flusso libero non usa ``enforce_min_durations`` (non ha ancore da
+    preservare): la sua anti-flicker è ``merge_short_segments``, che FUSO un
+    segmento corto nel vicino. Il risultato è la stessa cosa — una durata
+    concessa per leggibilità, non misurata sul parlato — ma senza questa
+    funzione quel dato finiva solo nel log e il riepilogo chiedeva all'utente di
+    controllare a mano durate che erano per costruzione.
+
+    ``merge_short_segments`` restituisce le durate naturali dei segmenti
+    scomparsi, ma non dice CHI le aveva: nel flusso libero una stessa slide può
+    comparire più volte (``free flow`` = riordino), quindi l'attribuzione è per
+    posizione e non per numero di slide.
+
+    Returns:
+        ``{"min_seconds", "guaranteed", "shortened", "unguaranteed", "absorbed"}``
+    """
+    sure = sorted(d for d in durate_assorbite if d < min_seconds - _FLOOR_TOLERANCE_SECONDS)
+    return {
+        "min_seconds": round(min_seconds, 1),
+        "guaranteed": [{"segment": i, "before": round(d, 1)} for i, d in enumerate(sure)],
+        "shortened": [],
+        "unguaranteed": [],
+        # Le durate finali, per posizione: servono a un operatore che voglia
+        # ricostruire a mano la segmentazione (nel flusso libero una slide può
+        # comparire più volte, quindi la posizione è l'unico riferimento).
+        "durations": [
+            round(float(cast(float, m["end"])) - float(cast(float, m["start"])), 1)
+            for m in (cast("Mapping[str, object]", s) for s in segments)
+        ],
     }
 
 
@@ -1123,6 +1229,33 @@ def _should_escalate_weak_signal(
     i timestamp sono già dichiarati dal parlato.
     """
     return weak_signal and missing_count > 0 and llm_enabled
+
+
+def _escalate_senza_ancore(
+    weak_local: bool,
+    local_failed: bool,
+    llm_enabled: bool,
+) -> bool:
+    """Serve l'LLM nel flusso podcast -> slide (dove le ancore non esistono)?
+
+    È la domanda che `_needs_llm_escalation` non sa fare, e il motivo è
+    strutturale: lì ``missing_count`` misura un problema (troppe slide non
+    annunciate), qui sarebbe SEMPRE uguale a ``total_slides - 1`` perché il
+    prompt vieta le ancore. Applicare le stesse soglie farebbe spendere una
+    chiamata LLM (~16 min) a ogni run di questo flusso, anche quando il motore
+    embedding è convinto.
+
+    Quindi qui la soglia è una sola e non è un numero: l'LLM viene coinvolto
+    solo se il motore locale ha dichiarato di non distinguere le slide
+    (``weak_local``). È il caso in cui la timeline non è "un po' imprecisa" ma
+   costruita su un segnale piatto, e il posizionamento dell'LLM legge il
+    contenuto dei chunk invece di un argmax su una matrice piatta.
+
+    Se il motore locale non ha prodotto nulla l'LLM non viene coinvolto: non
+    è il caso da cui questo percorso nasce, e il flusso libero (dove l'LLM è il
+    motore principale) copre già quel fallback.
+    """
+    return weak_local and not local_failed and llm_enabled
 
 
 def _needs_llm_escalation(
@@ -1949,6 +2082,30 @@ def main(argv: list | None = None) -> None:
         floor_note: dict[str, object] | None = None
         floor_guaranteed: dict[int, float] = {}
         floor_unguaranteed: dict[int, float] = {}
+        # `floor_min` è letto DOPO la biforcazione dei flussi (dalle anomalie
+        # di durata), quindi va inizializzato qui: nei rami che non applicano
+        # nessun pavimento non deve esistere, e lasciarlo non assegnato faceva
+        # esplodere la run con UnboundLocalError. Il flusso libero con MiniLM è
+        # esattamente quel ramo: il suo anti-flicker è interno al motore e non
+        # lascia nessuna nota.
+        floor_min: float = 0.0
+
+        # Scelta LLM richiesta esplicitamente: la decisione "cosa faremo in
+        # questa run" può discostarsene (il fallback sotto), ma la richiesta
+        # va conservata per il report.
+        llm_rilevato: str = args.llm
+
+        # L'LLM è "disponibile" se l'utente lo ha chiesto, e questa è la
+        # domanda che va posta al momento in cui serve davvero. Il fallback
+        # ORDERED azzera `args.llm` per non chiamare l'LLM subito — è una scelta
+        # di tempi (il percorso ordinato costa ~1 min, l'LLM ~16) — ma se più
+        # avanti il motore scopre che il segnale è debole, la disponibilità
+        # dell'LLM è esattamente la risposta all'informazione mancante, e
+        # l'utente l'aveva già autorizzata. Con `args.llm` come gate la
+        # disponibilità veniva revocata da una decisione di tempi presa prima
+        # di sapere se serviva, e l'escalation restava irraggiungibile nel
+        # flusso podcast -> slide, l'unico in cui non ci sono ancore.
+        llm_disponibile: bool = llm_rilevato != "off"
 
         # --- Auto-detection flusso (dopo trascrizione, prima della sincronizzazione) ---
         flow: str
@@ -1995,7 +2152,19 @@ def main(argv: list | None = None) -> None:
                         "--flow free --llm auto per la selezione libera via LLM."
                     )
                     flow = "slide-audio"
+                    # La scelta dell'utente non viene persa, viene registrata:
+                    # `args.llm` effettivo resta "off" per questa run (il
+                    # fallback è una decisione presa adesso, non un annullamento
+                    # di quello che l'utente aveva chiesto), ma `llm_rilevato`
+                    # conserva la richiesta originale. È la stessa distinzione
+                    # già usata per `flow` / `flow_rilevato`: senza questa,
+                    # `--llm auto` finiva dimenticato e l'escalation al LLM —
+                    # l'unico meccanismo che riposiziona le slide non ancorate —
+                    # restava impossibile proprio nei run a segnale debole, cioè
+                    # quando serviva.
                     args.llm = "off"
+                    sync_notes["engine"] = "ordered_embeddings_fallback"
+                    sync_notes["llm_rilevato"] = llm_rilevato
 
         # --- Ancore deterministiche disponibili ---
         # Calcolate una volta: servono all'avviso qui sotto e alla scelta
@@ -2167,6 +2336,13 @@ def main(argv: list | None = None) -> None:
         if flow == "free":
             log.info("3. Selezione libera: le slide seguono il contenuto del podcast, senza vincolo di ordine.")
 
+            # Soglia unica dell'anti-flicker per TUTTO il flusso libero. Prima
+            # il ramo MiniLM usava questa e il ramo LLM ne usava un'altra (il
+            # default di merge_short_segments, 15s): due soglie diverse nella
+            # stessa selezione, e nel caso limite (un segmento da 10s) il LLM lo
+            # assorbiva e il MiniLM no.
+            min_segment_seconds = max(8.0, 2 * args.semantic_min_duration)
+
             # Motore LLM (opzionale): supera il tetto di precisione del MiniLM
             # su presentazioni tematicamente omogenee. Unico provider: 9Router
             # online (cascata interna di 3 modelli), poi fallback automatico
@@ -2213,7 +2389,7 @@ def main(argv: list | None = None) -> None:
                         model_name=args.semantic_model,
                         cache_dir=args.semantic_cache_dir,
                         window_seconds=args.semantic_window,
-                        min_segment_seconds=max(8.0, 2 * args.semantic_min_duration),
+                        min_segment_seconds=min_segment_seconds,
                         min_avg_z=args.semantic_min_z,
                     ),
                 )
@@ -2223,6 +2399,56 @@ def main(argv: list | None = None) -> None:
                     segments = [dict(s) for s in local_segments]
             if not segments:
                 _abort("Selezione libera fallita: nessun segmento affidabile generabile da slide + trascrizione.")
+
+            # La timeline deve COPRIRE l'audio. Una selezione che si ferma a
+            # metà non è "una selezione imperfetta": è una selezione che
+            # buttaway via metà dell'audio, e il video che ne esce è corto senza
+            # che nulla lo dichiari. Successe su un podcast di 24m34s: 7 segmenti
+            # che coprivano i primi 210s, con una slide mai mostrata e un'altra
+            # mostrata due volte — riepilogo finale "nessuno, la sincronizzazione
+            # è risultata solida".
+            #
+            # Non è un controllo estetico: il fallback MiniLM qui sotto è
+            # esattamente la rete di sicurezza che serve, e senza questo guard
+            # la selezione libera può produrre un video troncato.
+            non_coperto = _frazione_non_coperta(segments, total_duration)
+            if non_coperto > _COPERTURA_MINIMA:
+                log.error(
+                    "   La selezione libera copre solo %.0f%% dell'audio "
+                    "(%.0fs su %.0fs): %s",
+                    (1 - non_coperto) * 100,
+                    total_duration * (1 - non_coperto),
+                    total_duration,
+                    "non accetto una timeline che perde l'audio, passo al motore locale.",
+                )
+                segments = None
+                log.info("   Sincronizzazione semantica locale (MiniLM)...")
+                local_segments = free_order_segments_from_words(
+                    slide_texts,
+                    words_raw,
+                    total_slides,
+                    total_duration,
+                    options=SemanticOptions(
+                        model_name=args.semantic_model,
+                        cache_dir=args.semantic_cache_dir,
+                        window_seconds=args.semantic_window,
+                        min_segment_seconds=min_segment_seconds,
+                        min_avg_z=args.semantic_min_z,
+                    ),
+                )
+                if local_segments is not None:
+                    segments = [dict(s) for s in local_segments]
+                if not segments:
+                    _abort(
+                        "Selezione libera non copre l'audio e il motore locale non "
+                        "ha prodotto una segmentazione: uso il flusso ordinato "
+                        "(--flow slide-audio)."
+                    )
+                llm_used = False
+                log.warning(
+                    "   [Fallback]uso il motore locale: la selezione libera "
+                    "posizionava le slide solo su una parte dell'audio."
+                )
 
             # Post-elaborazione dei SOLI segmenti LLM (flusso libero):
             #   1) confini a livello di parola (l'LLM lavora su chunk da 30s e
@@ -2248,12 +2474,23 @@ def main(argv: list | None = None) -> None:
                     window_seconds=min(args.llm_chunk, 30.0),
                 )
                 n_segments_before = len(segments)
-                segments = merge_short_segments(segments)
+                durate_assorbite: list[float] = []
+                segments = merge_short_segments(
+                    segments,
+                    min_seconds=min_segment_seconds,
+                    assorbiti=durate_assorbite,
+                )
                 if len(segments) != n_segments_before:
                     log.info(
                         "   Anti-flicker LLM: %d segmento/i corto/i assorbito/i.",
                         n_segments_before - len(segments),
                     )
+                if durate_assorbite:
+                    floor_note = _absorbed_report(
+                        durate_assorbite, segments, min_segment_seconds
+                    )
+                    floor_guaranteed, floor_unguaranteed, floor_min = _floor_split(floor_note)
+                    sync_notes["anti_flicker"] = floor_note
 
             t_sync = time.time() - t_phase_start
 
@@ -2485,8 +2722,8 @@ def main(argv: list | None = None) -> None:
             # cambiano: le cache LLM di run precedenti non servono più. Si
             # conservano SOLO quelle che questa run può riusare (stessi
             # contenuti, calcolate con gli stessi endpoint) e la timeline finale.
-            if args.llm != "off":
-                _llm_endpoints = endpoints_for(args.llm)
+            if llm_disponibile:
+                _llm_endpoints = endpoints_for(llm_rilevato)
                 if args.llm_model:
                     for ep in _llm_endpoints:
                         ep["model"] = args.llm_model
@@ -2526,7 +2763,18 @@ def main(argv: list | None = None) -> None:
             # ma work doppio inutile).
             local_timeline: dict[int, float] | None = None
             llm_hybrid_attempted = False
-            if args.llm != "off" and semantic_anchors and len(semantic_anchors) < total_slides - 1:
+            # `senza_ancore` è il flusso podcast -> slide: lì le ancore non
+            # esistono PER PROGETTO (il prompt le vieta), quindi il ramo ibrido
+            # non entrava mai e l'escalation — l'unico meccanismo che
+            # riposiziona le slide non ancorate — restava irraggiungibile
+            # proprio dove serviva. Il messaggio di `semantic_sync` ("con l'LLM
+            # attivo le slide non ancorate vengono riposizionate") era quindi
+            # una promessa falsa per costruzione.
+            senza_ancore = not semantic_anchors
+            if llm_disponibile and (
+                (semantic_anchors and len(semantic_anchors) < total_slides - 1)
+                or senza_ancore
+            ):
                 missing_count = (total_slides - 1) - len(semantic_anchors)
                 # Il flag di segnale debole è globale: azzerato qui per
                 # misurarlo SOLO su questa chiamata (altrimenti una
@@ -2560,13 +2808,28 @@ def main(argv: list | None = None) -> None:
                 # inaffidabile. La decisione è in `_needs_llm_escalation` (quindi
                 # è testabile da sola): il motore locale ha GIA' prodotto una
                 # timeline, l'LLM è solo un tentativo di migliorarla.
-                need_llm = _needs_llm_escalation(
-                    local_failed=local_failed,
-                    weak_local=weak_local,
-                    missing_count=missing_count,
-                    llm_local_threshold=args.llm_local_threshold,
-                    llm_enabled=args.llm != "off",
-                )
+                #
+                # Nel flusso SENZA ancore la regola è diversa e più stretta, per
+                # non spendere una chiamata LLM (~16 min) a ogni run: lì le
+                # ancore mancano per progetto, quindi "troppe slide senza ancora"
+                # è SEMPRE vero e farebbe scattare l'escalation sempre. L'unica
+                # ragione sufficiente è che il motore locale dichiari il segnale
+                # debole: non è un numero, è un fatto ("non distinguo queste
+                # slide"). Se il motore è convinto, la sua timeline va bene.
+                if senza_ancore:
+                    need_llm = _escalate_senza_ancore(
+                        weak_local=weak_local,
+                        local_failed=local_failed,
+llm_enabled=llm_disponibile,
+                    )
+                else:
+                    need_llm = _needs_llm_escalation(
+                        local_failed=local_failed,
+                        weak_local=weak_local,
+                        missing_count=missing_count,
+                        llm_local_threshold=args.llm_local_threshold,
+                        llm_enabled=llm_disponibile,
+                    )
                 if weak_local and not local_failed:
                     log.warning(
                         "\n   [Fallback] Motore embedding locale con segnale DEBOLE: "
@@ -2602,14 +2865,14 @@ def main(argv: list | None = None) -> None:
                     # viene discusso il contenuto: 9Router parte in automatico se
                     # spento (wait_for_router in llm_ordered_timeline).
                     llm_hybrid_attempted = True
-                    endpoints = endpoints_for(args.llm)
+                    endpoints = endpoints_for(llm_rilevato)
                     if args.llm_model:
                         for ep in endpoints:
                             ep["model"] = args.llm_model
                     log.info(
                         "   Flusso ibrido: ancore esatte + LLM per le %d slide senza ancora (--llm %s)...",
                         missing_count,
-                        args.llm,
+                        llm_rilevato,
                     )
                     try:
                         timeline = llm_ordered_timeline(
