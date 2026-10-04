@@ -24,6 +24,17 @@ rem avvisa e riporta l'esito nel riepilogo. Disattivabile con:
 rem   set VERIFY_VIDEO=0
 if not defined VERIFY_VIDEO set "VERIFY_VIDEO=1"
 if "%VERIFY_VIDEO%"=="1" set "MAIN_ARGS=!MAIN_ARGS! --verify-video"
+
+rem --- 9Router: OFF per default ---
+rem L'LLM non serve a sincronizzare. I confini li danno le frasi "slide N"
+rem pronunciate dal conduttore, e sul materiale provato l'escalation all'LLM ha
+rem fatto PEGGIO delle embedding: 21 dei 24 minuti dati a una sola slide, e una
+rem risposta troncata al 43% dell'audio che ha fatto perdere il confine di una
+mzza di secondi. Resta attivabile con --llm 9router per chi vuole provarlo, ma
+rem il default e' offline: nessuna dipendenza di rete, nessun 9router da
+rem installare.
+set "LLM_ARG=--llm off"
+
 :parse
 if "%~1"=="" goto run
 if /i "%~1"=="--no-pause" set "PAUSE_IT=0"& shift & goto parse
@@ -41,8 +52,10 @@ echo.
 
 echo Avvio pipeline: OCR -^> Trascrizione -^> Sincronizzazione semantica -^> Video
 echo Controllo del video finito: VERIFY_VIDEO=!VERIFY_VIDEO! (0 per disattivarlo)
+echo Motore LLM: OFF (--llm 9router per attivarlo)
 echo ========================================
 echo.
+
 echo  Nota: il controllo aggiornamenti si fa con aggiornamenti.bat
 echo  (qui disattivato per non rallentare la generazione del video).
 echo ========================================
@@ -62,18 +75,19 @@ if not %ERRORLEVEL% EQU 0 (
     )
 )
 
-rem --- 9Router: se installato usa --llm auto (posizionamento LLM), altrimenti offline (nessuna pausa) ---
-set "LLM_ARG=--llm off"
-where 9router >NUL 2>&1
-if %ERRORLEVEL% EQU 0 set "LLM_ARG=--llm auto"
-
 rem --- Scelta Python: helper condiviso (preferisce 3.11, vedi _python.bat) ---
 call "%~dp0_python.bat"
 echo Python scelto: !PY_CMD!
+
+rem --- Ordine degli argomenti: !LLM_ARG! PRIMA di !MAIN_ARGS! ---
+rem argparse fa vincere l'ultimo flag, quindi gli argomenti dell'utente devono
+rem stare DOPO. Con l'ordine inverso un esplicito "--llm off" (o "--flow", o
+rem "--whisper-model") veniva sovrascritto in silenzio dal default del
+rem launcher: nessun avviso, nessun errore.
 if "%CHECK_UPDATES%"=="0" (
-    !PY_CMD! main.py --no-update-check --no-confirm !MAIN_ARGS! !LLM_ARG!
+    !PY_CMD! main.py --no-update-check --no-confirm !LLM_ARG! !MAIN_ARGS!
 ) else (
-    !PY_CMD! main.py --no-confirm !MAIN_ARGS! !LLM_ARG!
+    !PY_CMD! main.py --no-confirm !LLM_ARG! !MAIN_ARGS!
 )
 
 echo.

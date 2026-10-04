@@ -2985,6 +2985,36 @@ llm_enabled=llm_disponibile,
             if timeline is None:
                 _abort("Sincronizzazione semantica fallita: nessuna timeline generabile da slide + trascrizione.")
 
+            # Raffinamento dei SOLI confini senza ancora, su QUALSIASI motore.
+            # Il confine di una slide non annunciata cade su una frontiera di
+            # blocco da `semantic_window` secondi, che puo' essere a meta' del
+            # discorso: qui viene spostato al punto di parola in cui la
+            # similarita' locale si inverte. Le ancore pronunciate restano ai
+            # loro timestamp.
+            #
+            # Va fatto anche senza LLM: prima questa post-elaborazione esisteva
+            # solo nei rami che passano dall'escalation, e con `--llm off` (che
+            # e' il default) non girava mai. Misurato sul run del 04/10: la
+            # slide 12, unica senza ancora, restava a 720s invece di 757.5s.
+            # Sotto LLM la stessa slide era a 757.5s: la differenza non era il
+            # modello, era che il refine non era passato.
+            if len(semantic_anchors) < total_slides - 1:
+                log.info(
+                    "   Raffinamento a livello di parola dei confini senza ancora..."
+                )
+                timeline = refine_llm_timeline_from_words(
+                    timeline,
+                    semantic_anchors,
+                    words_raw,
+                    slide_texts,
+                    total_duration,
+                    options=SemanticOptions(
+                        model_name=args.semantic_model,
+                        cache_dir=args.semantic_cache_dir,
+                    ),
+                    window_seconds=min(args.llm_chunk, 30.0),
+                )
+
             # --- Anti-flicker: garanzia di durata minima per ogni slide ---
             # Una slide a video 1-4s è un lampo illeggibile (tipico delle slide
             # senza ancora posizionate a ridosso dell'ancora successiva). Qui le

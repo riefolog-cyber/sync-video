@@ -17,6 +17,63 @@ from unittest import mock
 from ocr import _ocr_single_slide, convert_presentation_to_pdf
 
 
+class TestOcrTuttoVuoto(unittest.TestCase):
+    """Tesseract assente deve fermare la run, non produrre slide vuote.
+
+    `pytesseract.TesseractNotFoundError` eredita da `OSError`, quindi
+    `_ocr_single_slide` lo tratta come un errore di OCR qualsiasi, lo annulla e
+    rimette il segnaposto. Senza guardia la run andava a buon fine e usciva un
+    video con tutte le slide vuote: sembra a posto, non lo e', e per chi clona
+    il progetto non c'e' niente che lo dica.
+    """
+
+    VUOTO = "[Nessun testo rilevato. Immagine visiva.]"
+
+    def test_tutte_vuote_e_tesseract_mancante(self):
+        from ocr import _ocr_tutto_vuoto
+
+        self.assertTrue(_ocr_tutto_vuoto([self.VUOTO] * 6))
+        self.assertTrue(_ocr_tutto_vuoto([""] * 6))
+        self.assertTrue(_ocr_tutto_vuoto(["", self.VUOTO, "  "]))
+
+    def test_una_sola_slide_legittimamente_vuota_non_basta(self):
+        # Una slide-immagine e' normale: il segnaposto e' la risposta giusta e
+        # NON deve fermare la run.
+        from ocr import _ocr_tutto_vuoto
+
+        self.assertFalse(
+            _ocr_tutto_vuoto(["Il monopolio delle piattaforme", self.VUOTO, "Economie di rete"])
+        )
+
+    def test_deck_con_testo_non_e_vuoto(self):
+        from ocr import _ocr_tutto_vuoto
+
+        self.assertFalse(_ocr_tutto_vuoto(["primo", "secondo"]))
+
+    def test_nessuna_slide_non_e_un_deck_vuoto(self):
+        # Zero slide e' un PDF sbagliato, non un Tesseract mancante: la guardia
+        # non deve inventare una diagnosi.
+        from ocr import _ocr_tutto_vuoto
+
+        self.assertFalse(_ocr_tutto_vuoto([]))
+
+    def test_il_messaggio_dice_come_sistemarlo(self):
+        from ocr import _MESSAGGIO_OCR_VUOTO
+
+        testo = _MESSAGGIO_OCR_VUOTO.format(n=12)
+        self.assertIn("Tesseract", testo)
+        self.assertIn("winget", testo)
+        self.assertIn("tesseract --list-langs", testo)
+        self.assertIn("12", testo)
+
+    def test_il_segnaposto_e_unica_costante(self):
+        # Se il segnaposto cambiasse, la guardia smetterebbe di riconoscerlo e
+        # tornerebbe il fallimento silenzioso.
+        import ocr
+
+        self.assertEqual(ocr._TESTO_NESSUN_TESTO, self.VUOTO)
+
+
 class TestConvertPresentationToPdf(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

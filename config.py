@@ -1346,7 +1346,7 @@ Esempi:
     # Selezione slide via LLM (opzionale, supera il tetto dell'embedding)
     parser.add_argument(
         "--llm",
-        default="auto",
+        default="off",
         choices=["off", "auto", "9router"],
         help="Selezione slide via LLM. 'off' = solo embedding "
         "locale (nessuna rete). 'auto' e '9router' sono oggi "

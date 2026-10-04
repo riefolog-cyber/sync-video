@@ -338,6 +338,34 @@ def _tesseract() -> Any:
     return pytesseract
 
 
+_TESTO_NESSUN_TESTO = "[Nessun testo rilevato. Immagine visiva.]"
+
+_MESSAGGIO_OCR_VUOTO = (
+    "OCR: nessun testo estratto da nessuna delle {n} pagine. Tesseract è "
+    "installato e ha la lingua 'ita'?\n"
+    "  - Tesseract OCR: `winget install UB-Mannheim.TesseractOCR`\n"
+    "    (apt: `apt-get install tesseract-ocr tesseract-ocr-ita`)\n"
+    "  - Dati della lingua: `tessdata/ita.traineddata` (non sono nel repo)\n"
+    "  - Verifica con: `tesseract --list-langs`\n"
+    "  Senza OCR le slide restano vuote e la sincronizzazione perde il segnale "
+    "del contenuto: le ancore 'slide N' funzionano comunque, ma il motore non "
+    "ha piu' nulla su cui appoggiarsi."
+)
+
+
+def _ocr_tutto_vuoto(slide_texts: list[str]) -> bool:
+    """True se NESSUNA slide ha testo: il caso in cui Tesseract non c'e'.
+
+    Una slide senza testo e' legittima (un'immagine, una foto) e li' il
+    segnaposto e' la risposta giusta. Tutte vuote invece significa quasi
+    certamente che l'OCR non ha girato, e senza avviso la run produce un video
+    con le slide vuote: sembra a posto e non lo e'.
+    """
+    if not slide_texts:
+        return False
+    return all(t.strip() in ("", _TESTO_NESSUN_TESTO) for t in slide_texts)
+
+
 def _ocr_single_slide(image_path: Path, lang: str, max_retries: int = 3) -> str:
     """Esegue OCR su una singola immagine con retry e backoff."""
     pt = _tesseract()
@@ -369,7 +397,7 @@ def _ocr_single_slide(image_path: Path, lang: str, max_retries: int = 3) -> str:
                 except (pt.TesseractError, OSError):
                     raw = ""
     clean = re.sub(r"\s+", " ", raw).strip()
-    return clean if clean else "[Nessun testo rilevato. Immagine visiva.]"
+    return clean if clean else _TESTO_NESSUN_TESTO
 
 
 def extract_slides_text_ocr(
@@ -423,9 +451,22 @@ def extract_slides_text_ocr(
     slide_texts: list[str] = [""] * total_pages
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_ocr_single_slide, Path(sf), lang): idx for idx, sf in enumerate(slide_files)}
-        for future in tqdm(as_completed(futures), total=total_pages, desc="OCR slide"):
+        for future in as_completed(futures):
             idx = futures[future]
             slide_texts[idx] = future.result()
+
+    # Tesseract assente = ogni slide prende il segnaposto e la run va a buon
+    # fine: il video esce con le slide vuote e nessun errore, che è la cosa più
+    # difficile da diagnosticare per chi clona il progetto. pytesseract
+    # eredita TesseractNotFoundError da OSError, quindi _ocr_single_slide lo
+    # tratta come un errore di OCR qualsiasi e lo annulla.
+    #
+    # Una slide senza testo è legittima (un'immagine, una foto): il segnaposto
+    # è la risposta giusta. TUTTE le slide vuote no: è quasi certamente
+    # Tesseract non installato, e va detto adesso invece di produrre un video
+    # che sembra a posto e non lo è.
+    if _ocr_tutto_vuoto(slide_texts):
+        raise RuntimeError(_MESSAGGIO_OCR_VUOTO.format(n=total_pages))
 
     for i, txt in enumerate(slide_texts):
         preview = txt[:80] + "..." if len(txt) > 80 else txt
