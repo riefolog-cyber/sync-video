@@ -49,6 +49,7 @@ from config import (
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
     STOPWORDS_ITA,
 )
+from llm_sync import slide_di_altro_deck
 from semantic_sync import _clean_slide_text, _load_embed_model, _make_embed_fn, segment_verdict
 from video import _letterbox_references, _reference_matrix, _similarities
 
@@ -138,6 +139,29 @@ words = tc["words_raw"]
 slide_texts = slides["slide_texts"]
 slide_files = [Path(p) for p in slides["slide_files"]]
 total_slides = len(slide_texts)
+
+
+# La timeline e le ancore vanno confrontate con il deck PRIMA di usarle: e'
+# l'unico dato che distingue "cache di un altro podcast" da "misura di questo".
+# Il caso e' reale: le cache `llm_<hash>.json` sono hash del contenuto e non
+# hanno nel nome nulla che le leghi al materiale corrente.
+_fuori_timeline = slide_di_altro_deck(timeline, total_slides)
+if _fuori_timeline:
+    print(
+        f"[Verifica] ATTENZIONE: {TIMELINE_FILE.name} contiene slide fuori dal deck "
+        f"corrente ({sorted(set(_fuori_timeline))} su 1..{total_slides}): e' una "
+        "cache di un altro podcast, la sua sezione 3 sarebbe falsa."
+    )
+
+_fuori_ancore = slide_di_altro_deck(anchors_list, total_slides)
+if _fuori_ancore:
+    print(
+        f"[Verifica] ATTENZIONE: ignoro le ancore di {ANCHORS_FILE.name}: parlano di "
+        f"slide fuori dal deck corrente ({sorted(set(_fuori_ancore))} su "
+        f"1..{total_slides}). Il confronto ancorra/segmenti della sezione 3 verrebbe "
+        "riportato con scarti inventati."
+    )
+    anchors_list = []
 
 anchors = {int(a["slide"]): float(a["start"]) for a in anchors_list} if anchors_list else {}
 
@@ -339,6 +363,12 @@ print()
 print("=" * 100)
 print("3. ANCORE: delta ancora dichiarata vs inizio segmento")
 print("=" * 100)
+if not anchors:
+    # Meglio dichiararlo che lasciare una sezione vuota: una sezione muta sembra
+    # uno strumento rotto, e il lettore non puo' distinguere "nessuna ancora
+    # salvata" da "nessuna ancora perche' le ho scartate".
+    print("  (nessuna ancora utilizzabile: non e' stato salvato alcun riferimento "
+          "'slide N' di questa run)")
 for a_slide, a_time in sorted(anchors.items()):
     actual = next((s["start"] for s in segs if s["slide"] == a_slide), None)
     delta = (actual - a_time) if actual is not None else float("nan")

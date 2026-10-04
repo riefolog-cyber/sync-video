@@ -2121,6 +2121,33 @@ def _cache_key(
     )
 
 
+def slide_di_altro_deck(elementi: list, n_slide: int) -> list[int]:
+    """Numeri di slide che non esistono nel deck di ``n_slide`` pagine.
+
+    Le cache ``llm_<hash>.json`` sono hash del CONTENUTO e sopravvivono al
+    cambio di materiale: main.py le ripulisce all'avvio di ogni run, ma chi
+    ispeziona la cache a mano (o un controllo post-run come ``analysis_sync.py``)
+    puo' rileggerne una di un podcast precedente. Sono indistinguibili a occhio
+    dal file giusto, perché sembrano tutte liste di ``{"slide", "start"}``.
+
+    Senza questo controllo, il confronto ancore/segmento produce numeri che
+    sembrano misure e non lo sono: su un video verificato perfetto (12/12 frame,
+    11/11 confini) la sezione 3 riportava "delta +221.65s" e "slide 13 non
+    mostrata", frammenti di un deck da 13 slide.
+    """
+    fuori: list[int] = []
+    for e in elementi:
+        if not isinstance(e, dict) or "slide" not in e:
+            continue
+        try:
+            n = int(e["slide"])  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= n <= n_slide:
+            fuori.append(n)
+    return fuori
+
+
 def _load_llm_cache(key: str) -> list[dict[str, object]] | None:
     """Legge la timeline LLM cachata, o None.
 

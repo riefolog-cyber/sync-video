@@ -261,13 +261,14 @@ class TestAnnunciaPrimoAvvio(unittest.TestCase):
             # fastembed crea la cartella PRIMA di scaricare: una cartella che
             # esiste ma è vuota non significa "già scaricato".
             (root / "embedding_model").mkdir()
-            mancanti = _modelli_mancanti(root / "embedding_model", [])
+            mancanti = _modelli_mancanti(root / "embedding_model", "small")
             self.assertTrue(mancanti)
             self.assertIn("embedding", mancanti[0][0])
 
     def test_cache_piena_non_annuncia_nulla(self):
         import tempfile
         from pathlib import Path
+        from unittest import mock
 
         from config import _modelli_mancanti
 
@@ -275,7 +276,10 @@ class TestAnnunciaPrimoAvvio(unittest.TestCase):
             cache = Path(td) / "embedding_model"
             cache.mkdir()
             (cache / "modello.onnx").write_bytes(b"x" * 32)
-            self.assertEqual(_modelli_mancanti(cache, []), [])
+            # Anche whisper "in cache": con i due presenti non deve stampare.
+            with mock.patch("config._cache_whisper_faster") as hf:
+                hf.return_value = cache
+                self.assertEqual(_modelli_mancanti(cache, "small"), [])
 
     def test_una_cartella_di_zero_byte_non_conta(self):
         # Un file da 0 byte è il segnale di un download interrotto: contarlo
@@ -289,7 +293,50 @@ class TestAnnunciaPrimoAvvio(unittest.TestCase):
             cache = Path(td) / "m"
             cache.mkdir()
             (cache / "vuoto.bin").write_bytes(b"")
-            self.assertTrue(_modelli_mancanti(cache, []))
+            self.assertTrue(_modelli_mancanti(cache, "small"))
+
+    def test_il_modello_whisper_annunciato_e_quello_usato(self):
+        # faster-whisper scarica dalla cache HUB, non in .cache/: annunciare la
+        # directory sbagliata promette un download che non parte e nasconde
+        # quello che parte davvero.
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from config import _modelli_mancanti
+
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td) / "embedding_model"
+            cache.mkdir()
+            (cache / "m.onnx").write_bytes(b"x")
+            with mock.patch("config._cache_whisper_faster") as hf:
+                hf.return_value = Path(td) / "non_esiste"
+                mancanti = _modelli_mancanti(cache, "small")
+            nomi = " ".join(n for n, _ in mancanti)
+            self.assertIn("whisper small", nomi)
+            self.assertNotIn("openvino", nomi.lower())
+
+    def test_la_cache_whisper_e_indicata_con_il_nome_del_modello(self):
+        # Il percorso deve derivare dal modello in uso: con WHISPER_MODEL=base
+        # si cerca models--Systran--faster-whisper-base, non -small.
+        import os
+        from pathlib import Path
+
+        with mock.patch.dict(os.environ, {"HF_HOME": "/tmp/hf"}, clear=False):
+            d = config._cache_whisper_faster("base")
+        self.assertEqual(d.name, "models--Systran--faster-whisper-base")
+        self.assertIsInstance(d, Path)
+
+    def test_dimensione_whisper_solo_se_misurata(self):
+        # Per un modello senza misura (medium/large) si nomma il modello senza
+        # inventare una cifra: e' l'unica cosa che fa capire quanto manca.
+        from pathlib import Path
+
+        with mock.patch("config._gia_scaricato", return_value=False):
+            grandi = dict(config._modelli_mancanti(Path("/tmp/embedding"), "large"))
+            piccoli = dict(config._modelli_mancanti(Path("/tmp/embedding"), "small"))
+        self.assertEqual(grandi["modello di trascrizione (whisper large)"], "")
+        self.assertEqual(piccoli["modello di trascrizione (whisper small)"], "~490 MB")
 
     def test_il_messaggio_dice_che_non_e_un_blocco(self):
         import io
@@ -301,13 +348,30 @@ class TestAnnunciaPrimoAvvio(unittest.TestCase):
         precedente = config.log.handlers[:]
         config.log.handlers = [logging.StreamHandler(buf)]
         try:
-            config._annuncia_primo_avvio([("modello embedding", "~6 GB")])
+            config._annuncia_primo_avvio([("modello embedding", "~6.4 GB")])
         finally:
             config.log.handlers = precedente
         testo = buf.getvalue()
         self.assertIn("PRIMO AVVIO", testo)
         self.assertIn("NON", testo)
-        self.assertIn("6 GB", testo)
+        self.assertIn("6.4 GB", testo)
+
+    def test_il_messaggio_non_inventa_una_dimensione(self):
+        import io
+        import logging
+
+        import config
+
+        buf = io.StringIO()
+        precedente = config.log.handlers[:]
+        config.log.handlers = [logging.StreamHandler(buf)]
+        try:
+            config._annuncia_primo_avvio([("modello whisper large", "")])
+        finally:
+            config.log.handlers = precedente
+        testo = buf.getvalue()
+        self.assertIn("modello whisper large", testo)
+        self.assertNotIn("()", testo)
 
     def test_nessun_modello_mancante_non_stampa(self):
         import io

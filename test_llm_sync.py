@@ -31,6 +31,7 @@ from llm_sync import (
     parse_llm_response,
     review_llm_timeline,
     router_alive,
+    slide_di_altro_deck,
     wait_for_router,
 )
 
@@ -1978,6 +1979,47 @@ class TestCacheCleanup(unittest.TestCase):
         self.assertEqual(data["slide_texts"], ["t"])
         # scrittura atomica: nessun .tmp residuo
         self.assertEqual(list(self._tmpdir.glob("*.tmp")), [])
+
+
+class TestSlideDiAltroDeck(unittest.TestCase):
+    """Le cache llm_<hash>.json sopravvivono al cambio di materiale.
+
+    Regressione: il controllo post-run (analysis_sync.py) ha letto le ancore di
+    un deck da 13 slide mentre la timeline era quella del deck da 12, e ha
+    riportato "delta +221.65s" su un video verificato perfetto (12/12 frame,
+    11/11 confini). Il nome del file non dice nulla del contenuto: e' un hash.
+    """
+
+    def test_ancore_di_un_deck_piu_grande_vanno_rilevate(self):
+        # Caso reale: 6 ancore, ultima sulla slide 13, deck corrente da 12.
+        ancore = [
+            {"slide": 4, "start": 176.5},
+            {"slide": 5, "start": 260.5},
+            {"slide": 7, "start": 335.7},
+            {"slide": 9, "start": 424.1},
+            {"slide": 12, "start": 521.2},
+            {"slide": 13, "start": 594.0},
+        ]
+        self.assertEqual(slide_di_altro_deck(ancore, 12), [13])
+
+    def test_ancore_dello_stesso_deck_non_segnalano_nulla(self):
+        ancore = [{"slide": 2, "start": 71.19}, {"slide": 12, "start": 742.85}]
+        self.assertEqual(slide_di_altro_deck(ancore, 12), [])
+
+    def test_slide_zero_e_negativa_sono_fuori(self):
+        # Una numerazione che parte da 0 non esiste: la slide 1 parte a 0.0s e
+        # non e' un indice valido di pagina.
+        self.assertEqual(slide_di_altro_deck([{"slide": 0}, {"slide": -1}], 12), [0, -1])
+
+    def test_elementi_malformati_ignorati(self):
+        # La cache puo' contenere il marcatore di fallimento {"failed": true}:
+        # non deve far crashare il controllo ne' contare come slide.
+        self.assertEqual(
+            slide_di_altro_deck([{"failed": True}, {"slide": "x"}, "testo"], 12), []
+        )
+
+    def test_cache_vuota_non_segnala_nulla(self):
+        self.assertEqual(slide_di_altro_deck([], 12), [])
 
 
 if __name__ == "__main__":

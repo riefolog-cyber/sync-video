@@ -351,20 +351,50 @@ _BREW_ENV = {
 # sul disco e quindi quello che va detto.
 
 
+# Dimensioni dei modelli whisper misurate su questo progetto (cache
+# faster-whisper sull'hub HuggingFace), non stime: sono cioe' i byte che
+# l'utente vede comparire sul disco. Gli altri modelli non hanno una misura
+# affidabile qui, quindi per quelli non si scrive una cifra inventata.
+_DIMENSIONI_WHISPER = {"tiny": "~80 MB", "base": "~150 MB", "small": "~490 MB"}
+
+
+def _cache_whisper_faster(model: str) -> Path:
+    """Cartella del modello whisper CPU (quello che usa la pipeline di default).
+
+    faster-whisper scarica dalla cache dell'hub HuggingFace, NON in `.cache/`.
+    Cercarlo nel posto sbagliato e' un doppio errore: si annuncia un download
+    che non avviene e non si annuncia quello che avviene.
+    """
+    hf_home = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")
+    return hf_home / "hub" / f"models--Systran--faster-whisper-{model}"
+
+
 def _modelli_mancanti(
     embedding_cache: Path,
-    whisper_dirs: Sequence[Path],
+    whisper_model: str = "small",
 ) -> list[tuple[str, str]]:
-    """Modelli che verranno scaricati, come (nome, dimensione tipica).
+    """Modelli che verranno scaricati al primo avvio, come (nome, dimensione).
+
+    Solo i modelli che il percorso di default scarica davvero: embedding
+    (fastembed, cache in `.cache/`) e whisper CPU (cache sull'hub HuggingFace).
+    Il modello OpenVINO NON e' qui perche' e' opt-in (`--openvino-download`) e
+    con il default non viene scaricato: annunciarlo sarebbe promettere un
+    download che non parte, e ripeterlo a ogni avvio successivo.
 
     Vuoto = tutto in cache, e il primo avvio non deve dire nulla.
     """
     mancanti: list[tuple[str, str]] = []
     if not _gia_scaricato(embedding_cache):
-        mancanti.append(("modello embedding (multilingual-e5-large)", "~6 GB"))
-    for d in whisper_dirs:
-        if not _gia_scaricato(d):
-            mancanti.append((d.name, "~0.5 GB"))
+        # 6.4 GB di disco, non 2.2: fastembed tiene sia la copia "fast-" sia
+        # quella ONNX (2.1 + 4.3 GB misurati). E' un suo comportamento, non una
+        # scelta del progetto, ma e' quello che l'utente vede sul disco.
+        mancanti.append(("modello embedding (multilingual-e5-large)", "~6.4 GB"))
+    cache_whisper = _cache_whisper_faster(whisper_model)
+    if not _gia_scaricato(cache_whisper):
+        mancanti.append(
+            (f"modello di trascrizione (whisper {whisper_model})",
+             _DIMENSIONI_WHISPER.get(whisper_model, ""))
+        )
     return mancanti
 
 
@@ -384,14 +414,19 @@ def _gia_scaricato(directory: Path) -> bool:
 def _annuncia_primo_avvio(mancanti: Sequence[tuple[str, str]]) -> None:
     if not mancanti:
         return
-    righe = "\n".join(f"   - {nome} ({dim})" for nome, dim in mancanti)
+    # Un modello senza dimensione misurata (es. whisper medium/large) resta
+    # leggibile: si nomma e basta. Scrivere "~1 GB" a caso sarebbe una cifra
+    # inventata, e qui le cifre sono l'unica cosa che l'utempo usa per capire
+    # quanto tempo manca.
+    righe = "\n".join(f"   - {nome} ({dim})" if dim else f"   - {nome}"
+                      for nome, dim in mancanti)
     log.info(
         "\n⏳ PRIMO AVVIO — downloads in corso, NON è un blocco.\n"
         "%s\n"
-        "   Servono qualche minuto e qualche GB di disco (la cartella .cache/).\n"
-        "   Le run successive non scaricano più nulla. Per saltarli:\n"
-        "   --semantic-model <altro> / WHISPER_MODEL=tiny\n"
-        "   (un modello più piccolo è più rapido ma meno accurato sulle ancore).",
+        "   Servono qualche minuto e qualche GB di disco (la cartella .cache/ e la\n"
+        "   cache HuggingFace). Le run successive non scaricano più nulla.\n"
+        "   Per usare modelli più piccoli: --semantic-model <altro> / WHISPER_MODEL=tiny\n"
+        "   (più rapidi, meno accurati sulle ancore).",
         righe,
     )
 
@@ -805,7 +840,7 @@ def bootstrap() -> None:
     _annuncia_primo_avvio(
         _modelli_mancanti(
             Path(DEFAULT_EMBEDDING_CACHE_DIR),
-            [Path(DEFAULT_OPENVINO_MODEL_DIR)],
+            DEFAULT_WHISPER_MODEL,
         )
     )
 

@@ -248,13 +248,28 @@ e veloce il router lato server.
 
 | Componente | Dimensione | Metodo |
 |---|---|---|
-| Pacchetti pip (10) | ~200 MB | `pip install` |
+| Pacchetti pip (13 su x86-64) | ~250 MB | `pip install` |
 | Tesseract OCR | ~40 MB | `winget` / `apt-get` / `brew` |
 | ffmpeg | ~80 MB | `winget` / `apt-get` / `brew` |
-| Modello embedding e5-large | ~2.2 GB | fastembed (download automatico) |
-| Modello Whisper `small` | ~460 MB | faster-whisper (download automatico) |
-| Modello Whisper OpenVINO `small` | ~930 MB | `--openvino-download` (una tantum, consigliato) |
+| Modello embedding e5-large | **~6.4 GB** di disco | fastembed (download automatico) |
+| Modello Whisper `small` (CPU) | ~490 MB | faster-whisper (download automatico) |
+| Modello Whisper OpenVINO | ~80 MB (`tiny`) / ~930 MB (`small`) | `--openvino-download` (facoltativo) |
 | Lingua Tesseract ITA | inclusa | `tessdata/ita.traineddata` |
+
+> **Perché 6.4 GB e non 2.2 per il modello embedding.** Il download è ~2.2 GB,
+> ma fastembed tiene **due copie** di `multilingual-e5-large` nella cache
+> (`.cache/embedding_model/`): `fast-multilingual-e5-large` (2.1 GB) e
+> `models--qdrant--multilingual-e5-large-onnx` (4.3 GB), misurate. È un
+> comportamento di fastembed, non una scelta del progetto, ma è quello che
+> occupa disco: **chi pianifica lo spazio deve contare 6.4 GB**, non 2.2.
+>
+> **Il modello Whisper CPU è nella cache HuggingFace**, non in `.cache/`: con
+> `HF_HOME` personalizzato va cercato lì. La copia OpenVINO è **facoltativa** e
+> non viene scaricata dal percorso di default.
+>
+> Al primo avvio il programma **annuncia questi download prima di farli**,
+> perché un download da qualche gigabyte in silenzio è indistinguibile da un
+> blocco. Se i modelli sono già in cache non stampa nulla.
 
 > **La trascrizione è il collo di bottiglia** (≈85% del tempo su un podcast
 > reale). I due acceleratori sono attivi **di default** e non richiedono setup:
