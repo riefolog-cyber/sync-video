@@ -485,6 +485,16 @@ e veloce il router lato server.
 > `genera_video.bat` di default salta il controllo (flag `--no-update-check`)
 > per non rallentare la generazione; per riattivarlo al volo aggiungi
 > `--check-updates`.
+>
+> **La manutenzione di 9Router è un altro script.** Sta in
+> `aggiornamenti_9router.bat` e non è dentro `aggiornamenti.bat` perché
+> modifica *quali modelli il servizio espone* (con `-AutoReplace` toglie dalla
+> combo quelli che falliscono, con `-AddFreeModels` aggiunge quelli gratuiti):
+> sono modifiche automatiche e non annullabili, che vanno chiese esplicitamente
+> e non nascoste dietro "aggiorna le dipendenze". Serve solo se usi
+> `--llm 9router`, perché il percorso di default è `--llm off`.
+> Richiede `pwsh` (PowerShell 7): con il solo PowerShell di Windows lo dice e
+> si ferma, invece di saltare il passo in silenzio.
 
 ---
 
