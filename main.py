@@ -2936,14 +2936,34 @@ llm_enabled=llm_disponibile,
                     # Il motore locale ha GIA' prodotto questa timeline prima
                     # dell'escalation all'LLM: si riusa il risultato invece di
                     # ricalcolare da capo la stessa funzione con gli stessi
-                    # embedding. L'unica differenza rispetto al ramo precedente
-                    # sarebbe il refine, che qui non era stato applicato perche'
-                    # si stava andando all'LLM.
+                    # embedding. Il refine a granularità di parola viene
+                    # applicato anche qui: prima non lo era, con la scusa che
+                    # "la differenza sarebbe solo il refine", ma la differenza
+                    # è il confine delle slide SENZA ancora, che è
+                    # esattamente quello che l'escalation doveva migliorare.
+                    # Run del 04/10: l'LLM ha risposto per 12 chunk su 28 e la
+                    # guardia anti-troncamento l'ha respinto (correttamente),
+                    # il fallback ha riescluso la timeline locale GREZZA e la
+                    # slide 12, unica senza ancora, restava 35s prima del suo
+                    # confine vero. Con il refine va a 730.7s: non risolve, ma
+                    # è il massimo che le embedding possono fare su questo deck.
                     log.info(
                         "   Uso la timeline del motore embedding locale gia' calcolata "
-                        "prima dell'escalation all'LLM."
+                        "prima dell'escalation all'LLM, con il raffinamento dei "
+                        "confini senza ancora."
                     )
-                    timeline = local_timeline
+                    timeline = refine_llm_timeline_from_words(
+                        local_timeline,
+                        semantic_anchors,
+                        words_raw,
+                        slide_texts,
+                        total_duration,
+                        options=SemanticOptions(
+                            model_name=args.semantic_model,
+                            cache_dir=args.semantic_cache_dir,
+                        ),
+                        window_seconds=min(args.llm_chunk, 30.0),
+                    )
                 else:
                     log.info("   Sincronizzazione semantica (embeddings offline)...")
                     timeline = semantic_timeline_from_words(

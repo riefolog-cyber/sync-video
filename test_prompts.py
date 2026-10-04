@@ -89,6 +89,7 @@ REGOLE: list[tuple[str, str, str]] = [
     ("presentazione", "passiamo alla slide n", "frase di ancoraggio"),
     ("presentazione", "mai un segnaposto", "numero vero"),
     ("presentazione", "senza salti e senza ripetizioni", "annunci in ordine"),
+    ("presentazione", "l'ultima pagina si annuncia come le altre", "annuncio anche dell'ultima"),
     ("presentazione", "richiamare una pagina già", "no richiami"),
     ("presentazione", "riferimento fuori ordine che il programma deve scartare", "perche' dei richiami"),
     ("presentazione", "guarda sempre slide 3", "esempio di richiamo"),

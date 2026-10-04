@@ -2,9 +2,12 @@
 
 > **Flusso B.** La presentazione nasce dal podcast: una slide per sezione, e
 > l'audio si riusa se un errore ti fa rifare il deck. In compenso i confini sono
-> **stimati** dal contenuto e possono cadere minuti fuori posto: se quello che
-> ti serve è un confine esatto, usa
-> [`PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md>).
+> **stimati** dal contenuto e possono cadere minuti fuori posto.
+>
+> Nel riepilogo del programma, se leggi **«la somiglianza tra parlato e slide è
+> risultata debole»**, i confini sono stime e non misure: guarda il video prima
+> di darlo per buono. Se invece ti serve un confine esatto, usa
+> [`PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md)>).
 
 ## Fase 1 — Il podcast (incolla in "Personalizza" → "Istruzioni")
 

@@ -27,7 +27,7 @@ Ogni sezione:
 
 ANCORE: valgono più della fluidità del testo. Il video si sincronizza sulle frasi in cui dichiari il numero di pagina.
 
-- In ordine, una volta sola: se le pagine sono N, gli annunci sono N-1 dal 2 al N, senza salti e senza ripetizioni.
+- In ordine, una volta sola: se le pagine sono N, gli annunci sono N-1 dal 2 al N, senza salti e senza ripetizioni. L'ultima pagina si annuncia come le altre: non è una conclusione, è una sezione.
 
 - MAI RICHIAMARE una pagina già trattata. Un richiamo crea un riferimento fuori ordine che il programma deve scartare, e in quel caso rischia di perdere anche la transizione vera. Se torni su un concetto di una pagina precedente, non ne ripetere il numero, dillo con le parole. Non "guarda sempre slide 3" ma "come dicevamo, lo stesso schema".
 
