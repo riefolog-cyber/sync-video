@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -338,6 +339,61 @@ _BREW_ENV = {
     "HOMEBREW_NO_ENV_HINTS": "1",
     "NONINTERACTIVE": "1",
 }
+
+
+# Modelli che il programma scarica al primo uso, con la dimensione TIPICA
+# misurata su questo progetto (non una stima): l'annuncio del primo avvio
+# serve proprio a evitare che qualcuno interpreti il silenzio come un blocco.
+#
+# I 6.4 GB non sono un modello solo: fastembed tiene sia la copia "fast-" sia
+# quella ONNX di multilingual-e5-large (2.1 + 4.3 GB). E' un suo
+# comportamento, non una scelta del progetto, ma e' quello che l'utente vede
+# sul disco e quindi quello che va detto.
+
+
+def _modelli_mancanti(
+    embedding_cache: Path,
+    whisper_dirs: Sequence[Path],
+) -> list[tuple[str, str]]:
+    """Modelli che verranno scaricati, come (nome, dimensione tipica).
+
+    Vuoto = tutto in cache, e il primo avvio non deve dire nulla.
+    """
+    mancanti: list[tuple[str, str]] = []
+    if not _gia_scaricato(embedding_cache):
+        mancanti.append(("modello embedding (multilingual-e5-large)", "~6 GB"))
+    for d in whisper_dirs:
+        if not _gia_scaricato(d):
+            mancanti.append((d.name, "~0.5 GB"))
+    return mancanti
+
+
+def _gia_scaricato(directory: Path) -> bool:
+    """True se la cartella di cache del modello contiene qualcosa.
+
+    Non si usa "esiste la cartella": fastembed la crea prima di scaricare, quindi
+    una cartella vuota farebbe dire "già scaricato" al primo avvio, che è
+    esattamente il caso in cui l'annuncio serve.
+    """
+    try:
+        return any(p.is_file() and p.stat().st_size > 0 for p in directory.rglob("*"))
+    except OSError:
+        return False
+
+
+def _annuncia_primo_avvio(mancanti: Sequence[tuple[str, str]]) -> None:
+    if not mancanti:
+        return
+    righe = "\n".join(f"   - {nome} ({dim})" for nome, dim in mancanti)
+    log.info(
+        "\n⏳ PRIMO AVVIO — downloads in corso, NON è un blocco.\n"
+        "%s\n"
+        "   Servono qualche minuto e qualche GB di disco (la cartella .cache/).\n"
+        "   Le run successive non scaricano più nulla. Per saltarli:\n"
+        "   --semantic-model <altro> / WHISPER_MODEL=tiny\n"
+        "   (un modello più piccolo è più rapido ma meno accurato sulle ancore).",
+        righe,
+    )
 
 
 def _try_system_install(name: str, winget_id: str, apt_pkg: str, brew_pkg: str) -> bool:
@@ -741,6 +797,17 @@ def bootstrap() -> None:
                     _FFMPEG_DOWNLOAD_URL,
                 )
                 sys.exit(1)
+
+    # --- Primo avvio: i modelli ML si scaricano al primo uso ---
+    # Lo dico PRIMA, non mentre succede: il silenzio di un download da qualche
+    # gigabyte è indistinguibile da un blocco, e la cosa piu' probabile a quel
+    # punto e' chiudere il programma e non riaprirlo.
+    _annuncia_primo_avvio(
+        _modelli_mancanti(
+            Path(DEFAULT_EMBEDDING_CACHE_DIR),
+            [Path(DEFAULT_OPENVINO_MODEL_DIR)],
+        )
+    )
 
 
 # =====================================================================

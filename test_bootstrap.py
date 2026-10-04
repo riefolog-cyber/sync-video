@@ -241,5 +241,89 @@ class TestLoadEnvFile(unittest.TestCase):
                 self.assertEqual(os.environ["S2VTEST_I"], "gia_impostata")
 
 
+class TestAnnunciaPrimoAvvio(unittest.TestCase):
+    """Il primo avvio scarica qualche GB: dirlo PRIMA, non durante.
+
+    Il silenzio di un download da gigabyte è indistinguibile da un blocco, e la
+    cosa più probabile a quel punto è chiudere il programma. Il caso da
+    coprire è anche l'opposto: quando i modelli ci sono già l'annuncio non deve
+    ripetersi, altrimenti è rumore che impedisce di leggere il resto.
+    """
+
+    def test_cache_vuota_annuncia(self):
+        import tempfile
+        from pathlib import Path
+
+        from config import _modelli_mancanti
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            # fastembed crea la cartella PRIMA di scaricare: una cartella che
+            # esiste ma è vuota non significa "già scaricato".
+            (root / "embedding_model").mkdir()
+            mancanti = _modelli_mancanti(root / "embedding_model", [])
+            self.assertTrue(mancanti)
+            self.assertIn("embedding", mancanti[0][0])
+
+    def test_cache_piena_non_annuncia_nulla(self):
+        import tempfile
+        from pathlib import Path
+
+        from config import _modelli_mancanti
+
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td) / "embedding_model"
+            cache.mkdir()
+            (cache / "modello.onnx").write_bytes(b"x" * 32)
+            self.assertEqual(_modelli_mancanti(cache, []), [])
+
+    def test_una_cartella_di_zero_byte_non_conta(self):
+        # Un file da 0 byte è il segnale di un download interrotto: contarlo
+        # come "scaricato" riporterebbe il problema al primo vero avvio utile.
+        import tempfile
+        from pathlib import Path
+
+        from config import _modelli_mancanti
+
+        with tempfile.TemporaryDirectory() as td:
+            cache = Path(td) / "m"
+            cache.mkdir()
+            (cache / "vuoto.bin").write_bytes(b"")
+            self.assertTrue(_modelli_mancanti(cache, []))
+
+    def test_il_messaggio_dice_che_non_e_un_blocco(self):
+        import io
+        import logging
+
+        import config
+
+        buf = io.StringIO()
+        precedente = config.log.handlers[:]
+        config.log.handlers = [logging.StreamHandler(buf)]
+        try:
+            config._annuncia_primo_avvio([("modello embedding", "~6 GB")])
+        finally:
+            config.log.handlers = precedente
+        testo = buf.getvalue()
+        self.assertIn("PRIMO AVVIO", testo)
+        self.assertIn("NON", testo)
+        self.assertIn("6 GB", testo)
+
+    def test_nessun_modello_mancante_non_stampa(self):
+        import io
+        import logging
+
+        import config
+
+        buf = io.StringIO()
+        precedente = config.log.handlers[:]
+        config.log.handlers = [logging.StreamHandler(buf)]
+        try:
+            config._annuncia_primo_avvio([])
+        finally:
+            config.log.handlers = precedente
+        self.assertEqual(buf.getvalue(), "")
+
+
 if __name__ == "__main__":
     unittest.main()
