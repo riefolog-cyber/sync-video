@@ -1173,6 +1173,70 @@ def _segment_content_verdict(
     return "disallineata"
 
 
+# Numero STAMPATO in cima alla pagina: "3. Titolo", "3) Titolo", "3 - Titolo".
+# Solo se è plausibile come indice di slide: un anno ("2024. Lezioni") o
+# qualsiasi numero più grande del numero di pagine non è un'etichetta.
+_NUMERO_STAMPATO = re.compile(r"^\s*(\d{1,3})\s*[.):\-]\s")
+
+
+def _numeri_stampati(slide_texts: Sequence[str]) -> list[int | None]:
+    """Numero stampato in cima a ogni pagina, ``None`` se non c'è.
+
+    L'OCR mette per primo il testo in alto a sinistra, che nel deck generato da
+    NotebookLM è l'etichetta della sezione. È una lettura fragile (dipende dal
+    layout), quindi chi non ha un numero non viene contato come errore.
+    """
+    trovati: list[int | None] = []
+    for testo_slide in slide_texts:
+        m = _NUMERO_STAMPATO.match(testo_slide)
+        n = int(m.group(1)) if m else None
+        trovati.append(n if n is not None and 1 <= n <= len(slide_texts) else None)
+    return trovati
+
+
+def _check_numerazione_stampata(slide_texts: Sequence[str]) -> str | None:
+    """Avvisa se i numeri stampati sulle slide sono sfasiati dalla posizione.
+
+    Un deck con una copertina non numerata in testa numera le sezioni 1..N-1 sulle
+    pagine fisiche 2..N: l'etichetta che si vede sul video è allora diversa dal
+    numero che il speaker annuncia, anche quando la sincronizzazione è perfetta.
+    Il video resta giusto — i tempi di taglio vengono dal numero pronunciato
+    applicato alla posizione della pagina, non dall'etichetta — ma chi guarda vede
+    due numeri diversi e crede a un bug. Prima che succeda lo dice il programma.
+
+    Avvisa solo se lo scarto è SISTEMATICO: una numerazione irregolare non è uno
+    sfasamento, è un'altra cosa, e non va descritta come un offset.
+    """
+    numeri = _numeri_stampati(slide_texts)
+    scarti = [n - pos for pos, n in enumerate(numeri, start=1) if n is not None]
+    if len(scarti) < 2 or len(set(scarti)) != 1:
+        return None
+    scarto = scarti[0]
+    if scarto == 0:
+        return None
+
+    # Tre esempi e il conteggio: elencare tutte le pagine renderebbe l'avviso
+    # illeggibile proprio nel caso in cui il deck è più grande.
+    esempi = [
+        (pos, n)
+        for pos, n in enumerate(numeri, start=1)
+        if n is not None and n - pos == scarto
+    ]
+    campione = ", ".join(f"la pagina {pos} mostra '{n}.'" for pos, n in esempi[:3])
+    if len(esempi) > 3:
+        campione += f", ... ({len(esempi)} pagine in tutto)"
+    return (
+        f"[Numerazione] I numeri stampati sulle slide sono sfasiati di {scarto:+d} "
+        f"rispetto alla posizione della pagina ({campione}). I tempi di taglio non "
+        "cambiano: vengono dal numero pronunciato applicato alla posizione della "
+        "pagina, quindi il video resta sincronizzato, ma sullo schermo si legge un "
+        "numero diverso da quello annunciato dal podcast. Causa tipica: una "
+        "copertina non numerata all'inizio del deck, che sposta la numerazione di "
+        "uno. Perche' etichetta e numero annunciato coincidano, il deck deve "
+        "numerare dalla 1 anche la prima pagina, oppure non avere la copertina."
+    )
+
+
 def _validate_anomalous_segments(
     anomalous_positions: Sequence[tuple[int, int, float]],
     slide_texts: Sequence[str],
@@ -2534,6 +2598,14 @@ def main(argv: list | None = None) -> None:
                 )
             else:
                 log.info("3. Nessun riferimento 'slide N': sincronizzazione solo per contenuto.")
+            # Numerazione stampata sulle slide vs posizione della pagina. Non
+            # corregge nulla di proposito: la sincronizzazione e' gia' vincolata
+            # alle ancore pronunciate, e l'etichetta stampata e' un difetto dei
+            # materiali che l'utente deve sapere, non un errore da nascondere.
+            if slide_texts:
+                _avviso_numerazione = _check_numerazione_stampata(slide_texts)
+                if _avviso_numerazione:
+                    log.warning("   %s", _avviso_numerazione)
             if slide_one_refs:
                 log.info(
                     "   [Ancore] Riferimento parlato alla 'slide 1' a %.1fs: "

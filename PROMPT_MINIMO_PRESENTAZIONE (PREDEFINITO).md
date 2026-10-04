@@ -10,7 +10,9 @@
 ## Fase 1 — La presentazione (incolla in "Studio → Slide Deck")
 
 ```
-Crea una presentazione: una slide per argomento, senza dividere un argomento in due slide né accorparne due in una. Non creare pagine che sono solo un elenco di voci. Numera ogni slide nell'ordine delle pagine. Testo rigorosamente solo in italiano.
+Crea una presentazione: una slide per argomento, senza dividere un argomento in due slide né accorparne due in una. Non creare pagine che sono solo un elenco di voci. Testo rigorosamente solo in italiano.
+
+Numera ogni slide con il numero della sua posizione, dalla 1: niente copertina senza numero. Il video sincronizza sul numero della posizione della pagina, quindi un numero stampato diverso da quello annunciato fa leggere sul video un numero che il podcast non sta dicendo.
 
 ```
 
