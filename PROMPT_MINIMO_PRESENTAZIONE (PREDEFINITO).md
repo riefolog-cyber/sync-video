@@ -12,7 +12,6 @@
 ```
 Crea una presentazione: una slide per argomento, senza dividere un argomento in due slide né accorparne due in una. Non creare pagine che sono solo un elenco di voci. Numera ogni slide nell'ordine delle pagine. Testo rigorosamente solo in italiano.
 
-Titolo distintivo e breve (max 8 parole) con il termine specifico dell'argomento, mai "Introduzione", "Conclusioni", "Argomento 2". Sotto, 3-4 punti molto brevi con le parole chiave, evitando termini generici ripetuti sulle altre pagine.
 ```
 
 Scarica la presentazione e **ricaricala nelle fonti come PRESENTAZIONE**.
@@ -34,7 +33,7 @@ ANCORE: valgono più della fluidità del testo. Il video si sincronizza sulle fr
 
 - Un numero solo nella frase che apre la sezione, mai altrove, almeno una frase di distanza da "slide". Mai "slide 1" in apertura (la prima pagina parte già all'inizio), mai il numero totale di pagine.
 
-Sezioni di lunghezza simile: evita che una sezione duri due minuti e un'altra pochi secondi. Se una pagina è un semplice elenco, nonarle una sezione autonoma: la sua durata non potrà essere misurata.
+Sezioni di lunghezza simile: evita che una sezione duri due minuti e un'altra pochi secondi. Se una pagina è un semplice elenco, non darle una sezione autonoma: la sua durata non potrà essere misurata.
 
 TONO E STILE DEL DIBATTITO
 TARGET: classe di scuola secondaria di secondo grado (14-19 anni), lezione di IRC.

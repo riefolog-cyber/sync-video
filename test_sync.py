@@ -4237,6 +4237,125 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
 
         return _embed
 
+    def test_offsets_sparsi_non_distruggono_le_ancore(self):
+        """Il caso reale del 04/10, con la combinazione che manca nei test.
+
+        Dieci ancore, slides 2..11 dette nell'ordine giusto. Il contenuto ne
+        contraddice alcune sparse, e la sotto-sequenza monotona ne scarta
+        diverse: la timeline veniva ricostruita da zero e la slide 1 durava 4
+        secondi.
+
+        La combinazione e' voluta: quattro ancore hanno uno sliftamento
+        CONSISTENTE (drift vero, la sotto-sequenza le tiene e vengono
+        rimappate) e tre contraddicono in modo irregolare (la sotto-sequenza le
+        scarta). Serve perche' con sole ancore contraddittorie il codice
+        arrivava a "sospetto" anche senza la guardia, e il test passava per il
+        motivo sbagliato: una guardia che non e' provata da niente.
+
+        Qui senza la guardia vengono rimappate 4 ancore e perse 3; con la
+        guardia non si corregge niente e si tengono tutte le ancore pronunciate.
+        """
+        n = 32
+        slides = [f"tema{i} slide" for i in range(1, n + 1)]
+        # Gli offset sono DISPERSI (mai due uguali consecutivi), altrimenti
+        # entrerebbe il ramo 2 (una sola run sfasata) che corregge senza
+        # passare dalla sotto-sequenza monotona: il test non proverebbe la
+        # guardia. Alternati, il ramo 3 e' l'unico che puo' scartare ancore.
+        punti = {
+            2: 3, 6: 4, 10: 11, 14: 9, 18: 19, 22: 15, 26: 27, 30: 2,
+        }
+        parole = []
+        for spoken, migliore in punti.items():
+            t = 100.0 * spoken
+            parole += [{"word": f"tema{migliore}", "start": t + i} for i in range(4)]
+        ancore = {spoken: 100.0 * spoken for spoken in punti}
+
+        report: dict = {}
+        out = verify_anchor_mapping_embedding(
+            slides,
+            parole,
+            ancore,
+            total_slides=n,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(n),
+            report=report,
+        )
+        # Nessuna correzione: il chiamante tiene tutte le ancore pronunciate.
+        self.assertIsNone(
+            out,
+            "una correzione che perde ancore pronunciate non va applicata",
+        )
+        # E il caso resta ispezionabile: dichiarato sospetto, non liquidato.
+        self.assertTrue(report.get("suspicious"))
+
+    def test_perdita_di_una_sola_ancora_e_permessa(self):
+        """La guardia tollera UNA perdita: oltre quella il contenuto non basta.
+
+        Perdere un'ancora e' un giudizio legittimo (un numero pronunciato male):
+        quel confine torna a essere stimato e il report lo dichiara. Perderne di
+        piu' significa che la similarita' non dice niente, e allora il numero
+        pronunciato vince.
+
+        Qui la sotto-sequenza monotona scarta una sola ancora e ne lascia tre
+        rimappabili: la correzione va applicata. Il test fissa il confine della
+        guardia, che se fosse piu' stretta bloccherebbe anche i drift reali.
+        """
+        n = 32
+        slides = [f"tema{i} slide" for i in range(1, n + 1)]
+        punti = {2: 3, 6: 4, 10: 11, 14: 9, 18: 19}
+        parole = []
+        for spoken, migliore in punti.items():
+            t = 100.0 * spoken
+            parole += [{"word": f"tema{migliore}", "start": t + i} for i in range(4)]
+        ancore = {spoken: 100.0 * spoken for spoken in punti}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            parole,
+            ancore,
+            total_slides=n,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(n),
+        )
+        self.assertIsNotNone(
+            out, "una sola ancora persa e' un giudizio, non rumore"
+        )
+        # La misura della perdita e' il conteggio, non il confronto dei numeri:
+        # un rimap cambia il numero di slide per definizione, quindi
+        # `set(ancore) - set(out)` conta come perse anche le rimappate.
+        self.assertEqual(len(out), len(ancore) - 1)
+        # E il rimap c'e' stato: altrimenti questo test non coprirebbe nulla.
+        self.assertNotEqual(set(out), set(ancore))
+
+    def test_ancore_sulla_slide_1_non_vincolano_la_timeline(self):
+        """Un rimappo che finisce sulla slide 1 non e' un confine di transizione.
+
+        La slide 1 parte a 0.0s: un'ancora che la riguarda non puo' spostare
+        nulla, quindi viene rimossa dal chiamante invece di far oscillare la
+        timeline. Nota: non e' pero' il caso in cui la parola pronunciata sia
+        "slide 1", che non dovrebbe mai accadere (la prima pagina non si annuncia).
+        """
+        n = 5
+        slides = [f"tema{i} slide" for i in range(1, n + 1)]
+        parole = []
+        for spoken, migliore in ((2, 1), (3, 3), (4, 4)):
+            t = 100.0 * spoken
+            parole += [{"word": f"tema{migliore}", "start": t + i} for i in range(4)]
+        ancore = {2: 200.0, 3: 300.0, 4: 400.0}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            parole,
+            ancore,
+            total_slides=n,
+            window_seconds=40.0,
+            embed_fn=self._embed_fn(n),
+        )
+        # Il chiamante (main) filtra via la slide 1; qui verifichiamo solo che
+        # l'ancora non venga inventata sulla slide 1 se il mapping e' scartato.
+        if out is not None:
+            self.assertNotIn(1, out)
+
     def test_systematic_offset_detected_even_with_every_slide_anchored(self):
         # Il caso che il gating saltava: TUTTE le transizioni annunciate, quindi
         # nessuna slide senza ancora. È proprio lì che uno sfasamento di

@@ -1445,6 +1445,33 @@ def verify_anchor_mapping_embedding(
                     (spoken, spoken + off) for spoken, _, off in kept_pairs if off != 0
                 ]
                 corrected = {spoken + off: time for spoken, time, off in kept_pairs}
+                # Una correzione che PERDE ancore non è una correzione: è il
+                # contenuto che contraddice i numeri pronunciati in un modo che
+                # questo codice non sa risolvere, e la sua reazione non può
+                # essere buttare via la prova. Il numero parlato è un fatto; il
+                # giudizio sull'embedding è un parere, e su un deck con OCR
+                # illeggibile è un parere fatto a caso.
+                #
+                # Caso reale (04/10): 10 ancore perfette, slides 2..11 dette in
+                # ordine. L'OCR della slide 3 era illeggibile, gli offset sono
+                # diventati rumore, la LIS ne ha tenute 6 e la timeline è stata
+                # ricostruita su un segnale piatto: la slide 1 durava 4 secondi.
+                # Con questa guardia le 10 ancore sopravvivono.
+                #
+                # Tolleranza 1: perdere un'ancora è un giudizio legittimo
+                # (un numero pronunciato male) e lascia un confine che il
+                # chiamante dichiarerà come stimato nel report. Perderne diverse
+                # significa che il contenuto non è usable per il mapping.
+                if len(kept) < len(ordered) - 1:
+                    log.warning(
+                        "   [Ancore] Il contenuto contraddice %d ancore su %d: "
+                        "non correggo niente e tengo tutte le ancore pronunciate. "
+                        "Se il mapping è davvero sfasato, le ancore rimandano "
+                        "a pagine sbagliate: verifica il video.",
+                        len(ordered) - len(kept),
+                        len(ordered),
+                    )
+                    return _done(None, True)
                 if (
                     len(remaps) >= 2
                     and len(corrected) == len(kept)

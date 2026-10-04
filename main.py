@@ -650,7 +650,7 @@ def _log_plain_summary(
         if senza_ancora:
             doubts.append(
                 f"la somiglianza tra parlato e slide è risultata debole: i "
-                f"confini che danno il passo alle {_slide_list_text(senza_ancora, di=True)} "
+                f"confini che fanno partire {_slide_list_text(senza_ancora)} "
                 f"sono stime, non misure, e su un deck confondibile possono cadere "
                 f"minuti fuori posto (1:1 solo con le ancore 'slide N')"
             )

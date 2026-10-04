@@ -39,10 +39,6 @@ deck non può seguire le sezioni.
 ```
 Crea una presentazione che segua le sezioni del podcast nell'ordine in cui compaiono: UNA slide per sezione, con lo stesso numero di sezioni. Non fondere due sezioni e non aggiungere pagine. Eccezione: se una sezione è un puro elenco, accorpala alla pagina del tema che la introduce.
 
-Ogni slide espone una sola idea centrale, non un riassunto della sezione.
-
-Titolo distintivo e breve (max 8 parole) con il termine specifico della sezione, mai "Introduzione", "Conclusioni", "Argomento 2". Sotto, 3-4 punti molto brevi con le parole chiave del parlato, evitando termini generici ripetuti sulle altre pagine: le parole sulla slide sono l'unico segnale che il video usa per capire di cosa parla.
-
 Numera ogni slide (1, 2, 3...) nell'ordine delle pagine. Testo rigorosamente solo in italiano.
 ```
 

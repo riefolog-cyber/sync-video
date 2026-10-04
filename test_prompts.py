@@ -76,9 +76,6 @@ REGOLE: list[tuple[str, str, str]] = [
     ("podcast", "una slide per sezione", "una slide per sezione"),
     ("podcast", "non fondere due sezioni e non aggiungere pagine", "niente fusioni"),
     ("podcast", "accorpala alla pagina del tema che la introduce", "eccezione lista"),
-    ("podcast", "una sola idea centrale", "una idea per slide"),
-    ("podcast", 'mai "introduzione", "conclusioni", "argomento 2"', "titoli non generici"),
-    ("podcast", "evitando termini generici ripetuti sulle altre pagine", "parole distinctive"),
     ("podcast", "numera ogni slide", "slide numerate"),
     ("podcast", "rigorosamente solo in italiano", "deck in italiano"),
     # --- flusso A: deck ---
@@ -86,8 +83,6 @@ REGOLE: list[tuple[str, str, str]] = [
     ("presentazione", "non creare pagine che sono solo un elenco", "no pagine-lista"),
     ("presentazione", "numera ogni slide", "slide numerate"),
     ("presentazione", "rigorosamente solo in italiano", "deck in italiano"),
-    ("presentazione", 'mai "introduzione", "conclusioni", "argomento 2"', "titoli non generici"),
-    ("presentazione", "evitando termini generici ripetuti sulle altre pagine", "parole distinctive"),
     # --- flusso A: podcast con le ancore ---
     ("presentazione", "non rileggere il testo delle slide", "non leggere la slide"),
     ("presentazione", "non introdurre argomenti di altre pagine", "no contaminazione"),
@@ -101,8 +96,26 @@ REGOLE: list[tuple[str, str, str]] = [
     ("presentazione", 'mai "slide 1" in apertura', "no slide 1"),
     ("presentazione", "mai il numero totale di pagine", "no totale pagine"),
     ("presentazione", "sezioni di lunghezza simile", "sezioni equilibrate"),
-    ("presentazione", "nonarle una sezione autonoma", "no sezione per lista"),
+    ("presentazione", "non darle una sezione autonoma", "no sezione per lista"),
+    # --- tono, presente in entrambi e identico ---
+    ("podcast", "tono e stile del dibattito", "blocco tono (B)"),
+    ("presentazione", "tono e stile del dibattito", "blocco tono (A)"),
 ]
+
+# Scelte deliberate del 04/10, non dimenticanze. Queste regole sono state tolte
+# dai prompt e NON sono piu' richieste; il fatto resta scritto perche' il peso
+# delle parole del deck e' diverso nei due flussi.
+REGOLE_RIMOSSE = [
+    ("titoli non generici", 'mai "Introduzione", "Conclusioni", "Argomento 2"'),
+    ("parole distinctive", "evitando termini generici ripetuti sulle altre pagine"),
+    ("una idea per slide", "una sola idea centrale"),
+]
+# Nel flusso A le ancore sono le frasi pronunciate: le parole del deck non
+# posizionano nulla e la regola serve solo alla qualita' della slide, quindi
+# si può togliere. Nel flusso B invece sono l'UNICO segnale, perche' li' i
+# confini si deducono dal contenuto: senza questa regola il deck torna a essere
+# "tutte le slide sullo stesso tema", che e' la situazione in cui il motore non
+# distingue le sezioni (ed e' cio' che ha reso il primo run non sincronizzabile).
 
 
 class TestRegolePrompt(unittest.TestCase):
@@ -119,6 +132,21 @@ class TestRegolePrompt(unittest.TestCase):
     def test_i_due_prompt_esistono(self):
         for percorso in PROMPT.values():
             self.assertTrue(percorso.exists(), f"manca {percorso.name}")
+
+    def test_nessuna_regola_rimossa_torna_indietro(self):
+        """Le regole tolte non devono riapparire per sbaglio.
+
+        Sono state levate di proposito. Se una riappare, il prompt e' stato
+        modificato da qualcuno che non sapeva della scelta, e il peso delle
+        parole del deck cambia fra i due flussi (vedi REGOLE_RIMOSSE).
+        """
+        tornate = [
+            nome
+            for nome, frammento in REGOLE_RIMOSSE
+            for testo in (_testo_da_incollare(p) for p in PROMPT.values())
+            if _normale(frammento) in testo
+        ]
+        self.assertEqual(tornate, [], "regole tolte di proposito, riapparse")
 
 
 class TestCoerenzaTraPrompt(unittest.TestCase):
