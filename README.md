@@ -486,6 +486,10 @@ e veloce il router lato server.
 > per non rallentare la generazione; per riattivarlo al volo aggiungi
 > `--check-updates`.
 >
+> Gli interruttori sono gli stessi di `main.py` e di `genera_video.bat`:
+> `--no-update` (notifica senza installare), `--no-update-check` (non
+> controllare PyPI), `--no-pause` (non fermarsi, per l'uso in automazione).
+>
 > **La manutenzione di 9Router è un altro script.** Sta in
 > `aggiornamenti_9router.bat` e non è dentro `aggiornamenti.bat` perché
 > modifica *quali modelli il servizio espone* (con `-AutoReplace` toglie dalla
@@ -493,8 +497,26 @@ e veloce il router lato server.
 > sono modifiche automatiche e non annullabili, che vanno chiese esplicitamente
 > e non nascoste dietro "aggiorna le dipendenze". Serve solo se usi
 > `--llm 9router`, perché il percorso di default è `--llm off`.
-> Richiede `pwsh` (PowerShell 7): con il solo PowerShell di Windows lo dice e
-> si ferma, invece di saltare il passo in silenzio.
+>
+> | `aggiornamenti_9router.bat` | effetto |
+> |---|---|
+> | (nessun argomento) | chiede conferma, poi applica |
+> | `--dry-run` | **mostra cosa cambierebbe e non applica nulla** |
+> | `--no-pause` | non si ferma a fine script (automazione) |
+>
+> Un consiglio: la prima volta lancialo con `--dry-run`. `update-comboact.ps1`
+> in anteprima scrive `Would update combo ... No changes applied` con i modelli
+> che entrerebbero e quelli che uscirebbero.
+>
+> **Il codice di uscita di questo script non dice se la combo è sana.**
+> `update-comboact.ps1` esce con `0` anche quando ha rimosso modelli falliti
+> (esce con `1` solo su eccezione grave): un `0` significa "lo script è andato
+> a buon fine". Per lo stato della combo guarda la riga
+> `SUCCESS: Kept=.. | Removed=.. | Replaced=..` o il report in
+> `9router-maintenance/logs/`.
+>
+> Serve `pwsh` (PowerShell 7): con il solo PowerShell di Windows lo dice e si
+> ferma, invece di saltare il passo in silenzio.
 
 ---
 
