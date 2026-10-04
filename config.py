@@ -716,12 +716,31 @@ def bootstrap() -> None:
             brew_pkg="ffmpeg",
         )
         if not ok:
-            log.warning(
-                "⚠️  ffmpeg non trovato e auto-install fallita.\n"
-                "   Installa manualmente: %s\n"
-                "   (winget install ffmpeg — su Windows 10/11)",
-                _FFMPEG_DOWNLOAD_URL,
-            )
+            # ffmpeg e' indispensabile: video.py lo lancia come processo per
+            # l'encoding (non e' una libreria linkata). Senza, la run arriva in
+            # fondo e muore con un FileNotFoundError dopo dieci minuti di
+            # trascrizione e OCR, che e' la diagnosi piu' lontana dalla causa
+            # che si possa immaginare. Tesseract, due righe sopra, esce subito:
+            # qui si fa lo stesso.
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-version"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
+                log.info("   ✅ ffmpeg installato nel PATH.")
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                log.error(
+                    "\n❌ FFMPEG NON TROVATO — obbligatorio per montare il video.\n"
+                    "   Auto-install fallita. Scaricalo da: %s\n"
+                    "   Oppure installalo con: winget install Gyan.FFmpeg.Shared\n"
+                    "   (apt: `apt-get install ffmpeg` / brew: `brew install ffmpeg`)\n"
+                    "   Poi riavvia.\n",
+                    _FFMPEG_DOWNLOAD_URL,
+                )
+                sys.exit(1)
 
 
 # =====================================================================
