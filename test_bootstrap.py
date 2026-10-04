@@ -10,7 +10,9 @@ Esegui con: python -m unittest test_bootstrap -v
 """
 
 import builtins
+import os
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import config
@@ -317,15 +319,67 @@ class TestAnnunciaPrimoAvvio(unittest.TestCase):
             self.assertNotIn("openvino", nomi.lower())
 
     def test_la_cache_whisper_e_indicata_con_il_nome_del_modello(self):
-        # Il percorso deve derivare dal modello in uso: con WHISPER_MODEL=base
-        # si cerca models--Systran--faster-whisper-base, non -small.
-        import os
-        from pathlib import Path
-
-        with mock.patch.dict(os.environ, {"HF_HOME": "/tmp/hf"}, clear=False):
+        # faster-whisper indicizza i modelli come Systran/faster-whisper-<taglia>,
+        # quindi con WHISPER_MODEL=base va cercato -base e non -small.
+        with mock.patch("config._cache_hub_huggingface") as hub:
+            hub.return_value = Path("/hub")
             d = config._cache_whisper_faster("base")
-        self.assertEqual(d.name, "models--Systran--faster-whisper-base")
-        self.assertIsInstance(d, Path)
+        self.assertEqual(d, Path("/hub/models--Systran--faster-whisper-base"))
+
+    def test_la_cache_whisper_su_HF_HUB_CACHE_non_su_HF_HOME(self):
+        # HF_HUB_CACHE ha precedenza su HF_HOME nella libreria: guardando solo
+        # HF_HOME/hub, un utente con HF_HUB_CACHE riceverebbe l'annuncio del
+        # primo avvio a ogni run perche' la cache vera e' altrove.
+        with mock.patch("huggingface_hub.constants.HF_HUB_CACHE", str(Path("/custom/hub"))):
+            self.assertEqual(config._cache_hub_huggingface(), Path("/custom/hub"))
+
+    def test_cache_hub_se_huggingface_hub_non_c_e_in_importabile(self):
+        # La libreria onora HF_HOME aggiungendo /hub: senza di lei la riserva
+        # deve ricostruire la stessa catena.
+        vuoto_hub = mock.patch("huggingface_hub.constants.HF_HUB_CACHE", "")
+        with mock.patch.dict(os.environ, {"HF_HOME": str(Path("/home/hf"))}, clear=False), vuoto_hub:
+            self.assertEqual(config._cache_hub_huggingface(), Path("/home/hf/hub"))
+
+    def test_cache_hub_da_HF_HUB_cache_senza_la_libreria(self):
+        # HF_HUB_CACHE e' la cache GIA' (non un parent come HF_HOME): aggiungere
+        # /hub darebbe un percorso inesistente e l'annuncio ripeterebbe ogni run.
+        with mock.patch.dict(os.environ, {"HF_HUB_CACHE": str(Path("/direct/hub"))},
+                             clear=False), mock.patch("huggingface_hub.constants.HF_HUB_CACHE", ""):
+            self.assertEqual(config._cache_hub_huggingface(), Path("/direct/hub"))
+
+    def test_modello_whisper_non_standard_non_produce_annuncio(self):
+        # Un repo custom o un percorso locale non ha una cartella prevedibile:
+        # controllare una cartella che non verra' mai scritta significa
+        # annunciare il download a ogni run, per sempre.
+        self.assertIsNone(config._cache_whisper_faster("deepdml/faster-whisper-large-v3"))
+        self.assertIsNone(config._cache_whisper_faster(r"C:\modelli\mio"))
+        self.assertIsNone(config._cache_whisper_faster(""))
+
+    def test_modello_whisper_custom_non_rompe_l_annuncio_embedding(self):
+        with mock.patch("config._gia_scaricato", return_value=False):
+            nomi = [n for n, _ in config._modelli_mancanti(Path("/tmp/e"),
+                                                          "deepdml/qualcosa")]
+        self.assertEqual(len(nomi), 1)
+        self.assertIn("embedding", nomi[0])
+
+    def test_dimensione_embedding_solo_per_il_modello_misurato(self):
+        # Con --semantic-model diverso la cache occupa un altro spazio: la
+        # dimensione del default sarebbe una cifra falsa.
+        with mock.patch("config._gia_scaricato", return_value=False):
+            default = dict(config._modelli_mancanti(
+                Path("/tmp/e"), "small", "intfloat/multilingual-e5-large"))
+            altro = dict(config._modelli_mancanti(
+                Path("/tmp/e"), "small", "BAAI/bge-m3"))
+        self.assertEqual(default["modello embedding (intfloat/multilingual-e5-large)"],
+                         "~6.4 GB")
+        # Il nome riportato e' quello configurato, non quello del default.
+        self.assertEqual(altro["modello embedding (BAAI/bge-m3)"], "")
+
+    def test_il_nome_del_modello_embedding_segue_la_configurazione(self):
+        with mock.patch("config._gia_scaricato", return_value=False):
+            nomi = [n for n, _ in config._modelli_mancanti(
+                Path("/tmp/e"), "small", "BAAI/bge-m3")]
+        self.assertIn("BAAI/bge-m3", nomi[0])
 
     def test_dimensione_whisper_solo_se_misurata(self):
         # Per un modello senza misura (medium/large) si nomma il modello senza

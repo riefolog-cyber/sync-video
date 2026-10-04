@@ -357,21 +357,65 @@ _BREW_ENV = {
 # affidabile qui, quindi per quelli non si scrive una cifra inventata.
 _DIMENSIONI_WHISPER = {"tiny": "~80 MB", "base": "~150 MB", "small": "~490 MB"}
 
+# Dimensione su disco della cache embedding del modello di default. Sono i due
+# file che fastembed tiene (coppia "fast-" e ONNX), misurati: 2.1 + 4.3 GB. Il
+# download e' ~2.2 GB ma il disco occupato e' questo, e l'utente vede questo.
+_CACHE_EMBEDDING_DEFAULT = "~6.4 GB"
 
-def _cache_whisper_faster(model: str) -> Path:
-    """Cartella del modello whisper CPU (quello che usa la pipeline di default).
 
-    faster-whisper scarica dalla cache dell'hub HuggingFace, NON in `.cache/`.
-    Cercarlo nel posto sbagliato e' un doppio errore: si annuncia un download
-    che non avviene e non si annuncia quello che avviene.
+def _cache_hub_huggingface() -> Path:
+    """Cartella della cache dell'hub HuggingFace.
+
+    Si chiede a ``huggingface_hub`` invece di indovinare: la libreria onora
+    ``HF_HUB_CACHE``, poi ``HF_HOME``, poi il default, e i tre possono puntare
+    posti diversi. Guardare solo ``HF_HOME/hub`` significa che un utente con
+    ``HF_HUB_CACHE`` riceverebbe l'annuncio del primo avvio a ogni run, perche'
+    la cache vera non e' dove si guarda.
+
+    Il valore viene pero' validato: ``Path()`` su qualcosa che non e' un percorso
+    non solleva eccezione (con un mock restituisce un percorso assurdo), quindi
+    un controllo solo su "l'import e' riuscito" non basta e la riserva
+    cadrebbe silenziosamente nel ramo sbagliato.
     """
-    hf_home = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")
-    return hf_home / "hub" / f"models--Systran--faster-whisper-{model}"
+    try:
+        from huggingface_hub import constants as hf_constants
+
+        valore = getattr(hf_constants, "HF_HUB_CACHE", "")
+        if isinstance(valore, str) and valore:
+            return Path(valore)
+    except Exception:  # noqa: BLE001 - la lib puo' non essere installata o rotta
+        pass
+    for chiave in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        valore = os.environ.get(chiave)
+        if valore:
+            return Path(valore)
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        return Path(hf_home) / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _cache_whisper_faster(model: str) -> Path | None:
+    """Cartella del modello whisper CPU, o None se il percorso non e' deducibile.
+
+    faster-whisper scarica dalla cache dell'hub HuggingFace, NON in `.cache/`:
+    cercarlo nel posto sbagliato e' un doppio errore, si annuncia un download
+    che non avviene e non si annuncia quello che avviene.
+
+    ``None`` quando il modello non e' una taglia standard (per esempio un
+    percorso locale o un repo HuggingFace custom): in quel caso non c'e' una
+    cartella da controllare, e il caso peggiore sarebbe controllare una cartella
+    che non verra' mai scritta e quindi annunciare il download ogni run.
+    """
+    if not model or "/" in model or "\\" in model:
+        return None
+    return _cache_hub_huggingface() / f"models--Systran--faster-whisper-{model}"
 
 
 def _modelli_mancanti(
     embedding_cache: Path,
     whisper_model: str = "small",
+    embedding_model: str = "",
 ) -> list[tuple[str, str]]:
     """Modelli che verranno scaricati al primo avvio, come (nome, dimensione).
 
@@ -381,16 +425,24 @@ def _modelli_mancanti(
     con il default non viene scaricato: annunciarlo sarebbe promettere un
     download che non parte, e ripeterlo a ogni avvio successivo.
 
+    La dimensione e' scritta solo per i modelli per cui e' stata MISURATA: un
+    `--semantic-model` diverso porta una dimensione diversa, e una cifra
+    sbagliata fa decidere male su spazio e tempo.
+
     Vuoto = tutto in cache, e il primo avvio non deve dire nulla.
     """
     mancanti: list[tuple[str, str]] = []
     if not _gia_scaricato(embedding_cache):
+        nome = embedding_model or DEFAULT_EMBEDDING_MODEL.split("/")[-1]
         # 6.4 GB di disco, non 2.2: fastembed tiene sia la copia "fast-" sia
         # quella ONNX (2.1 + 4.3 GB misurati). E' un suo comportamento, non una
-        # scelta del progetto, ma e' quello che l'utente vede sul disco.
-        mancanti.append(("modello embedding (multilingual-e5-large)", "~6.4 GB"))
+        # scelta del progetto, ma e' quello che l'utente vede sul disco. La
+        # dimensione vale solo per il modello di default: con `--semantic-model`
+        # diverso la cache occupa un altro spazio.
+        dim = _CACHE_EMBEDDING_DEFAULT if embedding_model == DEFAULT_EMBEDDING_MODEL else ""
+        mancanti.append((f"modello embedding ({nome})", dim))
     cache_whisper = _cache_whisper_faster(whisper_model)
-    if not _gia_scaricato(cache_whisper):
+    if cache_whisper is not None and not _gia_scaricato(cache_whisper):
         mancanti.append(
             (f"modello di trascrizione (whisper {whisper_model})",
              _DIMENSIONI_WHISPER.get(whisper_model, ""))
@@ -841,6 +893,7 @@ def bootstrap() -> None:
         _modelli_mancanti(
             Path(DEFAULT_EMBEDDING_CACHE_DIR),
             DEFAULT_WHISPER_MODEL,
+            DEFAULT_EMBEDDING_MODEL,
         )
     )
 
