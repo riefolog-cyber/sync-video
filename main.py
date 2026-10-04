@@ -3293,6 +3293,43 @@ llm_enabled=llm_disponibile,
                     ", ".join(f"slide {s} = {d:.0f}s" for s, d in uncertain),
                 )
 
+        # --- La PRIMA sezione non ha ancora: va verificata per conto suo ---
+        # La slide 1 parte a 0.0s, quindi non è una transizione e nessuna
+        # ancora la vincola; nessun altro controllo la guarda. Con il flusso
+        # slide -> podcast ogni pagina ha una sezione (una sezione per pagina,
+        # con l'annuncio solo dalla seconda in poi), quindi l'attesa è definita:
+        # i primi secondi di audio devono parlare di cosa c'è sulla pagina 1.
+        # Nel flusso podcast -> slide non vale: il deck è derivato dall'audio e
+        # la prima pagina può essere qualsiasi cosa.
+        if durations and flow_rilevato != "free":
+            _primo = _validate_anomalous_segments(
+                [(0, slide_ids[0], durations[0])], slide_texts, words_raw, durations
+            ).get(slide_ids[0])
+            if _primo == "coerente":
+                log.info(
+                    "\n   [Verifica] La prima sezione parla del contenuto della "
+                    "slide 1: coerente.",
+                )
+            elif _primo == "disallineata":
+                log.warning(
+                    "\n   [Avviso] La prima sezione (%.0fs, slide %d) non parla "
+                    "del contenuto della slide 1 ma di un'altra: il video apre "
+                    "con la slide sbagliata.\n"
+                    "   Tutte le altre sezioni possono essere corrette e il "
+                    "video sembrare a posto: questo punto in particolare va "
+                    "guardato a mano. Con --strict-sync il video non viene "
+                    "generato.",
+                    durations[0],
+                    slide_ids[0],
+                )
+                if args.strict_sync:
+                    _abort(
+                        f"Sincronizzazione sospetta: la prima sezione ({durations[0]:.0f}s) "
+                        f"parla di una slide diversa dalla 1 mostrata nel video. Il video "
+                        "NON è stato generato (--strict-sync attivo): guarda i primi "
+                        f"{durations[0]:.0f} secondi, oppure rimuovi --strict-sync."
+                    )
+
         # --- Revisione LLM (--llm-review): le discrepanze non vanno perse ---
         # Il secondo passaggio LLM è "advisory" (non modifica la timeline) ma è
         # già pagato: prima finiva solo nei log. Ora sta nel report e, con
