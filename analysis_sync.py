@@ -154,7 +154,7 @@ if _fuori_timeline:
     )
 
 _fuori_ancore = slide_di_altro_deck(anchors_list, total_slides)
-if _fuori_ancore:
+if _fuori_ancore and ANCHORS_FILE is not None:
     print(
         f"[Verifica] ATTENZIONE: ignoro le ancore di {ANCHORS_FILE.name}: parlano di "
         f"slide fuori dal deck corrente ({sorted(set(_fuori_ancore))} su "
