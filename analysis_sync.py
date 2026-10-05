@@ -51,10 +51,10 @@ from config import (
 )
 from llm_sync import slide_di_altro_deck
 from semantic_sync import _clean_slide_text, _load_embed_model, _make_embed_fn, segment_verdict
+from timeline import extract_slide_anchors
 from video import _letterbox_references, _reference_matrix, _similarities
 
 TIMELINE_FILE = None
-ANCHORS_FILE = None
 
 # Auto-rilevamento dei file piu recenti della run corrente.
 # Il file "timeline" ha voci con la chiave "end"; il file "ancore" ha voci
@@ -88,7 +88,8 @@ if FINAL_TIMELINE.exists():
     TIMELINE_FILE = FINAL_TIMELINE
     print(f"[Verifica] Uso timeline finale validata: {FINAL_TIMELINE.name}")
 
-# 2) Timeline LLM / ancore: auto-rilevamento (solo se non gia' impostata)
+# 2) Timeline LLM: auto-rilevamento (solo se non gia' impostata). Le ancore NON
+#    vengono da qui: sono ricalcolate dalla trascrizione piu' in basso.
 for f in sorted(CACHE.glob("llm_*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
     if f == FINAL_TIMELINE:
         continue
@@ -100,11 +101,6 @@ for f in sorted(CACHE.glob("llm_*.json"), key=lambda p: p.stat().st_mtime, rever
         continue
     if all(isinstance(e, dict) and "end" in e for e in data) and TIMELINE_FILE is None:
         TIMELINE_FILE = f
-    elif (
-        all(isinstance(e, dict) and "start" in e and "end" not in e for e in data)
-        and ANCHORS_FILE is None
-    ):
-        ANCHORS_FILE = f
 
 TIMELINE_FILE = TIMELINE_FILE or _newest("llm_*.json")
 SLIDES_FILE = _newest("slides_*.json")
@@ -131,7 +127,6 @@ WORD_GAP_CUT = 0.4  # secondi: gap < soglia => taglio "a meta frase"
 # Caricamento dati
 # ----------------------------------------------------------------------
 timeline = json.loads(TIMELINE_FILE.read_text(encoding="utf-8"))
-anchors_list = json.loads(ANCHORS_FILE.read_text(encoding="utf-8")) if ANCHORS_FILE else []
 slides = json.loads(SLIDES_FILE.read_text(encoding="utf-8"))
 tc = json.loads(TRANSCRIPT_FILE.read_text(encoding="utf-8"))
 
@@ -140,11 +135,26 @@ slide_texts = slides["slide_texts"]
 slide_files = [Path(p) for p in slides["slide_files"]]
 total_slides = len(slide_texts)
 
+# Le ancore NON si leggono da una cache: si ricalcolano dalla trascrizione.
+#
+# Prima cercavo un file llm_<hash>.json e lo scartavo se conteneva numeri di
+# slide fuori dal deck. Il controllo reggeva solo in un caso: deck NUOVO piu'
+# piccolo del vecchio. Con un deck di 15 slide, un file di ancore di un deck da
+# 12 (slide 4..13) entrava e la sezione 3 ha stampato "delta +200s" e "+496s"
+# su un video verificato corretto. Confronto numerico non e' sufficiente.
+#
+# La trascrizione e' gia' caricata e le ancole 'slide N' sono deterministiche:
+# non serve cercare in giro un file che potrebbe essere di ieri.
+anchors = extract_slide_anchors(words, total_slides)
+print(
+    f"[Verifica] Ancore ricalcolate dalla trascrizione: {len(anchors)}"
+    f" su {total_slides} pagine."
+)
 
-# La timeline e le ancore vanno confrontate con il deck PRIMA di usarle: e'
-# l'unico dato che distingue "cache di un altro podcast" da "misura di questo".
-# Il caso e' reale: le cache `llm_<hash>.json` sono hash del contenuto e non
-# hanno nel nome nulla che le leghi al materiale corrente.
+
+# La timeline viene invece letta da cache (main.py la scrive a ogni run) e va
+# confrontata con il deck: e' l'unico dato che distingue "misura di questo
+# podcast" da "file di un altro materiale".
 _fuori_timeline = slide_di_altro_deck(timeline, total_slides)
 if _fuori_timeline:
     print(
@@ -152,18 +162,6 @@ if _fuori_timeline:
         f"corrente ({sorted(set(_fuori_timeline))} su 1..{total_slides}): e' una "
         "cache di un altro podcast, la sua sezione 3 sarebbe falsa."
     )
-
-_fuori_ancore = slide_di_altro_deck(anchors_list, total_slides)
-if _fuori_ancore and ANCHORS_FILE is not None:
-    print(
-        f"[Verifica] ATTENZIONE: ignoro le ancore di {ANCHORS_FILE.name}: parlano di "
-        f"slide fuori dal deck corrente ({sorted(set(_fuori_ancore))} su "
-        f"1..{total_slides}). Il confronto ancorra/segmenti della sezione 3 verrebbe "
-        "riportato con scarti inventati."
-    )
-    anchors_list = []
-
-anchors = {int(a["slide"]): float(a["start"]) for a in anchors_list} if anchors_list else {}
 
 # Segmenti reali: end = start della slide successiva, ultimo = fine audio
 starts = [float(s["start"]) for s in timeline]
