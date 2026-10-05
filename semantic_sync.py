@@ -1314,13 +1314,20 @@ def verify_anchor_mapping_embedding(
         sistematico rilevabile in modo affidabile.
     """
     def _done(value: dict[int, float] | None, suspicious: bool) -> dict[int, float] | None:
-        """Imposta il report (se richiesto) e restituisce il valore."""
+        """Imposta il report (se fornito) e restituisce il valore."""
         if report is not None:
             report["suspicious"] = suspicious
             report["unconfirmed"] = list(unconfirmed)
+            report["disaccordo"] = disaccordo
         return value
 
     unconfirmed: list[dict[str, Any]] = []
+    # Come il contenuto contraddice le ancore: "uniforme" (tutte dalla stessa
+    # parte: la numerazione e' davvero sfalsata) oppure "mista" (alcune sì,
+    # altre no: e' il motore che non distingue, non la numerazione che
+    # sbaglia). Sul run del 05/10 era "mista" e il messaggio diceva che la
+    # numerazione non era uniforme: bug di significato, non di misura.
+    disaccordo = ""
 
     if not words_raw or len(anchors) < 2:
         return _done(None, False)
@@ -1370,8 +1377,11 @@ def verify_anchor_mapping_embedding(
     ]
     if len(offsets) < 2:
         # Troppo poco segnale per un giudizio: non sospetto (evita chiamate
-        # LLM spurie quando la verifica non può valutare nulla).
+        # LLM spurie quando la verifica non pu�� valutare nulla).
         return _done(None, False)
+
+    if any(off != 0 for off in offsets):
+        disaccordo = "uniforme" if len(set(offsets)) == 1 else "mista"
 
     # 1) Offset UNIFORME su tutte le ancore (es. copertina esclusa): un
     #    segnale forte, correzione globale.
@@ -1463,14 +1473,42 @@ def verify_anchor_mapping_embedding(
                 # chiamante dichiarerà come stimato nel report. Perderne diverse
                 # significa che il contenuto non è usable per il mapping.
                 if len(kept) < len(ordered) - 1:
-                    log.warning(
-                        "   [Ancore] Il contenuto contraddice %d ancore su %d: "
-                        "non correggo niente e tengo tutte le ancore pronunciate. "
-                        "Se il mapping è davvero sfasato, le ancore rimandano "
-                        "a pagine sbagliate: verifica il video.",
-                        len(ordered) - len(kept),
-                        len(ordered),
-                    )
+                    # Due situazioni diverse dietro gli stessi numeri, e
+                    # vanno dette in modo diverso.
+                    if disaccordo == "mista":
+                        # Non e' la numerazione a essere sfasata: e' il motore
+                        # che non distingue le slide (deck monotema, pagine
+                        # simili fra loro). Le ancore pronunciate restano
+                        # valide e i tempi non cambiano; dirlo come "verifica
+                        # il video" spingerebbe a riguardare un video che puo'
+                        # essere corretto, e insegnerebbe a ignorare gli
+                        # avvisi veri.
+                        log.warning(
+                            "   [Ancore] Il confronto col contenuto non ha "
+                            "confermato %d ancore su %d, ma in modo NON "
+                            "uniforme: alcune puntano a un'altra pagina, "
+                            "altre confermano la propria. E' il segnale che il "
+                            "motore fatica su questo deck (pagine simili fra "
+                            "loro), non che la numerazione sia sbagliata.\n"
+                            "   Non correggo niente e tengo tutte le ancore "
+                            "pronunciate: i tempi restano quelli dichiarati "
+                            "nel podcast, che sono la misura piu' affidabile "
+                            "che abbiamo.",
+                            len(ordered) - len(kept),
+                            len(ordered),
+                        )
+                    else:
+                        log.warning(
+                            "   [Ancore] Il contenuto contraddice %d ancore su "
+                            "%d IN MODO UNIFORME: e' il segnale che la "
+                            "numerazione parlata e' davvero sfalsata.\n"
+                            "   Non correggo niente e tengo tutte le ancore "
+                            "pronunciate, quindi se il problema e' reale le "
+                            "ancore rimandano a pagine sbagliate: verifica il "
+                            "video.",
+                            len(ordered) - len(kept),
+                            len(ordered),
+                        )
                     return _done(None, True)
                 if (
                     len(remaps) >= 2

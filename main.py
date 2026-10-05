@@ -569,6 +569,10 @@ def _log_plain_summary(
     anchored = int(cast("int", anchor_info.get("anchored") or 0))
     transitions = int(cast("int", anchor_info.get("transitions") or 0))
     mapping_suspicious = bool(anchor_info.get("mapping_suspicious", False))
+    # Come il contenuto ha contraddetto le ancore: "uniforme" (la numerazione è
+    # davvero sfalsata) o "mista" (è il motore che non distingue). Cambia il
+    # messaggio, non i tempi.
+    _disaccordo = str(anchor_info.get("disaccordo") or "")
     unconfirmed = sorted(
         int(cast("int", u.get("slide") or 0))
         for u in cast("Sequence[dict[str, object]]", anchor_info.get("unconfirmed") or [])
@@ -669,18 +673,46 @@ def _log_plain_summary(
         # Il segnale più insidioso: con quasi tutte le transizioni ancorate, il
         # video può essere perfino rispetto a una numerazione parlata sbagliata,
         # e la sola fiducia del motore non lo distingue.
-        doubts.append(
-            f"per {_slide_list_text(unconfirmed)} il parlato che segue l'annuncio "
-            "somiglia di più a un'altra slide: il numero detto ad alta voce e la "
-            "slide mostrata potrebbero non coincidere (dettagli in "
-            ".cache/sync_report.json, anchors.unconfirmed)"
-        )
+        if _disaccordo == "mista":
+            # Non e' un difetto della numerazione: e' il motore che non
+            # distingue le slide. Dirlo cosi' evita di mandare a riguardare un
+            # video che i frame hanno gia' verificato.
+            doubts.append(
+                f"per {_slide_list_text(unconfirmed)} il confronto col contenuto "
+                "non ha confermato la pagina annunciata, ma in modo non uniforme "
+                "(alcune confermano, altre no): è il motore che fatica su questo "
+                "deck, non la numerazione. Le ancore pronunciate sono state "
+                "tenute e i tempi restano quelli dichiarati nel podcast"
+                + (" (segnale debole)" if weak_signal_seen() else "")
+                + " — vale la pena un'occhiata, ma non è un allarme"
+                + " (dettagli in .cache/sync_report.json, anchors.unconfirmed)"
+            )
+        else:
+            doubts.append(
+                f"per {_slide_list_text(unconfirmed)} il parlato che segue l'annuncio "
+                "somiglia di più a un'altra slide: il numero detto ad alta voce e la "
+                "slide mostrata potrebbero non coincidere (dettagli in "
+                ".cache/sync_report.json, anchors.unconfirmed)"
+            )
     if mapping_suspicious:
-        doubts.append(
-            "la numerazione delle slide dette ad alta voce non è uniforme rispetto "
-            "alla presentazione, e non è stato possibile correggerla da solo: "
-            "ricontrolla i cambi di slide nel video"
-        )
+        if _disaccordo == "mista":
+            # Prima diceva "la numerazione non è uniforme": su un deck monotema
+            # questo è falso (run del 05/10: 13 ancore su 14 esatte al
+            # millisecondo) e spingeva a riguardare i cambi di slide, che erano
+            # tutti corretti. Ora dice cosa è vero: il confronto non conclude.
+            doubts.append(
+                "il confronto fra il parlato e le slide non ha potuto verificare la "
+                "numerazione (motore incerto su questo deck): la correzione non è "
+                " stata applicata e i tempi sono quelli delle ancore pronunciate. "
+                "Se i frame del video hanno confermato tutto, puoi ignorare questa "
+                "riga"
+            )
+        else:
+            doubts.append(
+                "la numerazione delle slide dette ad alta voce non è uniforme rispetto "
+                "alla presentazione, e non è stato possibile correggerla da solo: "
+                "ricontrolla i cambi di slide nel video"
+            )
 
     log.info("")
     if not doubts:
@@ -2785,6 +2817,12 @@ def main(argv: list | None = None) -> None:
                     []
                     if _mapping_corrected
                     else list(_anchor_report.get("unconfirmed") or [])
+                ),
+                # "uniforme" | "mista" | "": serve al messaggio finale, che
+                # altrimenti non distingue "numerazione sfalsata" da "motore
+                # incerto" e descrive come difetto una sincronizzazione regolare.
+                "disaccordo": (
+                    "" if _mapping_corrected else str(_anchor_report.get("disaccordo") or "")
                 ),
                 "discarded_citations": discarded_citations(words_raw, total_slides, semantic_anchors),
             }
