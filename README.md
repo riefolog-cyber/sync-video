@@ -536,7 +536,7 @@ riferimenti "slide N": l'assenza di ancore è il comportamento atteso.
 - Il pipeline ripiega sull'allineamento ordinato con soli embeddings (veloce,
   senza LLM) e posiziona le slide per contenuto.
 
-> **`--require-full-anchors` in questo flusso è ignorato**: serve al flusso B →
+> **`--require-full-anchors` e `--min-anchor-coverage` in questo flusso sono ignorati**: servono al flusso B →
 > A (dove ogni pagina deve essere annunciata), qui le ancore sono escluse dal
 > prompt per scelta. L'opzione viene applicata solo se il flusso *rilevato* è
 > quello con ancore: il fallback interno riscrive il flusso effettivo da `free`
@@ -563,8 +563,10 @@ La presentazione esiste prima e il podcast deve **annunciare ogni slide**
 - Avviso "Solo N slide su M annunciate esplicitamente" → nel flusso
   slide → podcast il podcast doveva annunciarle tutte: se le manca, conviene
   rigenerare l'audio PRIMA di procedere. In batch/CI (`--no-confirm`, es.
-  `genera_video.bat`) aggiungi `--require-full-anchors` per **interrompere**
-  invece di generare un video con durate stimate e micro-segmenti.
+  `genera_video.bat`) la soglia `--min-anchor-coverage` (default 50%)
+  interrompe da sola sotto copertura; aggiungi `--require-full-anchors` per
+  **interrompere** anche sopra soglia (qualsiasi ancora mancante) invece di
+  generare un video con durate stimate e micro-segmenti.
 - Avviso "Durate slide molto squilibrate" → ora viene **validato sul
   contenuto**: se il parlato del segmento è coerente con la slide mostrata
   (F1 lessicale), la durata lunga/corta è reale e l'avviso si riduce a una
@@ -683,6 +685,7 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--llm-review` | — | Dopo la timeline LLM nel flusso libero, secondo passaggio LLM che ri-verifica la selezione chunk→slide e avvisa (senza modificare la timeline) sui chunk sospetti. Risultato cachato. |
 | `--llm-local-threshold` | `2` | Nel flusso ordinato, numero massimo di slide senza ancora che il **raffinamento locale** (embeddings, ~secondi, nessun 9Router) può gestire da solo. Il motore locale gira comunque **sempre per primo**; oltre questa soglia si chiede anche all'LLM (9Router, che si avvia da solo se spento) di migliorare la timeline, e se non riesce si usa quella locale già calcolata. `0` = chiedi sempre all'LLM |
 | `--require-full-anchors` | — | Nel flusso ordinato, **interrompi** se il podcast non annuncia TUTTE le slide (ancore `slide N` incomplete) invece di generare un video con durate stimate. Utile in batch/CI (`genera_video.bat`) |
+| `--min-anchor-coverage` | `0.5` | Nel flusso slide → podcast, **interrompi prima della sincronizzazione** se la frazione di transizioni con ancora `slide N` è sotto la soglia (default 50%: con `--no-confirm` la pausa interattiva viene saltata e senza gate un podcast condensato generava un video degradato in silenzio). `0` disattiva. Più morbido di `--require-full-anchors`, che pretende il 100% |
 | `--strict-sync` | — | Modalità "non consegnare un video sospetto". Blocca PRIMA della generazione se un segmento di durata anomala risulta disallineato dal contenuto (il parlato somiglia a un'altra slide) o se la revisione LLM (`--llm-review`) contesta la mappa chunk→slide; blocca DOPO la generazione (il video resta su disco, ma l'esito è un errore) se la verifica frame vs slide trova segmenti con la slide sbagliata. Attiva automaticamente `--verify-video`. Default: avviso soltanto. Il report dei segmenti è salvato comunque in `.cache/sync_report.json` |
 | `--verify-video` | — | Dopo la generazione estrae un frame a metà di ogni segmento e lo confronta con la slide attesa: è l'unico controllo sull'ARTEFATTO (la timeline può essere coerente e il video comunque sbagliato). I frame restano in `.cache/verify_frames/` e l'esito finisce in `sync_report.json`. `genera_video.bat` lo attiva di default (pochi secondi in più) |
 | `--no-auto-repair` | — | Disattiva la **riparazione automatica**. Quando la verifica del video trova un segmento con la slide sbagliata, la pipeline sposta da sola quel confine (motore embedding, solo nella direzione indicata dall'evidenza) e rigenera il video, poi lo ricontrolla. Con questo flag l'esito resta un avviso e il video non viene rifatto |
@@ -1048,8 +1051,7 @@ avvisa e usa il flusso libero (LLM via 9Router). Fallback senza LLM:
 `python main.py --flow slide-audio --llm off` (allineamento monotono embedding,
 meno preciso senza ancore ma deterministico).
 
-Risultato su test reale: 6 ancore deterministiche, durate uniformi ~130s,
-sincronizzazione perfetta.
+Risultato su test reali (NotebookLM, flusso A con presentazione come UNICA fonte): 11/11, 13/14 e 12/13 ancore, durate 37s–2m05s senza pavimenti anti-flicker, fiducia del motore alta (picco 0.53–0.74 su soglia 0.45) e frame-check pieno. Sincronizzazione misurata, non stimata.
 
 ---
 
