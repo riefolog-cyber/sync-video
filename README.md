@@ -107,8 +107,8 @@ Due ricette pronte, in base al punto di partenza:
 
 | Prompt | Flusso | Quando usarlo |
 |---|---|---|
-| [`PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md>) | **A**: deck → podcast con ancore `slide N` | **Consigliato.** Confini **misurati** (è lo speaker a dichiarare il tempo). Podcast più strutturato. Fragile a un errore operativo: se il deck cambia dopo il podcast, le ancore puntano a pagine che non esistono più |
-| [`PROMPT_MINIMO_PODCAST.md`](<PROMPT_MINIMO_PODCAST.md>) | **B**: podcast libero → deck derivato dal parlato | Più robusto: non c'è nulla da tenere allineato, e un errore si corregge rigenerando **solo il deck** (l'audio si riusa). Confini **stimati** dal contenuto: possono cadere minuti fuori posto, e va verificato nel riepilogo |
+| [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>) | **A**: deck → podcast con ancore `slide N` | **Consigliato.** Confini **misurati** (è lo speaker a dichiarare il tempo). Podcast più strutturato. Fragile a un errore operativo: se il deck cambia dopo il podcast, le ancore puntano a pagine che non esistono più |
+| [`PROMPT_PODCAST.md`](<PROMPT_PODCAST.md>) | **B**: podcast libero → deck derivato dal parlato | Più robusto: non c'è nulla da tenere allineato, e un errore si corregge rigenerando **solo il deck** (l'audio si riusa). Confini **stimati** dal contenuto: possono cadere minuti fuori posto, e va verificato nel riepilogo |
 
 **Come scegliere.** I due flussi non sono "uno giusto e uno di riserva": hanno
 vantaggi diversi e difetti diversi.
@@ -134,8 +134,8 @@ Non includono la scelta dei formati grafici delle slide, che è di NotebookLM.
 
 | Prompt | Flusso | Perché questo e non l'altro |
 |---|---|---|
-| [`PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md>) | A: presentazione → podcast | I confini sono **misurati**: il conduttore dichiara il numero della pagina. Costa un ciclo in più e un podcast più dichiarato, in cambio di confini esatti |
-| [`PROMPT_MINIMO_PODCAST.md`](<PROMPT_MINIMO_PODCAST.md>) | B: podcast → presentazione | Il deck nasce dal parlato e un errore si corregge rigenerando **solo il deck**. In compenso i confini sono **stimati** e possono cadere minuti fuori posto |
+| [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>) | A: presentazione → podcast | I confini sono **misurati**: il conduttore dichiara il numero della pagina. Costa un ciclo in più e un podcast più dichiarato, in cambio di confini esatti |
+| [`PROMPT_PODCAST.md`](<PROMPT_PODCAST.md>) | B: podcast → presentazione | Il deck nasce dal parlato e un errore si corregge rigenerando **solo il deck**. In compenso i confini sono **stimati** e possono cadere minuti fuori posto |
 
 
 ### 🤖 Selezione con LLM (opzionale, supera il tetto dell'embedding)
@@ -182,7 +182,7 @@ python main.py --llm auto --preview     # valuta senza generare video
 python main.py --llm 9router           # forza 9Router online
 ```
 
-> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto, ma per stima. Prompt NotebookLM: [`PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md>) — vedi "Come scegliere".
+> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto, ma per stima. Prompt NotebookLM: [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>) — vedi "Come scegliere".
 >
 > ⚠️ **Il nemico non è dimenticare la slide: è richiamarla.** Se il conduttore
 > torna su una pagina già trattata e ne ripete il numero (*"guarda sempre slide 3,
@@ -525,7 +525,7 @@ e veloce il router lato server.
 Il progetto supporta due modi di lavorare, riconosciuti automaticamente dalla
 trascrizione (override con `--flow`):
 
-### 1. Podcast → Slide (`PROMPT_MINIMO_PODCAST.md`)
+### 1. Podcast → Slide (`PROMPT_PODCAST.md`)
 
 Il podcast viene generato PER PRIMO, in modo libero, e la presentazione nasce
 DA esso (una slide per sezione). Il prompt **vieta esplicitamente** i
@@ -555,7 +555,7 @@ riferimenti "slide N": l'assenza di ancore è il comportamento atteso.
 > motore resti **alta** (picco medio normalizzato sopra la soglia) e non
 > compaia l'avviso "segnale debole".
 
-### 2. Slide → Podcast (`PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md`)
+### 2. Slide → Podcast (`PROMPT_PRESENTAZIONE (PREDEFINITO).md`)
 
 La presentazione esiste prima e il podcast deve **annunciare ogni slide**
 ("passiamo alla slide N"): queste ancore vincolano la sincronizzazione.
@@ -876,8 +876,8 @@ crea_venv.sh             ← Crea .venv (macOS/Linux)
 requirements.txt         ← Dipendenze pip
 ruff.toml                ← Configurazione lint (guardrail di stile)
 mypy.ini                 ← Configurazione type-check
-PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md ← Prompt NotebookLM: presentazione → podcast (flusso A, consigliato)
-PROMPT_MINIMO_PODCAST.md            ← Prompt NotebookLM: podcast → presentazione (flusso B)
+PROMPT_PRESENTAZIONE (PREDEFINITO).md ← Prompt NotebookLM: presentazione → podcast (flusso A, consigliato)
+PROMPT_PODCAST.md            ← Prompt NotebookLM: podcast → presentazione (flusso B)
 tessdata/                ← Modelli lingua Tesseract portatili
 9router-maintenance/     ← Script manutenzione combo `comboact` di 9Router (vedi sotto)
 sync-video-architecture.json/html ← Diagramma architettura (generato con archify)
@@ -1026,16 +1026,16 @@ pronunciare le ancore "slide N" **in cifre** a ogni sezione: senza ancore il
 pipeline non può sapere dove cambia la slide e passa al flusso libero (che usa
 l'LLM — un avviso in console lo segnala).
 
-Il prompt [`PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md>)
+Il prompt [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>)
 guida sia la generazione della presentazione (Studio → Slide Deck, dalle tue
-fonti) sia il podcast che la segue nell'ordine, arricchendola con le altre
-fonti. Ancore strette: cifre, "slide" chiara, mai "la slide successiva",
+fonti) sia il podcast che la segue nell'ordine, con la presentazione come
+UNICA fonte. Ancore strette: cifre, "slide" chiara, mai "la slide successiva",
 recupero salti.
 
 **Procedura (Presentazione → Podcast):**
 
-1. Genera la **presentazione** con NotebookLM (Studio → Slide Deck) usando il prompt dedicato nel file, e mettila nelle fonti come **PRESENTAZIONE**.
-2. Genera il **podcast** con il prompt del file: segue l'ordine della presentazione, con le ancore + riferimenti alle altre fonti.
+1. Genera la **presentazione** con NotebookLM (Studio → Slide Deck) usando il prompt dedicato nel file, e mettila nelle fonti come **UNICA fonte (rimuovi le altre)**.
+2. Genera il **podcast** con il prompt del file: segue l'ordine della presentazione, con le ancore.
 3. Verifica le ancore prima di lanciare il pipeline:
    ```bash
    grep -c "slide" transcript_raw.txt   # deve essere ≥ N-1 (una per transizione)

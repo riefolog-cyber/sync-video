@@ -1231,6 +1231,42 @@ class TestFlowRilevatoVsEffettivo(unittest.TestCase):
         self.assertIn("ancora esplicita", advice)
 
 
+class TestMinAnchorCoverage(unittest.TestCase):
+    """Fail-fast sulla copertura delle ancore (run del 06/10: 4 su 13).
+
+    Con --no-confirm (genera_video.bat) la pausa interattiva viene saltata e
+    il video degradato veniva generato in silenzio: sotto soglia la run deve
+    fermarsi PRIMA della sincronizzazione, quando rigenerare l'audio costa
+    ancora poco.
+    """
+
+    def test_run_06_10_sotto_soglia(self):
+        from main import _anchor_coverage_ok
+
+        self.assertFalse(_anchor_coverage_ok(4, 14, 0.5))
+
+    def test_meta_transizioni_ok(self):
+        from main import _anchor_coverage_ok
+
+        self.assertTrue(_anchor_coverage_ok(7, 14, 0.5))
+
+    def test_copertura_piena_ok(self):
+        from main import _anchor_coverage_ok
+
+        self.assertTrue(_anchor_coverage_ok(13, 14, 0.5))
+
+    def test_soglia_zero_disattiva(self):
+        from main import _anchor_coverage_ok
+
+        self.assertTrue(_anchor_coverage_ok(0, 14, 0))
+
+    def test_una_sola_slide_sempre_ok(self):
+        # Nessuna transizione: copertura vacua, niente da ancorare.
+        from main import _anchor_coverage_ok
+
+        self.assertTrue(_anchor_coverage_ok(0, 1, 0.5))
+
+
 class TestStarvedSlides(unittest.TestCase):
     """Slide senza tempo proprio nel podcast (il caso "scorre velocemente").
 

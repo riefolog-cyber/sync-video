@@ -24,8 +24,8 @@ from pathlib import Path
 
 RADICE = Path(__file__).resolve().parent
 PROMPT = {
-    "podcast": RADICE / "PROMPT_MINIMO_PODCAST.md",
-    "presentazione": RADICE / "PROMPT_MINIMO_PRESENTAZIONE (PREDEFINITO).md",
+    "podcast": RADICE / "PROMPT_PODCAST.md",
+    "presentazione": RADICE / "PROMPT_PRESENTAZIONE (PREDEFINITO).md",
 }
 README = RADICE / "README.md"
 
@@ -75,12 +75,12 @@ REGOLE: list[tuple[str, str, str]] = [
     # --- flusso B: deck derivato dal podcast ---
     ("podcast", "una slide per sezione", "una slide per sezione"),
     ("podcast", "non fondere due sezioni e non aggiungere pagine", "niente fusioni"),
-    ("podcast", "accorpala alla pagina del tema che la introduce", "eccezione lista"),
+    ("podcast", "dagli comunque una pagina propria", "sempre una pagina"),
     ("podcast", "numera ogni slide", "slide numerate"),
     ("podcast", "rigorosamente solo in italiano", "deck in italiano"),
     # --- flusso A: deck ---
     ("presentazione", "una slide per argomento", "una slide per argomento"),
-    ("presentazione", "non creare pagine che sono solo un elenco", "no pagine-lista"),
+    ("presentazione", "mai pagine che sono solo un elenco di voci, nemmeno una", "no pagine-lista"),
     ("presentazione", "numera ogni slide", "slide numerate"),
     ("presentazione", "rigorosamente solo in italiano", "deck in italiano"),
     # --- flusso A: podcast con le ancore ---
@@ -97,7 +97,38 @@ REGOLE: list[tuple[str, str, str]] = [
     ("presentazione", 'mai "slide 1" in apertura', "no slide 1"),
     ("presentazione", "mai il numero totale di pagine", "no totale pagine"),
     ("presentazione", "sezioni di lunghezza simile", "sezioni equilibrate"),
-    ("presentazione", "non darle una sezione autonoma", "no sezione per lista"),
+    ("presentazione", "dagli comunque una sezione di almeno 60 secondi", "sempre una sezione"),
+    # --- flusso A: regole nate dai run del 05/10, quando il podcast ha coperto
+    # 6 e poi 4 sezioni su 14 pagine. Il sintomo era sempre uno solo: gli
+    # annunci sparivano dalla metà in giù, non la numerazione. Da qui le tre
+    # regole sotto: la corrispondenza è dichiarata senza condizionali, la
+    # brevità è qualitativa (il numero di pagine lo sceglie NotebookLM), e
+    # quando il tempo stringe si dice cosa sacrificare. ---
+    ("presentazione", "una sezione per pagina, tutte le pagine dalla prima all'ultima", "tutte le pagine"),
+    ("presentazione", "restando breve: un solo esempio, niente divagazioni", "sezioni brevi"),
+    ("presentazione", "accorcia l'esempio e non la sezione", "priorita' all'annuncio"),
+    ("presentazione", "ogni pagina deve poter diventare una sezione breve del podcast", "deck leggero"),
+    ("presentazione", "al massimo 6 righe e 60 parole", "deck leggero quantificato"),
+    ("presentazione", "ogni sezione dura 60-180 secondi", "durate quantificate (A)"),
+    ("podcast", "ogni sezione dura 60-180 secondi", "durate quantificate (B)"),
+    ("presentazione", "detta sempre dallo stesso conduttore", "ancora stesso conduttore"),
+    ("podcast", "titolo univoco di 3-5 parole chiave", "titolo univoco"),
+    ("podcast", "riprendi nel titolo di ogni slide le stesse 3-5 parole chiave", "titoli specchio"),
+    ("presentazione", "non elencare mai i numeri già annunciati", "no recap numerato"),
+    ("presentazione", "non saltarla mai, un salto sposta tutti i numeri dopo", "no salti di pagina"),
+    # --- fonte unica: una seconda fonte sposta minutaggio e attenzione fuori
+    # dal deck (run con libro + presentazione: 3 slide mai discusse, ancore
+    # 2-12 su un deck da 15). Nel flusso A il podcast usa solo la
+    # presentazione, nel B il deck usa solo il podcast. ---
+    ("presentazione", "nelle fonti tieni solo la presentazione", "fonte unica (A)"),
+    ("podcast", "usa solo il podcast come fonte", "fonte unica (B)"),
+    # --- flusso B: due pagine senza sezione (run del 04/10) hanno rotto il
+    # video peggio di qualunque altro difetto: la 13 si e' presa quattro
+    # minuti di materiale delle altre. Il deck aggiungeva pagine di sintesi e
+    # la numerazione non vietava la copertina (vedi commit 02926a7). ---
+    ("podcast", "non aggiungere pagine di sintesi, riepilogo o conclusione", "niente pagine di sintesi"),
+    ("podcast", "niente copertina senza numero", "niente copertina"),
+    ("presentazione", "niente copertina senza numero", "niente copertina"),
     # --- tono, presente in entrambi e identico ---
     ("podcast", "tono e stile del dibattito", "blocco tono (B)"),
     ("presentazione", "tono e stile del dibattito", "blocco tono (A)"),

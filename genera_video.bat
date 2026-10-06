@@ -30,7 +30,7 @@ rem L'LLM non serve a sincronizzare. I confini li danno le frasi "slide N"
 rem pronunciate dal conduttore, e sul materiale provato l'escalation all'LLM ha
 rem fatto PEGGIO delle embedding: 21 dei 24 minuti dati a una sola slide, e una
 rem risposta troncata al 43% dell'audio che ha fatto perdere il confine di una
-mzza di secondi. Resta attivabile con --llm 9router per chi vuole provarlo, ma
+rem     mzza di secondi. Resta attivabile con --llm 9router per chi vuole provarlo, ma
 rem il default e' offline: nessuna dipendenza di rete, nessun 9router da
 rem installare.
 set "LLM_ARG=--llm off"

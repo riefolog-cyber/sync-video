@@ -977,6 +977,15 @@ DEFAULT_SEMANTIC_TEMPERATURE = _env_float("SEMANTIC_TEMPERATURE", 0.15)
 # produce durate altrettanto bilanciate (es. 47.8-136.0s) in ~1 min senza
 # dipendenza dall'LLM. Disattivabile con --no-free-ordered-fallback.
 DEFAULT_FREE_ORDERED_FALLBACK = os.environ.get("FREE_ORDERED_FALLBACK", "1") == "1"
+# Copertura minima delle ancore 'slide N' nel flusso slide -> podcast, come
+# frazione delle transizioni (slide 2..N). Sotto soglia la timeline sarebbe
+# stimata per contenuto, con durate inaffidabili e possibili micro-segmenti
+# (run del 06/10: 4 ancore su 13 transizioni, slide da 0.5s): meglio fermarsi
+# e rigenerare l'audio. Riguarda solo il flusso slide -> podcast, dove ogni
+# pagina DEVE essere annunciata; nel podcast -> slide le ancore sono escluse
+# dal prompt per scelta e il gate resta zitto (vedi _anchor_gate_applies).
+# 0.5 = almeno meta' transizioni ancorate; 0 disattiva (procede sempre).
+DEFAULT_MIN_ANCHOR_COVERAGE = _env_float("MIN_ANCHOR_COVERAGE", 0.5)
 
 # --- Parametri tecnici (sovrascrivibili da .env) ---
 DEFAULT_TRANSCRIPT_WINDOW = 3.0  # secondi per raggruppamento parole
@@ -1354,6 +1363,16 @@ Esempi:
         "annunciate verrebbero stimate per contenuto, con durate poco "
         "affidabili. Utile in batch/CI (es. genera_video.bat), dove non "
         "si vuole generare un video degradato: rigenera l'audio e rilancia.",
+    )
+    parser.add_argument(
+        "--min-anchor-coverage",
+        type=float,
+        default=DEFAULT_MIN_ANCHOR_COVERAGE,
+        help="Nel flusso slide -> podcast, interrompi se la frazione di "
+        "transizioni con ancora 'slide N' e' sotto la soglia (default: "
+        f"{DEFAULT_MIN_ANCHOR_COVERAGE}): sotto soglia la timeline sarebbe "
+        "stimata, con durate inaffidabili. 0 disattiva (procede sempre). "
+        "Piu' morbido di --require-full-anchors, che pretende il 100%.",
     )
     parser.add_argument(
         "--openvino-download",

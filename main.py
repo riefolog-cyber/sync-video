@@ -1808,6 +1808,18 @@ def _anchor_gate_applies(flow_rilevato: str) -> bool:
     return flow_rilevato != "free"
 
 
+def _anchor_coverage_ok(n_anchored: int, total_slides: int, minimum: float) -> bool:
+    """True se la copertura delle ancore raggiunge la soglia minima.
+
+    Copertura = ancore trovate / transizioni (slide 2..N). Con una sola slide
+    non ci sono transizioni: copertura vacua, sempre ok. Soglia <= 0 disattiva.
+    """
+    transitions = max(total_slides - 1, 0)
+    if transitions <= 0 or minimum <= 0:
+        return True
+    return n_anchored / transitions >= minimum
+
+
 def _thin_slide_advice(flow_rilevato: str) -> str:
     """Rimedio per una slide con durata troppo breve.
 
@@ -2308,6 +2320,30 @@ def main(argv: list | None = None) -> None:
                     "   Rigenera il podcast facendo annunciare OGNI slide "
                     '(\"passiamo alla slide N\" in cifre) e rilancia la pipeline; '
                     "oppure togli --require-full-anchors per procedere comunque."
+                )
+            # Soglia minima di copertura (default 50%, disattivabile con
+            # --min-anchor-coverage 0): il caso del 06/10 (4 ancore su 13
+            # transizioni) generava un video degradato in silenzio, perche'
+            # genera_video.bat usa --no-confirm e la pausa interattiva qui
+            # sotto veniva saltata. Il gate scatta PRIMA della sincronizzazione,
+            # quando rigenerare l'audio costa ancora poco.
+            min_cov = float(getattr(args, "min_anchor_coverage", 0.5) or 0)
+            if (
+                min_cov > 0
+                and _anchor_gate_applies(flow_rilevato)
+                and not _anchor_coverage_ok(len(early_anchors), total_slides, min_cov)
+            ):
+                _abort(
+                    "Copertura ancore insufficiente: "
+                    f"{len(early_anchors)} su {max(total_slides - 1, 0)} transizioni "
+                    f"annunciate (soglia {min_cov:.0%}, "
+                    f"mancanti: {', '.join(str(s) for s in early_missing)}).\n"
+                    "   Sotto soglia la timeline sarebbe stimata per contenuto, "
+                    "con durate inaffidabili e possibili micro-segmenti.\n"
+                    "   Rigenera il podcast facendo annunciare OGNI slide "
+                    '("passiamo alla slide N" in cifre) e rilancia la pipeline; '
+                    "oppure abbassa la soglia con --min-anchor-coverage 0 "
+                    "per procedere comunque."
                 )
             if early_anchors and early_missing:
                 log.warning(
