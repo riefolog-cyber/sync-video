@@ -108,7 +108,7 @@ REGOLE: list[tuple[str, str, str]] = [
     ("presentazione", "restando breve: un solo esempio, niente divagazioni", "sezioni brevi"),
     ("presentazione", "accorcia l'esempio e non la sezione", "priorita' all'annuncio"),
     ("presentazione", "ogni pagina deve poter diventare una sezione breve del podcast", "deck leggero"),
-    ("presentazione", "al massimo 6 righe e 60 parole", "deck leggero quantificato"),
+    ("presentazione", "al massimo 8 righe e 80 parole", "deck leggero quantificato"),
     ("presentazione", "ogni sezione dura 60-180 secondi", "durate quantificate (A)"),
     ("podcast", "ogni sezione dura 60-180 secondi", "durate quantificate (B)"),
     ("presentazione", "detta sempre dallo stesso conduttore", "ancora stesso conduttore"),
@@ -122,6 +122,13 @@ REGOLE: list[tuple[str, str, str]] = [
     # presentazione, nel B il deck usa solo il podcast. ---
     ("presentazione", "nelle fonti tieni solo la presentazione", "fonte unica (A)"),
     ("podcast", "usa solo il podcast come fonte", "fonte unica (B)"),
+    # --- numero pagina unico: il tema di Slide Deck ristampa il numero in
+    # calce oltre a quello nel contenuto (doppio numero su ogni slide).
+    # Non rompe la sync (il controllo legge la posizione) ma sporca il video.
+    # La posizione "in basso a sinistra" è un desiderio, non un vincolo che
+    # il tema rispetti sempre: l'unica cosa che conta è "una sola volta". ---
+    ("presentazione", "il numero compare una sola volta per pagina", "numero unico (A)"),
+    ("podcast", "il numero compare una sola volta per pagina", "numero unico (B)"),
     # --- flusso B: due pagine senza sezione (run del 04/10) hanno rotto il
     # video peggio di qualunque altro difetto: la 13 si e' presa quattro
     # minuti di materiale delle altre. Il deck aggiungeva pagine di sintesi e

@@ -10,9 +10,9 @@
 ## Fase 1 — La presentazione (incolla in "Studio → Slide Deck")
 
 ```
-Crea una presentazione: una slide per argomento, senza dividere un argomento in due slide né accorparne due in una. Mai pagine che sono solo un elenco di voci, nemmeno una: ogni pagina deve poter diventare una sezione breve del podcast, quindi un argomento solo, poche righe, al massimo 6 righe e 60 parole. Testo rigorosamente solo in italiano.
+Crea una presentazione: una slide per argomento, senza dividere un argomento in due slide né accorparne due in una. Mai pagine che sono solo un elenco di voci, nemmeno una: ogni pagina deve poter diventare una sezione breve del podcast, quindi un argomento solo, poche righe, al massimo 8 righe e 80 parole. Testo rigorosamente solo in italiano.
 
-Numera ogni slide con il numero della sua posizione, dalla 1: niente copertina senza numero. Il video sincronizza sul numero della posizione della pagina, quindi un numero stampato diverso da quello annunciato fa leggere sul video un numero che il podcast non sta dicendo.
+Numera ogni slide con il numero della sua posizione, dalla 1: niente copertina senza numero. Il numero compare una sola volta per pagina, in basso a sinistra. Il video sincronizza sul numero della posizione della pagina, quindi un numero stampato diverso da quello annunciato fa leggere sul video un numero che il podcast non sta dicendo.
 ```
 
 Scarica la presentazione e **ricaricala nelle fonti come UNICA fonte (rimuovi tutte le altre)**.
