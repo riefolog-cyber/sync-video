@@ -129,6 +129,13 @@ REGOLE: list[tuple[str, str, str]] = [
     # il tema rispetti sempre: l'unica cosa che conta è "una sola volta". ---
     ("presentazione", "il numero compare una sola volta per pagina", "numero unico (A)"),
     ("podcast", "il numero compare una sola volta per pagina", "numero unico (B)"),
+    # --- grafica ricca ma senza testo decorativo: l'OCR legge tutto cio'
+    # che appare sulla slide (filigrane comprese) e il testo fuori dal corpo
+    # diluisce il segnale che distingue una slide dall'altra. ---
+    ("presentazione", "arricchisci ogni pagina con un elemento visivo pertinente", "grafica ricca (A)"),
+    ("podcast", "arricchisci ogni pagina con un elemento visivo pertinente", "grafica ricca (B)"),
+    ("presentazione", "niente infografiche cariche di testo", "no testo decorativo (A)"),
+    ("podcast", "niente infografiche cariche di testo", "no testo decorativo (B)"),
     # --- flusso B: due pagine senza sezione (run del 04/10) hanno rotto il
     # video peggio di qualunque altro difetto: la 13 si e' presa quattro
     # minuti di materiale delle altre. Il deck aggiungeva pagine di sintesi e

@@ -129,13 +129,31 @@ una sezione che si limita a elencare produce una pagina che nel video scorre
 veloce (vedi `starved_slides` nel report).
 
 **I due prompt.** Sono due, e non ce n'è un terzo: ciascuno contiene tutto
-quello che serve perché il video sia sincronizzato, più il tono del dibattito.
-Non includono la scelta dei formati grafici delle slide, che è di NotebookLM.
+quello che serve perché il video sia sincronizzato, più il tono del dibattito
+e l'istruzione grafica (un elemento visivo per pagina, senza testo
+decorativo: l'OCR legge tutto ciò che appare e il testo fuori corpo diluisce
+il segnale). Ogni regola è blindata da `test_prompts.py`: se una frase
+protettiva sparisce dai file, i test falliscono.
 
 | Prompt | Flusso | Perché questo e non l'altro |
 |---|---|---|
 | [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>) | A: presentazione → podcast | I confini sono **misurati**: il conduttore dichiara il numero della pagina. Costa un ciclo in più e un podcast più dichiarato, in cambio di confini esatti |
 | [`PROMPT_PODCAST.md`](<PROMPT_PODCAST.md>) | B: podcast → presentazione | Il deck nasce dal parlato e un errore si corregge rigenerando **solo il deck**. In compenso i confini sono **stimati** e possono cadere minuti fuori posto |
+
+
+### ✅ Ricetta validata (flusso A, 5 run verdi consecutive)
+
+Procedura congelata: deck da 12–15 slide generato dal prompt, **presentazione come UNICA fonte** per il podcast, annunci `slide N` su tutte le transizioni, sezioni da 45s in su. Gate `--min-anchor-coverage` (default 50%) attivo in `genera_video.bat`.
+
+| Run | Slide | Ancore | Durata min | Fiducia motore | Frame-check | Dubbi manuali |
+|---|---|---|---|---|---|---|
+| 1 | 12 | 11/11 | 45s | 0.74 alta | 12/12 | 2 (non allarmi) |
+| 2 | 15 | 13/14 | 58s | 0.62 alta | 15/15 | 2 (non allarmi) |
+| 3 | 14 | 12/13 | 37s | 0.53 alta | 14/14 | 2 (non allarmi) |
+| 4 | 15 | 13/14 | 58s | 0.79 alta | 15/15 | **nessuno** |
+| 5 | 15 | 11/14 | 45s | 0.65 alta | 15/15 | **nessuno** |
+
+Se i materiali seguono le regole (fonte unica, tutte le pagine annunciate, sezioni sviluppate), il risultato si ripete: non modificare prompt né soglie senza rieseguire `python -m unittest test_prompts test_sync`.
 
 
 ### 🤖 Selezione con LLM (opzionale, supera il tetto dell'embedding)
