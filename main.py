@@ -12,7 +12,9 @@ import re
 import sys
 import threading
 import time
+import traceback
 from collections.abc import Mapping, Sequence
+from concurrent.futures import thread as _futures_thread
 from contextlib import suppress
 from itertools import pairwise
 from pathlib import Path
@@ -3678,6 +3680,49 @@ llm_enabled=llm_disponibile,
 # =====================================================================
 # USCITA PULITA (protezione anti-zombie)
 # =====================================================================
+# Un worker di concurrent.futures passa TUTTA la vita dentro _worker, e lì la
+# coda dei task è quasi sempre vuota: il thread si accoda su work_queue.get e
+# aspetta che nessuno gli chieda più niente. Sono thread non-daemon che restano
+# vivi, ma NON bloccano l'uscita: concurrent.futures registra
+# threading._register_atexit, che a fine run mette None nella coda e fa join dei
+# worker. Riconoscerli serve a non confonderli con un thread impiantato.
+# In un interprete "frozen" (PyInstaller, embedded) __file__ puo' essere None:
+# senza il controllo, il resolve() qui a import time farebbe fallire l'import di
+# main.py, e un modulo che non importa e' il modo peggiore di fallire. Senza il
+# riferimento non si puo' riconoscere un worker, quindi non se ne filtra nessuno
+# e la protezione resta quella di prima: filtri sbagliati si, silently di meno.
+_WORKER_POOL_SRC = getattr(_futures_thread, "__file__", None)
+_WORKER_POOL_FILE = Path(_WORKER_POOL_SRC).resolve() if _WORKER_POOL_SRC else None
+_WORKER_POOL_FUNC = "_worker"
+
+
+def _in_coda_su_un_pool(t: threading.Thread) -> bool:
+    """True se `t` è un worker di un ThreadPoolExecutor, non un thread impiantato.
+
+    Non basta il NOME del thread ("ThreadPoolExecutor-0_0"): è solo una
+    convenzione di default, e un worker che invece sta eseguendo un task lento
+    ha esattamente lo stesso nome. Si guarda il frame in cima alla pila del
+    thread e lo si confronta con il file e la funzione reali di
+    concurrent.futures.thread: niente numeri di riga, che cambiano da versione
+    a versione.
+
+    Il limite consapevole è che _worker è il ciclo intero del worker, quindi il
+    filtro copre anche un worker fermo dentro un task. Va bene perché la
+    protezione serve a fermare un processo zombie che brucia CPU, non a
+    denunciare lavoro incompiuto: in quel caso os._exit(0) farebbe danno,
+    mascherando l'errore con un exit code 0.
+    """
+    if _WORKER_POOL_FILE is None:
+        return False
+    frame = sys._current_frames().get(t.ident)
+    if frame is None or frame.f_code.co_name != _WORKER_POOL_FUNC:
+        return False
+    try:
+        return Path(frame.f_code.co_filename).resolve() == _WORKER_POOL_FILE
+    except OSError:
+        return False
+
+
 def _force_clean_exit() -> None:
     """Forza la terminazione del processo se thread residui ne bloccano l'uscita.
 
@@ -3689,18 +3734,53 @@ def _force_clean_exit() -> None:
     colpevoli (per la diagnosi) e, solo in quel caso, forziamo l'uscita dopo
     il flush dei log. Se non ci sono thread residui, l'uscita normale segue
     il suo corso (atexit inclusi).
+
+    I worker di un ThreadPoolExecutor sono esclusi dal computo: senza il filtro
+    il messaggio e l'os._exit comparivano a ogni run senza che ci fosse mai un
+    hang, per colpa della telemetria OpenVINO (vedi _in_coda_su_un_pool), e il
+    prezzo era saltare gli atexit e forzare l'exit code a 0.
     """
-    lingering = [
-        t.name
-        for t in threading.enumerate()
-        if t is not threading.current_thread() and not t.daemon and t.is_alive()
-    ]
-    if not lingering:
+    corrente = threading.current_thread()
+    bloccanti: list[threading.Thread] = []
+    in_coda: list[str] = []
+    for t in threading.enumerate():
+        if t is corrente or t.daemon or not t.is_alive():
+            continue
+        if _in_coda_su_un_pool(t):
+            in_coda.append(t.name)
+        else:
+            bloccanti.append(t)
+
+    if in_coda:
+        log.debug(
+            "   %d thread in attesa su una coda di concurrent.futures (%s): "
+            "chiudono da soli, non forzo l'uscita.",
+            len(in_coda),
+            ", ".join(in_coda),
+        )
+    if not bloccanti:
         return
-    log.info(
-        "   Thread residui a fine run (%s): forzo l'uscita pulita.",
-        ", ".join(lingering),
+    # WARNING e non INFO: la calibrazione di questa riga è cambiata con il
+    # filtro sopra. Prima compariva a ogni run, e "forzo l'uscita pulita" era
+    # narrazione di routine; ora che scatta solo su un thread davvero bloccante,
+    # è un'anomalia da leggere, e va detto anche cosa comporta (gli atexit non
+    # verranno eseguiti). Il dettaglio diagnostico sta nel frame del colpevole.
+    log.warning(
+        "   ATTENZIONE: %d thread non-daemon ancora vivi a fine run (%s): "
+        "forzo l'uscita e gli atexit NON verranno eseguiti, quindi file "
+        "temporanei e risorse non chiuse restano indietro. Se la run resta "
+        "appesa bruciando CPU, il colpevole è uno di questi.",
+        len(bloccanti),
+        ", ".join(t.name for t in bloccanti),
     )
+    for t in bloccanti:
+        frame = sys._current_frames().get(t.ident)
+        if frame is not None:
+            log.debug(
+                "   Stack del thread %s:\n%s",
+                t.name,
+                "".join(traceback.format_stack(frame)),
+            )
     logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()

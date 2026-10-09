@@ -56,7 +56,7 @@ class TestForceCleanExit(unittest.TestCase):
         mock_exit.assert_not_called()
 
     def test_lingering_non_daemon_forces_exit_zero(self):
-        """Un thread non-daemon vivo -> log + os._exit(0) dopo flush."""
+        """Un thread non-daemon vivo -> warning + os._exit(0) dopo flush."""
         import logging
 
         import main
@@ -65,7 +65,7 @@ class TestForceCleanExit(unittest.TestCase):
         with (
             patch("main.os._exit") as mock_exit,
             patch("main.logging.shutdown") as mock_shutdown,
-            patch.object(logging.Logger, "info") as mock_log,
+            patch.object(logging.Logger, "warning") as mock_log,
             patch(
                 "main.threading.enumerate",
                 return_value=[threading.current_thread(), zombie],
@@ -91,6 +91,111 @@ class TestForceCleanExit(unittest.TestCase):
         ):
             main._force_clean_exit()
         mock_exit.assert_not_called()
+
+    def test_worker_di_un_pool_non_forza_uscita(self):
+        """Un worker fermo sulla coda di un pool vero NON forza l'uscita.
+
+        Usa un ThreadPoolExecutor reale, non un mock: è l'unico modo per avere
+        un thread davvero fermo dentro concurrent.futures.thread._worker, cioè
+        lo stato in cui `import openvino` lascia a fine run il sender della
+        telemetria (openvino/__init__.py:106 -> openvino.tools.ovc ->
+        init_ovc_telemetry -> TelemetrySender, un pool che force_shutdown non
+        chiude mai).
+
+        Il worker è non-daemon ma non blocca l'uscita: concurrent.futures
+        registra threading._register_atexit, che a fine run mette None in coda
+        e fa join. Senza il filtro, os._exit(0) saltava gli atexit a ogni run
+        e forzava l'exit code a 0 senza che ci fosse mai un hang.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        import main
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            # il task crea il worker, che poi si riaccoda su work_queue.get
+            pool.submit(lambda: None).result()
+            with (
+                patch("main.os._exit") as mock_exit,
+                patch("main.logging.shutdown") as mock_shutdown,
+            ):
+                main._force_clean_exit()
+        mock_exit.assert_not_called()
+        mock_shutdown.assert_not_called()
+
+    def test_thread_che_non_e_un_worker_viene_ancora_segnalato(self):
+        """Il filtro deve colpire i soli worker: un thread normale forza ancora.
+
+        Stesso nome convenzionale di un worker ("ThreadPoolExecutor-0_0"), ma
+        il frame in cima alla pila è un'altra funzione: il nome da solo non
+        basta, altrimenti si nasconderebbe proprio il thread impiantato che la
+        protezione deve catturare.
+        """
+        import main
+
+        finto = self._fake_thread("ThreadPoolExecutor-0_0", daemon=False)
+        with (
+            patch("main.os._exit") as mock_exit,
+            patch("main.logging.shutdown"),
+            patch(
+                "main.threading.enumerate",
+                return_value=[threading.current_thread(), finto],
+            ),
+            patch("main._in_coda_su_un_pool", return_value=False),
+        ):
+            main._force_clean_exit()
+        mock_exit.assert_called_once_with(0)
+
+    def test_worker_e_thread_bloccante_insieme_forzano_uscita(self):
+        """Se c'e' anche un vero thread bloccante, l'uscita forzata scatta.
+
+        Il filtro non deve far dimenticare i colpevoli veri: ignorare i worker
+        senza guardare il resto della lista annullerebbe la protezione.
+        """
+        import logging
+        from concurrent.futures import ThreadPoolExecutor
+
+        import main
+
+        bloccante = self._fake_thread("ffmpeg-reader", daemon=False)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(lambda: None).result()
+            with (
+                patch("main.os._exit") as mock_exit,
+                patch("main.logging.shutdown") as mock_shutdown,
+                patch.object(logging.Logger, "warning") as mock_log,
+                patch(
+                    "main.threading.enumerate",
+                    return_value=[threading.current_thread(), bloccante],
+                ),
+            ):
+                main._force_clean_exit()
+        mock_shutdown.assert_called_once()
+        self.assertIn("ffmpeg-reader", str(mock_log.call_args))
+        mock_exit.assert_called_once_with(0)
+
+    def test_senza_riferimento_al_file_nessun_filtro(self):
+        """Se __file__ manca (interprete frozen) il filtro non se ne accorge.
+
+        _WORKER_POOL_FILE vale None quando concurrent.futures non espone il
+        percorso del proprio file, e li' non si puo' distinguere un worker da un
+        thread impiantato. Il default e' NON filtrare: la protezione deve
+        scattare, perche' il rischio di ignorare un colpevole vero e' peggiore
+        del fastidio di un falso positivo che si e' gia' visto una volta sola.
+        """
+        import main
+
+        zombie = self._fake_thread("ThreadPoolExecutor-0_0", daemon=False)
+        with (
+            patch("main._WORKER_POOL_FILE", None),
+            patch("main.os._exit") as mock_exit,
+            patch("main.logging.shutdown"),
+            patch(
+                "main.threading.enumerate",
+                return_value=[threading.current_thread(), zombie],
+            ),
+        ):
+            main._force_clean_exit()
+        mock_exit.assert_called_once_with(0)
 
 
 def _words(items):
