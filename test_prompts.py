@@ -134,6 +134,17 @@ REGOLE: list[tuple[str, str, str]] = [
     # la fiducia del motore sui run). Resta l'arricchimento visivo. ---
     ("presentazione", "arricchisci ogni pagina con un elemento visivo pertinente", "grafica ricca (A)"),
     ("podcast", "arricchisci ogni pagina con un elemento visivo pertinente", "grafica ricca (B)"),
+    # --- il conduttore non annuncia le pause. Il prompt A chiedeva una "pausa
+    # prima dell'esempio" e NotebookLM la eseguiva alla lettera: nella trascrizione
+    # del run del 09/10 la parola "Pausa." compare 6 volte in 19m47s, come
+    # segmento isolato (maiuscola e punto: era un'indicazione di scena scritta,
+    # letta ad alta voce dalla TTS) e quasi sempre esattamente su un cambio di
+    # sezione, cioe' dove la si era chiesta. Rumore per l'ascoltatore, e rumore
+    # per il motore: un blocco fatto di una parola di riempimento non ha
+    # contenuto semantico, quindi diluisce il segnale che separa le sezioni.
+    # Vale per i due flussi, perche' i due prompt generano entrambi il podcast. ---
+    ("presentazione", "niente parole di riempimento e niente indicazioni di scena", "no pause (A)"),
+    ("podcast", "niente parole di riempimento e niente indicazioni di scena", "no pause (B)"),
     # --- flusso B: due pagine senza sezione (run del 04/10) hanno rotto il
     # video peggio di qualunque altro difetto: la 13 si e' presa quattro
     # minuti di materiale delle altre. Il deck aggiungeva pagine di sintesi e

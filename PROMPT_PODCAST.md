@@ -21,6 +21,8 @@ Ogni sezione si apre annunciando l'argomento con parole chiare, usando i termini
 
 Non limitarti a elencare gli elementi di un argomento: sviluppa almeno uno di quelli elementi con una spiegazione. Una sezione fatta solo di elenco dura pochi secondi, e la pagina che vi corrisponde nel video non potrà avere una durata reale.
 
+Niente parole di riempimento e niente indicazioni di scena lette ad alta voce: non dire mai "pausa", "silenzio" o "un attimo". Tra una sezione e l'altra si passa diretti, senza segnali di attesa.
+
 Sezioni di lunghezza simile: ogni sezione dura 60-180 secondi, nessuna sotto 45 secondi e nessuna oltre il doppio della media.
 
 Introduzione di 30-40 secondi, già dentro la prima sezione e senza annunciare una scaletta: un preambolo non appartiene a nessuna sezione, quindi non può essere attribuito a nessuna pagina.

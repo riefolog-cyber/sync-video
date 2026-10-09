@@ -23,8 +23,10 @@ Scarica la presentazione e **ricaricala nelle fonti come UNICA fonte (rimuovi tu
 La presentazione è la spina dorsale: segui le sue pagine in ordine, una sezione per pagina, TUTTE le pagine dalla prima all'ultima. Nelle fonti tieni SOLO la presentazione, rimuovi le altre: non introdurre argomenti di altre pagine. Non rileggere il testo delle slide: sintetizzalo e arricchiscilo con esempi concreti.
 
 Ogni sezione:
-1. si apre con la frase isolata "Passiamo alla slide N.", con punto fermo, detta sempre dallo stesso conduttore e seguita da una pausa prima dell'esempio, dove N è il numero vero della pagina (mai un segnaposto), dalla seconda in poi;
+1. si apre con la frase isolata "Passiamo alla slide N.", con punto fermo, detta sempre dallo stesso conduttore e seguita subito dall'esempio, dove N è il numero vero della pagina (mai un segnaposto), dalla seconda in poi;
 2. sviluppa il contenuto con esempi concreti, senza limitarti a elencare i punti della slide, ma restando breve: un solo esempio, niente divagazioni e niente elenchi di punti.
+
+Niente parole di riempimento e niente indicazioni di scena lette ad alta voce: non dire mai "pausa", "silenzio" o "un attimo". Tra una sezione e l'altra si passa diretti, senza segnali di attesa.
 
 ANCORE: valgono più della fluidità del testo. Il video si sincronizza sulle frasi in cui dichiari il numero di pagina.
 
