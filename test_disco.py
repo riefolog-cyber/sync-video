@@ -198,6 +198,24 @@ class TestIntegrazioneAnnuncio(unittest.TestCase):
             config._annuncia_primo_avvio([])
         avviso.assert_not_called()
 
+    def test_il_controllo_riceve_le_stesse_cache_annunciate(self) -> None:
+        # Se il controllo ricalcolasse da solo i modelli mancanti con i
+        # percorsi di default, guarderebbe una cache diversa da quella che
+        # l'annuncio sta per far scrivere: su una macchina vergine direbbe
+        # "tutto gia' scaricato" e non avviserebbe mai.
+        with (
+            tempfile.TemporaryDirectory() as d,
+            patch.object(config, "_avvisa_spazio_insufficiente") as avviso,
+        ):
+            emb = Path(d) / "emb"
+            config._annuncia_primo_avvio(
+                [("modello embedding", "~6.4 GB")],
+                embedding_cache=emb,
+                whisper_model="base",
+                embedding_model="altro/modello",
+            )
+        avviso.assert_called_once_with(emb, "base", "altro/modello")
+
 
 if __name__ == "__main__":
     unittest.main()

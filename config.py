@@ -734,7 +734,21 @@ def _gia_scaricato(directory: Path) -> bool:
         return False
 
 
-def _annuncia_primo_avvio(mancanti: Sequence[tuple[str, str]]) -> None:
+def _annuncia_primo_avvio(
+    mancanti: Sequence[tuple[str, str]],
+    *,
+    embedding_cache: Path | None = None,
+    whisper_model: str | None = None,
+    embedding_model: str | None = None,
+) -> None:
+    """Annuncia i download e controlla che il disco li regga.
+
+    I parametri sono gli stessi usati per costruire `mancanti`: il controllo
+    dello spazio ricalcola da solo quali modelli mancano, e se ricevesse
+    percorsi diversi da quelli dell'annuncio controllerebbe una cache
+    diversa da quella che sta per essere scritta (o, al contrario, non
+    controllerebbe quella che verrà scritta davvero).
+    """
     if not mancanti:
         return
     # Un modello senza dimensione misurata (es. whisper medium/large) resta
@@ -752,7 +766,7 @@ def _annuncia_primo_avvio(mancanti: Sequence[tuple[str, str]]) -> None:
         "   (più rapidi, meno accurati sulle ancore).",
         righe,
     )
-    _avvisa_spazio_insufficiente()
+    _avvisa_spazio_insufficiente(embedding_cache, whisper_model, embedding_model)
 
 
 # Margine oltre ai modelli: la run produce anche il video, le slide renderizzate
@@ -1228,7 +1242,10 @@ def bootstrap() -> None:
             Path(DEFAULT_EMBEDDING_CACHE_DIR),
             DEFAULT_WHISPER_MODEL,
             DEFAULT_EMBEDDING_MODEL,
-        )
+        ),
+        embedding_cache=Path(DEFAULT_EMBEDDING_CACHE_DIR),
+        whisper_model=DEFAULT_WHISPER_MODEL,
+        embedding_model=DEFAULT_EMBEDDING_MODEL,
     )
 
 
