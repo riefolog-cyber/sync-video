@@ -31,7 +31,8 @@ genera_video.bat
 # Il bootstrap installa automaticamente TUTTE le dipendenze:
 # pacchetti pip, Tesseract OCR, ffmpeg, modelli ML
 # Su Windows installa anche Python, se sul PC non c'e' ne' uno
-# (via winget: serve Windows 10 1809 o Windows 11).
+# (via winget: serve Windows 10 1809 o Windows 11), scegliendo la
+# versione in base all'architettura: 3.12 su x86-64, 3.11 su ARM64.
 # Output: video_finale.mp4
 #
 # Installa/aggiorna anche i pacchetti sotto la versione minima richiesta: un

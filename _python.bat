@@ -51,8 +51,41 @@ if exist "%~dp0.venv\Scripts\python.exe" (
 )
 
 :senza_venv
+
+rem ---------------------------------------------------------------------
+rem Quale Python usare/installare dipende dall'ARCHITETTURA di questa
+rem macchina, non dalla macchina su cui il progetto e' stato sviluppato:
+rem  - ARM64 (Snapdragon e simili): 3.11, la versione su cui il progetto e'
+rem    stata collaudata su Windows ARM. Li' faster-whisper e OpenVINO non
+rem    sono installabili (CTranslate2 non pubblica wheel win_arm64), quindi
+rem    la trascrizione va su CPU, ma gli altri pacchetti funzionano.
+rem  - x86-64 (tutti i PC Intel/AMD): 3.12, che e' nella matrice della CI e
+rem    non ha ragioni per essere evitata. Fissare il 3.11 perche' "e' quello
+rem    che funziona su ARM" obbligherebbe anche i PC x86-64 a una versione
+rem    vecchia senza motivo.
+rem
+rem %PROCESSOR_ARCHITEW6432% e' l'architettura REALE quando questo cmd.exe
+rem gira emulato su Windows ARM: %PROCESSOR_ARCHITECTURE% direbbe AMD64,
+rem cioe' l'architettura del processo, non della macchina. Senza questo
+rem controllo un PC ARM si farebbe passare per x86-64 e riceverebbe il
+rem pacchetto sbagliato.
+rem
+rem _PY_ORDINE e' anche l'ordine in cui vengono cercate le versioni gia'
+rem installate, cosi' che su x86-64 venga usato il 3.12 e non un 3.11
+rem lasciato sul PC per un motivo qualsiasi.
+rem ---------------------------------------------------------------------
+set "_ARCH=%PROCESSOR_ARCHITECTURE%"
+if defined PROCESSOR_ARCHITEW6432 set "_ARCH=%PROCESSOR_ARCHITEW6432%"
+set "_PY_VERSION=3.12"
+set "_PY_ORDINE=3.12 3.11 3.13"
+if /i "%_ARCH%"=="ARM64" (
+    set "_PY_VERSION=3.11"
+    set "_PY_ORDINE=3.11 3.12 3.13"
+)
+set "_PY_PKG=Python.Python.%_PY_VERSION%"
+
 call :cerca_python
-if not errorlevel 1 exit /b 0
+if not errorlevel 1 goto pulisci_e_esci
 
 rem --- Nessun Python su questa macchina ---
 if "%SYNC_VIDEO_NO_PYTHON_INSTALL%"=="1" goto nessun_python
@@ -64,11 +97,12 @@ echo ========================================
 echo    Python non trovato: lo installo
 echo ========================================
 echo.
-echo Sto scaricando Python 3.11 (circa 25 MB) con winget.
+echo Architettura rilevata: %_ARCH%
+echo Sto scaricando Python %_PY_VERSION% (%_PY_PKG%, circa 25 MB) con winget.
 echo Serve una volta sola, solo su questo PC.
 echo Per installarlo a mano, o per saltare questo passo, vedi README.
 echo.
-winget install --id Python.Python.3.11 -e --scope user --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+winget install --id %_PY_PKG% -e --scope user --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
 if errorlevel 1 goto install_fallito
 
 rem L'installer aggiunge Python al PATH dell'utente, ma questa sessione
@@ -77,8 +111,8 @@ call :ricarica_path
 call :cerca_python
 if errorlevel 1 goto install_fallito
 echo.
-echo Python installato e pronto.
-exit /b 0
+echo Python %_PY_VERSION% installato e pronto.
+goto pulisci_e_esci
 
 :install_fallito
 echo.
@@ -96,6 +130,22 @@ echo Poi rilancia questo programma.
 echo.
 echo Per decidere tu come installarlo: imposta
 echo SYNC_VIDEO_NO_PYTHON_INSTALL=1 prima di rilanciare.
+goto pulisci_e_esci_1
+
+rem Uscita pulita: le variabili di lavoro non restano nel chiamante, che
+rem potrebbe usarle per errore come se fossero sue.
+:pulisci_e_esci
+set "_ARCH="
+set "_PY_VERSION="
+set "_PY_ORDINE="
+set "_PY_PKG="
+exit /b 0
+
+:pulisci_e_esci_1
+set "_ARCH="
+set "_PY_VERSION="
+set "_PY_ORDINE="
+set "_PY_PKG="
 exit /b 1
 
 
@@ -105,19 +155,22 @@ rem ============================================================
 :cerca_python
 set "PY_CMD="
 
-rem 1) Preferisce un Python che abbia gia' fastembed installato. '&&' e
-rem    'goto' invece di 'if errorlevel' dentro il for: usabili anche senza
-rem    espansione ritardata, e il goto esce dal ciclo al primo successo.
-for %%V in (3.11 3.12 3.13) do (
+rem 1) Preferisce un Python che abbia gia' fastembed installato: risparmia
+rem    di ricaricare qualche centinaio di MB solo perche' sul PC c'era
+rem    gia' una versione pronta. L'ordine e' quello giusto per questa
+rem    architettura (_PY_ORDINE). '&&' e 'goto' invece di 'if errorlevel'
+rem    dentro il for: usabili anche senza espansione ritardata, e il goto
+rem    esce dal ciclo al primo successo.
+for %%V in (%_PY_ORDINE%) do (
     py -%%V -c "import fastembed" >NUL 2>&1 && (
         set "PY_CMD=py -%%V"
         goto scelto
     )
 )
 
-rem 2) Poi qualsiasi versione installata: al primo avvio i pacchetti non ci
-rem    sono ancora, li mettera' il bootstrap.
-for %%V in (3.11 3.12 3.13) do (
+rem 2) Poi qualsiasi versione installata, nello stesso ordine: al primo
+rem    avvio i pacchetti non ci sono ancora, li mettera' il bootstrap.
+for %%V in (%_PY_ORDINE%) do (
     py -%%V -c "import sys" >NUL 2>&1 && (
         set "PY_CMD=py -%%V"
         goto scelto

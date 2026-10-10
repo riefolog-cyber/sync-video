@@ -68,6 +68,20 @@ Windows **non devi installare niente a mano**. Il programma, in ordine:
    di amministratore). È l'unica cosa che non può fare il bootstrap interno,
    perché il bootstrap gira *dentro* Python: a installarlo è il `.bat`, che
    gira in `cmd.exe`.
+
+   La **versione dipende dall'architettura** di quel PC:
+
+   | Architettura | Versione | Perché |
+   |---|---|---|
+   | x86-64 (Intel, AMD) | **3.12** | È quella della CI, non ci sono motivi per evitarne un'altra |
+   | ARM64 (Snapdragon, ecc.) | **3.11** | È la versione collaudata su Windows ARM, dove `faster-whisper` e OpenVINO non sono installabili (CTranslate2 non pubblica wheel `win_arm64`) e la trascrizione va su CPU |
+
+   L'architettura è letta da `%PROCESSOR_ARCHITEW6432%` quando disponibile,
+   perché su Windows ARM un `cmd.exe` x64 emulato si dichiara `AMD64`: leggere
+   quella variabile da sola installerebbe il pacchetto sbagliato.
+
+   Se sul PC c'è già un Python con i pacchetti del progetto, viene usato
+   quello e non si installa niente.
 2. **Tesseract OCR** e **ffmpeg** — con `winget` / `apt-get` / `brew`, se mancano.
 3. **I modelli** (~6.4 GB di embedding + ~490 MB di Whisper), annunciati
    prima di essere scaricati.
