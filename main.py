@@ -285,6 +285,16 @@ def _print_timing(
     log.info("   ─────────────────────────")
     log.info("   TOTALE         │ %s", _format_time(t_total))
     log.info("─" * 50)
+    # Peso cache nel riepilogo (P1): l'utente vede quanto spazio occupa.
+    # Mai bloccare il riepilogo per una misura: gli errori restano in debug.
+    with suppress(Exception):
+        from cache_maintenance import cache_disk_usage, format_bytes
+
+        righe = cache_disk_usage(CACHE_DIR)
+        if righe:
+            totale = sum(peso for _, peso in righe)
+            dettaglio = ", ".join(f"{nome.rstrip('/')} {format_bytes(peso)}" for nome, peso in righe[:3])
+            log.info("   💾 Cache: %s (%s)", format_bytes(totale), dettaglio)
     _append_timing_history(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total, t_llm)
 
 
@@ -1929,9 +1939,44 @@ def _prefetch_models(args: Any) -> None:
 
 
 def main(argv: list | None = None) -> None:
+    args = parse_args(argv)
+
+    # --- Misura / pulizia cache e uscita (P1: policy sicura) ---
+    # PRIMA di bootstrap/setup/update-check: sono comandi di ispezione che non
+    # devono scaricare nulla né chiedere conferme di aggiornamento.
+    if args.cache_du or args.clean_cache:
+        from cache_maintenance import cache_disk_usage, clean_cache, format_bytes
+
+        if args.cache_du:
+            righe = cache_disk_usage(CACHE_DIR)
+            totale = sum(peso for _, peso in righe)
+            log.info("Peso della cache (%s): %s", CACHE_DIR, format_bytes(totale))
+            for nome, peso in righe:
+                log.info("   %-42s %10s", nome, format_bytes(peso))
+            return
+        # --clean-cache: i modelli pesanti solo con --include-models + conferma.
+        if args.include_models and not args.yes and sys.stdin.isatty():
+            try:
+                risposta = input(
+                    "Rimuovere anche i modelli ML scaricati (GB di re-download)? [s/N] "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                risposta = ""
+            if risposta not in ("s", "si", "sì", "y", "yes"):
+                log.info("   Pulizia modelli annullata: rimuovo solo la cache sicura.")
+                args.include_models = False
+        esito = clean_cache(CACHE_DIR, include_models=args.include_models)
+        log.info(
+            "Cache pulita: %d JSON orfani, %d embedding oltre il tetto, %d frame di verifica%s.",
+            esito["orphan_json"],
+            esito["embed_npz"],
+            esito["verify_frames"],
+            f", modelli rimossi ({format_bytes(esito['model_bytes'])})" if esito["model_bytes"] else "",
+        )
+        return
+
     # Bootstrap esplicito: verifica dipendenze prima di tutto
     bootstrap()
-    args = parse_args(argv)
 
     # Se l'utente ha scelto il device a mano, un eventuale fallimento di CUDA non
     # viene nascosto da un ripiego silenzioso su CPU. Va segnalato PRIMA che

@@ -1413,6 +1413,29 @@ Esempi:
         "--preview", action="store_true", help="Mostra la timeline in formato visuale e esci (non genera il video)"
     )
     parser.add_argument("--no-cache", action="store_true", help="Ignora la cache e rifai tutto da zero")
+    parser.add_argument(
+        "--cache-du",
+        action="store_true",
+        help="Mostra il peso di ogni voce di .cache/ e esci (non genera il video)",
+    )
+    parser.add_argument(
+        "--clean-cache",
+        action="store_true",
+        help="Pulisce la cache sicura (JSON orfani, embedding oltre il tetto LRU, "
+        "frame di verifica) e esce. Non tocca i modelli pesanti: per quelli serve "
+        "anche --include-models.",
+    )
+    parser.add_argument(
+        "--include-models",
+        action="store_true",
+        help="Con --clean-cache, rimuove anche i modelli ML scaricati "
+        "(embedding_model/, whisper_openvino_*: GB di re-download al prossimo avvio).",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Con --clean-cache --include-models, salta la conferma interattiva.",
+    )
     parser.add_argument("--debug", action="store_true", help="Logging DEBUG dettagliato")
     parser.add_argument(
         "--ocr-workers",
