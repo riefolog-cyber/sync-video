@@ -10,11 +10,11 @@ rem    wheel nativi mancano e i pacchetti del progetto sono installati su 3.11
 rem    x64 emulato), poi 3.12, 3.13, infine il launcher di default.
 rem
 rem Prima passa cerca una versione che abbia GIA' le dipendenze del progetto
-rem (fastembed): se un Python esiste ma e' "nudo" (es. py -3.13 appena
-rem installato senza i pacchetti), viene saltato invece di essere scelto e
-rem far fallire l'installazione automatica. Se nessuna versione ha i
-rem pacchetti (primo avvio), ripiega su qualsiasi Python disponibile: il
-rem bootstrap di main.py installera' tutto da solo.
+rem (fastembed): se un Python esiste ma e' "nudo" (es. appena installato senza
+rem i pacchetti), viene saltato invece di essere scelto e far fallire
+rem l'installazione automatica. Se nessuna versione ha i pacchetti (primo
+rem avvio), ripiega su qualsiasi Python disponibile: il bootstrap di main.py
+rem installera' tutto da solo.
 rem
 rem Se NON esiste alcun Python, prova a installarlo con winget: e' un
 rem eseguibile di Windows, quindi funziona anche quando Python non c'e' (e
@@ -22,15 +22,20 @@ rem questa e' l'unica cosa che bootstrap() non puo' fare, perche' bootstrap
 rem gira dentro Python). Con SYNC_VIDEO_NO_PYTHON_INSTALL=1 non installa
 rem nulla e si limita ad avvisare.
 rem
-rem Uso:  call "%~dp0_python.bat"   poi   !PY_CMD! script.py
+rem Uso:  call "%~dp0_python.bat"   poi   %PY_CMD% script.py
 rem Esce con 0 se PY_CMD e' valido, con 1 se nessun Python e' disponibile.
 rem
-rem NON richiede 'setlocal enabledelayedexpansion': usa solo %VAR% e
-rem 'if errorlevel', entrambi risolti dal parser senza espansione ritardata.
-rem Il file precedente la richiedeva, e senza di essa la ricerca falliva in
-rem silenzio PY_CMD vuoto: con l'installazione automatica questo avrebbe
-rem fatto partire winget su un PC che aveva gia' Python, solo perche' il
-rem chiamante non aveva abilitato l'espansione ritardata.
+rem NON richiede 'setlocal enabledelayedexpansion' nel chiamante: usa solo
+rem %VAR%, 'if errorlevel' e '&&', che il parser risolve senza espansione
+rem ritardata. La versione precedente la richiedeva, e senza di essa la
+rem ricerca falliva in silenzio con PY_CMD vuoto: con l'installazione
+rem automatica questo avrebbe fatto partire winget su un PC che aveva gia'
+rem Python. E' esattamente cio' che succede a chi digita 'call _python.bat'
+rem da un prompt cmd, dove l'espansione ritardata non e' attiva.
+rem Per lo stesso motivo la ricerca usa 'goto' e non 'call :subroutine':
+rem dentro un blocco, l'errore di una subroutine non sempre torna al
+rem chiamante e la selezione risultava sbagliata (sceglieva un Python che
+rem non aveva i pacchetti invece del primo che li aveva).
 rem
 rem NOTA: mantenere questo file in SOLO ASCII. I caratteri accentati
 rem (UTF-8 multibyte) confondono il parser di cmd.exe anche con chcp 65001
@@ -39,7 +44,7 @@ rem e fanno eseguire i commenti come comandi.
 if "%SYNC_VIDEO_NO_VENV%"=="1" goto senza_venv
 
 rem Le virgolette fanno parte del valore di PY_CMD: il percorso del progetto
-rem puo' contenere spazi, e i chiamanti usano PY_CMD cosi' com'e'.
+rem puo' contenere spazi, e i chiamanti usano %PY_CMD% cosi' com'e'.
 if exist "%~dp0.venv\Scripts\python.exe" (
     set "PY_CMD="%~dp0.venv\Scripts\python.exe""
     exit /b 0
@@ -100,103 +105,74 @@ rem ============================================================
 :cerca_python
 set "PY_CMD="
 
-rem 1) Preferisce un Python che abbia gia' fastembed installato.
-call :prova_py 3.11 "import fastembed"
-if not errorlevel 1 exit /b 0
-call :prova_py 3.12 "import fastembed"
-if not errorlevel 1 exit /b 0
-call :prova_py 3.13 "import fastembed"
-if not errorlevel 1 exit /b 0
+rem 1) Preferisce un Python che abbia gia' fastembed installato. '&&' e
+rem    'goto' invece di 'if errorlevel' dentro il for: usabili anche senza
+rem    espansione ritardata, e il goto esce dal ciclo al primo successo.
+for %%V in (3.11 3.12 3.13) do (
+    py -%%V -c "import fastembed" >NUL 2>&1 && (
+        set "PY_CMD=py -%%V"
+        goto scelto
+    )
+)
 
-rem 2) Poi qualsiasi versione installata (primo avvio: i pacchetti non ci
-rem    sono ancora, li mettera' il bootstrap).
-call :prova_py 3.11 "import sys"
-if not errorlevel 1 exit /b 0
-call :prova_py 3.12 "import sys"
-if not errorlevel 1 exit /b 0
-call :prova_py 3.13 "import sys"
-if not errorlevel 1 exit /b 0
+rem 2) Poi qualsiasi versione installata: al primo avvio i pacchetti non ci
+rem    sono ancora, li mettera' il bootstrap.
+for %%V in (3.11 3.12 3.13) do (
+    py -%%V -c "import sys" >NUL 2>&1 && (
+        set "PY_CMD=py -%%V"
+        goto scelto
+    )
+)
 
 rem 3) Il launcher generico.
-where py >NUL 2>&1
-if errorlevel 1 goto senza_launcher
-set "PY_CMD=py"
-call :verifica
-if not errorlevel 1 exit /b 0
+where py >NUL 2>&1 && set "PY_CMD=py"
+if not "%PY_CMD%"=="" goto scelto
 
-:senza_launcher
 rem 4) python nel PATH.
-where python >NUL 2>&1
-if errorlevel 1 goto percorso_noto
-set "PY_CMD=python"
-call :verifica
-if not errorlevel 1 exit /b 0
+where python >NUL 2>&1 && set "PY_CMD=python"
+if not "%PY_CMD%"=="" goto scelto
 
-:percorso_noto
 rem 5) Percorso noto dell'installer. Serve SOPRATTUTTO appena dopo winget:
 rem    la sessione cmd corrente ha ancora il PATH di prima dell'installazione,
-rem    quindi 'where python' non vede nulla. E' il modo piu' affidabile per
-rem    arrivare all'interprete appena installato.
-if exist "%LOCALAPPDATA%\Programs\Python\Python314\python.exe" (
-    set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python314\python.exe""
-    call :verifica
-    if not errorlevel 1 exit /b 0
-)
-if exist "%LOCALAPPDATA%\Programs\Python\Python313\python.exe" (
-    set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python313\python.exe""
-    call :verifica
-    if not errorlevel 1 exit /b 0
-)
-if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
-    set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python312\python.exe""
-    call :verifica
-    if not errorlevel 1 exit /b 0
-)
-if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
-    set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python311\python.exe""
-    call :verifica
-    if not errorlevel 1 exit /b 0
-)
+rem    quindi 'where python' non vede ancora nulla. E' il modo piu' affidabile
+rem    per arrivare all'interprete appena installato.
+if exist "%LOCALAPPDATA%\Programs\Python\Python314\python.exe" set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python314\python.exe""
+if not "%PY_CMD%"=="" goto scelto
+if exist "%LOCALAPPDATA%\Programs\Python\Python313\python.exe" set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python313\python.exe""
+if not "%PY_CMD%"=="" goto scelto
+if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python312\python.exe""
+if not "%PY_CMD%"=="" goto scelto
+if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python311\python.exe""
+if not "%PY_CMD%"=="" goto scelto
+if exist "%LOCALAPPDATA%\Programs\Python\Python310\python.exe" set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python310\python.exe""
+if not "%PY_CMD%"=="" goto scelto
+
 exit /b 1
 
-
-rem prova_py <versione> <istruzione>: sceglie py -<versione> se gira.
-:prova_py
-py -%1 -c "%~2" >NUL 2>&1
-if errorlevel 1 exit /b 1
-set "PY_CMD=py -%1"
-exit /b 0
-
-
-rem verifica: PY_CMD deve davvero girare, non solo esistere.
-:verifica
+:scelto
+rem Verifica finale: PY_CMD deve davvero girare, non solo esistere.
 %PY_CMD% -c "import sys" >NUL 2>&1
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    set "PY_CMD="
+    exit /b 1
+)
 exit /b 0
 
 
 rem ============================================================
 rem ricarica_path: rilegge il PATH utente e macchina dal registro
 rem ============================================================
-rem Serve solo dopo l'installazione di Python: il cmd.exe corrente ha
-rem gia' memorizzato il PATH di quando e' partito, quindi le variabili
-rem nuove dell'installer non sono visibili fino alla sessione successiva.
+rem Serve solo dopo l'installazione di Python: il cmd.exe corrente ha gia'
+rem memorizzato il PATH di quando e' partito, quindi le variabili nuove
+rem dell'installer non sono visibili fino alla sessione successiva.
 rem Non si puo' usare setlocal perche' il PATH modificato deve tornare al
 rem chiamante.
 :ricarica_path
-set "_PATH_VECCHIO=%PATH%"
-set "_PATH_NUOVO="
-call :leggi_path "HKCU\Environment"
-call :leggi_path "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
-if not "%_PATH_NUOVO%"=="" set "PATH=%_PATH_NUOVO%;%_PATH_VECCHIO%"
-set "_PATH_NUOVO="
-set "_PATH_VECCHIO="
-exit /b 0
-
-:leggi_path
-for /f "tokens=2,*" %%A in ('reg query "%~1" /v Path 2^>NUL ^| find /i "Path"') do call :aggiungi_path "%%B"
-exit /b 0
-
-:aggiungi_path
-set "_PATH_NUOVO=%_PATH_NUOVO%;%~1"
+set "_PATH_UTENTE="
+set "_PATH_MACCHINA="
+for /f "tokens=2,*" %%A in ('reg query "HKCU\Environment" /v Path 2^>NUL ^| find /i "Path"') do set "_PATH_UTENTE=%%B"
+for /f "tokens=2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>NUL ^| find /i "Path"') do set "_PATH_MACCHINA=%%B"
+if not "%_PATH_UTENTE%%_PATH_MACCHINA%"=="" set "PATH=%_PATH_UTENTE%;%_PATH_MACCHINA%;%PATH%"
+set "_PATH_UTENTE="
+set "_PATH_MACCHINA="
 exit /b 0
