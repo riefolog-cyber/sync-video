@@ -23,8 +23,14 @@ rem gira dentro Python). Con SYNC_VIDEO_NO_PYTHON_INSTALL=1 non installa
 rem nulla e si limita ad avvisare.
 rem
 rem Uso:  call "%~dp0_python.bat"   poi   !PY_CMD! script.py
-rem (richiede setlocal enabledelayedexpansion nel chiamante).
 rem Esce con 0 se PY_CMD e' valido, con 1 se nessun Python e' disponibile.
+rem
+rem NON richiede 'setlocal enabledelayedexpansion': usa solo %VAR% e
+rem 'if errorlevel', entrambi risolti dal parser senza espansione ritardata.
+rem Il file precedente la richiedeva, e senza di essa la ricerca falliva in
+rem silenzio PY_CMD vuoto: con l'installazione automatica questo avrebbe
+rem fatto partire winget su un PC che aveva gia' Python, solo perche' il
+rem chiamante non aveva abilitato l'espansione ritardata.
 rem
 rem NOTA: mantenere questo file in SOLO ASCII. I caratteri accentati
 rem (UTF-8 multibyte) confondono il parser di cmd.exe anche con chcp 65001
@@ -33,7 +39,7 @@ rem e fanno eseguire i commenti come comandi.
 if "%SYNC_VIDEO_NO_VENV%"=="1" goto senza_venv
 
 rem Le virgolette fanno parte del valore di PY_CMD: il percorso del progetto
-rem puo' contenere spazi, e i chiamanti usano !PY_CMD! senza aggiungerne.
+rem puo' contenere spazi, e i chiamanti usano PY_CMD cosi' com'e'.
 if exist "%~dp0.venv\Scripts\python.exe" (
     set "PY_CMD="%~dp0.venv\Scripts\python.exe""
     exit /b 0
@@ -64,11 +70,10 @@ rem L'installer aggiunge Python al PATH dell'utente, ma questa sessione
 rem cmd.exe eredita gia' il PATH vecchio: va riletto dal registro.
 call :ricarica_path
 call :cerca_python
-if not errorlevel 1 (
-    echo.
-    echo Python installato. Rileggo l'ambiente...
-    goto fatto
-)
+if errorlevel 1 goto install_fallito
+echo.
+echo Python installato e pronto.
+exit /b 0
 
 :install_fallito
 echo.
@@ -84,12 +89,9 @@ echo Installa Python 3.11 o superiore da https://python.org
 echo e spunta "Add Python to PATH" durante l'installazione.
 echo Poi rilancia questo programma.
 echo.
-echo Per installare Python a mano e decidere tu: imposta
+echo Per decidere tu come installarlo: imposta
 echo SYNC_VIDEO_NO_PYTHON_INSTALL=1 prima di rilanciare.
 exit /b 1
-
-:fatto
-exit /b 0
 
 
 rem ============================================================
@@ -98,50 +100,78 @@ rem ============================================================
 :cerca_python
 set "PY_CMD="
 
+rem 1) Preferisce un Python che abbia gia' fastembed installato.
+call :prova_py 3.11 "import fastembed"
+if not errorlevel 1 exit /b 0
+call :prova_py 3.12 "import fastembed"
+if not errorlevel 1 exit /b 0
+call :prova_py 3.13 "import fastembed"
+if not errorlevel 1 exit /b 0
+
+rem 2) Poi qualsiasi versione installata (primo avvio: i pacchetti non ci
+rem    sono ancora, li mettera' il bootstrap).
+call :prova_py 3.11 "import sys"
+if not errorlevel 1 exit /b 0
+call :prova_py 3.12 "import sys"
+if not errorlevel 1 exit /b 0
+call :prova_py 3.13 "import sys"
+if not errorlevel 1 exit /b 0
+
+rem 3) Il launcher generico.
 where py >NUL 2>&1
-if not errorlevel 1 (
-    for %%V in (3.11 3.12 3.13) do (
-        if "!PY_CMD!"=="" (
-            py -%%V -c "import fastembed" >NUL 2>&1
-            if not errorlevel 1 set "PY_CMD=py -%%V"
-        )
-    )
-    for %%V in (3.11 3.12 3.13) do (
-        if "!PY_CMD!"=="" (
-            py -%%V -c "import sys" >NUL 2>&1
-            if not errorlevel 1 set "PY_CMD=py -%%V"
-        )
-    )
-    if "!PY_CMD!"=="" set "PY_CMD=py"
-)
+if errorlevel 1 goto senza_launcher
+set "PY_CMD=py"
+call :verifica
+if not errorlevel 1 exit /b 0
 
-if "!PY_CMD!"=="" (
-    where python >NUL 2>&1
-    if not errorlevel 1 set "PY_CMD=python"
-)
+:senza_launcher
+rem 4) python nel PATH.
+where python >NUL 2>&1
+if errorlevel 1 goto percorso_noto
+set "PY_CMD=python"
+call :verifica
+if not errorlevel 1 exit /b 0
 
-rem Percorso noto dell'installer. Serve SOPRATTUTTO appena dopo winget:
-rem la sessione cmd corrente ha ancora il PATH di prima dell'installazione,
-rem quindi 'where python' non vede nulla. Questo e' il modo piu' affidabile
-rem per arrivare all'interprete appena installato.
-if "!PY_CMD!"=="" (
-    for %%V in (314 313 312 311 310) do (
-        if "!PY_CMD!"=="" (
-            if exist "%LOCALAPPDATA%\Programs\Python\Python%%V\python.exe" (
-                set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python%%V\python.exe""
-            )
-        )
-    )
+:percorso_noto
+rem 5) Percorso noto dell'installer. Serve SOPRATTUTTO appena dopo winget:
+rem    la sessione cmd corrente ha ancora il PATH di prima dell'installazione,
+rem    quindi 'where python' non vede nulla. E' il modo piu' affidabile per
+rem    arrivare all'interprete appena installato.
+if exist "%LOCALAPPDATA%\Programs\Python\Python314\python.exe" (
+    set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python314\python.exe""
+    call :verifica
+    if not errorlevel 1 exit /b 0
 )
-
-if "!PY_CMD!"=="" exit /b 1
-
-rem Verifica finale: PY_CMD deve davvero girare, non solo esistere.
-!PY_CMD! -c "import sys" >NUL 2>&1
-if errorlevel 1 (
-    set "PY_CMD="
-    exit /b 1
+if exist "%LOCALAPPDATA%\Programs\Python\Python313\python.exe" (
+    set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python313\python.exe""
+    call :verifica
+    if not errorlevel 1 exit /b 0
 )
+if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
+    set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python312\python.exe""
+    call :verifica
+    if not errorlevel 1 exit /b 0
+)
+if exist "%LOCALAPPDATA%\Programs\Python\Python311\python.exe" (
+    set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python311\python.exe""
+    call :verifica
+    if not errorlevel 1 exit /b 0
+)
+exit /b 1
+
+
+rem prova_py <versione> <istruzione>: sceglie py -<versione> se gira.
+:prova_py
+py -%1 -c "%~2" >NUL 2>&1
+if errorlevel 1 exit /b 1
+set "PY_CMD=py -%1"
+exit /b 0
+
+
+rem verifica: PY_CMD deve davvero girare, non solo esistere.
+:verifica
+%PY_CMD% -c "import sys" >NUL 2>&1
+if errorlevel 1 exit /b 1
 exit /b 0
 
 
@@ -156,9 +186,17 @@ rem chiamante.
 :ricarica_path
 set "_PATH_VECCHIO=%PATH%"
 set "_PATH_NUOVO="
-for /f "tokens=2,*" %%A in ('reg query "HKCU\Environment" /v Path 2^>NUL ^| find /i "Path"') do set "_PATH_NUOVO=%%B"
-for /f "tokens=2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>NUL ^| find /i "Path"') do set "_PATH_NUOVO=!_PATH_NUOVO!;%%B"
-if not "!_PATH_NUOVO!"=="" set "PATH=!_PATH_NUOVO!;%_PATH_VECCHIO%"
+call :leggi_path "HKCU\Environment"
+call :leggi_path "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+if not "%_PATH_NUOVO%"=="" set "PATH=%_PATH_NUOVO%;%_PATH_VECCHIO%"
 set "_PATH_NUOVO="
 set "_PATH_VECCHIO="
+exit /b 0
+
+:leggi_path
+for /f "tokens=2,*" %%A in ('reg query "%~1" /v Path 2^>NUL ^| find /i "Path"') do call :aggiungi_path "%%B"
+exit /b 0
+
+:aggiungi_path
+set "_PATH_NUOVO=%_PATH_NUOVO%;%~1"
 exit /b 0
