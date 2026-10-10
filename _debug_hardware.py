@@ -30,6 +30,7 @@ class _Args:
     openvino_device = "GPU"
     openvino_model_dir = "x"  # il Protocol di machine_setup lo dichiara str
     video_encoder = "auto"
+    whisper_model = "small"
 
 
 def _check(label: str, ottenuto: object, atteso: object) -> bool:

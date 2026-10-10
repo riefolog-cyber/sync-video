@@ -393,6 +393,7 @@ class _TranscriberArgs(Protocol):
     openvino_device: str
     openvino_model_dir: str
     video_encoder: str
+    whisper_model: str
 
 
 def _video_vendor(gpus: list[str]) -> str:
@@ -477,6 +478,49 @@ def _engine_note(rec: dict) -> str:
     return ""
 
 
+def _warn_ram_bassa(args: _TranscriberArgs) -> None:
+    """Avvisa se su questo PC i modelli di default sono pesanti.
+
+    Il batch size si e' gia' adattato alla RAM (vedi `config._RAM_TIER`), ma
+    i MODELLI non si adattano: `multilingual-e5-large` tiene ~4,3 GB residenti
+    e whisper `small` altri ~500 MB, qualunque sia la macchina.
+
+    Non si abbassa il modello di nascosto: un risultato peggiore che nessuno
+    ha scelto e' la cosa peggiore che un programma automatico possa fare, e
+    il confronto con la baseline del progetto (che usa `small`) perderebbe
+    significato. Si dice cosa sta succedendo e si lascia scegliere, con il
+    valore da mettere in `.env` gia' scritto.
+
+    Non avvisa se l'utente ha gia' scelto un modello piccolo: dirgli che deve
+    scendere quando ci e' gia' sceso sarebbe rumore.
+    """
+    from hardware import format_ram, memory_tier, ram_total_bytes
+
+    totale = ram_total_bytes()
+    tier = memory_tier(totale)
+    if tier == "ignoto" or tier == "alto":
+        return
+
+    modello = str(getattr(args, "whisper_model", "") or "")
+    if modello in ("tiny", "base"):
+        return
+
+    log.warning(
+        "   ⚠️  RAM %s (%s): i modelli di default sono pesanti per questa macchina.",
+        format_ram(totale),
+        tier,
+    )
+    log.warning(
+        "      L'embedding multilingual-e5-large tiene ~4,3 GB in memoria, whisper %s altri ~500 MB. "
+        "Il batch e' gia' ridotto automaticamente.",
+        modello or "small",
+    )
+    log.warning(
+        "      Per alleggerire, in .env:  WHISPER_MODEL=tiny  (trascrizione piu' rapida, "
+        "meno accurata sulle ancore)."
+    )
+
+
 def machine_setup(args: _TranscriberArgs, force: bool = False) -> None:
     """Configura il motore di trascrizione piu' adatto (idempotente).
 
@@ -514,6 +558,7 @@ def machine_setup(args: _TranscriberArgs, force: bool = False) -> None:
         log.info("   Device faster-whisper: CUDA (float16)")
 
     _apply_video_encoder(args, gpus)
+    _warn_ram_bassa(args)
 
     nota = _engine_note(rec)
     if nota:
