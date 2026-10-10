@@ -5,10 +5,14 @@ Esegui con: python -m unittest test_auto_threads -v
 """
 
 import os
+import sys
 import unittest
 from unittest.mock import patch
 
-from config import auto_thread_budget
+from config import _logical_cpus, _physical_cpus, auto_thread_budget
+
+if sys.platform == "win32":
+    from config import _physical_cpus_win32
 
 
 class TestAutoThreadBudget(unittest.TestCase):
@@ -52,6 +56,44 @@ class TestAutoThreadBudget(unittest.TestCase):
                 self.assertEqual(auto_thread_budget("whisper"), 14)
                 self.assertEqual(auto_thread_budget("embed"), 12)
                 self.assertEqual(auto_thread_budget("video"), 12)
+
+
+class TestPhysicalCpuProbe(unittest.TestCase):
+    """Il probe dei core fisici: se fallisce silenziosamente, whisper si
+    aggancia ai fratelli SMT (20 thread su 14 core) invece che ai core
+    veri. La catena di fallback non deve MAI sollevare."""
+
+    def test_ritorna_un_numero_positivo_o_none(self) -> None:
+        # Sulla macchina di test: se il probe funziona torna un intero
+        # <= logici; altrimenti None. Non deve mai alzare.
+        fisici = _physical_cpus()
+        if fisici is not None:
+            self.assertGreaterEqual(fisici, 1)
+            self.assertLessEqual(fisici, _logical_cpus())
+
+    def test_nessun_core_piu_dei_logici(self) -> None:
+        # Errore classico dei probe: restituire i logici come "fisici" fa
+        # sembrare SMT piu' veloce di quanto sia.
+        fisici = _physical_cpus()
+        if fisici is not None:
+            self.assertLessEqual(fisici, _logical_cpus())
+
+    def test_psutil_ha_precedenza_ma_non_e_necessario(self) -> None:
+        # psutil non e' in requirements.txt: il probe deve funzionare
+        # anche senza, altrimenti il fallback silenzioso tornerebbe a
+        # logici su ogni macchina che non lo ha installato.
+        with patch.dict(sys.modules, {"psutil": None}):
+            fisici = _physical_cpus()
+        self.assertTrue(fisici is None or fisici >= 1)
+
+    def test_probe_windows_oltre_64_logici_rinuncia(self) -> None:
+        # Oltre i 64 thread logici l'informazione e' divisa in gruppi e la
+        # nostra lettura non la aggrega: deve rinunciare (None), non
+        # restituire un numero sbagliato.
+        if sys.platform != "win32":
+            self.skipTest("solo Windows")
+        with patch("os.cpu_count", return_value=128):
+            self.assertIsNone(_physical_cpus_win32())
 
 
 if __name__ == "__main__":

@@ -16,8 +16,11 @@ from config import CACHE_DIR, LLM_REVIEW_CACHE_PREFIX, atomic_write_text, log
 
 # Chiavi "housekeeping" che NON sono cache di contenuto: vanno conservate
 # (updates_check = TTL PyPI, fastembed_ab = report A/B, sync_report =
-# report ultima run, machine_setup = fatti hardware).
-KEEP_CACHE_STEMS = frozenset({"machine_setup", "updates_check", "fastembed_ab", "sync_report"})
+# report ultima run, machine_setup = fatti hardware, hardware = profilo
+# hardware + encoder ffmpeg di questa macchina).
+KEEP_CACHE_STEMS = frozenset(
+    {"machine_setup", "updates_check", "fastembed_ab", "sync_report", "hardware"}
+)
 
 
 def clean_orphan_cache(active_keys: set[str], cache_dir: Path | None = None) -> int:

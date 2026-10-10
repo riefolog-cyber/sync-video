@@ -13,9 +13,11 @@ from contextlib import suppress
 
 from config import (
     CACHE_DIR,
+    DEFAULT_EMBED_BATCH,
     DEFAULT_EMBED_THREADS,
     DEFAULT_OCR_WORKERS,
     DEFAULT_VIDEO_THREADS,
+    DEFAULT_WHISPER_BATCH,
     DEFAULT_WHISPER_THREADS,
     _physical_cpus,
     log,
@@ -71,12 +73,17 @@ def print_timing(
     t_video: float, t_total: float, t_llm: float = 0.0,
     *,
     history_fn: Callable[..., None] | None = None,
+    video_encoder: str | None = None,
 ) -> None:
-    """Riepilogo tempi + peso cache + thread auto-tuning + storico.
+    """Riepilogo tempi + peso cache + thread auto-tuning + hardware + storico.
 
     ``history_fn`` è il callback per lo storico: default = la funzione di
     questo modulo, ma main.py passa la propria (così i test che patchano
     ``main._append_timing_history`` vedono il mock).
+
+    ``video_encoder``: l'encoder scelto dal rilevamento hardware, se noto.
+    Serve a rendere visibile che la GPU è stata usata anche per il video
+    (prima l'encoding era sempre su CPU, e il riepilogo non lo diceva).
     """
     log.info("\n" + "─" * 50)
     log.info(" ⏱️  RIEPILOGO TEMPI")
@@ -115,4 +122,16 @@ def print_timing(
             DEFAULT_OCR_WORKERS,
             sorgente,
         )
+    with suppress(Exception):
+        from hardware import memory_tier, ram_total_bytes
+
+        totale_ram = ram_total_bytes()
+        righe_hw = [f"RAM {totale_ram / 1024**3:.1f} GB" if totale_ram else "RAM sconosciuta"]
+        if totale_ram:
+            righe_hw.append(memory_tier(totale_ram))
+        righe_hw.append(f"batch whisper {DEFAULT_WHISPER_BATCH}, embedding {DEFAULT_EMBED_BATCH}")
+        righe_hw.append(
+            f"video {video_encoder} (GPU)" if video_encoder and video_encoder != "libx264" else "video libx264 (CPU)"
+        )
+        log.info("   🖥️  Hardware: %s", ", ".join(righe_hw))
     (history_fn or append_timing_history)(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total, t_llm)

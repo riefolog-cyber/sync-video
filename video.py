@@ -28,6 +28,7 @@ from config import (
     DEFAULT_VIDEO_THREADS,
     log,
 )
+from hardware import encoder_args
 
 
 # =====================================================================
@@ -238,12 +239,18 @@ def _build_video_ffmpeg(
     output_path: Path,
     fps: int,
     threads: int,
+    encoder: str = "libx264",
 ) -> None:
     """Assembla il video con il concat demuxer di ffmpeg.
 
     Un solo processo di encoding: le slide sono PNG statici (letterbox su
     canvas comune) e l'audio è mappato dal file sorgente. Tipicamente molto
     più veloce del percorso MoviePy a parità di output.
+
+    `encoder`: encoder H.264 scelto dal rilevamento hardware
+    (``hardware.choose_video_encoder``). Se quello accelerato fallisce a
+    runtime (driver, device non supportato, filtro mancante) si ritenta
+    una volta con libx264: un video lento è sempre meglio di nessun video.
     """
     audio = Path(audio_path)
     if not audio.exists():
@@ -251,11 +258,13 @@ def _build_video_ffmpeg(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     total_duration = sum(durations)
+    accelerato = encoder != "libx264"
     log.info(
-        "   Motore: ffmpeg concat demuxer (%d slide, %.1fs totali, fps=%d).",
+        "   Motore: ffmpeg concat demuxer (%d slide, %.1fs totali, fps=%d, %s).",
         len(slide_files),
         total_duration,
         fps,
+        encoder,
     )
 
     with tempfile.TemporaryDirectory(prefix="s2v_render_") as tmp:
@@ -265,27 +274,43 @@ def _build_video_ffmpeg(
         concat_path = workdir / "concat.txt"
         _write_concat_file(entries, concat_path)
 
-        cmd = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-progress", "pipe:1",
-            "-f", "concat", "-safe", "0", "-i", str(concat_path),
-            "-i", str(audio),
-            "-map", "0:v:0", "-map", "1:a:0",
-            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
-            # NOTA: si usa il filtro fps (non -r): con il concat demuxer
-            # l'opzione di output -r produce overshoot di secondi sull'ultima
-            # immagine, il filtro fps resta entro un frame di tolleranza.
-            "-vf", f"fps={fps}", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "160k",
-            "-threads", str(threads),
-            "-movflags", "+faststart",
-            # Cap deterministico sulla durata: il demuxer concat estende
-            # l'ultimo segmento con quirk di metadati (durata sovrastimata);
-            # conosciamo la durata esatta (somma durate + buffer) e la imponiamo.
-            "-t", f"{total_duration:.6f}",
-            str(output_path),
-        ]
-        _run_ffmpeg(cmd, total_duration)
+        def _comando(enc: str) -> list[str]:
+            return [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-nostdin",
+                "-progress", "pipe:1",
+                "-f", "concat", "-safe", "0", "-i", str(concat_path),
+                "-i", str(audio),
+                "-map", "0:v:0", "-map", "1:a:0",
+                *encoder_args(enc),
+                # NOTA: si usa il filtro fps (non -r): con il concat demuxer
+                # l'opzione di output -r produce overshoot di secondi sull'ultima
+                # immagine, il filtro fps resta entro un frame di tolleranza.
+                "-vf", f"fps={fps}", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-b:a", "160k",
+                # Con un encoder accelerato i thread CPU non servono: il
+                # lavoro e' sulla GPU e forzarli aggiunge solo contention.
+                *([] if enc != "libx264" else ["-threads", str(threads)]),
+                "-movflags", "+faststart",
+                # Cap deterministico sulla durata: il demuxer concat estende
+                # l'ultimo segmento con quirk di metadati (durata sovrastimata);
+                # conosciamo la durata esatta (somma durate + buffer) e la imponiamo.
+                "-t", f"{total_duration:.6f}",
+                str(output_path),
+            ]
+
+        try:
+            _run_ffmpeg(_comando(encoder), total_duration)
+        except RuntimeError:
+            if not accelerato:
+                raise
+            # Rete di sicurezza: un encoder accelerato puo' essere compilato
+            # in ffmpeg ma non funzionare (driver vecchio, device non
+            # supportato, presenza errata). Il fallback e' sempre software e
+            # funziona su ogni macchina.
+            log.warning(
+                "   ⚠️  Encoding %s fallito: ritento con libx264 (CPU, piu' lento).", encoder
+            )
+            _run_ffmpeg(_comando("libx264"), total_duration)
 
 
 def build_video(
@@ -297,6 +322,7 @@ def build_video(
     threads: int = DEFAULT_VIDEO_THREADS,
     transition_duration: float = 0.0,
     engine: str = DEFAULT_VIDEO_ENGINE,
+    encoder: str = "libx264",
 ) -> None:
     """
     Assembla il video finale:
@@ -311,10 +337,13 @@ def build_video(
             legge direttamente) oppure clip MoviePy AudioFileClip già aperta
         output_path: percorso file video output
         fps: frame per second
-        threads: thread per encoding
+        threads: thread per encoding (solo con encoder software: con un encoder
+            accelerato il lavoro è sulla GPU e i thread CPU servono a poco)
         transition_duration: durata dissolvenza in secondi (0 = nessuna);
             > 0 forza il motore moviepy
         engine: 'ffmpeg' (default, veloce) o 'moviepy' (legacy)
+        encoder: encoder H.264 scelto dal rilevamento hardware; se quello
+            accelerato fallisce si ripiega automaticamente su libx264
     """
     log.info("\n4. Generazione rapida del flusso video definitivo...")
 
@@ -374,7 +403,7 @@ def build_video(
         _build_video_moviepy(slide_files, durations, audio_source, output_path, fps, threads, transition_duration)
     else:
         assert audio_path is not None  # garantito dal ramo use_moviepy
-        _build_video_ffmpeg(slide_files, durations, audio_path, output_path, fps, threads)
+        _build_video_ffmpeg(slide_files, durations, audio_path, output_path, fps, threads, encoder=encoder)
 
     log.info("\n[COMPLETATO] File sincronizzato salvato in: %s", output_path)
 

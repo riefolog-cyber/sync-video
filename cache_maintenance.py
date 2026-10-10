@@ -22,7 +22,9 @@ from pathlib import Path
 # Cartelle con i pesi ML: cancellarle costa GB di re-download.
 MODEL_DIRS = ("embedding_model", "whisper_openvino_small", "whisper_openvino_base", "whisper_openvino_medium")
 # Chiavi che non sono cache di contenuto: vanno conservate.
-KEEP_STEMS = frozenset({"machine_setup", "updates_check", "fastembed_ab", "sync_report"})
+KEEP_STEMS = frozenset(
+    {"machine_setup", "updates_check", "fastembed_ab", "sync_report", "hardware"}
+)
 
 
 def _dir_size(cartella: Path) -> int:

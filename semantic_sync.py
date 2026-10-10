@@ -284,12 +284,25 @@ def _load_embed_model(
     return None
 
 
-def _make_embed_fn(model: TextEmbedding, batch_size: int = 64) -> EmbedFn:
+def _make_embed_fn(model: TextEmbedding, batch_size: int | None = None) -> EmbedFn:
     """Avvolge fastembed: restituisce embeddings normalizzati (cosine).
 
     Per i modelli E5 (es. multilingual-e5-large) aggiunge il prefisso
     "passage: " previsto dal modello (ricerca simmetrica slide↔blocchi).
+
+    `batch_size=None` -> `config.DEFAULT_EMBED_BATCH`, che scala con la RAM
+    della macchina (16 sotto i 6 GB, 32 sotto i 12, 64 oltre). Il batch e'
+    memoria di picco: su una macchina piccola un batch da 64 e' cio' che
+    fa finire la run in OutOfMemory.
+
+    Attenzione: il batch entra in `embed_id`, quindi nella chiave della cache
+    content-addressed. Cambiarlo (o cambiare macchina) invalida la cache
+    embedding: e' il comportamento giusto, ma fa rifare il lavoro.
     """
+    from config import DEFAULT_EMBED_BATCH
+
+    if batch_size is None:
+        batch_size = DEFAULT_EMBED_BATCH
 
     def _embed(texts: Sequence[str]) -> np.ndarray:
         global _EMBED_SECONDS

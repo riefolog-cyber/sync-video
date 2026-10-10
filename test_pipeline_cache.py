@@ -104,7 +104,7 @@ class TestKeepCacheStems(_CacheTemp):
 
         self.assertEqual(
             KEEP_CACHE_STEMS,
-            frozenset({"machine_setup", "updates_check", "fastembed_ab", "sync_report"}),
+            frozenset({"machine_setup", "updates_check", "fastembed_ab", "sync_report", "hardware"}),
         )
         self.assertEqual(KEEP_STEMS, KEEP_CACHE_STEMS)
 

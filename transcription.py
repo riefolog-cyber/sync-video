@@ -471,6 +471,41 @@ def _transcribe_with_fallback(
     return _collect_words(segments), info
 
 
+def _warn_cpu_transcription(model_size: str) -> None:
+    """Stima della durata della trascrizione su CPU, scalata sui core.
+
+    I minuti base sono una stima empirica misurata su una CPU Intel con 8
+    core fisici: sono quindi riferiti a quella macchina, non a questa. Il
+    fattore `8 / core_di_questa_macchina` e' un'approssimazione lineare (il
+    throughput non scala esattamente con i core), ma sbagliare in eccesso e'
+    preferibile a restare muti.
+
+    Il messaggio dice sempre cosa fare: un modello piu' piccolo via env, che
+    e' l'unico intervento che l'utente puo' fare senza toccare il codice.
+    """
+    minuti_riferimento = {  # minuti per 28 min di audio, 8 core fisici Intel
+        "tiny": 2,
+        "base": 4,
+        "small": 8,
+        "medium": 14,
+        "large": 25,
+    }
+    base = minuti_riferimento.get(model_size, 8)
+
+    from config import _logical_cpus, _physical_cpus
+
+    core = _physical_cpus() or _logical_cpus() or 8
+    stima = max(1, round(base * 8 / max(1, core)))
+
+    log.warning(
+        "   ⚠️  Trascrizione su CPU (nessuna accelerazione GPU): ~%d min per 28 min di audio "
+        "su %d core. Per andare piu' veloce: WHISPER_MODEL=tiny (o base) nell'env, "
+        "oppure una macchina con GPU accelerabile.",
+        stima,
+        core,
+    )
+
+
 def transcribe_with_whisper(
     audio_path: Path,
     model_size: str = "small",
@@ -514,25 +549,21 @@ def transcribe_with_whisper(
     )
     if openvino_available is None:
         openvino_available = openvino_usable()
-    if openvino_available:
-        log.warning(
-            "   ⚠️  faster-whisper su CPU è LENTO: ~%d min per 28 min di audio. "
-            "Installando openvino-genai + il modello OpenVINO (vedi README) la "
-            "trascrizione usa la iGPU (~1.5x più veloce).",
-            {  # stima empirica (RTF su CPU Intel)
-                "tiny": 2,
-                "base": 4,
-                "small": 8,
-                "medium": 14,
-                "large": 25,
-            }.get(model_size, 8),
-        )
+    # Avviso "ci mette un po'" su QUALSIASI macchina che sta davvero
+    # trascrivendo su CPU. La versione precedente lo mostrava solo quando
+    # OpenVINO era un upgrade possibile, cioe' sulle macchine veloci: il
+    # caso in cui l'utente ha davvero bisogno di saperlo restava muto.
+    if device == "cpu":
+        _warn_cpu_transcription(model_size)
+    elif openvino_available:
+        log.info("   Trascrizione su iGPU OpenVINO:Accelerazione attiva.")
 
     # Carica modello. cpu_threads esplicito: il default di faster-whisper
     # sottoutilizza CPU con piu' core (misurato su Snapdragon X Elite: 8
-    # thread ~27% piu' veloci di 4 su clip da 60s). Il cap a 8 evita di
-    # saturare la banda memoria; resta pero' esposto via WHISPER_THREADS
-    # perche' il cap nasce dalla misura su una sola CPU.
+    # thread ~27% piu' veloci di 4 su clip da 60s). Il tetto (non piu' dei
+    # core FISICI: i fratelli SMT non danno throughput, solo context switch)
+    # e' in config.auto_thread_budget; resta pero' esposto via
+    # WHISPER_THREADS perche' il tetto nasce dalla misura su una sola CPU.
     n_threads = cpu_threads if cpu_threads else DEFAULT_WHISPER_THREADS
     # Rete di sicurezza: se l'accelerazione richiesta fallisce alla COSTRUZIONE
     # del modello, si ripiega su CPU invece di far morire la pipeline. Il

@@ -18,6 +18,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from hardware import memory_tier, ram_total_bytes
+
 # stdout/stderr in UTF-8 con fallback 'replace': evita UnicodeEncodeError
 # (codice cp1252 di Windows) quando il bootstrap stampa emoji (es. ⏳ 🔧).
 for _stream in (sys.stdout, sys.stderr):
@@ -92,6 +94,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+# Classe di memoria della macchina: 'basso' (< 6 GB), 'medio' (< 12 GB),
+# 'alto', 'ignoto'. Governa i batch size (whisper ed embedding), che sono
+# memoria di picco: il modello di embedding da solo tiene ~4,3 GB residenti.
+#
+# Si usa la RAM TOTALE e non quella disponibile perche' questi valori finiscono
+# anche dentro le chiavi di cache (vedi DEFAULT_EMBED_BATCH): un default che
+# oscilla a ogni run invaliderebbe la cache a ogni run.
+_RAM_TIER = memory_tier(ram_total_bytes())
+
+
 def _env_float(name: str, default: float) -> float:
     """Legge una variabile d'ambiente come float, con fallback al default."""
     value = os.environ.get(name)
@@ -110,9 +122,19 @@ def _logical_cpus() -> int:
 
 
 def _physical_cpus() -> int | None:
-    """Core fisici (psutil se c'è, wmic su Windows); None se non rilevabili."""
-    # Probe hardware difensivi (stessa natura di machine_setup.py): falliscono
-    # in modi imprevedibili su macchine diverse, quindi except ampi.
+    """Core fisici, o None se non rilevabili.
+
+    Catena di probe, dal piu' affidabile al piu' grezzo. Tutti falliscono
+    in modo difensivo (stessa natura di machine_setup.py): una macchina
+    senza psutil e senza wmic deve comunque restare usabile.
+
+    Attenzione: se questo restituisce None, ``auto_thread_budget`` ripiega
+    sui core LOGICI, e su una CPU con SMT (es. i7-12700H: 14 fisici, 20
+    logici) i thread si agganciano ai fratelli hyperthreading invece che
+    ai core veri: piu' thread, non piu' velocita'. E' il motivo per cui i
+    tetti 12 di embed/video esistono.
+    """
+    # 1. psutil, se presente.
     try:
         import psutil  # type: ignore[import-not-found]
 
@@ -121,7 +143,16 @@ def _physical_cpus() -> int | None:
             return int(fisici)
     except Exception:
         pass
-    if sys.platform == "win32":  # best-effort, mai bloccante
+    # 2. Windows senza dipendenze: conta le coppie (core, gruppo) che
+    #    GetLogicalProcessorInformationEx(RelationProcessorCore) espone.
+    #    Sopra i 64 processori logici servirebbe aggregare i gruppi: in
+    #    quel caso si rimane a None e si ripiega sui logici.
+    if sys.platform == "win32":
+        try:
+            return _physical_cpus_win32()
+        except Exception:
+            pass
+        # 3. wmic: rimosso da Windows 11 24H2+, tenuto per Windows vecchi.
         try:
             import subprocess
 
@@ -136,7 +167,106 @@ def _physical_cpus() -> int | None:
                 return sum(nuclei)
         except Exception:
             pass
+    # 4. Linux senza dipendenze: /proc/cpuinfo espone "physical id" (socket)
+    #    e "core id"; i core fisici sono le coppie distinte dei due.
+    elif sys.platform.startswith("linux"):
+        try:
+            import pathlib
+
+            socket_e_core: set[tuple[str, str]] = set()
+            socket = core = ""
+            for riga in pathlib.Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
+                if ":" not in riga:
+                    if socket and core:  # fine del blocco di un processore
+                        socket_e_core.add((socket, core))
+                        socket = core = ""
+                    continue
+                chiave, _, valore = riga.partition(":")
+                chiave = chiave.strip().lower()
+                valore = valore.strip()
+                if chiave == "physical id":
+                    socket = valore
+                elif chiave == "core id":
+                    core = valore
+            if socket and core:
+                socket_e_core.add((socket, core))
+            if socket_e_core:
+                return len(socket_e_core)
+        except Exception:
+            pass
+    # 5. macOS: hw.physicalcpu e' il numero di core fisici.
+    elif sys.platform == "darwin":
+        try:
+            import subprocess
+
+            out = subprocess.run(
+                ["sysctl", "-n", "hw.physicalcpu"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.strip()
+            if out.isdigit() and int(out) > 0:
+                return int(out)
+        except Exception:
+            pass
     return None
+
+
+def _physical_cpus_win32() -> int | None:
+    """Core fisici su Windows via ctypes, senza dipendenze.
+
+    Ogni record restituito da GetLogicalProcessorInformationEx con
+    RelationProcessorCore descrive UN core fisico (con i suoi gruppi e la
+    maschera dei fratelli SMT dentro). Basta quindi contare i record: non
+    serve interpretare i campi della union.
+
+    None se l'API non e' disponibile, se il processore supera i 64 thread
+    logici (l'informazione e' divisa in gruppi e va aggregata: non lo
+    gestiamo, si ripiega sui logici) o se il buffer non e' leggibile.
+    """
+    import ctypes
+    import struct
+    from ctypes import wintypes
+
+    relation_processor_core = 0
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32.GetLogicalProcessorInformationEx.argtypes = [
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.GetLogicalProcessorInformationEx.restype = wintypes.BOOL
+
+    logici = os.cpu_count() or 0
+    if logici > 64:
+        return None  # serve aggregare i gruppi: fuori portata, si usa il logico
+
+    # Prima chiamata con buffer nullo: torna solo la dimensione in byte.
+    dimensione = wintypes.DWORD(0)
+    kernel32.GetLogicalProcessorInformationEx(relation_processor_core, None, ctypes.byref(dimensione))
+    if dimensione.value == 0:
+        return None
+
+    buffer = (ctypes.c_byte * dimensione.value)()
+    if not kernel32.GetLogicalProcessorInformationEx(
+        relation_processor_core, ctypes.cast(buffer, ctypes.c_void_p), ctypes.byref(dimensione)
+    ):
+        return None
+
+    # Solo i primi 8 byte di ogni record servono: Relationship + Size.
+    # unpack_from evita di dover materializzare la union, che ha grandezza
+    # variabile e nell'ultimo record può essere più corta della struct.
+    grezzo = bytes(buffer)
+    core = 0
+    offset = 0
+    while offset + 8 <= dimensione.value:
+        relazione, size = struct.unpack_from("<iI", grezzo, offset)
+        if size == 0:  # difesa: uno Size 0 farebbe girare all'infinito
+            break
+        if relazione == relation_processor_core:
+            core += 1
+        offset += size
+    return core or None
 
 
 def auto_thread_budget(kind: str = "generic") -> int:
@@ -1041,6 +1171,18 @@ DEFAULT_EMBEDDING_CACHE_DIR = os.environ.get("EMBEDDING_CACHE_DIR", str(CACHE_DI
 # misurata oltre. Override con EMBED_THREADS (ha sempre precedenza).
 DEFAULT_EMBED_THREADS = auto_thread_budget("embed")
 
+# Batch size dell'embedding: quanti testi vanno al modello per volta. E' il
+# picco di memoria della fase semantica (multilingual-e5-large tiene ~4,3 GB
+# residenti, e il batch aggiunge il picco transient).
+#
+# ATTENZIONE: il batch finisce dentro `embed_id`, che e' la CHIAVE della cache
+# content-addressed (`_embed_cache_key`). Per questo qui si usa solo la RAM
+# TOTALE, mai quella disponibile: se oscillasse, la chiave cambierebbe a ogni
+# run e la cache embedding verrebbe invalidata ogni volta. Lo stesso vale per
+# un override manuale: cambiarlo invalida la cache (e va rifatto).
+# Override con EMBED_BATCH.
+DEFAULT_EMBED_BATCH = _env_int("EMBED_BATCH", {"basso": 16, "medio": 32}.get(_RAM_TIER, 64))
+
 DEFAULT_SEMANTIC_WINDOW = _env_float("SEMANTIC_WINDOW", 4.0)  # secondi per blocco
 DEFAULT_SEMANTIC_MIN_DURATION = _env_float("SEMANTIC_MIN_DURATION", 3.0)  # durata minima slide
 # L'unica soglia di qualità. Sulla scala grezza dei coseni la soglia sarebbe un
@@ -1145,7 +1287,13 @@ DEFAULT_WHISPER_BEAM = _env_int("WHISPER_BEAM", 1)
 # 8 = batch ottimale misurato (16 non migliora, 40.1s vs 40.1s).
 # 0 o 1 = decodifica sequenziale (fallback automatico se la classe manca).
 # Override con WHISPER_BATCH.
-DEFAULT_WHISPER_BATCH = _env_int("WHISPER_BATCH", 8)
+#
+# Sotto i ~6 GB di RAM il batch scende a 4: il batch e' memoria di picco,
+# e su un portatile da 4-8 GB conviene sprecare un po' di velocita' per
+# non rischiare l'OutOfMemory, che uccide la run.
+DEFAULT_WHISPER_BATCH = _env_int(
+    "WHISPER_BATCH", 4 if _RAM_TIER == "basso" else 8
+)
 # Beam size della decodifica ACCURATA: usato quando la timeline NON è vincolata
 # dalle ancore 'slide N', cioè quando il testo è l'unico segnale di
 # sincronizzazione (flusso libero, o quasi nessuna slide annunciata).
@@ -1329,8 +1477,16 @@ def get_stopwords(lang: str = "ita") -> frozenset:
 # =====================================================================
 # ARGPARSE
 # =====================================================================
-def parse_args(argv: list | None = None) -> argparse.Namespace:
-    """Configura e parsare gli argomenti da riga di comando."""
+def build_parser() -> argparse.ArgumentParser:
+    """Costruisce il parser degli argomenti.
+
+    Separato da ``parse_args`` per una ragione precisa: argparse formats
+    le stringhe `help` con `help_text % params`, quindi un `%` letterale
+    dentro una help fa esplodere `--help` con `ValueError: incomplete
+    format` — un errore che si vede SOLO lanciando `--help`, mai usando
+    l'argomento. Con il parser isolato, un test puo' chiamare
+    `format_help()` e intercettare subito il problema.
+    """
     parser = argparse.ArgumentParser(
         description="Sincronizza PDF + audio in un video con timeline generata "
         "da embeddings semantici (offline, senza LLM).",
@@ -1464,7 +1620,7 @@ Esempi:
         "transizioni con ancora 'slide N' e' sotto la soglia (default: "
         f"{DEFAULT_MIN_ANCHOR_COVERAGE}): sotto soglia la timeline sarebbe "
         "stimata, con durate inaffidabili. 0 disattiva (procede sempre). "
-        "Piu' morbido di --require-full-anchors, che pretende il 100%.",
+        "Piu' morbido di --require-full-anchors, che pretende il 100%%.",
     )
     parser.add_argument(
         "--openvino-download",
@@ -1499,6 +1655,16 @@ Esempi:
         "(encoding diretto, molto più veloce, nessun crossfade); 'moviepy' "
         "usa il percorso legacy (più lento, richiesto per --transitions > 0). "
         f"(default: {DEFAULT_VIDEO_ENGINE})",
+    )
+    parser.add_argument(
+        "--video-encoder",
+        default="auto",
+        choices=["auto", "libx264", "h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolbox"],
+        help="Encoder H.264 per il video. 'auto' (default) sceglie quello "
+        "accelerato se la GPU lo supporta (NVIDIA/Intel/AMD/Apple) e altrimenti "
+        "libx264 su CPU. Se l'encoder accelerato fallisce a runtime si ripiega "
+        "automaticamente su libx264. Forzarlo a mano e' sconsigliato: 'auto' e' "
+        "quello che misura cosa funziona davvero su questa macchina.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Ferma dopo la generazione timeline, non produce video")
     parser.add_argument(
@@ -1714,6 +1880,12 @@ Esempi:
     )
     parser.add_argument("--log-file", default=None, help="Percorso file di log (salva i log anche su file)")
 
+    return parser
+
+
+def parse_args(argv: list | None = None) -> argparse.Namespace:
+    """Parsa gli argomenti e applica il post-processing (percorsi, log, clamp)."""
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     # Post-processing

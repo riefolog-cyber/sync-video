@@ -50,6 +50,7 @@ seconda fonte di verita' capace di rendere ``--force-setup`` inefficace (vedi
 
 import importlib.util
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -57,6 +58,7 @@ from pathlib import Path
 from typing import Protocol
 
 from config import CACHE_DIR, cuda_available, log, openvino_device_available
+from hardware import choose_video_encoder, ffmpeg_encoders
 
 MACHINE_CONFIG_PATH = CACHE_DIR / "machine_setup.json"
 
@@ -81,6 +83,68 @@ def _run(cmd: list[str], timeout: int = 30) -> str:
 # =====================================================================
 # RILEVAMENTO HARDWARE
 # =====================================================================
+def _gpus_linux() -> list[str]:
+    """GPU su Linux, con tre fonti a cascata.
+
+    `lspci` e' la fonte migliore ma sta nel pacchetto `pciutils`, che NON e'
+    installato di default su molte distro (Debian/Ubuntu server, Alpine,
+    container minimali). Se manca, `_run` ingoia l'eccezione e la lista
+    resta vuota: senza i fallback qui sotto, una macchina NVIDIA finiva su
+    faster-whisper CPU senza dire nulla, e cioe' 5-10x piu' lenta in
+    silenzio. Un rilevamento che sbaglia perche' manca un tool e' peggio di
+    nessun rilevamento, quindi si prova anche altrove.
+    """
+    # 1. lspci, se presente (nomi ricchi: vendor + device).
+    out = _run(["lspci", "-nn"])
+    gpus: list[str] = []
+    for line in out.splitlines():
+        low = line.lower()
+        if any(k in low for k in ("vga compatible", "3d controller", "display controller")):
+            gpus.append(line.strip())
+    if gpus:
+        return gpus
+
+    # 2. nvidia-smi: risponde solo se c'e' una GPU NVIDIA con i driver
+    #    installati, quindi e' un segnale affidabile da solo.
+    nvidia = _run(["nvidia-smi", "-L"])
+    if nvidia.strip():
+        return [line.strip() for line in nvidia.splitlines() if line.strip()]
+
+    # 3. sysfs: /sys/class/drm/card*/device/vendor e /uevent (PCI_ID).
+    #    Funziona senza installare nulla, ma restituisce solo il vendor
+    #    (0x8086 Intel, 0x10de NVIDIA, 0x1002/0x1022 AMD): basta per
+    #    classificare, che e' tutto quello che serve.
+    sysfs: list[str] = []
+    try:
+        import glob
+        import re
+
+        vendor_nomi = {
+            "0x8086": "Intel",
+            "0x10de": "NVIDIA",
+            "0x1002": "AMD",
+            "0x1022": "AMD",
+            "0x10c8": "Qualcomm",
+            "0x5143": "Qualcomm",
+        }
+        for uevent in glob.glob("/sys/class/drm/card*/device/uevent"):
+            testo = Path(uevent).read_text(encoding="utf-8", errors="replace")
+            m = re.search(r"DRIVER=(\S+)", testo)
+            vendor = m.group(1) if m else ""
+            # Il vendor id e' in PCI_ID=VVVV:DDDD. Attenzione: nel sysfs e' in
+            # MAIUSCOLO (0x10DE), mentre la tabella e' in minuscolo: senza
+            # il lower() una GPU NVIDIA finiva 'unknown' e tornava su CPU,
+            # cioe' esattamente il buco che questo fallback deve chiudere.
+            p = re.search(r"PCI_ID=(\w{4}):(\w{4})", testo, re.IGNORECASE)
+            nome = vendor_nomi.get(f"0x{p.group(1).lower()}", "") if p else ""
+            etichetta = f"{nome} GPU ({vendor})" if nome and vendor else (nome or vendor)
+            if etichetta and etichetta not in sysfs:
+                sysfs.append(etichetta)
+    except Exception:
+        return sysfs
+    return sysfs
+
+
 def detect_gpus() -> list[str]:
     """Restituisce la lista delle GPU rilevate (nomi/descrizioni)."""
     if sys.platform == "win32":
@@ -96,14 +160,7 @@ def detect_gpus() -> list[str]:
     if sys.platform == "darwin":
         out = _run(["system_profiler", "SPDisplaysDataType"])
         return [line.split(":", 1)[1].strip() for line in out.splitlines() if "Chipset Model" in line]
-    # Linux
-    out = _run(["lspci", "-nn"])
-    gpus: list[str] = []
-    for line in out.splitlines():
-        low = line.lower()
-        if any(k in low for k in ("vga compatible", "3d controller", "display controller")):
-            gpus.append(line.strip())
-    return gpus
+    return _gpus_linux()
 
 
 def _classify_gpu(name: str) -> str:
@@ -335,6 +392,48 @@ class _TranscriberArgs(Protocol):
     whisper_compute_type: str
     openvino_device: str
     openvino_model_dir: str
+    video_encoder: str
+
+
+def _video_vendor(gpus: list[str]) -> str:
+    """Famiglia della GPU che decide l'encoder video, con la precedenza di
+    ``recommend``: NVIDIA prima di Intel (una dGPU dedicata batte un'iGPU
+    anche per l'encoding)."""
+    if any(_classify_gpu(g) == "nvidia" for g in gpus):
+        return "nvidia"
+    if any(_classify_gpu(g) == "intel" for g in gpus):
+        return "intel"
+    if any(_classify_gpu(g) == "amd" for g in gpus):
+        return "amd"
+    if sys.platform == "darwin":
+        return "apple"
+    return "unknown"
+
+
+def _apply_video_encoder(args: _TranscriberArgs, gpus: list[str]) -> None:
+    """Sceglie l'encoder H.264 e lo annuncia.
+
+    L'override esplicito ha sempre precedenza: il flag
+    ``--video-encoder`` se diverso da ``auto``, poi la variabile
+    ``VIDEO_ENCODER``. Se l'encoder accelerato fallisce a runtime,
+    ``video._build_video_ffmpeg`` lo intercetta e ripiega su libx264: qui si
+    sceglie il percorso veloce, non si garantisce che funzioni.
+
+    La decisione NON viene persistita: come il motore di trascrizione
+    dipende da fatti che cambiano (ffmpeg installato dopo, driver
+    aggiornati), e va ricalcolata a ogni run. Il probe degli encoder e'
+    invece cachato, perche' costa ~100 ms.
+    """
+    scelto = (getattr(args, "video_encoder", "auto") or "auto").strip()
+    if scelto == "auto":
+        scelto = os.environ.get("VIDEO_ENCODER", "").strip()
+    if not scelto:
+        scelto = choose_video_encoder(_video_vendor(gpus), ffmpeg_encoders())
+    args.video_encoder = scelto
+    if scelto == "libx264":
+        log.info("   Video: libx264 (CPU) — nessuna accelerazione video disponibile")
+    else:
+        log.info("   Video: %s (GPU accelerata)", scelto)
 
 
 def _apply(args: _TranscriberArgs, rec: dict) -> None:
@@ -413,6 +512,8 @@ def machine_setup(args: _TranscriberArgs, force: bool = False) -> None:
         log.info("   Device OpenVINO: %s", rec["openvino_device"])
     elif rec["whisper_device"] == "cuda":
         log.info("   Device faster-whisper: CUDA (float16)")
+
+    _apply_video_encoder(args, gpus)
 
     nota = _engine_note(rec)
     if nota:

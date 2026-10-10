@@ -217,6 +217,8 @@ def _print_timing(
     t_video: float,
     t_total: float,
     t_llm: float = 0.0,
+    *,
+    video_encoder: str | None = None,
 ) -> None:
     """Riepilogo tempi (wrapper su pipeline_report).
 
@@ -225,10 +227,14 @@ def _print_timing(
     ogni chiamata, il patch sul namespace di main viene visto dalla stampa
     (se pipeline_report chiamasse il proprio modulo, il mock sarebbe
     invisibile e il test fallirebbe).
+
+    ``video_encoder`` rende visibile nel riepilogo che la GPU è stata usata
+    anche per l'encoding (prima era sempre libx264 su CPU, senza dirlo).
     """
     _print_timing_impl(
         t_ocr, t_transcribe, t_sync, t_embed, t_model, t_video, t_total, t_llm,
         history_fn=_append_timing_history,
+        video_encoder=video_encoder,
     )
 
 
@@ -3386,6 +3392,7 @@ llm_enabled=llm_disponibile,
                 0.0,
                 t_total,
                 llm_seconds(),
+                video_encoder=getattr(args, "video_encoder", None),
             )
             _warn_sync_uncertainty()
             _log_plain_summary(
@@ -3416,6 +3423,7 @@ llm_enabled=llm_disponibile,
             threads=DEFAULT_VIDEO_THREADS,
             transition_duration=args.transitions,
             engine=args.engine,
+            encoder=getattr(args, "video_encoder", "libx264"),
         )
         t_video = time.time() - t_phase_start
 
@@ -3489,6 +3497,7 @@ llm_enabled=llm_disponibile,
                         threads=DEFAULT_VIDEO_THREADS,
                         transition_duration=args.transitions,
                         engine=args.engine,
+                        encoder=getattr(args, "video_encoder", "libx264"),
                     )
                     t_video = time.time() - t_phase_start
                     # I frame del video precedente li rimuove la verifica stessa
@@ -3532,6 +3541,7 @@ llm_enabled=llm_disponibile,
             t_video,
             t_total,
             llm_seconds(),
+            video_encoder=getattr(args, "video_encoder", None),
         )
         _warn_sync_uncertainty(
             cast("dict[str, object] | None", sync_report.get("frame_check")),
