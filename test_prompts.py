@@ -315,7 +315,12 @@ class TestRiferimentiReadme(unittest.TestCase):
             target = con_cani or senza_cani
             if target.startswith(("http://", "https://", "mailto:", "#")):
                 continue
-            if not (RADICE / target).exists():
+            # Via#sezione e' un link valido: il file e' 'via', il resto e'
+            # l'ancora dentro il file. Controllare l'intera stringa come
+            # percorso segnalerebbe come rotto un link che funziona, e
+            # renderebbe vietato Linking a una sezione.
+            percorso = target.split("#", 1)[0]
+            if not (RADICE / percorso).exists():
                 rotti.append(target)
         self.assertEqual(rotti, [], "link del README a file inesistenti")
 
