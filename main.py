@@ -100,7 +100,7 @@ from timeline import (
     reconcile_timeline,
 )
 from transcription import correct_transcript_names, resolved_transcriber, transcribe_audio
-from updates import run_update_check
+from updates import run_frozen_report, run_update_check
 from video import build_video, frame_consistency_check
 
 
@@ -1825,6 +1825,14 @@ def main(argv: list | None = None) -> None:
             esito["verify_frames"],
             f", modelli rimossi ({format_bytes(esito['model_bytes'])})" if esito["model_bytes"] else "",
         )
+        return
+
+    # --- Diagnostica dei pacchetti fermi e uscita ---
+    # Anche questo prima di bootstrap/setup/update-check, per lo stesso motivo: è un
+    # referto. Legge la metadata installata e l'API di PyPI (nessun download, nessuna
+    # installazione, nessuna domanda) e spiega perché certi pacchetti non si muovono.
+    if args.frozen_report:
+        run_frozen_report()
         return
 
     # Bootstrap esplicito: verifica dipendenze prima di tutto

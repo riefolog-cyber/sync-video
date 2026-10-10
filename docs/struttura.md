@@ -16,11 +16,14 @@ video.py                 ← Fase 4: Assemblaggio MP4 (1080p)
 pipeline_cache.py        ← Hash/caricamento/salvataggio cache (estratto da main)
 pipeline_report.py       ← Formattazione tempi + report (estratto da main)
 cache_maintenance.py     ← `--cache-du` / `--clean-cache` (peso e pulizia sicura)
+controlli.py             ← Verifica completa in un comando (CI + mypy 3 piattaforme + debug)
 test_sync.py             ← Suite di test unitari
 test_llm_sync.py         ← Test modulo LLM
 test_chunks.py           ← Test finestre temporali condivise
 test_prompts.py          ← Test dei prompt e dei link del README
 test_integration.py      ← Test di integrazione
+controlli.bat            ← Wrapper Windows di controlli.py
+prova.bat                ← Test rapido senza generare il video (dry-run)
 genera_video.bat         ← Launcher 1-click (Windows)
 crea_venv.bat            ← Crea .venv (Windows)
 crea_venv.sh             ← Crea .venv (macOS/Linux)
@@ -40,7 +43,10 @@ sync-video-architecture (in docs/) ← Diagramma architettura (generato con arch
 Comandi verificati per chi modifica il codice:
 
 ```bash
-# Test (suite completa, unittest — 834 test)
+# Verifica completa in un colpo: CI + mypy 3 piattaforme + debug hardware
+python controlli.py
+
+# Test (suite completa, unittest — 892 test)
 python -m unittest discover -s . -p "test_*.py"
 
 # Type-check (mypy: codice di produzione e test, tranne la deny-list in mypy.ini)

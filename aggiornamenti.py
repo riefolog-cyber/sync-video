@@ -5,19 +5,20 @@ Controllo e aggiornamento dei pacchetti (script standalone).
 Esegue il bootstrap delle dipendenze e poi il controllo aggiornamenti con
 richiesta S/N per installare i pacchetti NON pinnati (e i pinnati testabili
 A/B, solo se equivalenti). I salti di major version vengono solo segnalati,
-mai installati automaticamente.
-
-Uso:
+mai installati automaticamente.Uso:
   python aggiornamenti.py            chiede S/N prima di installare
   python aggiornamenti.py --no-update   notifica e basta, non installa
   python aggiornamenti.py --no-update-check   non controlla nulla su PyPI
-oppure (doppio click): aggiornamenti.bat [--no-update] [--no-update-check]
+  python aggiornamenti.py --frozen-report   perche' i pacchetti non si aggiornano
+                                            (referto, non installa nulla)
+op pure (doppio click): aggiornamenti.bat [--no-update] [--no-update-check]
+                                         [--frozen-report]
 """
 
 import argparse
 
 from config import bootstrap, log
-from updates import run_update_check
+from updates import run_frozen_report, run_update_check
 
 
 def main() -> None:
@@ -36,7 +37,20 @@ def main() -> None:
         action="store_true",
         help="Non controllare gli aggiornamenti su PyPI",
     )
+    parser.add_argument(
+        "--frozen-report",
+        action="store_true",
+        help="Diagnostica i pacchetti che non si aggiornano: chi li vincola e fin dove si "
+        "arriverebbe sciogliendo i vincoli, uno alla volta. Non installa nulla",
+    )
     args = parser.parse_args()
+
+    # Un referto non deve installare: niente bootstrap, che è la parte che tocca pip.
+    # Il flag vale anche insieme a --no-update-check, perché il referto È il controllo
+    # aggiornamenti spiegato: chi lo chiede vuole quella risposta lì.
+    if args.frozen_report:
+        run_frozen_report()
+        return
 
     bootstrap()
     log.info("=" * 40)

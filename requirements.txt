@@ -1,5 +1,14 @@
 # Dipendenze principali
 pymupdf>=1.23.0
+# Pillow resta a >=10: NON e' un aggiornamento mancato, e' bloccato a monte.
+# Misura del 2026-10-10 (10.4.0 vs 12.3.0) sul percorso reale: 15 slide
+# 5734x3200 -> letterbox LANCZOS -> PNG di encoder e reference del controllo
+# frame-vs-slide, thumbnail del motore moviepy, messa in piano RGBA di ocr.py.
+# Il CODICE regge 12 (pixel IDENTICI su tutti e tre; cambia solo la codifica
+# del PNG, che nessuno hasha). A bloccare non e' il codice ma la metadata:
+# fastembed 0.5.1 richiede pillow<11 e moviepy 2.2.1 richiede pillow<12, quindi
+# pip non risolve "pillow>=12" insieme a loro (ResolutionImpossible). Il tetto
+# effettivo e' <11 finche' fastembed resta pinnato a 0.5.1.
 pillow>=10.0.0
 pytesseract>=0.3.10
 pydub>=0.25.0

@@ -64,6 +64,10 @@ fallisce in silenzio (è già successo: vedi P2 #13).
 
 ## Come verificare
 
+Tutto in un comando, con un solo esito finale: `controlli.bat` (Windows) o
+`python controlli.py`. Esegue i passi qui sotto, piu' il type-check sulle tre
+piattaforme e `_debug_hardware.py`. Se preferisci vederli uno per uno:
+
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check .
 .\.venv\Scripts\python.exe -m mypy .

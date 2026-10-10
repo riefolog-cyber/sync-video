@@ -334,6 +334,24 @@ installazione: **non** fallisce con un errore incomprensibile.
 > automaticamente i pacchetti **non pinnati**; disabilita con `--no-update`
 > (solo notifica) o `--no-update-check` (nessun controllo).
 >
+> Il report distingue tre motivi per cui una voce non è un'azione disponibile:
+> è **pinnata** (scelta del progetto), è un salto di **major version** (da
+> valutare a mano) oppure è **bloccata** dalle dipendenze già installate. PyPI
+> dice cosa è pubblicato, non cosa sta in piedi in questo ambiente: `pillow 12`
+> esiste, ma il pin di `fastembed` (`pillow<11`) e `moviepy` (`pillow<12`) la
+> escludono, quindi `pip install -U pillow` non la installerebbe. Le voci
+> bloccate si mostrano con 🚫 e il motivo, ma non entrano né nell'invito a
+> `pip install -U` né nella domanda S/N: non c'è niente da installare.
+>
+> **Perché un pacchetto non si muove.** Quando il report dice "no" senza dire da
+> cosa dipende il no, `--frozen-report` (o `aggiornamenti.bat --frozen-report`)
+> spiega: per ogni pacchetto fermo elenca tutti i vincoli dei pacchetti installati
+> (con ✅/🚫), il **tetto** raggiungibile in questo ambiente e, per ogni vincolo che
+> esclude la candidata, fin dove si arriverebbe sciogliendolo **da solo** — gli
+> altri restano, perché sciogliere un vincolo significa aggiornare il pacchetto che
+> lo impone. Segnala anche quando il muro è a sua volta un pacchetto pinnato dal
+> progetto. È un referto: legge PyPI, non installa nulla e non chiede conferme.
+>
 > **Pacchetti pinnati e test A/B.** Alcuni pacchetti sono bloccati a una
 > versione specifica perché un upgrade cambierebbe il risultato validato.
 > L'unico pin attuale è `fastembed==0.5.1` (le versioni successive passano da
@@ -362,7 +380,8 @@ installazione: **non** fallisce con un errore incomprensibile.
 >
 > Gli interruttori sono gli stessi di `main.py` e di `genera_video.bat`:
 > `--no-update` (notifica senza installare), `--no-update-check` (non
-> controllare PyPI), `--no-pause` (non fermarsi, per l'uso in automazione).
+> controllare PyPI), `--frozen-report` (referto dei pacchetti fermi),
+> `--no-pause` (non fermarsi, per l'uso in automazione).
 >
 > **La manutenzione di 9Router è un altro script.** Sta in
 > `aggiornamenti_9router.bat` e non è dentro `aggiornamenti.bat` perché

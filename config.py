@@ -1722,6 +1722,13 @@ Esempi:
         help="Controlla gli aggiornamenti ma non chiede di installarli (solo notifica)",
     )
     parser.add_argument(
+        "--frozen-report",
+        action="store_true",
+        help="Diagnostica i pacchetti che non si aggiornano: chi li vincola e fin dove si "
+        "arriverebbe sciogliendo i vincoli, uno alla volta. Legge PyPI, non installa "
+        "nulla e non chiede conferme: stampa il referto ed esce",
+    )
+    parser.add_argument(
         "--no-confirm",
         action="store_true",
         help="Non chiedere conferma prima della sincronizzazione stimata "

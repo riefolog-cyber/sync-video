@@ -59,7 +59,7 @@ crea_venv.bat          # Windows
 > macOS/Linux. Usa quello del tuo sistema — i `.bat` non esistono su macOS/Linux
 > e i `.sh` su Windows.
 
-Da quel momento `genera_video.bat`, `aggiornamenti.bat`, `prova.bat` e `check_embedding_models.bat` usano `.venv` da soli: non serve cambiare nulla a mano. Su macOS/Linux il comando è `.venv/bin/python main.py`.
+Da quel momento `genera_video.bat`, `aggiornamenti.bat`, `prova.bat`, `controlli.bat` e `check_embedding_models.bat` usano `.venv` da soli: non serve cambiare nulla a mano. Su macOS/Linux il comando è `.venv/bin/python main.py`.
 
 | Comando | Cosa fa |
 |---|---|

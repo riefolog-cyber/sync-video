@@ -9,10 +9,13 @@ di aver scelto qualcosa.
 Non tocca PyPI ne' installs: il bootstrap e il controllo sono mockati.
 """
 
+import contextlib
+import io
 import unittest
 from unittest import mock
 
 import aggiornamenti
+import config
 
 
 class TestInterruttori(unittest.TestCase):
@@ -58,6 +61,46 @@ class TestInterruttori(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 2)
         boot.assert_not_called()
         check.assert_not_called()
+
+    def _esegui_diagnostica(self, argv: list[str]) -> tuple[mock.MagicMock, mock.MagicMock, mock.MagicMock]:
+        """Come `_esegui`, ma registra anche la diagnostica dei pacchetti fermi."""
+        with mock.patch.object(aggiornamenti, "bootstrap") as boot, mock.patch.object(
+            aggiornamenti, "run_update_check"
+        ) as check, mock.patch.object(aggiornamenti, "run_frozen_report") as diag, mock.patch(
+            "sys.argv", ["aggiornamenti.py", *argv]
+        ):
+            aggiornamenti.main()
+        return boot, check, diag
+
+    def test_frozen_report_non_installa_e_non_controlla(self) -> None:
+        # Un referto non tocca pip: niente bootstrap (e' la parte che installa) e niente
+        # controllo aggiornamenti (il referto E' il controllo, spiegato).
+        boot, check, diag = self._esegui_diagnostica(["--frozen-report"])
+        boot.assert_not_called()
+        check.assert_not_called()
+        diag.assert_called_once_with()
+
+    def test_frozen_report_vince_su_no_update_check(self) -> None:
+        # --no-update-check dice "non controllare", --frozen-report dice "spiega": chi lo
+        # chiede deve riceverlo, altrimenti e' un interruttore decorativo.
+        _, check, diag = self._esegui_diagnostica(["--no-update-check", "--frozen-report"])
+        check.assert_not_called()
+        diag.assert_called_once_with()
+
+    def test_lo_stesso_interruttore_anche_in_main(self) -> None:
+        # Gli interruttori dei due script devono coincidere (regola del progetto): se il
+        # referto esistesse solo qui, si imparerebbe una cosa e se ne userebbe un'altra.
+        self.assertTrue(config.parse_args(["--frozen-report"]).frozen_report)
+
+    def test_help_elenca_il_referto(self) -> None:
+        # E' l'unico modo in cui l'interruttore si scopre: se sparisse da --help,
+        # resterebbe un flag che esiste e non si trova.
+        with mock.patch("sys.argv", ["aggiornamenti.py", "--help"]), contextlib.redirect_stdout(
+            io.StringIO()
+        ) as out, self.assertRaises(SystemExit) as ctx:
+            aggiornamenti.main()
+        self.assertEqual(ctx.exception.code, 0)
+        self.assertIn("--frozen-report", out.getvalue())
 
     def test_help_non_rivela_nulla(self) -> None:
         with mock.patch.object(

@@ -13,6 +13,9 @@ rem  Uso:
 rem    aggiornamenti.bat                        chiede S/N prima di installare
 rem    aggiornamenti.bat --no-update            notifica e basta
 rem    aggiornamenti.bat --no-update-check      non controlla PyPI
+rem    aggiornamenti.bat --frozen-report        perche' i pacchetti non si aggiornano
+rem                                             (referto: chi li vincola e fin dove si
+rem                                             arriverebbe; non installa nulla)
 rem    aggiornamenti.bat --no-pause             non fermarsi (automazione)
 rem  Gli interruttori sono gli stessi di main.py: niente da ricordare due volte.
 rem
@@ -34,8 +37,9 @@ if "%~1"=="" goto parsed
 if /i "%~1"=="--no-pause" (set "PAUSE_IT=0"& shift & goto parse)
 if /i "%~1"=="--no-update" (set "PA_FLAGS=!PA_FLAGS! --no-update"& shift & goto parse)
 if /i "%~1"=="--no-update-check" (set "PA_FLAGS=!PA_FLAGS! --no-update-check"& shift & goto parse)
+if /i "%~1"=="--frozen-report" (set "PA_FLAGS=!PA_FLAGS! --frozen-report"& shift & goto parse)
 echo Opzione sconosciuta: "%~1"
-echo Usa --no-pause, --no-update o --no-update-check.
+echo Usa --no-pause, --no-update, --no-update-check o --frozen-report.
 set "EXIT=2"
 goto fine
 :parsed

@@ -123,6 +123,7 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--no-confirm` | — | Non chiedere conferma interattiva (per batch/CI) |
 | `--no-update` | — | Al controllo aggiornamenti: notifica senza installare |
 | `--no-update-check` | — | Non controllare gli aggiornamenti su PyPI (default di `genera_video.bat`) |
+| `--frozen-report` | — | Diagnostica i pacchetti **fermi**: per ognuno elenca chi lo vincola (tutti i vincoli dei pacchetti installati), il tetto raggiungibile in questo ambiente e a quali versioni si arriverebbe sciogliendo i vincoli **uno alla volta**. Legge PyPI, non installa nulla e non chiede conferme: stampa il referto ed esce. Stesso interruttore in `aggiornamenti.bat` |
 | `--semantic-cache-dir` | `.cache/embedding_model` | Cartella dei modelli embedding |
 | `--log-file` | — | Scrivi anche il log su file |
 
