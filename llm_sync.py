@@ -75,6 +75,11 @@ from typing import Any, cast
 
 from chunks import Word, build_windows, words_text_in_window
 from config import CACHE_DIR, atomic_write_text, log
+
+# Re-export esplicito: pipeline_cache e i test importano questo prefisso, ma il
+# valore vive in config per non trascinare questo modulo (e ``requests``) dove
+# serve solo la stringa. La forma ``as`` dice a ruff/mypy che l'import è voluto.
+from config import LLM_REVIEW_CACHE_PREFIX as LLM_REVIEW_CACHE_PREFIX
 from timeline import (
     _complete_from_anchors,
     _lis_anchors,
@@ -1986,7 +1991,12 @@ def review_llm_timeline(
 # cache della timeline (``llm_<hash>.json``): la pulizia di fine run deve
 # CONSERVARE le prime -- altrimenti la stessa revisione viene ripagata a ogni
 # run -- e rimuovere solo le seconde non più riusabili.
-LLM_REVIEW_CACHE_PREFIX = "llm_review_"
+#
+# Il valore ora vive in ``config`` (condiviso con ``pipeline_cache`` senza
+# trascinare questo modulo): l'import in testa al file fa da re-export per i
+# test che fanno ``from llm_sync import LLM_REVIEW_CACHE_PREFIX``. Nessuna
+# riassegnazione qui: sarebbe un self-assignment innocuo ma che shadowa
+# l'import (ruff F811) senza cambiare nulla.
 
 
 def _review_cache_key(

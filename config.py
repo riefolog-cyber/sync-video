@@ -211,6 +211,15 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
 BASE_DIR = Path(__file__).parent
 CACHE_DIR = BASE_DIR / ".cache"
 
+# Prefisso dei file cache della revisione LLM (``llm_review_<hash>.json``).
+# Vive qui (non in ``llm_sync``) perché ``pipeline_cache`` deve distinguere le
+# cache "review" da conservare dalle cache "timeline" da ripulire, e così
+# importare solo questa stringa da ``config`` invece di caricare tutto
+# ``llm_sync`` (che trascina ``requests`` e company). ``llm_sync`` la
+# re-esporta per retro-compatibilità con i test.
+LLM_REVIEW_CACHE_PREFIX = "llm_review_"
+
+
 # =====================================================================
 # LOGGING (setup minimo prima del bootstrap)
 # =====================================================================

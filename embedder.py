@@ -7,11 +7,14 @@ Scompone il contratto che finora era implicito in ``semantic_sync``:
 - caricare un modello (con fallback), poi
 - produrre una funzione ``texts -> vettori normalizzati``.
 
-Gli strumenti esterni (check_fastembed_upgrade, analysis_sync) facevano
-sempre ``_load_embed_model`` + ``_make_embed_fn`` a mano: qui il due passi
-ha un nome e un Protocol, così un backend alternativo (hf-transformers +
-ONNX quantizzato, ad esempio) si può provare senza toccare
-``semantic_sync.py``.
+Gli strumenti esterni facevano sempre ``_load_embed_model`` +
+``_make_embed_fn`` a mano: qui il due passi ha un nome e un Protocol,
+così un backend alternativo (hf-transformers + ONNX quantizzato,
+ad esempio) si può provare senza toccare ``semantic_sync.py``.
+
+Migrati finora: ``check_fastembed_upgrade``. Restano sul percorso
+vecchio ``analysis_sync`` (uso sperimentale, non bloccante) e
+``semantic_sync`` stesso, che per definizione possiede il fallback.
 
 Il backend rimane fastembed (pinnato a 0.5.1, vedi requirements.txt): il
 Protocol serve a POTERLO sostituire, non a sostituirlo oggi.

@@ -12,8 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from config import CACHE_DIR, atomic_write_text, log
-from llm_sync import LLM_REVIEW_CACHE_PREFIX
+from config import CACHE_DIR, LLM_REVIEW_CACHE_PREFIX, atomic_write_text, log
 
 # Chiavi "housekeeping" che NON sono cache di contenuto: vanno conservate
 # (updates_check = TTL PyPI, fastembed_ab = report A/B, sync_report =
