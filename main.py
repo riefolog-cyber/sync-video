@@ -4,8 +4,6 @@ Orchestratore principale del pipeline slide-audio.
 Gestisce cache/resume, dry-run, e coordina tutte le fasi.
 """
 
-import hashlib
-import json
 import logging
 import os
 import re
@@ -36,13 +34,11 @@ from config import (
     DEFAULT_WHISPER_BEAM_ACCURATE,
     DEFAULT_WHISPER_DEVICE,
     STOPWORDS_ITA,
-    atomic_write_text,
     bootstrap,
     log,
     parse_args,
 )
 from llm_sync import (
-    LLM_REVIEW_CACHE_PREFIX,
     endpoints_for,
     is_interactive,
     llm_cache_keys_for,
@@ -56,6 +52,26 @@ from llm_sync import (
 )
 from machine_setup import machine_setup
 from ocr import PRESENTATION_SUFFIXES, convert_presentation_to_pdf, extract_slides_text_ocr
+
+# =====================================================================
+# MODULI ESTRATTI (P2): cache + report vivono in pipeline_cache /
+# pipeline_report. Qui solo shim: `from main import X` (forma usata da
+# ~40 test) continua a funzionare senza modifiche. I wrapper iniettano la
+# CACHE_DIR di QUESTO modulo: i test fanno `main.CACHE_DIR = tmpdir` e
+# devono vedere il cambio (gli alias puri puntavano a config.CACHE_DIR).
+# =====================================================================
+from pipeline_cache import cache_path as _cache_path_impl
+from pipeline_cache import clean_orphan_cache as _clean_orphan_cache_impl
+from pipeline_cache import clean_stale_llm_cache as _clean_stale_llm_cache_impl
+from pipeline_cache import file_hash as _file_hash
+from pipeline_cache import load_cache as _load_cache_impl
+from pipeline_cache import save_cache as _save_cache_impl
+from pipeline_cache import save_final_timeline as _save_final_timeline_impl
+from pipeline_cache import save_sync_report as _save_sync_report_impl
+from pipeline_report import append_timing_history as _append_timing_history
+from pipeline_report import format_time as _format_time
+from pipeline_report import print_timing as _print_timing_impl
+from pipeline_report import slide_list_text as _slide_list_text
 from semantic_sync import (
     SemanticOptions,
     alignment_quality_from_words,
@@ -86,6 +102,46 @@ from timeline import (
 from transcription import correct_transcript_names, resolved_transcriber, transcribe_audio
 from updates import run_update_check
 from video import build_video, frame_consistency_check
+
+
+# =====================================================================
+# SHIM CACHE (P2): i wrapper iniettano la CACHE_DIR di QUESTO modulo —
+# i test fanno `main.CACHE_DIR = tmpdir` e devono vedere il cambio
+# (gli alias puri puntavano a config.CACHE_DIR, che non cambia).
+# =====================================================================
+def _clean_orphan_cache(active_keys: set[str]) -> int:
+    """Wrapper shim: vedi pipeline_cache.clean_orphan_cache (inietta CACHE_DIR)."""
+    return _clean_orphan_cache_impl(active_keys, cache_dir=CACHE_DIR)
+
+
+def _clean_stale_llm_cache(keep_stems: set[str]) -> int:
+    """Wrapper shim: vedi pipeline_cache.clean_stale_llm_cache (inietta CACHE_DIR)."""
+    return _clean_stale_llm_cache_impl(keep_stems, cache_dir=CACHE_DIR)
+
+
+def _save_final_timeline(timeline: dict[int, float], total_duration: float) -> None:
+    """Wrapper shim: vedi pipeline_cache.save_final_timeline (inietta CACHE_DIR)."""
+    _save_final_timeline_impl(timeline, total_duration, cache_dir=CACHE_DIR)
+
+
+def _save_sync_report(report: dict[str, object]) -> None:
+    """Wrapper shim: vedi pipeline_cache.save_sync_report (inietta CACHE_DIR)."""
+    _save_sync_report_impl(report, cache_dir=CACHE_DIR)
+
+
+def _cache_path(key: str) -> Path:
+    """Wrapper shim: vedi pipeline_cache.cache_path (inietta CACHE_DIR)."""
+    return _cache_path_impl(key, cache_dir=CACHE_DIR)
+
+
+def _load_cache(key: str) -> dict | None:
+    """Wrapper shim: vedi pipeline_cache.load_cache (inietta CACHE_DIR)."""
+    return _load_cache_impl(key, cache_dir=CACHE_DIR)
+
+
+def _save_cache(key: str, data: dict) -> None:
+    """Wrapper shim: vedi pipeline_cache.save_cache (inietta CACHE_DIR)."""
+    _save_cache_impl(key, data, cache_dir=CACHE_DIR)
 
 
 # =====================================================================
@@ -146,104 +202,10 @@ def _abort(message: str) -> NoReturn:
     sys.exit(1)
 
 
-# Chiavi "housekeeping" che NON sono cache di contenuto: vanno conservate
-# (updates_check = TTL del controllo PyPI, fastembed_ab = report test A/B,
-# sync_report = report di sincronizzazione dell'ultima run, artefatto di
-# diagnosi che analysis_sync.py e il debug manuale devono poter leggere).
-_KEEP_CACHE_STEMS = frozenset({"machine_setup", "updates_check", "fastembed_ab", "sync_report"})
-
-def _clean_orphan_cache(active_keys: set[str]) -> int:
-    """Rimuove i file .json nella cache che non corrispondono ai
-    file PDF/audio correnti (chiavi attive). Restituisce il numero rimossi.
-
-    I file ``llm_*.json`` (timeline e review LLM) NON vengono MAI rimossi:
-    la loro chiave è un hash del contenuto (slide + audio + chunk), quindi si
-    invalidano da soli quando cambia l'input. Cancellarli a fine run farebbe
-    ripagare la chiamata LLM a ogni esecuzione.
-
-    Anche ``machine_setup.json`` (scelta del motore rilevata dall'hardware)
-    NON viene rimosso: è un file di configurazione, non una cache, e va
-    riusato nelle run successive senza rifare il rilevamento. Le chiavi
-    housekeeping (``updates_check`` = TTL del check PyPI, ``fastembed_ab`` =
-    report del test A/B) vengono conservate per lo stesso motivo: cancellarle
-    farebbe ripetere il check di rete (o il test A/B) a ogni run.
-    """
-    if not CACHE_DIR.exists():
-        return 0
-    removed = 0
-    for cache_file in CACHE_DIR.glob("*.json"):
-        key = cache_file.stem  # nome file senza .json
-        if key.startswith("llm_") or key in _KEEP_CACHE_STEMS:
-            continue
-        if key not in active_keys:
-            cache_file.unlink()
-            removed += 1
-            log.debug("   🧹 Cache orfana rimossa: %s", cache_file.name)
-    return removed
-
-
-def _clean_stale_llm_cache(keep_stems: set[str]) -> int:
-    """Rimuove i file cache LLM (llm_*.json) che la run corrente non riuserà.
-
-    Le chiavi LLM sono hash del contenuto (slide + parlato + ancore +
-    endpoint): cambiando podcast o presentazione i vecchi file non servono più.
-    Conserva gli stem in ``keep_stems`` (le chiavi della run corrente e la
-    timeline finale per la verifica post-run) e TUTTE le cache della revisione
-    (``llm_review_*``): anche la revisione è un hash del contenuto, quindi si
-    invalida da sola quando l'input cambia, mentre rimuoverla a ogni avvio
-    farebbe ripagare la chiamata LLM a ogni run.
-    """
-    if not CACHE_DIR.exists():
-        return 0
-    removed = 0
-    for cache_file in CACHE_DIR.glob("llm_*.json"):
-        stem = cache_file.stem
-        if stem in keep_stems or stem.startswith(LLM_REVIEW_CACHE_PREFIX):
-            continue
-        cache_file.unlink()
-        removed += 1
-        log.debug("   🧹 Cache LLM orfana rimossa: %s", cache_file.name)
-    return removed
-
-
-# =====================================================================
-# STATISTICHE TEMPI
-# =====================================================================
-def _format_time(seconds: float) -> str:
-    """Formatta secondi in formato leggibile."""
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    m, s = divmod(int(seconds), 60)
-    return f"{m}m{s:02d}s"
-
-
-def _save_final_timeline(
-    timeline: dict[int, float],
-    total_duration: float,
-) -> None:
-    """Persiste la timeline finale validata come ``llm_timeline_finale.json``.
-
-    Gli strumenti di verifica post-run (analysis_sync.py) auto-rilevano la
-    timeline più recente dalla cache cercando i file ``llm_*.json``: il flusso
-    semantico (MiniLM) non salva cache LLM, quindi senza questo file verrebbe
-    riciclata una timeline di una run precedente. Il prefisso ``llm_`` fa sì
-    che il file sopravviva alla pulizia delle cache orfane, e viene
-    sovrascritto a ogni run con gli start/end effettivamente usati per il video.
-    """
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    entries: list[dict[str, float]] = []
-    ordered = sorted(timeline)
-    # `enumerate` invece di `ordered.index(s)`: quest'ultimo ripartiva dalla
-    # testa della lista a ogni slide, rendendo il salvataggio quadratico
-    # (irrilevante su 20 slide, ma la timeline può arrivare a centinaia).
-    for i, s in enumerate(ordered):
-        end = timeline[ordered[i + 1]] if i + 1 < len(ordered) else total_duration
-        entries.append({"slide": s, "start": round(float(timeline[s]), 3), "end": round(float(end), 3)})
-    atomic_write_text(
-        CACHE_DIR / "llm_timeline_finale.json",
-        json.dumps(entries, ensure_ascii=False),
-    )
-    log.info("   Timeline finale salvata in cache per la verifica (llm_timeline_finale.json).")
+# Corpi spostati in pipeline_cache.py / pipeline_report.py (re-export shim
+# sopra): _clean_orphan_cache, _clean_stale_llm_cache, _save_final_timeline,
+# _save_sync_report, _file_hash, _cache_path, _load_cache, _save_cache,
+# _format_time, _print_timing, _append_timing_history, _slide_list_text.
 
 
 def _print_timing(
@@ -256,120 +218,23 @@ def _print_timing(
     t_total: float,
     t_llm: float = 0.0,
 ) -> None:
-    """Stampa il riepilogo dei tempi di ogni fase e lo salva nello storico.
+    """Riepilogo tempi (wrapper su pipeline_report).
 
-    ``t_embed`` è il calcolo dei vettori (la voce che domina la
-    sincronizzazione), ``t_model`` è il caricamento dei pesi: confonderli
-    nascondeva il costo vero (la riga "Embedding" mostrava pochi secondi di
-    caricamento invece dei ~30s di embedding).
-
-    ``t_llm`` è l'attesa delle chiamate all'LLM. Va dichiarata per la stessa
-    ragione che ha fatto correggere la riga Embedding: senza, una cascata LLM
-    costata 328s finiva dentro "Sincronizzaz." senza attribuzione e lo spreco
-    restava invisibile finché non si leggevano i log riga per riga.
+    Il wrapper serve perché i test fanno ``mock.patch.object(main,
+    "_append_timing_history")``: delegando con history_fn risolto QUI, a
+    ogni chiamata, il patch sul namespace di main viene visto dalla stampa
+    (se pipeline_report chiamasse il proprio modulo, il mock sarebbe
+    invisibile e il test fallirebbe).
     """
-    log.info("\n" + "─" * 50)
-    log.info(" ⏱️  RIEPILOGO TEMPI")
-    log.info("─" * 50)
-    log.info("   OCR / Slide   │ %s", _format_time(t_ocr))
-    log.info("   Trascrizione  │ %s", _format_time(t_transcribe))
-    log.info("   Sincronizzaz. │ %s", _format_time(t_sync))
-    if t_embed > 0:
-        log.info("     └ Embedding │ %s", _format_time(t_embed))
-    if t_model > 0:
-        log.info("     └ Modello   │ %s", _format_time(t_model))
-    if t_llm > 0:
-        log.info("     └ LLM       │ %s", _format_time(t_llm))
-    if t_video > 0:
-        log.info("   Encoding Video│ %s", _format_time(t_video))
-    log.info("   ─────────────────────────")
-    log.info("   TOTALE         │ %s", _format_time(t_total))
-    log.info("─" * 50)
-    # Peso cache + thread effettivi nel riepilogo (P1): l'utente vede quanto
-    # spazio occupa e cosa ha scelto l'auto-tuning per questo PC.
-    # Mai bloccare il riepilogo per una misura: gli errori restano in debug.
-    with suppress(Exception):
-        from cache_maintenance import cache_disk_usage, format_bytes
-
-        righe = cache_disk_usage(CACHE_DIR)
-        if righe:
-            totale = sum(peso for _, peso in righe)
-            dettaglio = ", ".join(f"{nome.rstrip('/')} {format_bytes(peso)}" for nome, peso in righe[:3])
-            log.info("   💾 Cache: %s (%s)", format_bytes(totale), dettaglio)
-    with suppress(Exception):
-        from config import (
-            DEFAULT_EMBED_THREADS,
-            DEFAULT_OCR_WORKERS,
-            DEFAULT_VIDEO_THREADS,
-            DEFAULT_WHISPER_THREADS,
-            _physical_cpus,
-        )
-
-        fisici = _physical_cpus()
-        sorgente = f"{fisici} fisici" if fisici else "logici"
-        log.info(
-            "   🧵 Thread: whisper %d, embedding %d, video %d, ocr %d "
-            "(auto da %s; override WHISPER/EMBED/VIDEO_THREADS, OCR_WORKERS)",
-            DEFAULT_WHISPER_THREADS,
-            DEFAULT_EMBED_THREADS,
-            DEFAULT_VIDEO_THREADS,
-            DEFAULT_OCR_WORKERS,
-            sorgente,
-        )
-    _append_timing_history(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total, t_llm)
+    _print_timing_impl(
+        t_ocr, t_transcribe, t_sync, t_embed, t_model, t_video, t_total, t_llm,
+        history_fn=_append_timing_history,
+    )
 
 
-def _append_timing_history(
-    t_ocr: float, t_transcribe: float, t_sync: float, t_embed: float, t_video: float, t_total: float,
-    t_llm: float = 0.0,
-) -> None:
-    """Persiste lo storico dei tempi per fase in ``.cache/timing_history.jsonl``.
-
-    Serve a monitorare regressioni di velocità tra una run e l'altra (una
-    riga JSON per run, con data/ora). La mancata scrittura non blocca mai
-    la run (solo debug log).
-    """
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        entry = {
-            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "ocr": round(t_ocr, 1),
-            "transcribe": round(t_transcribe, 1),
-            "sync": round(t_sync, 1),
-            "embed": round(t_embed, 1),
-            "llm": round(t_llm, 1),
-            "video": round(t_video, 1),
-            "total": round(t_total, 1),
-        }
-        with (CACHE_DIR / "timing_history.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except OSError:
-        log.debug("   Impossibile salvare lo storico tempi (ignorato).")
-
-
-def _slide_list_text(slides: Sequence[int], *, di: bool = False) -> str:
-    """Elenco di slide in italiano per il riepilogo finale.
-
-    ``[13]`` -> "la slide 13", ``[6, 12]`` -> "le slide 6 e 12"; con
-    ``di=True`` gli articoli diventano "della/delle" (per frasi come "il parlato
-    della slide 2"). Il riepilogo è testo per l'utente: "per le slide 13 la
-    durata è anomala" è una frase sbagliata, non solo poco elegante.
-
-    Lista vuota -> stringa vuota: la funzione resta un formato, non un
-    assunzione sui dati. Oggi ogni chiamante controlla prima `if lista`, ma con
-    `numbers[0]` su una lista vuota il riepilogo finale — cioè l'ultima cosa
-    stampata, DOPO che il video è già stato prodotto — si sarebbe interrotto
-    con un IndexError e la run sarebbe sembrata fallita.
-    """
-    numbers = [str(s) for s in slides]
-    if not numbers:
-        return ""
-    if len(numbers) == 1:
-        return f"{'della' if di else 'la'} slide {numbers[0]}"
-    joined = f"{numbers[0]} e {numbers[1]}" if len(numbers) == 2 else f"{', '.join(numbers[:-1])} e {numbers[-1]}"
-    return f"{'delle' if di else 'le'} slide {joined}"
-
-
+# =====================================================================
+# RIEPILOGO FINALE (helper specifici del report in parole semplici)
+# =====================================================================
 def _transizioni_senza_ancora(anchors: dict[str, object] | None) -> list[int]:
     """Slide il cui inizio NON è fissato da un'ancora "slide N" pronunciata.
 
@@ -1472,30 +1337,12 @@ def _build_sync_report(
     return report
 
 
-def _save_sync_report(report: dict[str, object]) -> None:
-    """Scrive ``sync_report.json`` in cache (l'errore di scrittura non blocca)."""
-    try:
-        atomic_write_text(
-            CACHE_DIR / "sync_report.json",
-            json.dumps(report, ensure_ascii=False, indent=2),
-        )
-        log.debug("   Report di sincronizzazione salvato in cache (sync_report.json).")
-    except OSError:
-        log.debug("   Impossibile salvare il report di sincronizzazione (ignorato).")
+# (Spostata in pipeline_cache.save_sync_report, re-esportata come shim sopra.)
 
 
 # =====================================================================
-# CACHE SYSTEM
+# CACHE SYSTEM (primitive in pipeline_cache.py, re-esportate sopra)
 # =====================================================================
-def _file_hash(path: Path) -> str:
-    """MD5 hash del contenuto di un file (streaming: non carica il file in memoria)."""
-    md5 = hashlib.md5()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            md5.update(block)
-    return md5.hexdigest()
-
-
 def _transcript_cache_key(audio_hash: str, args: Any, beam: int | None = None) -> str:
     """Chiave di cache della trascrizione.
 
@@ -1769,29 +1616,7 @@ def _transcribe_with_accurate_beam(
     return transcript, words, {"accurate_beam": beam, "accurate_seconds": round(seconds, 1)}
 
 
-def _cache_path(key: str) -> Path:
-    """Percorso del file di cache per una data chiave."""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    return CACHE_DIR / f"{key}.json"
-
-
-def _load_cache(key: str) -> dict | None:
-    """Carica dati dalla cache, o None se non presente."""
-    path = _cache_path(key)
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except (json.JSONDecodeError, OSError) as e:
-            log.debug("   Cache corrotta (%s), ignoro: %s", key, e)
-    return None
-
-
-def _save_cache(key: str, data: dict) -> None:
-    """Salva dati nella cache."""
-    atomic_write_text(_cache_path(key), json.dumps(data, ensure_ascii=False, indent=2))
-    log.debug("   Cache salvata: %s", key)
+# (Spostate in pipeline_cache.py: _cache_path, _load_cache, _save_cache.)
 
 
 # =====================================================================
