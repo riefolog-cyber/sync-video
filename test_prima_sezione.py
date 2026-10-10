@@ -16,6 +16,7 @@ import unittest
 from typing import ClassVar
 
 import main
+from chunks import Word
 
 SLIDE1 = (
     "L'esperienza della perdita Cartografia dell'assenza e filosofia della "
@@ -44,35 +45,34 @@ INTRO_STRANIO = (
 )
 
 
-def _parla(frase, secondi):
+def _parla(frase: str, secondi: float) -> list[Word]:
     parole = frase.split()
     dur = secondi / max(len(parole), 1)
-    return [{"word": p, "start": i * dur, "end": (i + 1) * dur}
-            for i, p in enumerate(parole)]
+    return [{"word": p, "start": i * dur} for i, p in enumerate(parole)]
 
 
 class TestPrimaSezione(unittest.TestCase):
     DUR = 71.0
     SLIDE_TEXTS: ClassVar[list[str]] = [SLIDE1, SLIDE2, SLIDE3, SLIDE4]
 
-    def _verdetto(self, introduzione):
+    def _verdetto(self, introduzione: str) -> str | None:
         durations = [self.DUR, 60.0, 60.0, 60.0]
         return main._validate_anomalous_segments(
             [(0, 1, self.DUR)], self.SLIDE_TEXTS, _parla(introduzione, self.DUR), durations
         ).get(1)
 
-    def test_audio_coerente_con_la_primapagina(self):
+    def test_audio_coerente_con_la_primapagina(self) -> None:
         # Il caso reale del 04/10: il conduttore apre parlando del libro e la
         # pagina 1 e' la copertina del libro. Qui il controllo deve TACERE.
         self.assertEqual(self._verdetto(INTRO_REALE), "coerente")
 
-    def test_aperto_sulla_pagina_sbagliata_e_fuqariato(self):
+    def test_aperto_sulla_pagina_sbagliata_e_fuqariato(self) -> None:
         # Lo scenario pericoloso: l'audio parla nettamente della pagina 2
         # mentre il video apre con la pagina 1. Il verdetto deve essere netto,
         # altrimenti l'avviso non scatterebbe e il buco resterebbe aperto.
         self.assertEqual(self._verdetto(INTRO_PAGINA2), "disallineata")
 
-    def test_audio_senza_riferimenti_non_provocca_allarmi(self):
+    def test_audio_senza_riferimenti_non_provocca_allarmi(self) -> None:
         # Un'introduzione che non parla di nessuna pagina (crediti, esame) non
         # e' un errore di sincronizzazione: il verdetto resta incerto e non
         # parte nessun avviso. Un controllo che suona a caso peggiorerebbe la

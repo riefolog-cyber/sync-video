@@ -117,16 +117,14 @@ def baseline_embeddings(
     model: str = DEFAULT_MODEL,
     cache_dir: str | None = None,
 ) -> np.ndarray | None:
-    """Embedding di baseline con la fastembed installata (via semantic_sync)."""
-    cache_dir = cache_dir or str(CACHE_DIR / "embedding_model")
-    from semantic_sync import _load_embed_model, _make_embed_fn
+    """Embedding di baseline con la fastembed installata (via interfaccia embedder)."""
+    from embedder import load_embedder
 
-    model_obj = _load_embed_model(model, cache_dir, alternate_name=ALTERNATE_MODEL)
-    if model_obj is None:
+    cache_dir = cache_dir or str(CACHE_DIR / "embedding_model")
+    emb = load_embedder(model, cache_dir, alternate_name=ALTERNATE_MODEL)
+    if emb is None:
         return None
-    embed_fn = _make_embed_fn(model_obj)
-    emb = embed_fn(texts)
-    return np.asarray(emb, dtype=np.float32) if emb is not None else None
+    return np.asarray(emb.embed(texts), dtype=np.float32)
 
 
 # =====================================================================
