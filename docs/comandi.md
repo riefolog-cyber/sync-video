@@ -47,6 +47,8 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--whisper-model` | `small` | tiny/base/small/medium/large/large-v3 |
 | `WHISPER_MODEL` (env) | `small` | Modello usato da `genera_video.bat` (es. `set WHISPER_MODEL=tiny` per la bozza veloce) |
 | `VERIFY_VIDEO` (env) | `1` | Controllo del video finito attivato da `genera_video.bat` (pochi secondi): `set VERIFY_VIDEO=0` per disattivarlo |
+| `SYNC_VIDEO_NO_PYTHON_INSTALL` (env) | — | Impostala a `1` per **non** far installare Python automaticamente con winget al primo avvio su Windows |
+| `SYNC_VIDEO_NO_VENV` (env) | — | Impostala a `1` per usare il Python di sistema invece della cartella `.venv` del progetto |
 | `--transcriber` | `auto` | `auto`/`openvino`/`whisper` (OpenVINO ~1.5x più veloce) |
 | `--whisper-beam` | `1` | Beam size faster-whisper. `1` = decodifica greedy, default **misurato**: ~2.3× più veloce con le ancore `slide N` entro 0.15s da beam 5. Con `1` la pipeline **sceglie da sola**: decodifica veloce se le slide sono vincolate dalle ancore, altrimenti rifà la trascrizione a beam `5` (vedi sopra). `2`-`5` = scelta manuale, nessuna correzione automatica |
 | `--no-auto-beam` | — | Disattiva la scelta automatica del beam: usa esattamente `--whisper-beam` (o `AUTO_BEAM=0`) |

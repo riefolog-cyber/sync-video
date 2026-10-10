@@ -2,12 +2,16 @@
 
 ## 🖥️ Setup su un altro PC
 
-Su Windows puoi **saltare i passi 1 e 2**: lancia direttamente
-`genera_video.bat` e il programma installa da solo Python 3.11 (via winget),
-Tesseract, ffmpeg e i modelli. Vedi [Primo avvio automatico](#primo-avvio-automatico).
+**Su Windows, se hai scaricato lo ZIP: non devi installare niente a mano.**
+Metti `presentazione.pdf` e `podcast.m4a` nella cartella e fai doppio clic su
+`genera_video.bat`: il programma installa Python 3.11 (via winget), Tesseract,
+ffmpeg e i modelli, e poi genera il video. Vedi
+[Primo avvio automatico](#primo-avvio-automatico).
 
-1. **Installa Python 3.10+** da [python.org](https://python.org) — spunta **"Add Python to PATH"**.
-2. **Installa Git** da [git-scm.com](https://git-scm.com) (se non presente).
+Git serve solo se vuoi clonare il repository; dallo ZIP non ti serve.
+
+1. **Installa Python 3.10+** da [python.org](https://python.org) — spunta **"Add Python to PATH"**. *(Solo se non usi l'avvio automatico, o se sei su Linux/macOS.)*
+2. **Installa Git** da [git-scm.com](https://git-scm.com) (se non presente, e solo se vuoi clonare).
 3. **Clona il repository**:
    ```bash
    git clone https://github.com/riefolog-cyber/sync-video.git

@@ -26,16 +26,23 @@ graph LR
 # Opzione 1: Doppio click su genera_video.bat
 
 # Opzione 2: Terminale
-python main.py
+genera_video.bat
 
 # Il bootstrap installa automaticamente TUTTE le dipendenze:
 # pacchetti pip, Tesseract OCR, ffmpeg, modelli ML
+# Su Windows installa anche Python, se sul PC non c'e' ne' uno
+# (via winget: serve Windows 10 1809 o Windows 11).
 # Output: video_finale.mp4
 #
 # Installa/aggiorna anche i pacchetti sotto la versione minima richiesta: un
-# pacchetto troppo vecchio può far fallire l'import di un ALTRO pacchetto (es.
+# pacchetto troppo vecchio puo' far fallire l'import di un ALTRO pacchetto (es.
 # numpy vecchio -> pandas non si importa -> pytesseract sembra guasto).
 ```
+
+> Su Windows non devi installare niente a mano: scarichi lo ZIP, fai doppio
+> clic su `genera_video.bat`, e il programma prepara il PC da sé. Su Linux e
+> macOS Python va installato a mano. Dettagli e come disattivare
+> l'installazione automatica: [docs/setup.md](docs/setup.md#primo-avvio-automatico).
 
 ### 🔒 Ambiente dedicato (consigliato)
 
