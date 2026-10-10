@@ -29,6 +29,8 @@ consigliata, primo avvio automatico di Python su Windows).
 | P2 #15 | `main.py --help` rotto da un `%` non escapato | ✅ |
 | P2 #16 | Rilevamento GPU su Linux a cascata | ✅ |
 | #17 | Primo avvio automatico anche di Python (Windows) | ✅ |
+| #18 | Controllo dello spazio disco prima del primo download | ✅ |
+| #19 | Avviso se i modelli di default sono pesanti per il PC | ✅ |
 
 ## Decisioni da non riaprire
 
@@ -47,10 +49,11 @@ sarebbe plausibile: resta rimandata per una ragione di merito (beneficio
 incerto), non per una barriera tecnica.
 
 **Downgrade automatico del modello su RAM bassa: non eseguito di proposito.**
-Il batching si adatta alla RAM, ma cambiare modello (whisper `small` →
-`tiny`, e5-large → altro) peggiora il risultato in modo invisibile
-all'utente. Se serve, si fa come **avviso esplicito con suggerimento**, non
-come default nascosto: è una decisione che spetta a chi legge.
+Il batching, i thread e l'encoder si adattano alla RAM; i *pesi* no. Su un
+PC piccolo il programma **avvisa** (#19) e dice cosa mettere in `.env`, ma non
+abbassa il modello di nascosto: un risultato peggiore che nessuno ha scelto è
+peggio di un avviso, e i confronti con la baseline (che usa `small`)
+perderebbero significato.
 
 **`psutil` non è in `requirements.txt`.** Tutti i probe hardware funzionano
 senza: il progetto usa la libreria standard (`ctypes` su Windows,

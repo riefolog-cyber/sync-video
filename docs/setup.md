@@ -40,6 +40,15 @@ run lo dice.
 | Batch embedding | `16` sotto 6 GB di RAM, `32` sotto 12 GB, `64` oltre |
 | Batch whisper | `4` sotto 6 GB di RAM, `8` oltre |
 
+**Cosa NON si adatta, e perché.** I *modelli* restano quelli di default
+(`whisper small`, `multilingual-e5-large`) su ogni macchina. Il batch si
+riduce, ma i pesi no: e5-large tiene ~4,3 GB in memoria e `small` altri
+~500 MB, ovunque. Su un PC con poca RAM il programma **avvisa** all'avvio e
+dice cosa mettere in `.env` per alleggerire — non abbassa il modello di
+nascosto, perché un risultato peggiore che nessuno ha scelto è peggio di un
+avviso, e i confronti con la baseline del progetto (che usa `small`)
+perderebbero significato.
+
 **Nessuna di queste scelte può far fallire la run.** Se l'encoder accelerato
 non funziona (driver vecchio, device non supportato) il video viene rifatto
 automaticamente su `libx264`; se il modello di trascrizione non parte sul
