@@ -40,10 +40,10 @@ sync-video-architecture (in docs/) ← Diagramma architettura (generato con arch
 Comandi verificati per chi modifica il codice:
 
 ```bash
-# Test (suite completa, unittest — 315 test)
+# Test (suite completa, unittest — 834 test)
 python -m unittest discover -s . -p "test_*.py"
 
-# Type-check (mypy, 16 moduli sorgente; i test sono esclusi)
+# Type-check (mypy: codice di produzione e test, tranne la deny-list in mypy.ini)
 python -m mypy .
 
 # Lint (ruff — pulito)
@@ -55,9 +55,10 @@ python -m ruff check . --fix
 
 Il `ruff.toml` esclude le metriche di complessità (PLR09xx, PLC0415) perché
 rappresentano il backlog di refactoring, non guardrail di stile: il check
-default resta verde. Le 6 segnalazioni `BLE001` sono i `try/except Exception`
-volutamente ampi (fallback robusti: LLM irraggiungibile, cache corrotta,
-embedding fallito) e non vanno "stretti" senza motivo.
+default resta verde. I `try/except Exception` difensivi (fallback robusti: LLM
+irraggiungibile, cache corrotta, embedding fallito) non vanno "stretti" senza
+motivo: `ruff.toml` li esclude da BLE001 file per file (probe hardware e rete,
+fallback OCR, bootstrap).
 
 ### File generati (temporanei, auto-puliti)
 

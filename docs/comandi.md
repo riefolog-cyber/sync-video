@@ -26,7 +26,7 @@ python main.py --whisper-model large-v3
 python main.py --transcriber openvino
 python main.py --transcriber whisper
 
-# Esegui i test (147 unit test: pipeline, LLM, chunks, integrazione)
+# Esegui i test (424 test: pipeline, LLM, chunks, integrazione)
 python -m unittest test_sync test_integration test_llm_sync test_chunks
 ```
 
@@ -92,7 +92,7 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--openvino-device` | `GPU` | Device OpenVINO (`GPU` iGPU o `CPU`) |
 | `--openvino-download` | — | Scarica modello OpenVINO IR (una tantum) |
 | `--prefetch-models` | — | Scarica **tutti** i modelli ML (embedding, pesi Whisper, OpenVINO IR) e esce, senza toccare PDF o audio. Utile dopo un clone o un cambio di macchina: tiene i download fuori dalla prima run reale |
-| `--semantic-model` | e5-large | Modello embedding |
+| `--semantic-model` | `intfloat/multilingual-e5-large` | Modello embedding (serve l'id completo del repo, non `e5-large`: fastembed non accetta l'abbreviazione) |
 | `--semantic-window` | `4.0` | Secondi per blocco |
 | `--semantic-min-duration` | `3.0` | Durata minima slide (s) |
 | `--semantic-temperature` | `0.15` | Competizione softmax (più bassa = picchi più netti) |
