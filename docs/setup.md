@@ -2,6 +2,10 @@
 
 ## 🖥️ Setup su un altro PC
 
+Su Windows puoi **saltare i passi 1 e 2**: lancia direttamente
+`genera_video.bat` e il programma installa da solo Python 3.11 (via winget),
+Tesseract, ffmpeg e i modelli. Vedi [Primo avvio automatico](#primo-avvio-automatico).
+
 1. **Installa Python 3.10+** da [python.org](https://python.org) — spunta **"Add Python to PATH"**.
 2. **Installa Git** da [git-scm.com](https://git-scm.com) (se non presente).
 3. **Clona il repository**:
@@ -49,6 +53,41 @@ Le variabili d'ambiente hanno sempre precedenza sul rilevamento automatico
 > ripieghi una macchina con GPU NVIDIA restava sulla CPU senza dirlo. Se
 > sospetti che il rilevamento abbia mancato la tua GPU, verifica con
 > `--force-setup`.
+
+### Primo avvio automatico
+
+Scaricato lo ZIP del repository e fatto doppio clic su `genera_video.bat`, su
+Windows **non devi installare niente a mano**. Il programma, in ordine:
+
+1. **Python 3.11** — se non c'è nessun Python sul PC, lo installa con `winget`
+   (circa 25 MB, una volta sola, per il tuo utente senza chiedere privilegi
+   di amministratore). È l'unica cosa che non può fare il bootstrap interno,
+   perché il bootstrap gira *dentro* Python: a installarlo è il `.bat`, che
+   gira in `cmd.exe`.
+2. **Tesseract OCR** e **ffmpeg** — con `winget` / `apt-get` / `brew`, se mancano.
+3. **I modelli** (~6.4 GB di embedding + ~490 MB di Whisper), annunciati
+   prima di essere scaricati.
+4. **L'ambiente** `.venv`, con i pacchetti del progetto isolati dagli altri
+   programmi del PC.
+
+Riepilogo: **Tesseract, ffmpeg, i modelli, i pacchetti, l'encoder video e i
+thread** si adattano da soli. Python richiede winget (cioè Windows 10
+1809/Windows 11) e può essere saltato.
+
+Per **non** farlo installare e decidere tu:
+
+```powershell
+$env:SYNC_VIDEO_NO_PYTHON_INSTALL=1
+.\genera_video.bat
+```
+
+Se winget non è disponibile (Linux, macOS, Windows 10 precedente, macchine
+gestite) il programma lo dice esplicitamente e indica la pagina di
+installazione: **non** fallisce con un errore incomprensibile.
+
+> Su **Linux e macOS** l'installazione automatica di Python **non** esiste:
+> il repo richiede di installare Python a mano, poi lancia `crea_venv.sh`
+> (o `crea_venv.bat`). Tutto il resto è automatico anche lì.
 
 ### Cosa viene installato automaticamente al primo avvio
 

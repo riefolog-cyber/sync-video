@@ -16,8 +16,15 @@ rem far fallire l'installazione automatica. Se nessuna versione ha i
 rem pacchetti (primo avvio), ripiega su qualsiasi Python disponibile: il
 rem bootstrap di main.py installera' tutto da solo.
 rem
+rem Se NON esiste alcun Python, prova a installarlo con winget: e' un
+rem eseguibile di Windows, quindi funziona anche quando Python non c'e' (e
+rem questa e' l'unica cosa che bootstrap() non puo' fare, perche' bootstrap
+rem gira dentro Python). Con SYNC_VIDEO_NO_PYTHON_INSTALL=1 non installa
+rem nulla e si limita ad avvisare.
+rem
 rem Uso:  call "%~dp0_python.bat"   poi   !PY_CMD! script.py
 rem (richiede setlocal enabledelayedexpansion nel chiamante).
+rem Esce con 0 se PY_CMD e' valido, con 1 se nessun Python e' disponibile.
 rem
 rem NOTA: mantenere questo file in SOLO ASCII. I caratteri accentati
 rem (UTF-8 multibyte) confondono il parser di cmd.exe anche con chcp 65001
@@ -33,23 +40,125 @@ if exist "%~dp0.venv\Scripts\python.exe" (
 )
 
 :senza_venv
-set "PY_CMD=python"
-where py >NUL 2>&1
-if %ERRORLEVEL% EQU 0 (
-    for %%V in (3.11 3.12 3.13) do (
-        py -%%V -c "import fastembed" >NUL 2>&1
-        if !ERRORLEVEL! EQU 0 (
-            set "PY_CMD=py -%%V"
-            exit /b 0
-        )
-    )
-    for %%V in (3.11 3.12 3.13) do (
-        py -%%V -c "import sys" >NUL 2>&1
-        if !ERRORLEVEL! EQU 0 (
-            set "PY_CMD=py -%%V"
-            exit /b 0
-        )
-    )
-    set "PY_CMD=py"
+call :cerca_python
+if not errorlevel 1 exit /b 0
+
+rem --- Nessun Python su questa macchina ---
+if "%SYNC_VIDEO_NO_PYTHON_INSTALL%"=="1" goto nessun_python
+where winget >NUL 2>&1
+if errorlevel 1 goto nessun_python
+
+echo.
+echo ========================================
+echo    Python non trovato: lo installo
+echo ========================================
+echo.
+echo Sto scaricando Python 3.11 (circa 25 MB) con winget.
+echo Serve una volta sola, solo su questo PC.
+echo Per installarlo a mano, o per saltare questo passo, vedi README.
+echo.
+winget install --id Python.Python.3.11 -e --scope user --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+if errorlevel 1 goto install_fallito
+
+rem L'installer aggiunge Python al PATH dell'utente, ma questa sessione
+rem cmd.exe eredita gia' il PATH vecchio: va riletto dal registro.
+call :ricarica_path
+call :cerca_python
+if not errorlevel 1 (
+    echo.
+    echo Python installato. Rileggo l'ambiente...
+    goto fatto
 )
+
+:install_fallito
+echo.
+echo [ERRORE] Installazione di Python non riuscita (winget ha restituito un errore).
+
+:nessun_python
+echo.
+echo ========================================
+echo    Serve Python per continuare
+echo ========================================
+echo.
+echo Installa Python 3.11 o superiore da https://python.org
+echo e spunta "Add Python to PATH" durante l'installazione.
+echo Poi rilancia questo programma.
+echo.
+echo Per installare Python a mano e decidere tu: imposta
+echo SYNC_VIDEO_NO_PYTHON_INSTALL=1 prima di rilanciare.
+exit /b 1
+
+:fatto
+exit /b 0
+
+
+rem ============================================================
+rem cerca_python: imposta PY_CMD se trova un Python usabile
+rem ============================================================
+:cerca_python
+set "PY_CMD="
+
+where py >NUL 2>&1
+if not errorlevel 1 (
+    for %%V in (3.11 3.12 3.13) do (
+        if "!PY_CMD!"=="" (
+            py -%%V -c "import fastembed" >NUL 2>&1
+            if not errorlevel 1 set "PY_CMD=py -%%V"
+        )
+    )
+    for %%V in (3.11 3.12 3.13) do (
+        if "!PY_CMD!"=="" (
+            py -%%V -c "import sys" >NUL 2>&1
+            if not errorlevel 1 set "PY_CMD=py -%%V"
+        )
+    )
+    if "!PY_CMD!"=="" set "PY_CMD=py"
+)
+
+if "!PY_CMD!"=="" (
+    where python >NUL 2>&1
+    if not errorlevel 1 set "PY_CMD=python"
+)
+
+rem Percorso noto dell'installer. Serve SOPRATTUTTO appena dopo winget:
+rem la sessione cmd corrente ha ancora il PATH di prima dell'installazione,
+rem quindi 'where python' non vede nulla. Questo e' il modo piu' affidabile
+rem per arrivare all'interprete appena installato.
+if "!PY_CMD!"=="" (
+    for %%V in (314 313 312 311 310) do (
+        if "!PY_CMD!"=="" (
+            if exist "%LOCALAPPDATA%\Programs\Python\Python%%V\python.exe" (
+                set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python%%V\python.exe""
+            )
+        )
+    )
+)
+
+if "!PY_CMD!"=="" exit /b 1
+
+rem Verifica finale: PY_CMD deve davvero girare, non solo esistere.
+!PY_CMD! -c "import sys" >NUL 2>&1
+if errorlevel 1 (
+    set "PY_CMD="
+    exit /b 1
+)
+exit /b 0
+
+
+rem ============================================================
+rem ricarica_path: rilegge il PATH utente e macchina dal registro
+rem ============================================================
+rem Serve solo dopo l'installazione di Python: il cmd.exe corrente ha
+rem gia' memorizzato il PATH di quando e' partito, quindi le variabili
+rem nuove dell'installer non sono visibili fino alla sessione successiva.
+rem Non si puo' usare setlocal perche' il PATH modificato deve tornare al
+rem chiamante.
+:ricarica_path
+set "_PATH_VECCHIO=%PATH%"
+set "_PATH_NUOVO="
+for /f "tokens=2,*" %%A in ('reg query "HKCU\Environment" /v Path 2^>NUL ^| find /i "Path"') do set "_PATH_NUOVO=%%B"
+for /f "tokens=2,*" %%A in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v Path 2^>NUL ^| find /i "Path"') do set "_PATH_NUOVO=!_PATH_NUOVO!;%%B"
+if not "!_PATH_NUOVO!"=="" set "PATH=!_PATH_NUOVO!;%_PATH_VECCHIO%"
+set "_PATH_NUOVO="
+set "_PATH_VECCHIO="
 exit /b 0

@@ -36,8 +36,14 @@ echo riusano: non vengono riscaricati.
 echo.
 
 rem --- Python di sistema, NON quello della venv che stiamo creando ---
+rem _python.bat prova anche a INSTALLARE Python se non c'e' (winget) e
+rem esce con 1 se non e' riuscito. In quel caso ha gia' spiegato cosa fare.
 set "SYNC_VIDEO_NO_VENV=1"
 call "%~dp0_python.bat"
+if errorlevel 1 (
+    set "EXIT=9009"
+    goto fine
+)
 !PY_CMD! --version >NUL 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo [ERRORE] Python non trovato nel PATH.

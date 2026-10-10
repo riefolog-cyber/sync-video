@@ -76,7 +76,14 @@ if not %ERRORLEVEL% EQU 0 (
 )
 
 rem --- Scelta Python: helper condiviso (preferisce 3.11, vedi _python.bat) ---
+rem Se sul PC non c'e' nessun Python, il helper prova a installarlo con
+rem winget; se non riesce esce con 1 e ha gia' spiegato cosa fare.
 call "%~dp0_python.bat"
+if errorlevel 1 (
+    echo.
+    if "%PAUSE_IT%"=="1" pause
+    exit /b 9009
+)
 echo Python scelto: !PY_CMD!
 
 rem --- Ordine degli argomenti: !LLM_ARG! PRIMA di !MAIN_ARGS! ---

@@ -46,8 +46,14 @@ echo    Verifica versioni PyPI e installa
 echo ========================================
 echo.
 
-rem --- Scelta Python: helper condiviso (preferisce 3.11, vedi _python.bat) ---
+rem --- Scelta Python: helper condivioso (preferisce 3.11, vedi _python.bat) ---
+rem Se non c'e' nessun Python il helper prova a installarlo con winget ed
+rem esce con 1 se non riesce: ha gia' spiegato cosa fare.
 call "%~dp0_python.bat"
+if errorlevel 1 (
+    set "EXIT=9009"
+    goto fine
+)
 !PY_CMD! --version >NUL 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo [ERRORE] Python non e' stato trovato nel PATH.

@@ -21,7 +21,14 @@ echo ========================================
 echo.
 
 rem --- Scelta Python: helper condiviso (preferisce 3.11, vedi _python.bat) ---
+rem Se non c'e' nessun Python il helper prova a installarlo con winget ed
+rem esce con 1 se non riesce: ha gia' spiegato cosa fare.
 call "%~dp0_python.bat"
+if errorlevel 1 (
+    echo.
+    pause
+    exit /b 9009
+)
 echo Python scelto: !PY_CMD!
 !PY_CMD! main.py --dry-run --debug !MAIN_ARGS!
 
