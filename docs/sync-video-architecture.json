@@ -3,7 +3,7 @@
   "diagram_type": "architecture",
   "meta": {
     "title": "Sync Video — Architettura",
-    "output": "sync-video-architecture.html",
+    "output": "docs/sync-video-architecture.html",
     "quality_profile": "showcase",
     "views": [
       { "id": "primary-path", "label": "Pipeline principale", "focus": ["user", "launcher", "main", "ocr", "transcriber", "sync", "video", "output"], "note": "Dal PDF + audio al video sincronizzato: OCR, trascrizione, allineamento, encoding." },

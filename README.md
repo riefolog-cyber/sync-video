@@ -826,13 +826,13 @@ HTML autocontenuto (si apre con doppio clic); il JSON è la sorgente tipizzata
 
 | File | Descrizione |
 |---|---|
-| `sync-video-architecture.json` / `.html` | Architettura della pipeline |
+| `docs/sync-video-architecture.json` / `.html` | Architettura della pipeline |
 
 Rigenera un diagramma dopo aver modificato il JSON (es. architettura):
 
 ```bash
-node ~/archify/archify/bin/archify.mjs validate architecture sync-video-architecture.json --quality showcase --json
-node ~/archify/archify/bin/archify.mjs deliver architecture sync-video-architecture.json sync-video-architecture.html --quality showcase --json
+node ~/archify/archify/bin/archify.mjs validate architecture docs/sync-video-architecture.json --quality showcase --json
+node ~/archify/archify/bin/archify.mjs deliver architecture docs/sync-video-architecture.json docs/sync-video-architecture.html --quality showcase --json
 ```
 
 ---
@@ -901,7 +901,7 @@ PROMPT_PRESENTAZIONE (PREDEFINITO).md ← Prompt NotebookLM: presentazione → p
 PROMPT_PODCAST.md            ← Prompt NotebookLM: podcast → presentazione (flusso B)
 tessdata/                ← Modelli lingua Tesseract portatili
 9router-maintenance/     ← Script manutenzione combo `comboact` di 9Router (vedi sotto)
-sync-video-architecture.json/html ← Diagramma architettura (generato con archify)
+sync-video-architecture (in docs/) ← Diagramma architettura (generato con archify)
 ```
 
 ### 🛠️ Sviluppo

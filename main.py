@@ -3712,7 +3712,7 @@ def _in_coda_su_un_pool(t: threading.Thread) -> bool:
     denunciare lavoro incompiuto: in quel caso os._exit(0) farebbe danno,
     mascherando l'errore con un exit code 0.
     """
-    if _WORKER_POOL_FILE is None:
+    if _WORKER_POOL_FILE is None or t.ident is None:
         return False
     frame = sys._current_frames().get(t.ident)
     if frame is None or frame.f_code.co_name != _WORKER_POOL_FUNC:
@@ -3774,6 +3774,8 @@ def _force_clean_exit() -> None:
         ", ".join(t.name for t in bloccanti),
     )
     for t in bloccanti:
+        if t.ident is None:
+            continue
         frame = sys._current_frames().get(t.ident)
         if frame is not None:
             log.debug(

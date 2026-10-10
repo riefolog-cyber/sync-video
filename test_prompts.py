@@ -91,7 +91,13 @@ REGOLE: list[tuple[str, str, str]] = [
     ("presentazione", "senza salti e senza ripetizioni", "annunci in ordine"),
     ("presentazione", "l'ultima pagina si annuncia come le altre", "annuncio anche dell'ultima"),
     ("presentazione", "richiamare una pagina già", "no richiami"),
-    ("presentazione", "riferimento fuori ordine che il programma deve scartare", "perche' dei richiami"),
+    # La formulazione del motivo e' cambiata: il prompt diceva "un riferimento
+    # fuori ordine che il programma deve scartare", ma il modello non ha un
+    # programma e non lo vedra' mai. Ora il motivo e' solo la conseguenza che il
+    # modello puo' evitare ("fuori ordine e fa perdere la transizione vera"), che
+    # e' anche tutto quello che serve a capire la regola. La regola in se' e'
+    # gia' protetta due volte, dalle due voci sopra e sotto.
+    ("presentazione", "il richiamo è fuori ordine e fa perdere la transizione vera", "perche' dei richiami"),
     ("presentazione", "guarda sempre slide 3", "esempio di richiamo"),
     ("presentazione", "un numero solo nella frase che apre la sezione", "numeri isolati"),
     ("presentazione", 'mai "slide 1" in apertura', "no slide 1"),
@@ -273,9 +279,23 @@ class TestBlocchiIncollabili(unittest.TestCase):
     def test_nessun_passo_oltre_una_pagina_di_istruzioni(self):
         # NotebookLM non ha un limite dichiarato, ma un prompt oltre qualche
         # migliaio di caratteri compete con i sorgenti. Si sta larghi.
+        #
+        # Il tetto e' per BLOCCO, non per file. I due blocchi di uno stesso file
+        # non vengono mai incollati insieme: Fase 1 va nel generatore di slide,
+        # Fase 2 nelle istruzioni dell'audio, e sono due sessioni NotebookLM
+        # diverse. Il confronto con i sorgenti avviene mentre ne e' vivo uno solo,
+        # quindi sommarli penalizzava un prompt di 700 caratteri per colpa di un
+        # altro blocco dello stesso file. Il margine che ne risultava era cosi'
+        # stretto da costringere a scegliere fra allentare il tetto e tagliare
+        # regole utili.
         for percorso in PROMPT.values():
-            caratteri = sum(len(b.strip()) for b in _blocchi(percorso))
-            self.assertLess(caratteri, 4000, f"{percorso.name}: {caratteri} caratteri")
+            for i, blocco in enumerate(_blocchi(percorso), start=1):
+                caratteri = len(blocco.strip())
+                self.assertLess(
+                    caratteri,
+                    4000,
+                    f"{percorso.name}: blocco {i} da {caratteri} caratteri",
+                )
 
 
 class TestRiferimentiReadme(unittest.TestCase):
