@@ -104,6 +104,94 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _logical_cpus() -> int:
+    """CPU logiche viste dal sistema (fallback 4 se non rilevabili)."""
+    return os.cpu_count() or 4
+
+
+def _physical_cpus() -> int | None:
+    """Core fisici (psutil se c'è, wmic su Windows); None se non rilevabili."""
+    # Probe hardware difensivi (stessa natura di machine_setup.py): falliscono
+    # in modi imprevedibili su macchine diverse, quindi except ampi.
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        fisici = psutil.cpu_count(logical=False)
+        if fisici:
+            return int(fisici)
+    except Exception:
+        pass
+    if sys.platform == "win32":  # best-effort, mai bloccante
+        try:
+            import subprocess
+
+            out = subprocess.run(
+                ["wmic", "cpu", "get", "NumberOfCores", "/value"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout
+            nuclei = [int(line.split("=", 1)[1]) for line in out.splitlines() if "NumberOfCores" in line]
+            if nuclei:
+                return sum(nuclei)
+        except Exception:
+            pass
+    return None
+
+
+def auto_thread_budget(kind: str = "generic") -> int:
+    """Default adattivo dei thread per OGNI sistema (P1: auto-tuning hardware).
+
+    Niente benchmark costosi (minuti di trascrizione extra): si basa sui fatti
+    hardware + le misure documentate nel repo:
+
+    - Base = core FISICI se noti, altrimenti logici (è la metrica che conta
+      per ONNX/Whisper/ffmpeg; lo Snapdragon X satura oltre 8 per banda
+      memoria, l'i7-12700H con 14 fisici regge 14).
+    - ``embed``/``video``: tetto 12 contro la saturazione di banda misurata
+      a 16+ (su CPU con 16+ core, 12 evita il peggioramento).
+    - ``whisper``: segue i fisici senza tetto rigido, mai oltre i logici
+      (misure: 8 lo sweet spot su Snapdragon, 14 meglio su desktop).
+    - ``ocr`` (Tesseract per pagina, I/O + CPU): 4-6 bastano ovunque.
+
+    L'override esplicito via env (WHISPER_THREADS / EMBED_THREADS /
+    VIDEO_THREADS / OCR_WORKERS) ha SEMPRE precedenza: qui si calcola solo
+    il default quando l'env non è impostato. Ritorna sempre >= 1.
+    """
+
+    def _da_env(nome: str) -> int | None:
+        valore = os.environ.get(nome, "").strip()
+        if not valore:
+            return None
+        try:
+            numero = int(valore)
+        except ValueError:
+            log.warning("   Variabile %s non numerica ('%s'), la ignoro.", nome, valore)
+            return None
+        if numero < 1:
+            log.warning("   Variabile %s non valida ('%s'), la ignoro.", nome, valore)
+            return None
+        return numero
+
+    env_name = {
+        "whisper": "WHISPER_THREADS",
+        "embed": "EMBED_THREADS",
+        "video": "VIDEO_THREADS",
+        "ocr": "OCR_WORKERS",
+    }.get(kind, "")
+    if env_name:
+        esplicito = _da_env(env_name)
+        if esplicito is not None:
+            return esplicito
+    logici = _logical_cpus()
+    fisici = _physical_cpus() or logici
+    if kind == "ocr":
+        return max(1, min(6, fisici, logici))
+    if kind == "whisper":
+        return max(1, min(fisici, logici))
+    return max(1, min(12, fisici, logici))
+
+
 def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
     """Scrive testo in modo atomico (file temporaneo + os.replace).
 
@@ -302,7 +390,7 @@ def cuda_available() -> bool:
         import ctranslate2
 
         return bool(ctranslate2.get_cuda_device_count() > 0)
-    except Exception:  # noqa: BLE001 - nessun CTranslate2, build senza CUDA, driver assente: qui significa la stessa cosa
+    except Exception:
         # Nessun CTranslate2, build senza CUDA, driver assente: tutte cose che
         # qui significano la stessa cosa, cioe' "CUDA non e' un canale valido".
         return False
@@ -318,7 +406,7 @@ def openvino_device_available() -> bool:
         from openvino import Core
 
         return "GPU" in Core().available_devices
-    except Exception:  # noqa: BLE001 - runtime assente o rotto: su macchine diverse fallisce in modi diversi
+    except Exception:
         return False
 
 
@@ -383,7 +471,7 @@ def _cache_hub_huggingface() -> Path:
         valore = getattr(hf_constants, "HF_HUB_CACHE", "")
         if isinstance(valore, str) and valore:
             return Path(valore)
-    except Exception:  # noqa: BLE001 - la lib puo' non essere installata o rotta
+    except Exception:
         pass
     for chiave in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
         valore = os.environ.get(chiave)
@@ -580,7 +668,7 @@ def _spec_ok(req: str, installed: str) -> bool:
         from packaging.specifiers import SpecifierSet
 
         return bool(SpecifierSet(spec).contains(installed))
-    except Exception:  # noqa: BLE001 - verifica non disponibile: non bloccare
+    except Exception:
         return True
 
 
@@ -838,7 +926,7 @@ def bootstrap() -> None:
                     ita_path,
                 )
                 log.info("   ✅ ita.traineddata scaricato in %s", _local_tessdata)
-            except Exception as e:  # noqa: BLE001 - rete: non deve bloccare il bootstrap
+            except Exception as e:
                 log.warning("   \u26a0\ufe0f  Scaricamento ita.traineddata fallito: %s", e)
         if ita_path.exists():
             os.environ["TESSDATA_PREFIX"] = str(_local_tessdata)
@@ -939,10 +1027,10 @@ DEFAULT_EMBEDDING_MODEL_ALTERNATE = os.environ.get(
 )
 DEFAULT_EMBEDDING_CACHE_DIR = os.environ.get("EMBEDDING_CACHE_DIR", str(CACHE_DIR / "embedding_model"))
 # Thread ONNX per il calcolo degli embedding: il default di fastembed è
-# conservativo e su CPU multi-core spreca core. Il sweet spot empirico su
-# laptop Intel client è ~8 (a 16+ la banda memoria saturazione e peggiora).
-# Override con EMBED_THREADS.
-DEFAULT_EMBED_THREADS = _env_int("EMBED_THREADS", min(8, os.cpu_count() or 4))
+# conservativo e su CPU multi-core spreca core. Default adattivo
+# (auto_thread_budget): fisici fino a 12 contro la saturazione di banda
+# misurata oltre. Override con EMBED_THREADS (ha sempre precedenza).
+DEFAULT_EMBED_THREADS = auto_thread_budget("embed")
 
 DEFAULT_SEMANTIC_WINDOW = _env_float("SEMANTIC_WINDOW", 4.0)  # secondi per blocco
 DEFAULT_SEMANTIC_MIN_DURATION = _env_float("SEMANTIC_MIN_DURATION", 3.0)  # durata minima slide
@@ -1003,13 +1091,10 @@ if _VIDEO_RES_ENV and "x" in _VIDEO_RES_ENV:
         DEFAULT_VIDEO_RES = (1920, 1080)
 else:
     DEFAULT_VIDEO_RES = (1920, 1080)
-# Thread di encoding del video. Stesso tetto di 8 dei thread embedding: il
-# default nasce dalla misura sullo Snapdragon X Elite, dove oltre 8 thread la
-# banda memoria satura e il risultato peggiora. Su una CPU con piu' core
-# fisici quel tetto e' pero' una scelta conservativa ereditata, non un muro:
-# conviene misurarlo (stessa procedura di EMBED_THREADS) prima di alzarlo.
-# Override con VIDEO_THREADS.
-DEFAULT_VIDEO_THREADS = _env_int("VIDEO_THREADS", min(8, os.cpu_count() or 4))
+# Thread di encoding del video. Default adattivo (auto_thread_budget):
+# fisici fino a 12; su CPU con piu' core il tetto evita la saturazione di
+# banda misurata oltre. Override con VIDEO_THREADS (ha sempre precedenza).
+DEFAULT_VIDEO_THREADS = auto_thread_budget("video")
 # Motore di rendering video: 'ffmpeg' (concat demuxer, encoding diretto, veloce)
 # o 'moviepy' (percorso legacy, richiesto per --transitions > 0).
 _VIDEO_ENGINE_ENV = os.environ.get("VIDEO_ENGINE", "").strip().lower()
@@ -1021,18 +1106,16 @@ else:
     DEFAULT_VIDEO_ENGINE = "ffmpeg"
 DEFAULT_OCR_DPI = _env_int("OCR_DPI", 300)
 DEFAULT_OCR_LANG = os.environ.get("OCR_LANG", "ita")
-DEFAULT_OCR_WORKERS = _env_int("OCR_WORKERS", min(4, os.cpu_count() or 2))
+DEFAULT_OCR_WORKERS = auto_thread_budget("ocr")
 DEFAULT_TRANSITION_DURATION = 0.0  # secondi (0 = nessuna transizione)
 DEFAULT_TRANSCRIBER = os.environ.get("TRANSCRIBER", "auto")  # 'auto'/'openvino'/'whisper'
 DEFAULT_WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")  # tiny/base/small/medium/large
 DEFAULT_WHISPER_DEVICE = os.environ.get("WHISPER_DEVICE", "cpu")  # 'cpu' o 'cuda'
 DEFAULT_WHISPER_COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")  # int8 (cpu) / float16 (cuda)
-# Thread per faster-whisper. Il default di faster-whisper sottoutilizza le CPU
-# con piu' core (misurato su Snapdragon X Elite: 8 thread ~27% piu' veloci di 4 su
-# clip da 60s), e il cap a 8 e' per la stessa ragione di EMBED_THREADS: su
-# Snapdragon la banda memoria satura oltre 8. Altrove il limite e' arbitrario,
-# quindi e' esposto. Override con WHISPER_THREADS.
-DEFAULT_WHISPER_THREADS = _env_int("WHISPER_THREADS", min(8, os.cpu_count() or 4))
+# Thread per faster-whisper. Default adattivo (auto_thread_budget): i core
+# fisici sono lo sweet spot (misure: 8 su Snapdragon X Elite ~27% meglio di 4,
+# 14 meglio su i7-12700H desktop). Override con WHISPER_THREADS (precedenza).
+DEFAULT_WHISPER_THREADS = auto_thread_budget("whisper")
 
 # Beam size faster-whisper. 1 (greedy) = default MISURATO.
 #

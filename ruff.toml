@@ -52,6 +52,9 @@ ignore = [
 # falliscono con eccezioni arbitrarie (zipfile/XML/PIL); gli except difensivi
 # del fallback Python in ocr.py sono il comportamento voluto.
 "ocr.py" = ["BLE001"]
+# Probe hardware CPU (psutil/wmic in _physical_cpus): stessa natura difensiva
+# dei probe GPU di machine_setup.py (falliscono in modi imprevedibili).
+"config.py" = ["BLE001"]
 
 [lint.flake8-bugbear]
 # Tolleranza per i "except Exception" difensivi (fallback robusti),

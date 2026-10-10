@@ -285,7 +285,8 @@ def _print_timing(
     log.info("   ─────────────────────────")
     log.info("   TOTALE         │ %s", _format_time(t_total))
     log.info("─" * 50)
-    # Peso cache nel riepilogo (P1): l'utente vede quanto spazio occupa.
+    # Peso cache + thread effettivi nel riepilogo (P1): l'utente vede quanto
+    # spazio occupa e cosa ha scelto l'auto-tuning per questo PC.
     # Mai bloccare il riepilogo per una misura: gli errori restano in debug.
     with suppress(Exception):
         from cache_maintenance import cache_disk_usage, format_bytes
@@ -295,6 +296,26 @@ def _print_timing(
             totale = sum(peso for _, peso in righe)
             dettaglio = ", ".join(f"{nome.rstrip('/')} {format_bytes(peso)}" for nome, peso in righe[:3])
             log.info("   💾 Cache: %s (%s)", format_bytes(totale), dettaglio)
+    with suppress(Exception):
+        from config import (
+            DEFAULT_EMBED_THREADS,
+            DEFAULT_OCR_WORKERS,
+            DEFAULT_VIDEO_THREADS,
+            DEFAULT_WHISPER_THREADS,
+            _physical_cpus,
+        )
+
+        fisici = _physical_cpus()
+        sorgente = f"{fisici} fisici" if fisici else "logici"
+        log.info(
+            "   🧵 Thread: whisper %d, embedding %d, video %d, ocr %d "
+            "(auto da %s; override WHISPER/EMBED/VIDEO_THREADS, OCR_WORKERS)",
+            DEFAULT_WHISPER_THREADS,
+            DEFAULT_EMBED_THREADS,
+            DEFAULT_VIDEO_THREADS,
+            DEFAULT_OCR_WORKERS,
+            sorgente,
+        )
     _append_timing_history(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total, t_llm)
 
 
