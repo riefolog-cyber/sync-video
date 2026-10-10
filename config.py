@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from hardware import memory_tier, ram_total_bytes
+from hardware import disk_free_bytes, memory_tier, ram_total_bytes
 
 # stdout/stderr in UTF-8 con fallback 'replace': evita UnicodeEncodeError
 # (codice cp1252 di Windows) quando il bootstrap stampa emoji (es. ⏳ 🔧).
@@ -584,10 +584,18 @@ _BREW_ENV = {
 # affidabile qui, quindi per quelli non si scrive una cifra inventata.
 _DIMENSIONI_WHISPER = {"tiny": "~80 MB", "base": "~150 MB", "small": "~490 MB"}
 
+# Stesse dimensioni in BYTE, per il controllo dello spazio libero. Vivono
+# qui accanto alle stringhe e non dentro di esse perche' una stringa "~6.4 GB"
+# va ri-parsata per ottenere un numero, e una parsata sbagliata (-> 64 byte,
+# per il punto e' lo stesso) fa fallire il controllo in silenzio. Il test
+# `test_bootstrap` confronta le due tabelle quindi non possono divergere.
+_BYTES_WHISPER = {"tiny": 80 * 1024**2, "base": 150 * 1024**2, "small": 490 * 1024**2}
+
 # Dimensione su disco della cache embedding del modello di default. Sono i due
 # file che fastembed tiene (coppia "fast-" e ONNX), misurati: 2.1 + 4.3 GB. Il
 # download e' ~2.2 GB ma il disco occupato e' questo, e l'utente vede questo.
 _CACHE_EMBEDDING_DEFAULT = "~6.4 GB"
+_BYTES_CACHE_EMBEDDING = int(6.4 * 1024**3)
 
 
 def _cache_hub_huggingface() -> Path:
@@ -639,6 +647,37 @@ def _cache_whisper_faster(model: str) -> Path | None:
     return _cache_hub_huggingface() / f"models--Systran--faster-whisper-{model}"
 
 
+def _modelli_mancanti_dettagliati(
+    embedding_cache: Path,
+    whisper_model: str = "small",
+    embedding_model: str = "",
+) -> list[tuple[str, str, int | None]]:
+    """`_modelli_mancanti` + i byte per modello (None = dimensione ignota)."""
+    mancanti: list[tuple[str, str, int | None]] = []
+    if not _gia_scaricato(embedding_cache):
+        nome = embedding_model or DEFAULT_EMBEDDING_MODEL.split("/")[-1]
+        # 6.4 GB di disco, non 2.2: fastembed tiene sia la copia "fast-" sia
+        # quella ONNX (2.1 + 4.3 GB misurati). E' un suo comportamento, non una
+        # scelta del progetto, ma e' quello che l'utente vede sul disco. La
+        # dimensione vale solo per il modello di default: con `--semantic-model`
+        # diverso la cache occupa un altro spazio, e senza misura non si
+        # scrive una cifra inventata nemmeno nel controllo dello spazio.
+        e_default = embedding_model == DEFAULT_EMBEDDING_MODEL
+        mancanti.append((
+            f"modello embedding ({nome})",
+            _CACHE_EMBEDDING_DEFAULT if e_default else "",
+            _BYTES_CACHE_EMBEDDING if e_default else None,
+        ))
+    cache_whisper = _cache_whisper_faster(whisper_model)
+    if cache_whisper is not None and not _gia_scaricato(cache_whisper):
+        mancanti.append((
+            f"modello di trascrizione (whisper {whisper_model})",
+            _DIMENSIONI_WHISPER.get(whisper_model, ""),
+            _BYTES_WHISPER.get(whisper_model),
+        ))
+    return mancanti
+
+
 def _modelli_mancanti(
     embedding_cache: Path,
     whisper_model: str = "small",
@@ -658,23 +697,28 @@ def _modelli_mancanti(
 
     Vuoto = tutto in cache, e il primo avvio non deve dire nulla.
     """
-    mancanti: list[tuple[str, str]] = []
-    if not _gia_scaricato(embedding_cache):
-        nome = embedding_model or DEFAULT_EMBEDDING_MODEL.split("/")[-1]
-        # 6.4 GB di disco, non 2.2: fastembed tiene sia la copia "fast-" sia
-        # quella ONNX (2.1 + 4.3 GB misurati). E' un suo comportamento, non una
-        # scelta del progetto, ma e' quello che l'utente vede sul disco. La
-        # dimensione vale solo per il modello di default: con `--semantic-model`
-        # diverso la cache occupa un altro spazio.
-        dim = _CACHE_EMBEDDING_DEFAULT if embedding_model == DEFAULT_EMBEDDING_MODEL else ""
-        mancanti.append((f"modello embedding ({nome})", dim))
-    cache_whisper = _cache_whisper_faster(whisper_model)
-    if cache_whisper is not None and not _gia_scaricato(cache_whisper):
-        mancanti.append(
-            (f"modello di trascrizione (whisper {whisper_model})",
-             _DIMENSIONI_WHISPER.get(whisper_model, ""))
-        )
-    return mancanti
+    return [(nome, dim) for nome, dim, _ in _modelli_mancanti_dettagliati(
+        embedding_cache, whisper_model, embedding_model
+    )]
+
+
+def _spazio_modelli_necessario(
+    embedding_cache: Path,
+    whisper_model: str = "small",
+    embedding_model: str = "",
+) -> int | None:
+    """Byte che i modelli mancanti occupano, o None se una dimensione ignota.
+
+    None se anche solo un modello non ha una dimensione misurata: preferisce
+    non controllare lo spazio a controllarlo con una cifra inventata (che
+    darebbe un falso senso di sicurezza peggio di nessun avviso).
+    """
+    totale = 0
+    for _, _, byte in _modelli_mancanti_dettagliati(embedding_cache, whisper_model, embedding_model):
+        if byte is None:
+            return None
+        totale += byte
+    return totale
 
 
 def _gia_scaricato(directory: Path) -> bool:
@@ -708,6 +752,69 @@ def _annuncia_primo_avvio(mancanti: Sequence[tuple[str, str]]) -> None:
         "   (più rapidi, meno accurati sulle ancore).",
         righe,
     )
+    _avvisa_spazio_insufficiente()
+
+
+# Margine oltre ai modelli: la run produce anche il video, le slide renderizzate
+# e i frame di verifica, e il download non e' l'unico uso del disco. Senza
+# margine l'avvisio scatterebbe solo quando il disco e' gia' pieno.
+_MARGINE_DISCO = 2 * 1024**3
+
+
+def _gb(byte: int) -> str:
+    """Byte -> '6.4 GB'. Formato semplice: qui l'utente deve poterlo confrontare
+    con la dimensione scritta nell'annuncio del download."""
+    return f"{byte / 1024**3:.1f} GB"
+
+
+def _avvisa_spazio_insufficiente(
+    embedding_cache: Path | None = None,
+    whisper_model: str | None = None,
+    embedding_model: str | None = None,
+) -> None:
+    """Avvisa se il disco non puo' ospitare i download del primo avvio.
+
+    Prima non esisteva nessun controllo: su un PC con poco spazio il download
+    partiva, riempiva il disco e la run moriva a meta' con un errore che non
+    nominava la causa vera. L'avviso non impedisce nulla (si scarica lo stesso,
+    se l'utente vuole provare) ma spiega prima invece che dopo.
+
+    Si controllano DUE destinazioni perche' possono stare su dischi diversi:
+    la cache embedding segue il progetto, quella whisper segue la home
+    dell'utente. Un progetto su D: e la home su C: hanno spazi distinti, e
+    controllare solo il primo darebbe un falso ok.
+    """
+    cache_embedding = Path(embedding_cache if embedding_cache is not None else DEFAULT_EMBEDDING_CACHE_DIR)
+    modello_whisper = whisper_model or DEFAULT_WHISPER_MODEL
+    modello_embedding = embedding_model if embedding_model is not None else DEFAULT_EMBEDDING_MODEL
+
+    necessario = _spazio_modelli_necessario(cache_embedding, modello_whisper, modello_embedding)
+    if not necessario:
+        # Tutti in cache, o dimensioni ignote: niente da controllare. Meglio
+        # nessun avviso che un avviso con una cifra inventata.
+        return
+
+    destinazioni = [(cache_embedding, "cache dei modelli (cartella del progetto)")]
+    cache_whisper = _cache_whisper_faster(modello_whisper)
+    if cache_whisper is not None:
+        destinazioni.append((cache_whisper, "cache HuggingFace (whisper)"))
+
+    for percorso, etichetta in destinazioni:
+        libero = disk_free_bytes(percorso)
+        if libero is None:
+            continue
+        if libero < necessario + _MARGINE_DISCO:
+            log.warning(
+                "   ⚠️  Spazio disco forse insufficiente su %s: %s liberi, ne servono ~%s "
+                "(modelli + margine per video e slide).",
+                etichetta,
+                _gb(libero),
+                _gb(necessario + _MARGINE_DISCO),
+            )
+            log.warning(
+                "   Libera spazio, oppure indica un'altra cartella con "
+                "--embedding-cache-dir, oppure HF_HUB_CACHE."
+            )
 
 
 def _try_system_install(name: str, winget_id: str, apt_pkg: str, brew_pkg: str) -> bool:

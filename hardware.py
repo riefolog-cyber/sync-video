@@ -28,6 +28,7 @@ import ctypes
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import time
@@ -159,6 +160,28 @@ def format_ram(total_bytes: int | None) -> str:
     if not total_bytes:
         return "sconosciuta"
     return f"{total_bytes / 1024**3:.1f} GB"
+
+
+# =====================================================================
+# SPAZIO DISCO
+# =====================================================================
+def disk_free_bytes(path: Path) -> int | None:
+    """Byte liberi sul disco che contiene `path`, o None se non rilevabile.
+
+    Serve perche' al primo avvio il progetto scarica ~6.9 GB (modello di
+    embedding + modello whisper) senza aver mai controllato che ci stiano:
+    su un PC con 3 GB liberi il download parte, si riempie il disco e la run
+    muore a meta' con un errore che non spiega la causa.
+    """
+    try:
+        # Il percorso puo' non esistere ancora (la cache si crea al primo
+        # download): shutil.disk_usage va su un antenato esistente.
+        alvo = path
+        while not alvo.exists() and alvo.parent != alvo:
+            alvo = alvo.parent
+        return int(shutil.disk_usage(alvo).free)
+    except Exception:
+        return None
 
 
 # =====================================================================
