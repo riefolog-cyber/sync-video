@@ -32,7 +32,6 @@ import shutil
 import subprocess
 import sys
 import time
-from ctypes import wintypes
 from pathlib import Path
 
 # Stessa posizione di config.CACHE_DIR, calcolata qui per non importare
@@ -51,25 +50,33 @@ _CACHE_VALID_SECONDS = 7 * 24 * 3600  # una settimana: l'hardware non cambia
 # =====================================================================
 # RAM
 # =====================================================================
-class _MemoryStatusEx(ctypes.Structure):
-    """MEMORYSTATUSEX di Windows (ctypes, nessuna dipendenza)."""
-
-    _fields_ = [
-        ("dwLength", wintypes.DWORD),
-        ("dwMemoryLoad", wintypes.DWORD),
-        ("ullTotalPhys", ctypes.c_ulonglong),
-        ("ullAvailPhys", ctypes.c_ulonglong),
-        ("ullTotalPageFile", ctypes.c_ulonglong),
-        ("ullAvailPageFile", ctypes.c_ulonglong),
-        ("ullTotalVirtual", ctypes.c_ulonglong),
-        ("ullAvailVirtual", ctypes.c_ulonglong),
-        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-    ]
-
-
 def _ram_win32() -> tuple[int, int] | None:
-    """(totale, disponibile) da GlobalMemoryStatusEx, o None."""
+    """(totale, disponibile) da GlobalMemoryStatusEx, o None.
+
+    La struttura e l'import di `ctypes.wintypes` stanno QUI dentro, non a
+    livello di modulo: vengono costruiti solo quando servono davvero, cioe'
+    solo su Windows. A importarli sul modulo, ogni macchina Linux e macOS
+    costruiva una struct del kernel che non usa, e `ctypes.wintypes` su
+    piattaforme non-Windows e' documentato come non portabile: un import
+    innocente puo' diventare un'eccezione a tempo di importazione, cioe'
+    prima ancora che il programmo faccia qualcosa.
+    """
     try:
+        from ctypes import wintypes
+
+        class _MemoryStatusEx(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", wintypes.DWORD),
+                ("dwMemoryLoad", wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
         status = _MemoryStatusEx()
         status.dwLength = ctypes.sizeof(_MemoryStatusEx)
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]

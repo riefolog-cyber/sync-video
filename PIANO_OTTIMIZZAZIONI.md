@@ -71,5 +71,19 @@ fallisce in silenzio (è già successo: vedi P2 #13).
 .\.venv\Scripts\python.exe .\_debug_hardware.py
 ```
 
+**`mypy .` da solo non basta.** La CI gira su `ubuntu-latest`, quindi il
+type-check va fatto anche per le altre piattaforme:
+
+```powershell
+.\.venv\Scripts\python.exe -m mypy --platform linux .
+.\.venv\Scripts\python.exe -m mypy --platform darwin .
+```
+
+È già dentro `_debug_hardware.py` (controllo 6). Non è pignoleria: un
+`if sys.platform == "win32"` attorno a un import passa in locale su Windows
+e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
+valuta la condizione e sul ramo non-Windows il nome risulta non definito.
+È successo, e i test in CI non erano nemmeno arrivati a girare.
+
 Stato all'ultimo lancio: ruff pulito, mypy pulito, test verdi,
 `_debug_hardware.py` 15/15.

@@ -9,10 +9,18 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from config import _logical_cpus, _physical_cpus, auto_thread_budget
-
-if sys.platform == "win32":
-    from config import _physical_cpus_win32
+# `_physical_cpus_win32` si importa SEMPRE, non dentro un
+# `if sys.platform == "win32"`: la funzione esiste su ogni piattaforma
+# (usa ctypes.windll, quindi su Linux solleva e basta), e mypy valuta la
+# condizione al type-check: con l'import condizionale, controllando su
+# Linux il nome risultava non definito e la CI andava in rosso su tutte e
+# tre le versioni di Python. La guardia a runtime resta nel test.
+from config import (
+    _logical_cpus,
+    _physical_cpus,
+    _physical_cpus_win32,
+    auto_thread_budget,
+)
 
 
 class TestAutoThreadBudget(unittest.TestCase):

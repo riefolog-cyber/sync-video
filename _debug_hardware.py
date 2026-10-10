@@ -59,6 +59,37 @@ def scenario(nome: str, gpus: list[str], vendor: str, ram_gb: float, encoders: f
     return ok
 
 
+def _mypy_cross_platform() -> bool:
+    """mypy sulle TRE piattaforme, non solo su quella di sviluppo.
+
+    La CI gira su ubuntu-latest: un type-check passato solo su Windows non
+    dice niente su quello che vede la CI. E' gia' successo: un import
+    condizionale `if sys.platform == "win32"` passava in locale e faceva
+    fallire la CI su tutte e tre le versioni di Python, perche' mypy
+    valuta la condizione e sul ramo non-Windows il nome risultava non
+    definito.
+    """
+    import subprocess
+    import sys
+
+    print(f"\n{'=' * 66}\n6. MYPY SU TUTTE LE PIATTAFORME (la CI gira su Linux)\n{'=' * 66}")
+    ok = True
+    for piattaforma in ("win32", "linux", "darwin"):
+        esito = subprocess.run(
+            [sys.executable, "-m", "mypy", "--platform", piattaforma, "."],
+            capture_output=True,
+            text=True,
+        )
+        riga = (esito.stdout or esito.stderr).strip().splitlines()[-1] if (esito.stdout or esito.stderr) else "?"
+        buono = esito.returncode == 0
+        ok &= buono
+        print(f"   [{'OK ' if buono else 'KO '}] {piattaforma:7s}: {riga}")
+        if not buono and esito.stdout:
+            for dettaglio in esito.stdout.strip().splitlines()[:8]:
+                print(f"          {dettaglio}")
+    return ok
+
+
 def main() -> int:
     risultati: list[tuple[str, bool]] = []
     completo = frozenset({"libx264", "h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolbox"})
@@ -186,6 +217,9 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         print(f"   [KO ] ripiego: {type(e).__name__}: {e}")
         risultati.append(("ripiego su libx264", False))
+
+    print("\n" + "=" * 66)
+    risultati.append(("mypy cross-platform", _mypy_cross_platform()))
 
     print("\n" + "=" * 66)
     falliti = [n for n, ok in risultati if not ok]
