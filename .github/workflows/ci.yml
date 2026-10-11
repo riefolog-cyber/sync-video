@@ -51,7 +51,10 @@ jobs:
         # con SYNC_VIDEO_RUN_SLOW=1 (job nightly sotto). Oggi tutta la suite
         # e' mockata e veloce (<1s/file), ma il meccanismo resta per i futuri
         # test con rete/modelli reali (vedi test_slow.py).
-        run: python -m unittest discover -s . -p "test_*.py"
+        # I .py sono in src/: senza -s src questo comando troverebbe ZERO
+        # test e uscirebbe con "OK", facendo passare la CI senza eseguire
+        # nulla. E' il perche' del -s esplicito, non una formalta'.
+        run: python -m unittest discover -s src -p "test_*.py"
 
   nightly-full:
     # Suite completa notturna con test lenti (modelli reali, rete).
@@ -90,5 +93,8 @@ jobs:
       - name: Suite completa (lenti inclusi)
         env:
           SYNC_VIDEO_RUN_SLOW: "1"
-        run: python -m unittest discover -s . -p "test_*.py"
+        # I .py sono in src/: senza -s src questo comando troverebbe ZERO
+        # test e uscirebbe con "OK", facendo passare la CI senza eseguire
+        # nulla. E' il perche' del -s esplicito, non una formalta'.
+        run: python -m unittest discover -s src -p "test_*.py"
 
