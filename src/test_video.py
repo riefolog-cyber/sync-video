@@ -382,8 +382,14 @@ class TestMixedAspectRatiosMatch(unittest.TestCase):
     sia ricostruita con lo stesso letterbox dell'encoder.
     """
 
-    def _deck(self, tmp: Path) -> tuple[list[str], Image.Image]:
-        """Deck con una slide 16:9 e una 4:3; ritorna i path e il frame della 4:3."""
+    def _deck(self, tmp: Path) -> tuple[list[str], Path]:
+        """Deck con una slide 16:9 e una 4:3; ritorna i path e il frame della 4:3.
+
+        Il frame e' un Path (il PNG su disco), non un'Image in memoria:
+        dichiararlo Image.Image faceva pensare al lettore che i due fossero
+        interscambiabili, e i call site passavano il path dove ci si aspettava
+        un'immagine. Individuato mettendo questo file sotto mypy.
+        """
         s1 = Image.new("RGB", (1920, 1080), (20, 60, 140))
         s2 = Image.new("RGB", (1280, 1024), (200, 20, 20))
         s2.paste(Image.new("RGB", (640, 1024), (250, 250, 250)), (0, 0))
