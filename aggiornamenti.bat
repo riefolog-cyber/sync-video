@@ -66,7 +66,7 @@ if %ERRORLEVEL% NEQ 0 (
     goto fine
 )
 echo Python scelto: !PY_CMD!
-!PY_CMD! aggiornamenti.py!PA_FLAGS!
+!PY_CMD! src\aggiornamenti.py!PA_FLAGS!
 set "EXIT=%ERRORLEVEL%"
 
 :fine

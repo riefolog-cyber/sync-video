@@ -3,6 +3,7 @@
 ## 📁 Struttura progetto
 
 ```
+src/                      ← Tutto il codice Python (moduli e test insieme)
 main.py                  ← Orchestratore (auto-detection, cache, timing)
 config.py                ← Bootstrap auto-dipendenze + costanti + CLI
 chunks.py                ← Finestre temporali condivise (semantic_sync + llm_sync)
@@ -22,6 +23,7 @@ test_llm_sync.py         ← Test modulo LLM
 test_chunks.py           ← Test finestre temporali condivise
 test_prompts.py          ← Test dei prompt e dei link del README
 test_integration.py      ← Test di integrazione
+src/scripts/             ← Script eseguibili (A/B fastembed, controllo modello, analisi)
 controlli.bat            ← Wrapper Windows di controlli.py
 prova.bat                ← Test rapido senza generare il video (dry-run)
 genera_video.bat         ← Launcher 1-click (Windows)
@@ -40,17 +42,23 @@ sync-video-architecture (in docs/) ← Diagramma architettura (generato con arch
 
 ### 🛠️ Sviluppo
 
+I `.py` stanno tutti in `src/`, i `.bat` in radice. Non è una scelta estetica:
+ogni `.bat` fa `cd /d "%~dp0"` (la propria cartella), quindi devono per forza
+stare dove l'utente li clicca. I moduli si trovano fra loro perché
+`python src/main.py` mette `src/` sul `sys.path` — per questo gli import
+restano `from config import ...` e non serve un pacchetto.
+
 Comandi verificati per chi modifica il codice:
 
 ```bash
 # Verifica completa in un colpo: CI + mypy 3 piattaforme + debug hardware
-python controlli.py
+python src/controlli.py
 
 # Test (suite completa, unittest — 892 test)
-python -m unittest discover -s . -p "test_*.py"
+python -m unittest discover -s src -p "test_*.py"
 
 # Type-check (mypy: codice di produzione e test, tranne la deny-list in mypy.ini)
-python -m mypy .
+python -m mypy src
 
 # Lint (ruff — pulito)
 python -m ruff check .

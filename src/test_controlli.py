@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import re
 import unittest
-from pathlib import Path
 
 import controlli
+from hardware import project_root
 
-RADICE = Path(__file__).resolve().parent
+# I file che questo test legge (.github/workflows/ci.yml) stanno in radice,
+# non in src/ dove vivono i moduli: `project_root()` risale fino a trovarla,
+# mentre `Path(__file__).parent` punterebbe a src/ e il file non esisterebbe.
+RADICE = project_root()
 WORKFLOW = RADICE / ".github" / "workflows" / "ci.yml"
 
 # Un passo eseguito dal workflow: `run: python -m <modulo> ...`.

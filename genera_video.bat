@@ -92,9 +92,9 @@ rem stare DOPO. Con l'ordine inverso un esplicito "--llm off" (o "--flow", o
 rem "--whisper-model") veniva sovrascritto in silenzio dal default del
 rem launcher: nessun avviso, nessun errore.
 if "%CHECK_UPDATES%"=="0" (
-    !PY_CMD! main.py --no-update-check --no-confirm !LLM_ARG! !MAIN_ARGS!
+    !PY_CMD! src\main.py --no-update-check --no-confirm !LLM_ARG! !MAIN_ARGS!
 ) else (
-    !PY_CMD! main.py --no-confirm !LLM_ARG! !MAIN_ARGS!
+    !PY_CMD! src\main.py --no-confirm !LLM_ARG! !MAIN_ARGS!
 )
 
 echo.

@@ -42,7 +42,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-RADICE = Path(__file__).resolve().parent
+from hardware import project_root
+
+# I comandi qui sotto girano con cwd=RADICE e cercano file di radice
+# (requirements.txt, .github/). Con `__file__.parent` diventerebbe src/ e i
+# percorsi relativi punterebbero a src/src: fallirebbe senza toccare codice.
+RADICE = project_root()
 
 
 @dataclass(frozen=True)
@@ -98,13 +103,13 @@ def _passi() -> list[Controllo]:
         ),
         Controllo(
             "unittest",
-            [py, "-m", "unittest", "discover", "-s", ".", "-p", "test_*.py"],
+            [py, "-m", "unittest", "discover", "-s", "src", "-p", "test_*.py"],
             "la stessa suite della CI",
             r"^(OK|FAILED)",
         ),
         Controllo(
             "debug hardware",
-            [py, "_debug_hardware.py"],
+            [py, str(Path(__file__).parent / "_debug_hardware.py")],
             "encoder reali, ripiego a runtime",
             r"^RISULTATO:",
         ),

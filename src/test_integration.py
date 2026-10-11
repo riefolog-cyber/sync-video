@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from hardware import project_root
 from timeline import (
     extract_timeline_from_transcript,
     reconcile_timeline,
@@ -210,7 +211,7 @@ class TestVideoBatchScript(unittest.TestCase):
     esplicitamente (set VERIFY_VIDEO=0)."""
 
     def test_verify_video_enabled_by_default(self):
-        script = (Path(__file__).parent / "genera_video.bat").read_text(
+        script = (project_root() / "genera_video.bat").read_text(
             encoding="utf-8", errors="replace"
         )
         self.assertIn('if not defined VERIFY_VIDEO set "VERIFY_VIDEO=1"', script)

@@ -30,7 +30,7 @@ if errorlevel 1 (
     exit /b 9009
 )
 echo Python scelto: !PY_CMD!
-!PY_CMD! main.py --dry-run --debug !MAIN_ARGS!
+!PY_CMD! src\main.py --dry-run --debug !MAIN_ARGS!
 
 echo.
 echo ========================================

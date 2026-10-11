@@ -22,7 +22,11 @@ import re
 import unittest
 from pathlib import Path
 
-RADICE = Path(__file__).resolve().parent
+from hardware import project_root
+
+# I .md che questo test verifica stanno in radice, i moduli in src/:
+# `project_root()` trova la radice, `__file__.parent` darebbe src/.
+RADICE = project_root()
 PROMPT = {
     "podcast": RADICE / "PROMPT_PODCAST.md",
     "presentazione": RADICE / "PROMPT_PRESENTAZIONE (PREDEFINITO).md",

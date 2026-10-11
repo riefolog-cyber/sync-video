@@ -49,7 +49,7 @@ if errorlevel 1 (
     exit /b 9009
 )
 echo Python scelto: !PY_CMD!
-!PY_CMD! controlli.py!CONTROLLI_ARGS!
+!PY_CMD! src\controlli.py!CONTROLLI_ARGS!
 set "EXIT=%ERRORLEVEL%"
 
 echo.

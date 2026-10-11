@@ -43,8 +43,12 @@ from collections.abc import Generator
 from pathlib import Path
 
 import config
+from hardware import project_root
 
-RADICE = Path(__file__).resolve().parent
+# I .md che questo test verifica stanno in radice, i moduli in src/:
+# `project_root()` trova la radice, `__file__.parent` darebbe src/ e i
+# documenti risulterebbero inesistenti (il test passerebbe saltandoli).
+RADICE = project_root()
 
 # Documenti in cui un default può essere scritto a mano.
 DOCUMENTI = [
@@ -86,8 +90,18 @@ def _conta_test(argomenti: str) -> int | None:
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     if "discover" in argomenti:
+        # Usa la cartella che il COMANDO dichiara (`-s src`), non la radice:
+        # altrimenti questo controllo conterebbe i test che si vedono da un
+        # posto diverso da quello documentato, e la doc passerebbe senza
+        # essere vera.
+        partenza = RADICE
+        m_s = re.search(r"-s\s+(\S+)", argomenti)
+        if m_s:
+            partenza = Path(m_s.group(1).strip('"').strip("'"))
+            if not partenza.is_absolute():
+                partenza = RADICE / partenza
         try:
-            suite.addTests(loader.discover(str(RADICE), pattern="test_*.py", top_level_dir=str(RADICE)))
+            suite.addTests(loader.discover(str(partenza), pattern="test_*.py", top_level_dir=str(partenza)))
         except Exception:
             return None
         return suite.countTestCases()
