@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -113,6 +114,34 @@ def _find_genoffice() -> tuple[str, str] | None:
             if cli_file.exists():
                 return (cand_str, str(cli_file))
     return None
+
+
+def _find_powerpoint() -> bool:
+    """True se Microsoft PowerPoint e' installato (COM utilizzabile).
+
+    Si interroga il REGISTRO, non l'applicazione: aprire COM avvia PowerPoint,
+    il che costerebbe qualche secondo e potrebbe lasciare una finestra aperta
+    solo per scoprire che Office non c'e'. Basta il ProgID: se la chiave
+    esiste, la sua sottochiave CLSID esiste per forza.
+    """
+    if os.environ.get("SYNC_VIDEO_NO_OFFICE") == "1":
+        return False
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+    except ImportError:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "PowerPoint.Application"):
+            return True
+    except OSError:
+        return False
+
+
+def _office_converter_script() -> Path:
+    """Percorso dello script PowerShell che pilota PowerPoint via COM."""
+    return Path(__file__).resolve().parent / "pptx_to_pdf_office.ps1"
 
 
 def _file_md5(path: Path, chunk: int = 1024 * 1024) -> str:
@@ -238,22 +267,26 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
     Ordine di preferenza:
       1. LibreOffice ``soffice`` (se installato)
       2. GenOffice CLI headless (se installata) — conserva grafica e layout
-      3. ONLYOFFICE ``x2t`` (se installato) — alternativa senza LibreOffice
-      4. Fallback Python puro (python-pptx + PyMuPDF) se i converter falliscono
+      3. Microsoft PowerPoint via COM (se installato) — per i PC con solo Office
+      4. ONLYOFFICE ``x2t`` (se installato) — alternativa senza LibreOffice
+      5. Fallback Python puro (python-pptx + PyMuPDF) se i converter falliscono
 
     GenOffice sta prima di ONLYOFFICE perche' e' piu' probabile trovarsi
     gia' installato come editor predefinito, e il suo convertitore mantiene
     il layout (il fallback Python no: perdo' forme, colori e sfondi).
+    PowerPoint sta per terzo perche' e' l'unico dei quattro che richiede una
+    licenza: e' l'ultima risorsa per i PC che hanno Office e nient'altro.
     """
     soffice = _find_soffice()
     genoffice = _find_genoffice()
     onlyoffice = _find_onlyoffice()
-    has_converter = soffice or genoffice or onlyoffice
+    powerpoint = _find_powerpoint()
+    has_converter = soffice or genoffice or onlyoffice or powerpoint
     # Anche senza converter proviamo il fallback Python puro
     if not has_converter:
         log.warning(
-            "   Nessun converter nativo (LibreOffice/GenOffice/ONLYOFFICE) trovato: "
-            "provo fallback Python puro..."
+            "   Nessun converter nativo (LibreOffice/GenOffice/PowerPoint/ONLYOFFICE) "
+            "trovato: provo fallback Python puro..."
         )
     out_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / (ppt_path.stem + ".pdf")
@@ -311,24 +344,45 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
             # sul runtime Electron dell'app. Senza questa variabile Electron
             # aprirebbe la GUI e il processo non restituirebbe l'output.
             env_extra = {"ELECTRON_RUN_AS_NODE": "1"}
+        elif powerpoint:
+            converter = "PowerPoint"
+            # Non c'e' un equivalente di --headless per PowerPoint: l'unica
+            # via e' pilotarlo via COM, e lo fa uno script PowerShell. Non
+            # richiede pywin32 perche' PowerShell parla COM nativamente.
+            ps = shutil.which("powershell") or shutil.which("pwsh")
+            cmd = [
+                ps or "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(_office_converter_script()),
+                str(ppt_path),
+                str(pdf_path),
+            ]
+            env_extra = {}
         else:
             converter = "ONLYOFFICE"
             cmd = [onlyoffice, str(ppt_path), str(pdf_path)]  # type: ignore[list-item]
             env_extra = {}
         log.info("   Conversione %s -> PDF (%s)...", ext_upper, converter)
+        # PowerPoint via COM avvia l'applicazione: su un deck grosso, o su un
+        # PC lento, 180s non bastano e il timeout ucciderebbe la conversione
+        # lasciando PowerPoint aperto. Gli altri sono headless e veloci.
+        timeout = 300 if converter == "PowerPoint" else 180
         proc = None
         try:
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=180,
+                timeout=timeout,
                 check=False,
                 env={**os.environ, **env_extra} if env_extra else None,
                 creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
             )
         except subprocess.TimeoutExpired:
-            log.warning("   Conversione %s->PDF timeout (180s), provo fallback...", ext_upper)
+            log.warning("   Conversione %s->PDF timeout (%ds), provo fallback...", ext_upper, timeout)
         except OSError as e:
             # soffice/x2t presenti nel PATH ma non eseguibili (ACL, voce
             # spazzatura, architettura sbagliata, permessi). Senza questo
@@ -372,6 +426,7 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
         f"Conversione {ext_upper}->PDF fallita con tutti i metodi.\n"
         f" - LibreOffice: {'non trovato' if not soffice else 'errore'}\n"
         f" - GenOffice CLI: {'non trovato' if not genoffice else 'errore'}\n"
+        f" - PowerPoint COM: {'non trovato' if not powerpoint else 'errore'}\n"
         f" - ONLYOFFICE x2t: {'non trovato' if not onlyoffice else 'errore (TypeError su questo file)'}\n"
         f" - Fallback Python: fallito\n"
         "Soluzioni immediate (senza installare LibreOffice):\n"
