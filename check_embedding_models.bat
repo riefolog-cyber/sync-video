@@ -21,7 +21,7 @@ if errorlevel 1 (
     exit /b 9009
 )
 echo Python scelto: !PY_CMD!
-!PY_CMD! check_embedding_models.py
+!PY_CMD! scripts\check_embedding_models.py
 set "EXIT=%ERRORLEVEL%"
 echo.
 echo ========================================

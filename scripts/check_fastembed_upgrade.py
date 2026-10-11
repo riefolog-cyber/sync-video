@@ -45,9 +45,16 @@ from typing import cast
 
 import numpy as np
 
-BASE_DIR = Path(__file__).resolve().parent
+# Deve stare PRIMO: mette la radice nel sys.path, senza di lei i moduli core
+# (hardware, fastembed...) non sono importabili da scripts/.
+from _bootstrap import RADICE
+
+# La radice la dà il bootstrap: `__file__` sta in scripts/, quindi `parent`
+# qui sarebbe la cartella sbagliata.
+BASE_DIR = RADICE
 CACHE_DIR = BASE_DIR / ".cache"
-WORKER = BASE_DIR / "_embed_candidate_worker.py"
+# Il worker e' suo, sta nella stessa cartella di questo script.
+WORKER = Path(__file__).resolve().parent / "_embed_candidate_worker.py"
 
 DEFAULT_MODEL = "intfloat/multilingual-e5-large"
 ALTERNATE_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"

@@ -526,6 +526,14 @@ def _run_pinned_ab_test(pkg: dict) -> str | None:
         pass
 
     try:
+        # Lo script A/B sta in scripts/ e non e' un pacchetto: si rende
+        # importabile aggiungendo la sua cartella al sys.path. Senza questo,
+        # `import` fallirebbe e il test A/B non girerebbe mai.
+        import sys
+
+        _scripts = BASE_DIR / "scripts"
+        if str(_scripts) not in sys.path:
+            sys.path.insert(0, str(_scripts))
         import check_fastembed_upgrade as ab  # type: ignore[import-not-found]
     except Exception as e:
         log.warning("   ⚠️ Impossibile eseguire il test A/B per %s: %s", pkg["name"], e)

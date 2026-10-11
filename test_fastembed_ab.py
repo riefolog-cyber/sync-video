@@ -7,12 +7,17 @@ Esegui con: python -m unittest test_fastembed_ab -v
 """
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
+
+# Il modulo e' in scripts/ (non e' un pacchetto: si esegue come script), quindi
+# la sua cartella va aggiunta al sys.path per poterlo importare da qui.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
 
 import check_fastembed_upgrade as ab
 

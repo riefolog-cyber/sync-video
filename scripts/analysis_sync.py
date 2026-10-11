@@ -35,10 +35,12 @@ import tempfile
 from contextlib import suppress
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
+# Deve stare PRIMO: mette la radice del progetto nel sys.path, senza di lei
+# i moduli core qui sotto non sono importabili da scripts/.
+from _bootstrap import RADICE
+
+BASE = RADICE
 CACHE = BASE / ".cache"
-if str(BASE) not in sys.path:
-    sys.path.insert(0, str(BASE))
 
 import numpy as np
 

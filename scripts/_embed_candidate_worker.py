@@ -9,8 +9,8 @@ embedding normalizzati su file .npy. Replica esattamente la logica di
 normalizzazione L2) cosi' baseline e candidata producono vettori
 confrontabili.
 
-Uso:
-  python _embed_candidate_worker.py <texts.json> <model> <cache_dir> <out.npy>
+Uso (chiamato da check_fastembed_upgrade.py, non a mano):
+  python scripts/_embed_candidate_worker.py <texts.json> <model> <cache_dir> <out.npy>
 
 testi.json: {"texts": [...]} oppure {"slides": [...], "blocks": [...]}.
 """

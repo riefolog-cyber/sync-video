@@ -33,10 +33,16 @@ import argparse
 import json
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
-BASE_DIR = Path(__file__).resolve().parent
+# Deve stare PRIMO: mette la radice nel sys.path. Questo script non importa
+# moduli core al livello superiore, ma i suoi test sì (importano config), e
+# senza il bootstrap non troverebbero nulla da scripts/.
+from _bootstrap import RADICE
+
+# La radice la dà il bootstrap: `__file__` sta in scripts/, quindi `parent`
+# qui sarebbe la cartella sbagliata (e la cache finirebbe in scripts/.cache).
+BASE_DIR = RADICE
 CACHE_DIR = BASE_DIR / ".cache"
 STATE_FILE = CACHE_DIR / "embedding_model_check.json"
 REPORT_FILE = CACHE_DIR / "embedding_model_check_report.md"

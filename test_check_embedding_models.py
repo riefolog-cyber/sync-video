@@ -7,8 +7,14 @@ raccomandazione ed esito.
 Esegui con: python -m unittest test_check_embedding_models -v
 """
 
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
+
+# Il modulo e' in scripts/ (non e' un pacchetto: si esegue come script), quindi
+# la sua cartella va aggiunta al sys.path per poterlo importare da qui.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
 
 import check_embedding_models as cm
 

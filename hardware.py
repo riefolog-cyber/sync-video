@@ -34,9 +34,39 @@ import sys
 import time
 from pathlib import Path
 
-# Stessa posizione di config.CACHE_DIR, calcolata qui per non importare
-# config (che a sua volta potrebbe voler importare questo modulo).
-BASE_DIR = Path(__file__).resolve().parent
+
+def project_root() -> Path:
+    """Radice del progetto: la cartella che contiene `requirements.txt`.
+
+    Sta QUI e non in `config` perche' questo modulo e' l'unico che non
+    importa nessun altro modulo del progetto (config lo importa, quindi
+    config non puo' importare hardware in modo pulito). Definire qui la
+    radice e' l'unico modo per avere UNA sola definizione invece di cinque
+    copie di `Path(__file__).parent`.
+
+    Perche' non basta `Path(__file__).parent`: e' corretto solo finche' i
+    moduli stanno in radice. Se un giorno i .py si spostassero in `src/`,
+    `parent` diventerebbe `src/` e i percorsi che ne derivano — la cache, il
+    PDF, l'audio, `requirements.txt` — cercherebbero tutti nel posto
+    sbagliato, SENZA sollevare un errore: il programma direbbe semplicemente
+    "non trovo il tuo podcast". Fallo risalire finche' trova i segni del
+    progetto, cosi' la radice e' la stessa da qualunque profondita' venga
+    importato questo modulo.
+
+    Fallback: la cartetta del file stesso, se nessun segno e' visibile
+    (checkout senza .git e senza requirements.txt, che non e' il caso
+    normale ma non deve far esplodere nulla).
+    """
+    qui = Path(__file__).resolve().parent
+    for candidato in (qui, *qui.parents):
+        if (candidato / "requirements.txt").exists() or (candidato / ".git").exists():
+            return candidato
+    return qui
+
+
+# Stessa posizione di config.CACHE_DIR: entrambe derivano da project_root(),
+# quindi restano allineate per costruzione e non per abitudine.
+BASE_DIR = project_root()
 CACHE_DIR = BASE_DIR / ".cache"
 HARDWARE_CACHE = CACHE_DIR / "hardware.json"
 

@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from hardware import disk_free_bytes, memory_tier, ram_total_bytes
+from hardware import disk_free_bytes, memory_tier, project_root, ram_total_bytes
 
 # stdout/stderr in UTF-8 con fallback 'replace': evita UnicodeEncodeError
 # (codice cp1252 di Windows) quando il bootstrap stampa emoji (es. ⏳ 🔧).
@@ -338,7 +338,12 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
 # =====================================================================
 # PATH DI BASE
 # =====================================================================
-BASE_DIR = Path(__file__).parent
+# La radice la decide hardware.project_root(), che risale fino a trovare i
+# segni del progetto. Non piu' `Path(__file__).parent`: quello funziona solo
+# finche' questo file sta in radice, e se i moduli si spostassero in `src/`
+# la cache, il PDF e l'audio verrebbero cercati dentro `src/` SENZA alcun
+# errore — il sintomo sarebbe "non trovo il tuo podcast".
+BASE_DIR = project_root()
 CACHE_DIR = BASE_DIR / ".cache"
 
 # Prefisso dei file cache della revisione LLM (``llm_review_<hash>.json``).
