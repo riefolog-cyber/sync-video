@@ -186,7 +186,7 @@ REGOLE_RIMOSSE = [
 class TestRegolePrompt(unittest.TestCase):
     """Ogni regola che protegge la sincronizzazione deve restare scritta."""
 
-    def test_ogni_regola_e_presente(self):
+    def test_ogni_regola_e_presente(self) -> None:
         mancanti = [
             f"{PROMPT[flusso].name}: {nome}"
             for flusso, atteso, nome in REGOLE
@@ -194,11 +194,11 @@ class TestRegolePrompt(unittest.TestCase):
         ]
         self.assertEqual(mancanti, [], "regole sparite dai prompt")
 
-    def test_i_due_prompt_esistono(self):
+    def test_i_due_prompt_esistono(self) -> None:
         for percorso in PROMPT.values():
             self.assertTrue(percorso.exists(), f"manca {percorso.name}")
 
-    def test_nessuna_regola_rimossa_torna_indietro(self):
+    def test_nessuna_regola_rimossa_torna_indietro(self) -> None:
         """Le regole tolte non devono riapparire per sbaglio.
 
         Sono state levate di proposito. Se una riappare, il prompt e' stato
@@ -220,16 +220,21 @@ class TestCoerenzaTraPrompt(unittest.TestCase):
     def _tono(self, percorso: Path) -> str:
         testo = percorso.read_text(encoding="utf-8")
         m = re.search(r"TONO E STILE DEL DIBATTITO(.*?)```", testo, re.S)
-        self.assertIsNotNone(m, f"{percorso.name}: blocco TONE non trovato")
+        # `assert m is not None` e non self.assertIsNotNone: il type-checker
+        # restringe il tipo solo con assert. Con assertIsNotNone restava
+        # Match|None e la riga dopo era un potenziale AttributeError che i
+        # test non potevano vedere (il fallimento sarebbe stato un errore
+        # invece di un messaggio pulito).
+        assert m is not None, f"{percorso.name}: blocco TONE non trovato"
         return _normale(m.group(1))
 
-    def test_blocco_tono_identico(self):
+    def test_blocco_tono_identico(self) -> None:
         # Le due versioni lunghe avevano blocchi quasi identici ma non uguali
         # (una chiudeva con un saluto finale, l'altra con una domanda aperta), e
         # la differenza non serviva a nessuno.
         self.assertEqual(self._tono(PROMPT["podcast"]), self._tono(PROMPT["presentazione"]))
 
-    def test_entrambi_i_prompt_hanno_un_blocco_tono(self):
+    def test_entrambi_i_prompt_hanno_un_blocco_tono(self) -> None:
         for percorso in PROMPT.values():
             self.assertIn("TONO E STILE DEL DIBATTITO", percorso.read_text(encoding="utf-8"))
 
@@ -243,7 +248,7 @@ class TestBlocchiIncollabili(unittest.TestCase):
     blocchi e non sono un problema: non raggiungono mai NotebookLM.
     """
 
-    def test_nessuna_riga_con_quattro_spazi(self):
+    def test_nessuna_riga_con_quattro_spazi(self) -> None:
         offending = [
             f"{percorso.name}: {riga!r}"
             for percorso in PROMPT.values()
@@ -253,7 +258,7 @@ class TestBlocchiIncollabili(unittest.TestCase):
         ]
         self.assertEqual(offending, [], "righe che diventerebbero blocco di codice")
 
-    def test_nessuna_grafica_markdown_dentro_ai_blocchi(self):
+    def test_nessuna_grafica_markdown_dentro_ai_blocchi(self) -> None:
         # #, **, ═, ▸ non hanno senso in un campo di testo: arrivano al
         # modello come spazzatura.
         grafica = re.compile(r"^#|\*\*|═|▸", re.M)
@@ -266,7 +271,7 @@ class TestBlocchiIncollabili(unittest.TestCase):
         ]
         self.assertEqual(offending, [], "grafica markdown dentro un blocco")
 
-    def test_nessun_simbolo_fuori_dal_testo_italiano(self):
+    def test_nessun_simbolo_fuori_dal_testo_italiano(self) -> None:
         # Solo lettere accentate e punteggiatura ASCII: tutto il resto e' un
         # rischio di codifica, e non aggiunge istruzione.
         vietati = {
@@ -280,7 +285,7 @@ class TestBlocchiIncollabili(unittest.TestCase):
             sorted(vietati), [], "simboli non-italiani dentro i blocchi da incollare"
         )
 
-    def test_nessun_passo_oltre_una_pagina_di_istruzioni(self):
+    def test_nessun_passo_oltre_una_pagina_di_istruzioni(self) -> None:
         # NotebookLM non ha un limite dichiarato, ma un prompt oltre qualche
         # migliaio di caratteri compete con i sorgenti. Si sta larghi.
         #
@@ -310,7 +315,7 @@ class TestRiferimentiReadme(unittest.TestCase):
     il funzionamento e' peggio di un link assente.
     """
 
-    def test_i_link_locali_esistono(self):
+    def test_i_link_locali_esistono(self) -> None:
         testo = README.read_text(encoding="utf-8")
         # [etichetta](<percorso>) e [etichetta](percorso)
         candidati = re.findall(r"\]\((?:<([^>]+)>|([^)\s]+))\)", testo)
@@ -328,7 +333,7 @@ class TestRiferimentiReadme(unittest.TestCase):
                 rotti.append(target)
         self.assertEqual(rotti, [], "link del README a file inesistenti")
 
-    def test_il_readme_cita_i_prompt_che_esistono(self):
+    def test_il_readme_cita_i_prompt_che_esistono(self) -> None:
         testo = README.read_text(encoding="utf-8")
         for percorso in PROMPT.values():
             self.assertIn(percorso.name, testo, f"{percorso.name} non e' citato nel README")

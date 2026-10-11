@@ -27,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from typing import Any
 
-from config import BASE_DIR, CACHE_DIR, atomic_write_text, log
+from config import BASE_DIR, CACHE_DIR, _installed_version, atomic_write_text, log
 
 UPDATES_CACHE = CACHE_DIR / "updates_check.json"
 DEFAULT_UPDATE_TTL_HOURS = 6.0  # ri-check di rete ogni N ore
@@ -58,14 +58,6 @@ _PINNED: dict[str, str] = {
     # per e5-large, cambiando gli embedding rispetto alla baseline validata.
     "fastembed": "pinnato a 0.5.1: embedding e5-large validati A/B",
 }
-
-
-def _installed_version(pip_name: str) -> str | None:
-    """Versione installata del pacchetto, o None se non presente."""
-    try:
-        return importlib.metadata.version(pip_name)
-    except importlib.metadata.PackageNotFoundError:
-        return None
 
 
 def _latest_version_pypi(pip_name: str) -> str | None:
