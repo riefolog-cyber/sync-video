@@ -31,6 +31,7 @@ consigliata, primo avvio automatico di Python su Windows).
 | #17 | Primo avvio automatico anche di Python (Windows) | ✅ |
 | #18 | Controllo dello spazio disco prima del primo download | ✅ |
 | #19 | Avviso se i modelli di default sono pesanti per il PC | ✅ |
+| #20 | Test che le tabelle delle doc corrispondano al codice | ✅ |
 
 ## Decisioni da non riaprire
 
