@@ -120,20 +120,31 @@ installazione: **non** fallisce con un errore incomprensibile.
 
 | Componente | Dimensione | Metodo |
 |---|---|---|
-| Pacchetti pip (13 su x86-64) | ~250 MB | `pip install` |
+| Pacchetti pip (12 su x86-64) | ~250 MB | `pip install` |
 | Tesseract OCR | ~40 MB | `winget` / `apt-get` / `brew` |
 | ffmpeg | ~80 MB | `winget` / `apt-get` / `brew` |
-| Modello embedding e5-large | **~6.4 GB** di disco | fastembed (download automatico) |
-| Modello Whisper `small` (CPU) | ~490 MB | faster-whisper (download automatico) |
-| Modello Whisper OpenVINO | ~80 MB (`tiny`) / ~930 MB (`small`) | `--openvino-download` (facoltativo) |
+| Modello embedding e5-large | **~2.1 GB** di disco | fastembed (download automatico) |
+| Modello Whisper `small` (CPU) | ~460 MB | faster-whisper (download automatico) |
+| Modello Whisper OpenVINO | ~75 MB (`tiny`) / ~470 MB (`small`) | `--openvino-download` (facoltativo) |
 | Lingua Tesseract ITA | inclusa | `tessdata/ita.traineddata` |
 
-> **Perché 6.4 GB e non 2.2 per il modello embedding.** Il download è ~2.2 GB,
-> ma fastembed tiene **due copie** di `multilingual-e5-large` nella cache
-> (`.cache/embedding_model/`): `fast-multilingual-e5-large` (2.1 GB) e
-> `models--qdrant--multilingual-e5-large-onnx` (4.3 GB), misurate. È un
-> comportamento di fastembed, non una scelta del progetto, ma è quello che
-> occupa disco: **chi pianifica lo spazio deve contare 6.4 GB**, non 2.2.
+> **Le dimensioni sono misurate, non stimate.** I valori sopra sono i byte
+> reali occupati dopo una run completa con le versioni pinnate in
+> `requirements.txt` (`fastembed==0.5.1`): la copia
+> `models--qdrant--multilingual-e5-large-onnx` dentro
+> `.cache/embedding_model/` pesa 2,10 GB, e il Whisper `small` nella cache
+> HuggingFace 464 MB.
+>
+> Una versione precedente di questa pagina riportava 6,4 GB per l'embedding,
+> scomposti in due copie (2,1 + 4,3 GB). **Quella scomposizione non si
+> riproduce**: sulla macchina in cui è stata rimisurata c'è una sola copia,
+> da 2,10 GB. Non è chiaro se dipenda da una versione diversa di fastembed o
+> da una misura fatta su una macchina che aveva scaricato di più.
+>
+> Finché la cosa non è chiara, **il controllo dello spazio nel programma
+> continua a usare 6,4 GB**, che è il caso peggiore: sbagliare in eccesso
+> dà un avviso inutile, sbagliare in difetto fa fallire il download a metà
+> con un errore che non spiega la causa.
 >
 > **Il modello Whisper CPU è nella cache HuggingFace**, non in `.cache/`: con
 > `HF_HOME` personalizzato va cercato lì. La copia OpenVINO è **facoltativa** e

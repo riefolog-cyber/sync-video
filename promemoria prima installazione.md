@@ -50,7 +50,9 @@ Il podcast deve seguire il prompt giusto (vedi `PROMPT_PRESENTAZIONE
 
 Doppio clic su **`genera_video.bat`** e aspetta il riepilogo finale.
 
-- La prima volta scarica i modelli (~7 GB): è normale che sembri fermo,
+- La prima volta scarica i modelli (~2,6 GB misurati; il programma ne
+  chiede ~9 GB perché controlla sul caso peggiore): è normale che sembri
+  fermo,
   i download vengono annunciati prima di partire.
 - Al primo avvio vedi anche cosa è stato deciso per il tuo PC (motore di
   trascrizione, encoder video, thread in base ai core, batch in base alla
