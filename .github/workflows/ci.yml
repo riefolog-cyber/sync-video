@@ -6,6 +6,16 @@ on:
   schedule:
     # Full suite notturna (test lenti inclusi): alle 03:00 UTC.
     - cron: "0 3 * * *"
+  workflow_dispatch:
+    # Permette di lanciare a mano anche il job nightly-full (che
+    # altrimenti gira solo col cron, e GitHub lo disabilita dopo
+    # 60 giorni di inattivita'). Utile per verificare che i test
+    # lenti girino davvero su ubuntu-latest senza aspettare la notte.
+    inputs:
+      run-slow:
+        description: "Esegue anche i test lenti (SYNC_VIDEO_RUN_SLOW=1)"
+        type: boolean
+        default: true
 
 jobs:
   lint-typecheck-test:
@@ -58,7 +68,8 @@ jobs:
 
   nightly-full:
     # Suite completa notturna con test lenti (modelli reali, rete).
-    if: github.event_name == 'schedule'
+    # Gira col cron notturno O se lanciato a mano (workflow_dispatch).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
