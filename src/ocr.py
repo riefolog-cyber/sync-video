@@ -40,6 +40,20 @@ _ONLYOFFICE_CANDIDATES = [
     "/opt/onlyoffice/desktopeditors/converter/x2t",
 ]
 
+# Candidati GenOffice. NON ha un converter in stile x2t: dentro l'app c'e' una
+# CLI headless (resources\cli\genoffice.cjs) eseguita dal runtime Electron
+# dell'app stessa. Serve il .exe OLTRE allo script .cjs: senza GenOffice.exe la
+# CLI non parte, e per questo i due file sono verificati insieme.
+_GENOFFICE_CANDIDATES = [
+    r"C:\Program Files\GenOffice\GenOffice.exe",
+    r"C:\Program Files (x86)\GenOffice\GenOffice.exe",
+    "/opt/genoffice/GenOffice",
+    "/usr/bin/genoffice",
+]
+
+# Lo script CLI, relativo alla radice di installazione trovata sopra.
+_GENOFFICE_CLI_REL = Path("resources") / "cli" / "genoffice.cjs"
+
 
 def _find_soffice() -> str | None:
     """Cerca un eseguibile LibreOffice soffice utilizzabile per la conversione."""
@@ -70,6 +84,35 @@ def _find_onlyoffice() -> str | None:
 
 
 PRESENTATION_SUFFIXES = {".ppt", ".pptx"}
+
+
+def _find_genoffice() -> tuple[str, str] | None:
+    """(GenOffice.exe, percorso CLI) se la CLI headless e' installata.
+
+    Ritorna entrambi perche' servono insieme: il .exe da' il runtime Node,
+    lo .cjs contiene il codice della CLI. Se uno dei due manca non c'e'
+    conversione possibile, quindi si restituisce None invece di un percorso
+    che fallirebbe solo a runtime.
+    """
+    env_app = os.environ.get("GENOFFICE_PATH")
+    if env_app and Path(env_app).exists():
+        cli_env = Path(env_app).parent / _GENOFFICE_CLI_REL
+        return (env_app, str(cli_env)) if cli_env.exists() else None
+    found = shutil.which("genoffice")
+    if found:
+        # Il launcher sul PATH puo' essere lo script .cjs o il .cmd wrapper.
+        cand = Path(found)
+        cli_path = cand if cand.suffix == ".cjs" else cand.parent / "genoffice.cjs"
+        app_path = cand.parent.parent.parent / "GenOffice.exe"
+        if cli_path.exists() and app_path.exists():
+            return (str(app_path), str(cli_path))
+    for cand_str in _GENOFFICE_CANDIDATES:
+        p = Path(cand_str)
+        if p.exists():
+            cli_file = p.parent / _GENOFFICE_CLI_REL
+            if cli_file.exists():
+                return (cand_str, str(cli_file))
+    return None
 
 
 def _file_md5(path: Path, chunk: int = 1024 * 1024) -> str:
@@ -190,19 +233,28 @@ def _pptx_fallback_to_pdf(ppt_path: Path, pdf_path: Path) -> bool:
 
 
 def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
-    """Converte una presentazione PPT/PPTX in PDF usando LibreOffice o ONLYOFFICE.
+    """Converte una presentazione PPT/PPTX in PDF usando un converter nativo.
 
     Ordine di preferenza:
       1. LibreOffice ``soffice`` (se installato)
-      2. ONLYOFFICE ``x2t`` (se installato) — alternativa senza LibreOffice
-      3. Fallback Python puro (python-pptx + PyMuPDF) se i converter falliscono
+      2. GenOffice CLI headless (se installata) — conserva grafica e layout
+      3. ONLYOFFICE ``x2t`` (se installato) — alternativa senza LibreOffice
+      4. Fallback Python puro (python-pptx + PyMuPDF) se i converter falliscono
+
+    GenOffice sta prima di ONLYOFFICE perche' e' piu' probabile trovarsi
+    gia' installato come editor predefinito, e il suo convertitore mantiene
+    il layout (il fallback Python no: perdo' forme, colori e sfondi).
     """
     soffice = _find_soffice()
+    genoffice = _find_genoffice()
     onlyoffice = _find_onlyoffice()
-    has_converter = soffice or onlyoffice
+    has_converter = soffice or genoffice or onlyoffice
     # Anche senza converter proviamo il fallback Python puro
     if not has_converter:
-        log.warning("   Nessun converter nativo (LibreOffice/ONLYOFFICE) trovato: provo fallback Python puro...")
+        log.warning(
+            "   Nessun converter nativo (LibreOffice/GenOffice/ONLYOFFICE) trovato: "
+            "provo fallback Python puro..."
+        )
     out_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / (ppt_path.stem + ".pdf")
 
@@ -241,9 +293,28 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
         if soffice:
             converter = "LibreOffice"
             cmd = [soffice, "--headless", "--convert-to", "pdf", "--outdir", str(out_dir), str(ppt_path)]
+            env_extra: dict[str, str] = {}
+        elif genoffice:
+            converter = "GenOffice"
+            cmd = [
+                genoffice[0],
+                genoffice[1],
+                "convert",
+                str(ppt_path),
+                "--to",
+                "pdf",
+                "--out",
+                str(pdf_path),
+                "--force",
+            ]
+            # La CLI non e' un eseguibile autonomo: e' uno script Node che gira
+            # sul runtime Electron dell'app. Senza questa variabile Electron
+            # aprirebbe la GUI e il processo non restituirebbe l'output.
+            env_extra = {"ELECTRON_RUN_AS_NODE": "1"}
         else:
             converter = "ONLYOFFICE"
             cmd = [onlyoffice, str(ppt_path), str(pdf_path)]  # type: ignore[list-item]
+            env_extra = {}
         log.info("   Conversione %s -> PDF (%s)...", ext_upper, converter)
         proc = None
         try:
@@ -253,6 +324,7 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
                 text=True,
                 timeout=180,
                 check=False,
+                env={**os.environ, **env_extra} if env_extra else None,
                 creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
             )
         except subprocess.TimeoutExpired:
@@ -299,10 +371,11 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
     raise RuntimeError(
         f"Conversione {ext_upper}->PDF fallita con tutti i metodi.\n"
         f" - LibreOffice: {'non trovato' if not soffice else 'errore'}\n"
+        f" - GenOffice CLI: {'non trovato' if not genoffice else 'errore'}\n"
         f" - ONLYOFFICE x2t: {'non trovato' if not onlyoffice else 'errore (TypeError su questo file)'}\n"
         f" - Fallback Python: fallito\n"
         "Soluzioni immediate (senza installare LibreOffice):\n"
-        " 1) Apri presentazione.pptx in ONLYOFFICE DesktopEditors > "
+        " 1) Apri presentazione.pptx in GenOffice o ONLYOFFICE DesktopEditors > "
         "File > Scarica come > PDF e salva come presentazione.pdf\n"
         " 2) Oppure carica su Google Slides > File > Scarica > PDF\n"
         " 3) Poi lancia: "
