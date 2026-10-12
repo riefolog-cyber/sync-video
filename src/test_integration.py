@@ -64,6 +64,9 @@ class TestForceCleanExit(unittest.TestCase):
 
         zombie = self._fake_thread("ffmpeg-reader", daemon=False)
         with (
+            # Il thread finto non chiude mai: senza accorciare il grace si
+            # aspetterebbe i 5 secondi veri a ogni test di questo gruppo.
+            patch("main._GRACE_CHIUSURA_SECONDS", 0.01),
             patch("main.os._exit") as mock_exit,
             patch("main.logging.shutdown") as mock_shutdown,
             patch.object(logging.Logger, "warning") as mock_log,
@@ -135,6 +138,7 @@ class TestForceCleanExit(unittest.TestCase):
 
         finto = self._fake_thread("ThreadPoolExecutor-0_0", daemon=False)
         with (
+            patch("main._GRACE_CHIUSURA_SECONDS", 0.01),
             patch("main.os._exit") as mock_exit,
             patch("main.logging.shutdown"),
             patch(
@@ -161,6 +165,7 @@ class TestForceCleanExit(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=1) as pool:
             pool.submit(lambda: None).result()
             with (
+                patch("main._GRACE_CHIUSURA_SECONDS", 0.01),
                 patch("main.os._exit") as mock_exit,
                 patch("main.logging.shutdown") as mock_shutdown,
                 patch.object(logging.Logger, "warning") as mock_log,
@@ -188,6 +193,7 @@ class TestForceCleanExit(unittest.TestCase):
         zombie = self._fake_thread("ThreadPoolExecutor-0_0", daemon=False)
         with (
             patch("main._WORKER_POOL_FILE", None),
+            patch("main._GRACE_CHIUSURA_SECONDS", 0.01),
             patch("main.os._exit") as mock_exit,
             patch("main.logging.shutdown"),
             patch(
@@ -197,6 +203,70 @@ class TestForceCleanExit(unittest.TestCase):
         ):
             main._force_clean_exit()
         mock_exit.assert_called_once_with(0)
+
+    # --- Il thread che sta chiudendo non è un thread bloccante ---
+
+    def test_thread_che_si_chiude_da_solo_non_forza_uscita(self):
+        """Il falso positivo che costava gli atexit e l'exit code.
+
+        Un worker che ha finito e sta terminando è ancora isAlive() per un
+        istante: os._exit(0) a quel punto saltava gli atexit (temp e risorse
+        non chiuse) e forzava l'exit code a 0. Osservato al primo avvio su PC
+        nuovo, col pool di fastembed ancora in chiusura.
+
+        Il thread è REALE e vivo al momento del controllo, e muove subito
+        dopo: è la situazione vera. Con un thread già finito non si
+        proverebbe niente, perché il filtro `not t.is_alive()` lo scarterebbe
+        prima ancora di arrivare all'attesa.
+        """
+        import time
+
+        import main
+
+        def _chiude_presto() -> None:
+            time.sleep(0.2)
+
+        lento = threading.Thread(target=_chiude_presto, name="chiude-presto", daemon=False)
+        lento.start()
+        self.addCleanup(lento.join)
+        with (
+            patch("main.os._exit") as mock_exit,
+            patch("main.logging.shutdown") as mock_shutdown,
+            patch(
+                "main.threading.enumerate",
+                return_value=[threading.current_thread(), lento],
+            ),
+        ):
+            main._force_clean_exit()
+        mock_exit.assert_not_called()
+        mock_shutdown.assert_not_called()
+
+    def test_thread_che_non_si_chiude_forza_uscita_oltre_il_tetto(self):
+        """La protezione contro l'hang vero deve sopravvivere all'attesa."""
+        import main
+
+        with (
+            patch("main._WORKER_POOL_FILE", None),
+            patch("main._GRACE_CHIUSURA_SECONDS", 0.05),
+            patch("main.os._exit") as mock_exit,
+            patch("main.logging.shutdown"),
+            patch(
+                "main.threading.enumerate",
+                return_value=[threading.current_thread(), self._fake_thread("zombie", daemon=False)],
+            ),
+        ):
+            main._force_clean_exit()
+        mock_exit.assert_called_once_with(0)
+
+    def test_attesa_ha_un_tetto(self):
+        """Senza tetto, un hang vero non uscirebbe piu': è il punto del fix."""
+        import main
+
+        vivo = self._fake_thread("bloccato", daemon=False)
+        vivo.is_alive.return_value = True
+        with patch("main.time.sleep"):
+            rimasti = main._aspetta_che_si_chiudano([vivo], 0.05)
+        self.assertEqual([t.name for t in rimasti], ["bloccato"])
 
 
 def _words(items):

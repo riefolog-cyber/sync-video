@@ -3679,6 +3679,29 @@ _WORKER_POOL_FILE = Path(_WORKER_POOL_SRC).resolve() if _WORKER_POOL_SRC else No
 _WORKER_POOL_FUNC = "_worker"
 
 
+# Quanto si concede ai thread residui prima di dichiararli bloccanti. Serve a
+# distinguere un worker che sta chiudendo da uno che è impazzito: vedi la
+# chiamata in `_force_clean_exit`.
+_GRACE_CHIUSURA_SECONDS = 5.0
+
+
+def _aspetta_che_si_chiudano(threads: list[threading.Thread], secondi: float) -> list[threading.Thread]:
+    """Rivuota `threads` di quelli che chiudono da soli entro `secondi`.
+
+    Restituisce quelli ancora vivi dopo l'attesa: se la lista è vuota, il
+    processo può uscire normalmente (atexit inclusi) invece di essere forzato.
+    """
+    if not threads:
+        return []
+    fine = time.monotonic() + secondi
+    while time.monotonic() < fine:
+        rimasti = [t for t in threads if t.is_alive()]
+        if not rimasti:
+            return []
+        time.sleep(0.05)
+    return [t for t in threads if t.is_alive()]
+
+
 def _in_coda_su_un_pool(t: threading.Thread) -> bool:
     """True se `t` è un worker di un ThreadPoolExecutor, non un thread impiantato.
 
@@ -3743,6 +3766,23 @@ def _force_clean_exit() -> None:
         )
     if not bloccanti:
         return
+
+    # Un thread che sta chiudendo non è un thread bloccante. Shutdown di un
+    # pool, flush di una libreria: finiscono da sole in pochi istanti, ma il
+    # thread è ancora isAlive() mentre accade. Contarlo come bloccante costava
+    # due cose reali: os._exit(0) salta gli atexit (temp e risorse non chiuse
+    # restano indietro) e forza l'exit code a 0, mascherando un errore.
+    # Osservato proprio nel primo avvio su PC nuovo, col pool di fastembed
+    # ancora in chiusura.
+    #
+    # Il tetto è cio' che distingue "sta chiudendo" da "e' impazzito": la run
+    # che restava appesa bruciando CPU non finisce mai, quindi aspettare
+    # questi pochi secondi non la reintroduce.
+    bloccanti = _aspetta_che_si_chiudano(bloccanti, _GRACE_CHIUSURA_SECONDS)
+    if not bloccanti:
+        log.info("   I thread residui si sono chiusi da soli: l'uscita resta normale.")
+        return
+
     # WARNING e non INFO: la calibrazione di questa riga è cambiata con il
     # filtro sopra. Prima compariva a ogni run, e "forzo l'uscita pulita" era
     # narrazione di routine; ora che scatta solo su un thread davvero bloccante,
