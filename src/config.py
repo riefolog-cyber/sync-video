@@ -1484,6 +1484,11 @@ DEFAULT_EMBED_BATCH = _env_int("EMBED_BATCH", {"basso": 16, "medio": 32}.get(_RA
 
 DEFAULT_SEMANTIC_WINDOW = _env_float("SEMANTIC_WINDOW", 4.0)  # secondi per blocco
 DEFAULT_SEMANTIC_MIN_DURATION = _env_float("SEMANTIC_MIN_DURATION", 3.0)  # durata minima slide
+# Pavimento di leggibilità dell'anti-flicker: sotto questi secondi una slide
+# a video è un lampo illeggibile. La soglia effettiva è max(fondo, 2x durata
+# minima semantica), vedi timeline.anti_flicker_floor. Override con
+# MIN_SEGMENT_SECONDS.
+DEFAULT_MIN_SEGMENT_SECONDS = _env_float("MIN_SEGMENT_SECONDS", 8.0)
 # L'unica soglia di qualità. Sulla scala grezza dei coseni la soglia sarebbe un
 # presidio finto: misurata su dati reali, anche un testo senza senso dà 0.75
 # contro una slide e il parlato reale non scende mai sotto 0.75, quindi una

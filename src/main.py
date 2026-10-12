@@ -114,6 +114,7 @@ from semantic_sync import (
     weak_signal_seen,
 )
 from timeline import (
+    anti_flicker_floor,
     detect_flow_from_words,
     discarded_citations,
     enforce_min_durations,
@@ -2462,7 +2463,7 @@ def main(argv: list | None = None) -> None:
             # default di merge_short_segments, 15s): due soglie diverse nella
             # stessa selezione, e nel caso limite (un segmento da 10s) il LLM lo
             # assorbiva e il MiniLM no.
-            min_segment_seconds = max(8.0, 2 * args.semantic_min_duration)
+            min_segment_seconds = anti_flicker_floor(args.semantic_min_duration)
 
             # Motore LLM (opzionale): supera il tetto di precisione del MiniLM
             # su presentazioni tematicamente omogenee. Unico provider: 9Router
@@ -3157,7 +3158,7 @@ llm_enabled=llm_disponibile,
             # ancorati: le ancore "slide N" pronunciate restano esatte al
             # decimo di secondo (principio del progetto). Stessa soglia
             # dell'anti-flicker del flusso libero: max(8s, 2x durata minima).
-            min_slide_seconds = max(8.0, 2 * args.semantic_min_duration)
+            min_slide_seconds = anti_flicker_floor(args.semantic_min_duration)
             timeline_before_floor = dict(timeline)
             timeline, _moved = enforce_min_durations(
                 timeline,

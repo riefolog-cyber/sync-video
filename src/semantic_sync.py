@@ -47,6 +47,7 @@ from config import (
     DEFAULT_EMBEDDING_CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+    DEFAULT_MIN_SEGMENT_SECONDS,
     DEFAULT_SEMANTIC_MIN_Z,
     DEFAULT_SEMANTIC_TEMPERATURE,
     log,
@@ -1957,7 +1958,7 @@ def refine_llm_segment_boundaries(
     slide_texts: Sequence[str],
     embed_fn: EmbedFn,
     window_seconds: float = 30.0,
-    min_segment_seconds: float = 8.0,
+    min_segment_seconds: float = DEFAULT_MIN_SEGMENT_SECONDS,
     context_seconds: float = 10.0,
     margin: float = 0.01,
     refine_slides: Collection[int] | None = None,
@@ -2197,7 +2198,7 @@ def refine_ordered_llm_timeline(
     total_duration: float,
     embed_fn: EmbedFn,
     window_seconds: float = 30.0,
-    min_segment_seconds: float = 8.0,
+    min_segment_seconds: float = DEFAULT_MIN_SEGMENT_SECONDS,
 ) -> dict[int, float]:
     """Rifinisce i confini della timeline LLM ordinata a granularità di parola.
 
@@ -2299,7 +2300,7 @@ def repair_segments_from_frame_mismatches(
     words: Sequence[Word],
     slide_texts: Sequence[str],
     embed_fn: EmbedFn,
-    min_segment_seconds: float = 8.0,
+    min_segment_seconds: float = DEFAULT_MIN_SEGMENT_SECONDS,
     context_seconds: float = 12.0,
     max_shift_seconds: float = 180.0,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

@@ -1267,6 +1267,30 @@ class TestMinAnchorCoverage(unittest.TestCase):
         self.assertTrue(_anchor_coverage_ok(0, 1, 0.5))
 
 
+class TestAntiFlickerFloor(unittest.TestCase):
+    """Soglia unica dell'anti-flicker (era il letterale 8.0 in 5 punti).
+
+    Il fondo di leggibilità vive in un solo posto
+    (config.DEFAULT_MIN_SEGMENT_SECONDS): qui si fissa il comportamento,
+    non il valore.
+    """
+
+    def test_default_resta_il_fondo(self):
+        from timeline import anti_flicker_floor
+
+        self.assertEqual(anti_flicker_floor(3.0), 8.0)
+
+    def test_durata_minima_alta_trascina_il_pavimento(self):
+        from timeline import anti_flicker_floor
+
+        self.assertEqual(anti_flicker_floor(5.0), 10.0)
+
+    def test_soglia_zero_non_abbatte_mai_il_fondo(self):
+        from timeline import anti_flicker_floor
+
+        self.assertEqual(anti_flicker_floor(0.0), 8.0)
+
+
 class TestStarvedSlides(unittest.TestCase):
     """Slide senza tempo proprio nel podcast (il caso "scorre velocemente").
 

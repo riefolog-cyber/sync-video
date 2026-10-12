@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from typing import cast
 
 from chunks import Word
-from config import log
+from config import DEFAULT_MIN_SEGMENT_SECONDS, log
 
 # Parole che introducono un riferimento di slide. Include le varianti di
 # trascrizione misheard comuni: "sla" e "asl" per "slide" ("passiamo
@@ -1390,6 +1390,16 @@ def detect_flow_from_words(
 # 1e-13s ("slide 14: 544.1->544.1s") e consumava le passate senza cambiare
 # nulla.
 _MIN_BOUNDARY_MOVE_SECONDS = 0.05
+
+
+def anti_flicker_floor(semantic_min_duration: float) -> float:
+    """Soglia unica dell'anti-flicker per tutti i flussi.
+
+    Il fondo di leggibilità non basta da solo: se l'utente alza la durata
+    minima semantica, il pavimento segue (2x), altrimenti una slide al fondo
+    resterebbe comunque sotto la granularità del posizionamento.
+    """
+    return max(DEFAULT_MIN_SEGMENT_SECONDS, 2 * semantic_min_duration)
 
 
 def enforce_min_durations(
