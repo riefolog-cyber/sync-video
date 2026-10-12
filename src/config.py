@@ -411,7 +411,12 @@ except ImportError:
 # ("X è troppo vecchio").
 _REQUIRED_PACKAGES = {
     "pymupdf": "pymupdf",
-    "PIL": "pillow",
+    # Tetto esplicito: fastembed 0.5.1 richiede pillow<11. Finche' il pin su
+    # fastembed c'e', il resolver lo imporrebbe comunque, ma il bootstrap
+    # installava "pillow" senza versione: una major nuova passava se qualcosa
+    # nell'ambiente non tirava il vincolo. Qui e' dichiarato dove il pacchetto
+    # viene installato davvero, non solo in requirements.txt.
+    "PIL": "pillow>=10.0.0,<11",
     "pytesseract": "pytesseract",
     "pydub": "pydub",
     "moviepy": "moviepy",
@@ -464,6 +469,20 @@ def _active_required_packages() -> dict[str, str]:
 # piattaforme (apt usa /usr/share/tesseract-ocr/<versione>/tessdata, brew
 # /opt/homebrew/share/tessdata, l'installer Windows <exe>\tessdata).
 _TESSDATA_PATH_RE = re.compile(r'List of available languages in "([^"]+)"')
+
+
+# Dove può stare l'eseguibile di Tesseract. Sta a livello di modulo (e non
+# dentro bootstrap) perché lo usa anche `verifica_pc.py`, che serve a chi
+# riceve il programma: due elenchi separati drifterebbero, e il controllo
+# direbbe "non trovato" su un PC dove invece c'è.
+_TESSERACT_CANDIDATE = (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    "/usr/bin/tesseract",
+    "/usr/local/bin/tesseract",
+    "/opt/homebrew/bin/tesseract",
+    "/usr/local/opt/tesseract/bin/tesseract",
+)
 
 
 def _list_tessdata(tesseract_exe: str) -> tuple[set[str], Path | None]:
@@ -1160,19 +1179,8 @@ def bootstrap(*, ignora_spazio: bool = False) -> None:
     # TESSDATA_PREFIX: la scelta richiede di sapere cosa ha gia' Tesseract.
     _local_tessdata = BASE_DIR / "tessdata"
 
-    _CANDIDATES = [
-        # Windows
-        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-        # Linux
-        "/usr/bin/tesseract",
-        "/usr/local/bin/tesseract",
-        # macOS
-        "/opt/homebrew/bin/tesseract",
-        "/usr/local/opt/tesseract/bin/tesseract",
-    ]
     tesseract_found = False
-    for c in _CANDIDATES:
+    for c in _TESSERACT_CANDIDATE:
         if os.path.exists(c):
             pytesseract.pytesseract.tesseract_cmd = c
             log.debug("   Tesseract trovato: %s", c)
@@ -1199,7 +1207,7 @@ def bootstrap(*, ignora_spazio: bool = False) -> None:
             brew_pkg="tesseract",
         )
         # Riverifica dopo installazione
-        for c in _CANDIDATES:
+        for c in _TESSERACT_CANDIDATE:
             if os.path.exists(c):
                 pytesseract.pytesseract.tesseract_cmd = c
                 tesseract_found = True
@@ -1220,7 +1228,7 @@ def bootstrap(*, ignora_spazio: bool = False) -> None:
                 pass
 
     # Il vecchio re-scan delle due directory Windows standard è stato rimosso:
-    # sono già in _CANDIDATES e arrivare a questo punto prova che nessuna delle
+    # sono già in _TESSERACT_CANDIDATE e arrivare a questo punto prova che nessuna delle
     # due esiste. Le stringhe usavano anche backslash raddoppiati in raw string,
     # quindi avrebbero cercato un path diverso da quello reale.
     if not tesseract_found:

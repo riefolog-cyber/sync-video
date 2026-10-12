@@ -159,6 +159,19 @@ installazione: **non** fallisce con un errore incomprensibile.
 > download, si rilancia con `--ignora-spazio` e si torna al comportamento di
 > prima: avviso e si prosegue.
 >
+> ### Prima di iniziare: `verifica_pc.bat`
+>
+> Se non capisci perché il programma non parte, o vuoi sapere se un PC è adatto
+> **prima** di scaricare 2,6 GB, lancia `verifica_pc.bat`. Risponde a una domanda
+> sola — «su questo computer Sync Video riuscirà a fare un video?» — riga per
+> riga, e dice cosa fare quando la risposta è no.
+>
+> Non installa e non modifica nulla, quindi si può lanciare anche su un PC che non
+> ha ancora ricevuto i file. Esce con codice 1 se manca qualcosa di essenziale.
+>
+> Diverso da `controlli.bat`, che è lo strumento di chi sviluppa il codice e a
+> un collega non dice nulla.
+
 > ### Se metti un .pptx senza convertitori
 >
 > Non basta LibreOffice: il programma cerca, in ordine, **LibreOffice →

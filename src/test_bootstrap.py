@@ -11,6 +11,7 @@ Esegui con: python -m unittest test_bootstrap -v
 
 import builtins
 import os
+import re
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -82,11 +83,31 @@ class TestEnsurePipPackages(unittest.TestCase):
 
     @staticmethod
     def _versioni(numpy_vecchio=False, assente=None):
+        """Versione "tutto a posto" per ogni pacchetto.
+
+        NON basta restituire 99.0.0: dal momento in cui un requisito ha
+        un TETTO (pillow<11, per fastembed 0.5.1), 99.0.0 e' una versione
+        fuori range e il pacchetto risulta da reinstallare. Qui si sceglie
+        una versione che rispetta sia il pavimento sia l'eventuale tetto
+        dichiarato, cosi' l'helper resta valido se i vincoli cambiano.
+        """
+        soglie: dict[str, int] = {}
+        for spec in config._REQUIRED_PACKAGES.values():
+            # La chiave del dizionario e' il nome d'import ("PIL"), ma
+            # _installed_version riceve il nome pip ("pillow").
+            nome_pip = re.split(r"[<>=!~]", spec, maxsplit=1)[0].strip()
+            for tetto in re.findall(r"<\s*(\d+)", spec):
+                soglie[nome_pip] = int(tetto)
+
         def side_effect(pip_name):
             if pip_name == "numpy" and numpy_vecchio:
                 return "1.24.3"
             if pip_name == assente:
                 return None
+            tetto = soglie.get(pip_name)
+            if tetto is not None:
+                # Appena sotto il tetto e sopra ogni pavimento dichiarato
+                return f"{tetto - 1}.0.0"
             # Sopra ogni soglia minima dichiarata in _REQUIRED_PACKAGES
             return "99.0.0"
 
@@ -441,6 +462,46 @@ class TestAnnunciaPrimoAvvio(unittest.TestCase):
         finally:
             config.log.handlers = precedente
         self.assertEqual(buf.getvalue(), "")
+
+
+class TestTettoPillow(unittest.TestCase):
+    """Il tetto <11 deve valere dove il pacchetto viene INSTALLATO.
+
+    finche' fastembed resta pinnato a 0.5.1, il resolver imporrebbe
+    pillow<11 comunque: il pericolo e' che qualcuno, tempo dopo, allenti
+    il pin di fastembed e si trovi un ambiente che si installa ma non
+    parte. Il tetto dichiarato in config._REQUIRED_PACKAGES e' l'unico che
+    il bootstrap usa davvero: requirements.txt da solo non basta.
+    """
+
+    def test_il_bootstrap_installa_pillow_con_tetto(self) -> None:
+        from config import _REQUIRED_PACKAGES
+
+        spec = _REQUIRED_PACKAGES["PIL"]
+        self.assertIn("<11", spec, f"il tetto di pillow manca in _REQUIRED_PACKAGES: {spec}")
+        self.assertIn(">=10", spec, f"il pavimento di pillow manca: {spec}")
+
+    def test_il_tetto_e_dichiarato_anche_in_requirements(self) -> None:
+        from hardware import project_root
+
+        testo = (project_root() / "requirements.txt").read_text(encoding="utf-8")
+        self.assertIn("pillow>=10.0.0,<11", testo)
+
+    def test_la_versione_installata_rispetta_il_tetto(self) -> None:
+        """Il tetto non e' una dichiarazione: quello installato lo rispetta."""
+        import importlib.metadata as md
+
+        from config import _REQUIRED_PACKAGES
+
+        spec = _REQUIRED_PACKAGES["PIL"]
+        if "<11" not in spec:
+            self.skipTest("nessun tetto dichiarato")
+        try:
+            installata = md.version("pillow")
+        except md.PackageNotFoundError:
+            self.skipTest("pillow non installato in questo ambiente")
+        maggiore = int(installata.split(".")[0])
+        self.assertLess(maggiore, 11, f"pillow {installata} e' oltre il tetto dichiarato ({spec})")
 
 
 if __name__ == "__main__":

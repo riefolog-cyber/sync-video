@@ -9,7 +9,9 @@ pymupdf>=1.23.0
 # fastembed 0.5.1 richiede pillow<11 e moviepy 2.2.1 richiede pillow<12, quindi
 # pip non risolve "pillow>=12" insieme a loro (ResolutionImpossible). Il tetto
 # effettivo e' <11 finche' fastembed resta pinnato a 0.5.1.
-pillow>=10.0.0
+# II tetto (<11) e' dichiarato anche in config._REQUIRED_PACKAGES, che e' dove
+# il bootstrap installa davvero: qui da solo non basterebbe.
+pillow>=10.0.0,<11
 pytesseract>=0.3.10
 pydub>=0.25.0
 moviepy>=2.0.0
