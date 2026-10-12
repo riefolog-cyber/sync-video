@@ -518,12 +518,16 @@ def _run_pinned_ab_test(pkg: dict) -> str | None:
         pass
 
     try:
-        # Lo script A/B sta in scripts/ e non e' un pacchetto: si rende
+        # Lo script A/B sta in src/scripts/ e non e' un pacchetto: si rende
         # importabile aggiungendo la sua cartella al sys.path. Senza questo,
-        # `import` fallirebbe e il test A/B non girerebbe mai.
+        # `import` fallirebbe e il test A/B non girerebbe mai (e' successo
+        # dopo lo spostamento del codice in src/: il percorso vecchio non
+        # esiste piu' e il verdetto era sempre "test non disponibile").
         import sys
 
-        _scripts = BASE_DIR / "scripts"
+        _scripts = BASE_DIR / "src" / "scripts"
+        if not (_scripts / "check_fastembed_upgrade.py").exists():
+            _scripts = BASE_DIR / "scripts"
         if str(_scripts) not in sys.path:
             sys.path.insert(0, str(_scripts))
         import check_fastembed_upgrade as ab  # type: ignore[import-not-found]
@@ -651,16 +655,26 @@ def run_update_check(
     names = [d["name"] for d in upgradable]
 
     # Per i pinnati testabili, il verdetto del test A/B decide se includerli:
-    # EQUIVALENTE -> si aggiorna; DIVERGENTE/None -> resta pinnato.
-    for d in pinned_upd:
-        verdict = _run_pinned_ab_test(d)
-        if verdict == "EQUIVALENTE":
-            log.info("   ✅ Test A/B: %s è equivalente -> incluso nell'aggiornamento.", d["name"])
-            names.append(d["name"])
-        elif verdict == "DIVERGENTE":
-            log.info("   🔒 Test A/B: %s resta pinnato (embedding divergenti).", d["name"])
+    # EQUIVALENTE -> SI, procedi; DIVERGENTE/None -> NO, lascia come ora.
+    # Il test crea una venv temporanea e installa la candidata: e' lento,
+    # quindi prima si chiede il permesso esplicito (S/N). Senza permesso
+    # (o senza terminale: EOF) i pinnati restano come ora, senza verifiche.
+    if pinned_upd:
+        nomi = ", ".join(f"{d['name']} ({d['installed']} -> {d['latest']})" for d in pinned_upd)
+        if _ask_yes_no(
+            f"Verificare compatibilita' di {len(pinned_upd)} pinnato/i ({nomi})? (lento: venv temporanea)"
+        ):
+            for d in pinned_upd:
+                verdict = _run_pinned_ab_test(d)
+                if verdict == "EQUIVALENTE":
+                    log.info("   ✅ %s: equivalente -> SI, procedi (incluso nell'aggiornamento).", d["name"])
+                    names.append(d["name"])
+                elif verdict == "DIVERGENTE":
+                    log.info("   🔒 %s: divergente -> NO, lascia come ora (resta pinnato).", d["name"])
+                else:
+                    log.info("   🔒 %s: test non disponibile -> NO, lascia come ora (resta pinnato).", d["name"])
         else:
-            log.info("   🔒 %s resta pinnato (test non disponibile).", d["name"])
+            log.info("   🔒 Verifica pinnati saltata: lascio come ora (restano pinnati).")
 
     if not names:
         log.info("   Nessun pacchetto da aggiornare.")

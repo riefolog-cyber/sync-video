@@ -782,12 +782,31 @@ class TestRunUpdateCheck(_TempCacheMixin, unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        with mock.patch("builtins.input") as inp, mock.patch("updates._pip_upgrade") as upg, mock.patch(
+        with mock.patch("builtins.input", return_value="s"), mock.patch("updates._pip_upgrade") as upg, mock.patch(
             "updates._run_pinned_ab_test", return_value="DIVERGENTE"
         ):
             updates.run_update_check(ttl_hours=6, ask_to_update=True)
         upg.assert_not_called()
-        inp.assert_not_called()
+
+    def test_gate_no_skips_ab_and_leaves_pinned(self):
+        """Risposta N al cancello: nessun test A/B, pinnati come ora."""
+        self.cache_path.write_text(
+            json.dumps(
+                {
+                    "ts": 1e15,
+                    "outdated": [
+                        {"name": "fastembed", "installed": "1", "latest": "2", "pinned": True, "note": "pin"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch("builtins.input", return_value="n"), mock.patch("updates._pip_upgrade") as upg, mock.patch(
+            "updates._run_pinned_ab_test"
+        ) as ab:
+            updates.run_update_check(ttl_hours=6, ask_to_update=True)
+        ab.assert_not_called()
+        upg.assert_not_called()
 
     def test_major_not_upgraded_automatically(self):
         self.cache_path.write_text(
@@ -851,6 +870,20 @@ class TestRunUpdateCheck(_TempCacheMixin, unittest.TestCase):
         with mock.patch("builtins.input", return_value="s"), mock.patch("updates._pip_upgrade") as upg:
             updates.run_update_check(ttl_hours=6, ask_to_update=True)
         upg.assert_called_once_with(["tqdm"])
+
+    def test_ab_script_esiste_dove_lo_cerca_il_test(self):
+        """Il percorso dello script A/B deve esistere davvero.
+
+        Dopo lo spostamento del codice in src/ il vecchio percorso non
+        esisteva più e il verdetto era sempre "test non disponibile".
+        """
+        from config import BASE_DIR
+
+        candidati = [
+            BASE_DIR / "src" / "scripts" / "check_fastembed_upgrade.py",
+            BASE_DIR / "scripts" / "check_fastembed_upgrade.py",
+        ]
+        self.assertTrue(any(p.exists() for p in candidati))
 
     def test_pinnato_bloccato_non_fa_il_test_ab(self):
         """Un pinnato bloccato non finisce nel test A/B.
