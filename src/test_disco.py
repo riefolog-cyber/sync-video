@@ -121,9 +121,100 @@ class TestSpazioNecessario(unittest.TestCase):
         self.assertEqual(got, 0)
 
 
+class TestDownloadIncompleto(unittest.TestCase):
+    """Un download interrotto non puo' passare per uno finito.
+
+    Il difetto che copre: bastava che ci fosse "un file con dentro
+    qualcosa" per dichiarare la cache scaricata. Un download interrotto a
+    meta' lascia esattamente quello, e il programmo non avvisava, non
+    controllava lo spazio, e falliva molto dopo con un errore che non
+    nominava la causa.
+    """
+
+    def _cache(self, *file: tuple[str, int]) -> Path:
+        with tempfile.TemporaryDirectory() as d:
+            radice = Path(d)
+            for nome, byte in file:
+                p = radice / nome
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"x" * byte)
+            # La directory temporanea muore con il test, ma il filesystem
+            # no: qui basta il risultato, percio' si copia la struttura in
+            # una directory che sopravvive alla chiamata.
+            import shutil
+
+            copia = Path(tempfile.mkdtemp())
+            self.addCleanup(shutil.rmtree, copia, ignore_errors=True)
+            shutil.copytree(radice, copia, dirs_exist_ok=True)
+            return copia
+
+    def test_cache_vuota_non_e_scaricata(self) -> None:
+        self.assertFalse(config._gia_scaricato(self._cache()))
+
+    def test_file_veri_sono_scaricati(self) -> None:
+        cache = self._cache(("modello.onnx", 100), ("blobs/abc", 50))
+        self.assertTrue(config._gia_scaricato(cache))
+
+    def test_download_interrotto_non_e_scaricato(self) -> None:
+        """Il caso vero: il file c'è, ha byte dentro, ma è a metà."""
+        cache = self._cache(("blobs/abc.incomplete", 500), ("config.json", 20))
+        self.assertFalse(
+            config._gia_scaricato(cache),
+            "una cache con un file .incomplete non puo' dirsi scaricata",
+        )
+
+    def test_solo_file_temporaneo_non_e_scaricato(self) -> None:
+        cache = self._cache(("modello.onnx.part", 900))
+        self.assertFalse(config._gia_scaricato(cache))
+
+    def test_download_completato_dopo_e_rilevato(self) -> None:
+        """Il rimedio non blocca lo scaricamento vero: quando finisce, passa."""
+        cache = self._cache(("blobs/abc", 500))
+        self.assertTrue(config._gia_scaricato(cache))
+
+
+class TestBloccoSuBootstrapReale(unittest.TestCase):
+    """Il blocco deve scattare nel percorso vero, non solo nella funzione.
+
+    Si chiama `bootstrap()` come fa `main()`, con i modelli dati per mancanti
+    e il disco finto piccolo: se il parametro non arrivasse, il programma
+    partirebbe con il download e il test qui sotto passerebbe senza accorgersi
+    che il blocco è scollegato.
+    """
+
+    def _esegui(self, *, ignora_spazio: bool) -> None:
+        # `_spazio_modelli_necessario` va finto insieme a `_modelli_mancanti`:
+        # il controllo del disco ricalcola da solo se i modelli mancano, e su
+        # questa macchina sono gia' scaricati (senza il finto restituirebbe 0
+        # e nonFermerebbe mai niente, con un test che passerebbe per il
+        # motivo sbagliato).
+        with (
+            patch.object(config, "disk_free_bytes", return_value=3 * GB),
+            patch.object(config, "_modelli_mancanti", return_value=[("modello embedding", "~2.1 GB")]),
+            patch.object(config, "_spazio_modelli_necessario", return_value=8 * GB),
+            patch.object(config, "_cache_whisper_faster", return_value=None),
+            patch.object(config, "_ensure_pip_packages"),
+        ):
+            config.bootstrap(ignora_spazio=ignora_spazio)
+
+    def test_bootstrap_ferma_quando_lo_spazio_non_basta(self) -> None:
+        with self.assertRaises(SystemExit) as ctx:
+            self._esegui(ignora_spazio=False)
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_bootstrap_prosegue_con_ignora_spazio(self) -> None:
+        """Con l'override la run deve arrivare in fondo, non fermarsi."""
+        self._esegui(ignora_spazio=True)
+
+
 class TestAvvisoSpazio(unittest.TestCase):
-    def _cattura(self, libero: int | None, modello_whisper: str = "small") -> list[str]:
-        """Righe di WARNING emesse dall'avviso, con il disco finto a `libero`."""
+    def _cattura(self, libero: int | None, modello_whisper: str = "small", *, ignora: bool = False) -> list[str]:
+        """Righe emesse dall'avviso, con il disco finto a `libero`.
+
+        Di default lo spazio insufficiente FERMA il download (SystemExit 1):
+        la funzione non ritorna. Con `ignora=True` torna al vecchio
+        comportamento di avviso e prosegue.
+        """
         import logging
 
         with tempfile.TemporaryDirectory() as d:
@@ -132,46 +223,84 @@ class TestAvvisoSpazio(unittest.TestCase):
             logger = logging.getLogger()
             vecchio = logger.level
             logger.addHandler(handler)
-            logger.setLevel(logging.WARNING)
+            logger.setLevel(logging.INFO)
             try:
                 with (
                     patch.object(config, "disk_free_bytes", return_value=libero),
                     patch.object(config, "_cache_whisper_faster", return_value=Path(d) / "hf"),
                 ):
                     config._avvisa_spazio_insufficiente(
-                        Path(d) / "emb", modello_whisper, config.DEFAULT_EMBEDDING_MODEL
+                        Path(d) / "emb", modello_whisper, config.DEFAULT_EMBEDDING_MODEL, ignora=ignora
                     )
             finally:
                 logger.removeHandler(handler)
                 logger.setLevel(vecchio)
         return [riga for riga in buf.getvalue().splitlines() if riga.strip()]
 
-    def test_avvisa_quando_lo_spazio_non_basta(self) -> None:
-        righe = self._cattura(3 * GB)
-        self.assertTrue(righe, "con 3 GB liberi e ~8.9 GB necessari deve avvisare")
+    def _ferma(self, libero: int | None, modello_whisper: str = "small") -> list[str]:
+        """Come _cattura, ma annota l'uscita invece di propagarla."""
+        import logging
+
+        with tempfile.TemporaryDirectory() as d:
+            buf = StringIO()
+            handler = logging.StreamHandler(buf)
+            logger = logging.getLogger()
+            vecchio = logger.level
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+            try:
+                with (
+                    patch.object(config, "disk_free_bytes", return_value=libero),
+                    patch.object(config, "_cache_whisper_faster", return_value=Path(d) / "hf"),
+                    self.assertRaises(SystemExit) as ctx,
+                ):
+                    config._avvisa_spazio_insufficiente(
+                        Path(d) / "emb", modello_whisper, config.DEFAULT_EMBEDDING_MODEL
+                    )
+                self.assertEqual(ctx.exception.code, 1)
+            finally:
+                logger.removeHandler(handler)
+                logger.setLevel(vecchio)
+        return [riga for riga in buf.getvalue().splitlines() if riga.strip()]
+
+    # --- Il contratto nuovo: di default FERMA, non avvisa e basta ---
+
+    def test_ferma_quando_lo_spazio_non_basta(self) -> None:
+        righe = self._ferma(3 * GB)
         testo = "\n".join(righe)
         self.assertIn("Spazio", testo)
         self.assertIn("3.0 GB", testo)
         self.assertIn("8.9 GB", testo)
 
-    def test_non_avvisa_quando_lo_spazio_basta(self) -> None:
-        self.assertEqual(self._cattura(100 * GB), [])
+    def test_il_blocco_dice_come_proseguire(self) -> None:
+        """Un blocco senza via d'uscita e' un vicolo cieco."""
+        testo = "\n".join(self._ferma(3 * GB))
+        self.assertIn("--ignora-spazio", testo)
+        self.assertIn("--embedding-cache-dir", testo)
 
-    def test_avvisa_su_entrambe_le_destinazioni(self) -> None:
+    def test_con_ignora_avvisa_e_prosegue(self) -> None:
+        """Il comportamento di prima resta disponibile per chi lo chiede."""
+        righe = self._cattura(3 * GB, ignora=True)
+        self.assertTrue(righe, "con --ignora-spazio deve comunque avvisare")
+        self.assertIn("--ignora-spazio", "\n".join(righe))
+
+    def test_ferma_su_entrambe_le_destinazioni(self) -> None:
         # La cache embedding segue il progetto, quella whisper segue la home:
         # possono stare su dischi diversi, e vanno controllate entrambe.
-        righe = self._cattura(3 * GB)
-        testo = "\n".join(righe)
+        testo = "\n".join(self._ferma(3 * GB))
         self.assertIn("cartella del progetto", testo)
         self.assertIn("HuggingFace", testo)
 
-    def test_dimensione_ignora_non_avvisa(self) -> None:
-        # whisper large non e' misurato: niente avviso con cifra inventata.
+    def test_spazio_sufficiente_non_blocca(self) -> None:
+        self.assertEqual(self._cattura(100 * GB), [])
+
+    def test_dimensione_ignora_non_blocca(self) -> None:
+        # whisper large non e' misurato: niente blocco con cifra inventata.
         self.assertEqual(self._cattura(1 * GB, modello_whisper="large"), [])
 
-    def test_spazio_non_rilevabile_non_avvisa(self) -> None:
-        # Se il disco non e' interrogabile non si inventa nulla: l'avviso
-        # sarebbe falso.
+    def test_spazio_non_rilevabile_non_blocca(self) -> None:
+        # Se il disco non e' interrogabile non si inventa nulla: bloccherebbe
+        # un PC su cui lo spazio c'è.
         self.assertEqual(self._cattura(None), [])
 
 
@@ -214,7 +343,22 @@ class TestIntegrazioneAnnuncio(unittest.TestCase):
                 whisper_model="base",
                 embedding_model="altro/modello",
             )
-        avviso.assert_called_once_with(emb, "base", "altro/modello")
+        avviso.assert_called_once_with(emb, "base", "altro/modello", ignora=False)
+
+    def test_il_blocco_riceve_l_override_dalla_cli(self) -> None:
+        """--ignora-spazio deve arrivare intatto al controllo del disco."""
+        with (
+            tempfile.TemporaryDirectory() as d,
+            patch.object(config, "_avvisa_spazio_insufficiente") as avviso,
+        ):
+            config._annuncia_primo_avvio(
+                [("modello embedding", "~6.4 GB")],
+                embedding_cache=Path(d) / "emb",
+                whisper_model="base",
+                embedding_model="altro/modello",
+                ignora_spazio=True,
+            )
+        self.assertTrue(avviso.call_args.kwargs["ignora"])
 
 
 if __name__ == "__main__":

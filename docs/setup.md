@@ -150,6 +150,15 @@ installazione: **non** fallisce con un errore incomprensibile.
 > `HF_HOME` personalizzato va cercato lì. La copia OpenVINO è **facoltativa** e
 > non viene scaricata dal percorso di default.
 >
+> **Se lo spazio non basta, il download non parte.** Un download interrotto
+> a metà riempie il disco e lascia la cache dei modelli corrotta: il PC resta
+> a metà sistemato e l'errore successivo non dice nulla della causa. Quindi
+> il programma controlla lo spazio su **due dischi** (la cache dei modelli sta
+> nella cartella del progetto, quella di Whisper nella home) e, se non basta,
+> **ferma** dicendo cosa liberare. Se lo spazio si libera da solo durante il
+> download, si rilancia con `--ignora-spazio` e si torna al comportamento di
+> prima: avviso e si prosegue.
+>
 > ### Se lanci senza i file del video
 >
 > È il caso normale alla prima esecuzione: scarichi lo ZIP, avvii, e non hai

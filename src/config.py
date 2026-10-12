@@ -726,17 +726,36 @@ def _spazio_modelli_necessario(
     return totale
 
 
+# Suffissi con cui huggingface_hub e fastembed marcano un file ancora in
+# scaricamento. Finche' uno di questi file e' presente, la cache NON e'
+# completa: vedi _gia_scaricato.
+_DOWNLOAD_INCOMPLETI = (".incomplete", ".part", ".tmp", ".download")
+
+
 def _gia_scaricato(directory: Path) -> bool:
-    """True se la cartella di cache del modello contiene qualcosa.
+    """True se la cartella di cache del modello contiene un download COMPLETO.
 
     Non si usa "esiste la cartella": fastembed la crea prima di scaricare, quindi
     una cartella vuota farebbe dire "già scaricato" al primo avvio, che è
     esattamente il caso in cui l'annuncio serve.
+
+    Non basta neppure "c'è un file con dentro qualcosa": un download
+    INTERROTTO (chiusura della finestra, rete che salta) lascia il file a
+    metà, e la cache risultava scaricata. Conseguenze: il primo avvio non
+    avvisava, il controllo dello spazio non scattava, e il caricamento
+    falliva molto dopo con un errore che non nominava la causa. Le librerie
+    che scaricano lasciano il file temporaneo accanto a quello vero, con
+    questi suffissi, finché il trasferimento non è finito.
     """
     try:
-        return any(p.is_file() and p.stat().st_size > 0 for p in directory.rglob("*"))
+        file = [p for p in directory.rglob("*") if p.is_file() and p.stat().st_size > 0]
+        if not file:
+            return False
+        if any(p.name.lower().endswith(_DOWNLOAD_INCOMPLETI) for p in directory.rglob("*") if p.is_file()):
+            return False
     except OSError:
         return False
+    return True
 
 
 def _annuncia_primo_avvio(
@@ -745,6 +764,7 @@ def _annuncia_primo_avvio(
     embedding_cache: Path | None = None,
     whisper_model: str | None = None,
     embedding_model: str | None = None,
+    ignora_spazio: bool = False,
 ) -> None:
     """Annuncia i download e controlla che il disco li regga.
 
@@ -771,7 +791,7 @@ def _annuncia_primo_avvio(
         "   (più rapidi, meno accurati sulle ancore).",
         righe,
     )
-    _avvisa_spazio_insufficiente(embedding_cache, whisper_model, embedding_model)
+    _avvisa_spazio_insufficiente(embedding_cache, whisper_model, embedding_model, ignora=ignora_spazio)
 
 
 # Margine oltre ai modelli: la run produce anche il video, le slide renderizzate
@@ -790,13 +810,20 @@ def _avvisa_spazio_insufficiente(
     embedding_cache: Path | None = None,
     whisper_model: str | None = None,
     embedding_model: str | None = None,
+    *,
+    ignora: bool = False,
 ) -> None:
-    """Avvisa se il disco non puo' ospitare i download del primo avvio.
+    """Impedisce il download se il disco non puo' ospitarlo.
 
-    Prima non esisteva nessun controllo: su un PC con poco spazio il download
-    partiva, riempiva il disco e la run moriva a meta' con un errore che non
-    nominava la causa vera. L'avviso non impedisce nulla (si scarica lo stesso,
-    se l'utente vuole provare) ma spiega prima invece che dopo.
+    Prima era solo un avviso e il download partiva comunque: su un PC con
+    poco spazio finiva a meta', lasciando il disco pieno, la cache dei modelli
+    corrotta (metà modello) e un errore che non diceva la causa vera. Un
+    download che muove a meta' e' il modo peggiore di scoprire che manca
+    spazio: si rimane con un PC a meta' sistemato.
+
+    Con `ignora=True` torna il comportamento di prima (avvisa e prosegue):
+    serve a chi ha il disco che si libera da solo, o spazio su un'altra
+    partizione dove puo' spostare la cache.
 
     Si controllano DUE destinazioni perche' possono stare su dischi diversi:
     la cache embedding segue il progetto, quella whisper segue la home
@@ -818,22 +845,41 @@ def _avvisa_spazio_insufficiente(
     if cache_whisper is not None:
         destinazioni.append((cache_whisper, "cache HuggingFace (whisper)"))
 
+    insufficienti: list[tuple[str, int]] = []
     for percorso, etichetta in destinazioni:
         libero = disk_free_bytes(percorso)
         if libero is None:
             continue
         if libero < necessario + _MARGINE_DISCO:
-            log.warning(
-                "   ⚠️  Spazio disco forse insufficiente su %s: %s liberi, ne servono ~%s "
-                "(modelli + margine per video e slide).",
-                etichetta,
-                _gb(libero),
-                _gb(necessario + _MARGINE_DISCO),
-            )
-            log.warning(
-                "   Libera spazio, oppure indica un'altra cartella con "
-                "--embedding-cache-dir, oppure HF_HUB_CACHE."
-            )
+            insufficienti.append((etichetta, libero))
+
+    if not insufficienti:
+        return
+
+    richiesto = necessario + _MARGINE_DISCO
+    for etichetta, libero in insufficienti:
+        log.error(
+            "   Spazio disco insufficiente su %s: %s liberi, ne servono ~%s "
+            "(modelli + margine per video e slide).",
+            etichetta,
+            _gb(libero),
+            _gb(richiesto),
+        )
+
+    if ignora:
+        log.warning(
+            "   Continuo lo stesso perche' hai chiesto di ignorare il controllo "
+            "(--ignora-spazio): se il download si interrompe, la cache va rrifatta."
+        )
+        return
+
+    log.error(
+        "\n❌ Fermo il download: non partirebbe e lascerebbe il PC a meta'.\n"
+        "   Libera spazio, oppure indica un'altra cartella con --embedding-cache-dir,\n"
+        "   oppure HF_HUB_CACHE, oppure rilancia con --ignora-spazio se sei\n"
+        "   sicuro che lo spazio si liberi da solo durante il download."
+    )
+    sys.exit(1)
 
 
 def _try_system_install(name: str, winget_id: str, apt_pkg: str, brew_pkg: str) -> bool:
@@ -1083,7 +1129,7 @@ def installa_dipendenze_se_mancano() -> bool:
     return True
 
 
-def bootstrap() -> None:
+def bootstrap(*, ignora_spazio: bool = False) -> None:
     """
     Verifica e installa automaticamente tutte le dipendenze.
     - Python >= 3.10
@@ -1092,6 +1138,10 @@ def bootstrap() -> None:
     - ffmpeg (auto-install via winget/apt/brew)
 
     Deve essere chiamata esplicitamente da main.py all'avvio.
+
+    `ignora_spazio` (da `--ignora-spazio`) trasforma il blocco per disco
+    insufficiente in un semplice avviso. Per default il download dei modelli
+    non parte se lo spazio non c'è: vedi `_avvisa_spazio_insufficiente`.
     """
     # --- Python version ---
     if sys.version_info < (3, 10):  # noqa: UP036 - guardia runtime per utenti finali
@@ -1276,6 +1326,7 @@ def bootstrap() -> None:
         embedding_cache=Path(DEFAULT_EMBEDDING_CACHE_DIR),
         whisper_model=DEFAULT_WHISPER_MODEL,
         embedding_model=DEFAULT_EMBEDDING_MODEL,
+        ignora_spazio=ignora_spazio,
     )
 
 
@@ -1750,6 +1801,13 @@ Esempi:
         "--no-update",
         action="store_true",
         help="Controlla gli aggiornamenti ma non chiede di installarli (solo notifica)",
+    )
+    parser.add_argument(
+        "--ignora-spazio",
+        action="store_true",
+        help="Non fermarti quando lo spazio disco non basta per i modelli: avvisa e "
+        "prosegue. Di default il download non parte, perche' a meta' lascia il PC "
+        "con una cache corrotta.",
     )
     parser.add_argument(
         "--frozen-report",

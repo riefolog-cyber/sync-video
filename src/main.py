@@ -1896,7 +1896,10 @@ def main(argv: list | None = None) -> None:
         return
 
     # Bootstrap esplicito: verifica dipendenze prima di tutto
-    bootstrap()
+    # `ignora_spazio`: di default, se lo spazio non basta per i modelli il
+    # bootstrap FERMA il download invece di avvisare e proseguire. Un download
+    # interrotto a meta' lascia una cache corrotta e il PC a meta' sistemato.
+    bootstrap(ignora_spazio=args.ignora_spazio)
 
     # Se l'utente ha scelto il device a mano, un eventuale fallimento di CUDA non
     # viene nascosto da un ripiego silenzioso su CPU. Va segnalato PRIMA che
