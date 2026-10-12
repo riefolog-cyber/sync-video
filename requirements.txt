@@ -14,6 +14,16 @@ pymupdf>=1.23.0
 pillow>=10.0.0,<11
 pytesseract>=0.3.10
 pydub>=0.25.0
+# Python 3.13 ha rimosso `audioop` dalla libreria standard (PEP 594) e pydub lo
+# importa a livello di modulo: senza questo, la trascrizione muore con
+# "ModuleNotFoundError: No module named 'audioop'" DOPO che i 2,7 GB di modelli
+# sono gia' scaricati. Il fallback di pydub non serve: prova `pyaudioop`, che
+# su PyPI non esiste. Il marcatore serve a non rompere il bootstrap sotto la
+# 3.13, dove `audioop` e' gia' nella standard library e pip rifiuterebbe
+# l'installazione (audioop-lts richiede >=3.13).
+# Dichiarato anche in config._REQUIRED_PACKAGES, che e' dove il bootstrap
+# installa davvero: qui da solo non basterebbe.
+audioop-lts; python_version >= "3.13"
 moviepy>=2.0.0
 # numpy >= 1.26 richiesto da pandas (dipendenza di pytesseract) e moviepy 2.x:
 # con numpy 1.24.3 l'import di pandas fallisce e il programma non parte piu'

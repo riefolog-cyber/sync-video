@@ -432,6 +432,24 @@ _REQUIRED_PACKAGES = {
     "packaging": "packaging>=23.0",
 }
 
+# Python 3.13 ha rimosso `audioop` dalla libreria standard (PEP 594) e pydub
+# lo importa a LIVELLO DI MODULO: senza questo pacchetto la trascrizione muore
+# con "ModuleNotFoundError: No module named 'audioop'" DOPO che i 2,7 GB di
+# modelli sono gia' scaricati, e il messaggio non nomina ne' la causa ne' il
+# rimedio. Il fallback di pydub non salva: prova `pyaudioop`, che su PyPI non
+# esiste (HTTP 404 verificato il 12/10/2026).
+#
+# audioop-lts reinstalla il modulo col nome giusto: dentro la wheel c'e'
+# `audioop/__init__.py`, NON `audioop_lts`. La wheel e' cp313-abi3, quindi lo
+# stesso file va bene per 3.13, 3.14 e successive.
+#
+# Solo da 3.13, per due motivi: sotto, `audioop` e' nella libreria standard e
+# audioop-lts dichiara requires-python >=3.13, quindi pip lo rifiuterebbe e il
+# bootstrap fallirebbe su OGNI PC con 3.10-3.12. E la chiave e' il nome di
+# IMPORT (`audioop`) perche' e' verifica_pc a fare `__import__(chiave)`.
+if sys.version_info >= (3, 13):
+    _REQUIRED_PACKAGES["audioop"] = "audioop-lts"
+
 # =====================================================================
 # ARCHITETTURA: pacchetti senza build nativa ARM
 # =====================================================================
