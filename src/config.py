@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from hardware import PYTHON_MAX as _PYTHON_MAX
 from hardware import disk_free_bytes, memory_tier, project_root, ram_total_bytes
 
 # stdout/stderr in UTF-8 con fallback 'replace': evita UnicodeEncodeError
@@ -1166,6 +1167,64 @@ def installa_dipendenze_se_mancano() -> bool:
     return True
 
 
+# Finestra di versioni supportate: definita in hardware.py perche' anche
+# verifica_pc.py la usa, e non puo' importare config (vedi hardware.py).
+# Il limite inferiore e' controllato inline qui sotto; il superiore da
+# _rifiuta_python_troppo_recente.
+PYTHON_MAX = _PYTHON_MAX
+
+
+def _rifiuta_python_troppo_recente() -> None:
+    """Si ferma se Python e' piu' nuovo di quanto il progetso regga.
+
+    Il limite inferiore (3.10) e' una condaizione ovvia. Questo no, e serve
+    perche' il fallimento senza guardia e' il peggiore possibile: arriva
+    DENTRO pip, dopo che il programma ha gia' scaricato 2,7 GB di modelli.
+
+    La catena che blocca il 3.14:
+      fastembed==0.5.1 e' pinnato perche' dalla 0.6 il pooling passa da CLS a
+      mean e gli embedding cambiano (A/B misurato: coseno 0.935, decision
+      match 47%, verdetto divergente: vedi requirements.txt)
+      -> quindi pillow<11
+      -> pillow 10.4.0 pubblica wheel fino a cp313, e nessuna per cp314
+
+    Su un 3.14 pip non trova nulla e prova a COMPILARE pillow da sorgente:
+    minutes di compilazione, o un errore di toolchain che non nomina la causa
+    vera. Meglio una riga che dice cosa fare.
+
+    Non e' un blocco permanente: quando si sblocca il pin di fastembed (con il
+    relativo A/B di embedding) basta alzare questo numero e aggiungere la
+    versione alla matrice della CI.
+    """
+    # PYTHON_MAX e' INCLUSIVO e il confronto e' su (major, minor) solo.
+    # Confronto di tupla intera: (3, 13, 1, ...) NON e' minore di (3, 13),
+    # quindi un Python 3.13.1 reale verrebbe respinto: il programma si
+    # rifiuterebbe di partire sulla versione che la CI ha dichiarato verde.
+    # Confronto stretto: (3, 13) < (3, 13) e' falso, quindi il 3.13 stesso,
+    # che e' proprio quello verificato, verrebbe respinto.
+    if (sys.version_info.major, sys.version_info.minor) <= PYTHON_MAX:
+        return
+    log.error("")
+    log.error("=" * 70)
+    log.error(" Python %d.%d troppo recente per questo programma.",
+              sys.version_info.major, sys.version_info.minor)
+    log.error("=" * 70)
+    log.error(" Le dipendenze non hanno ancora i binari per questa versione:")
+    log.error(" pillow e' fermo a <11 (per il modello di sincronizzazione) e")
+    log.error(" l'ultima versione compatibile, 10.4.0, si ferma a Python 3.13.")
+    log.error("")
+    log.error(" Versioni verificate: Python 3.10, 3.11, 3.12, 3.13.")
+    log.error("")
+    log.error(" Cosa fare:")
+    log.error("   1. scarica Python 3.12 da https://www.python.org/downloads/")
+    log.error("   2. rilancia lo stesso file .bat: lo trova da solo e lo usa.")
+    log.error("")
+    log.error(" Se vuoi restare su questa versione, l'aggiornamento e' possibile")
+    log.error(" ma richiede di riversare il modello di sincronizzazione.")
+    log.error("=" * 70)
+    sys.exit(1)
+
+
 def bootstrap(*, ignora_spazio: bool = False) -> None:
     """
     Verifica e installa automaticamente tutte le dipendenze.
@@ -1184,6 +1243,7 @@ def bootstrap(*, ignora_spazio: bool = False) -> None:
     if sys.version_info < (3, 10):  # noqa: UP036 - guardia runtime per utenti finali
         log.error("Richiesto Python 3.10 o superiore. Versione attuale: %s", sys.version)
         sys.exit(1)
+    _rifiuta_python_troppo_recente()
 
     # --- Pip packages (assenti, vecchi, o non importabili) ---
     _ensure_pip_packages()

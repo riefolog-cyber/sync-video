@@ -70,6 +70,18 @@ BASE_DIR = project_root()
 CACHE_DIR = BASE_DIR / ".cache"
 HARDWARE_CACHE = CACHE_DIR / "hardware.json"
 
+# Finestra di versioni di Python che il progetto garantisce. Sta qui e non in
+# config.py perche' verifica_pc.py la usa senza poter importare config (che
+# trascina il bootstrap): hardware.py e' il modulo dei fatti su questa
+# macchina, ed e' gia' importato da entrambi.
+#
+# Il limite inferiore e' 3.10 (in config.bootstrap e in verifica_pc, che
+# controllano il caso "troppo vecchio"). Questo e' il superiore: 3.13 e' in
+# matrice CI e verde, 3.14 non e' installabile perche' il tetto pillow<11
+# non ha wheel oltre cp313. Vedi config._rifiuta_python_troppo_recente.
+PYTHON_MIN = (3, 10)
+PYTHON_MAX = (3, 13)
+
 # Sotto questa soglia non tentiamo accelerazioni hardware: una GPU senza
 # driver a modo puo' produrre un file illeggibile o far fallire ffmpeg, e
 # il guadagno non vale un video che non esce.

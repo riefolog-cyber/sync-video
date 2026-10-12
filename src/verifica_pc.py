@@ -27,7 +27,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from hardware import disk_free_bytes, format_ram, memory_tier, project_root, ram_total_bytes
+from hardware import (
+    PYTHON_MAX,
+    disk_free_bytes,
+    format_ram,
+    memory_tier,
+    project_root,
+    ram_total_bytes,
+)
 
 GB = 1024**3
 # Stessa soglia che usa config.py per l'avviso sul disco, cosi' i due
@@ -66,10 +73,29 @@ def _gb(n: int | float) -> str:
 def prova_python(r: Relazione) -> None:
     v = sys.version_info
     testo = f"Python {v.major}.{v.minor}.{v.micro}"
-    if v >= (3, 10):
+    # PYTHON_MAX e' INCLUSIVO, e il confronto e' su (major, minor) solo.
+    # Confronto di tupla intera: (3, 13, 1, ...) NON e' minore di (3, 13),
+    # quindi un 3.13.1 reale risulterebbe "troppo recente" pur essendo la
+    # versione verde in CI. Confronto stretto: (3, 13) < (3, 13) e' falso,
+    # quindi il 3.13 stesso verrebbe respinto.
+    dentro = (3, 10) <= (v.major, v.minor) <= PYTHON_MAX
+    if dentro:
         r.aggiungi(Esito("Python", OK, testo))
-    else:
+    elif (v.major, v.minor) < (3, 10):
         r.aggiungi(Esito("Python", KO, testo, "Servono Python 3.10 o superiore."))
+    else:
+        # Meglio qui che al bootstrap: il bootstrap si ferma DENTRO pip, e li'
+        # il messaggio e' della compilazione di pillow, non della causa.
+        r.aggiungi(
+            Esito(
+                "Python",
+                KO,
+                f"{testo} troppo recente",
+                "Versioni verificate: 3.10-3.13. Su questa versione le dipendenze "
+                "non hanno i binari (pillow<11 si ferma a 3.13). "
+                "Installa Python 3.12 da python.org e rilancia: lo trova da solo.",
+            )
+        )
 
 
 def prova_pacchetti(r: Relazione) -> None:
