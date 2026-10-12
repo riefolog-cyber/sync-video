@@ -150,6 +150,32 @@ installazione: **non** fallisce con un errore incomprensibile.
 > `HF_HOME` personalizzato va cercato lì. La copia OpenVINO è **facoltativa** e
 > non viene scaricata dal percorso di default.
 >
+> ### Se lanci senza i file del video
+>
+> È il caso normale alla prima esecuzione: scarichi lo ZIP, avvii, e non hai
+> ancora la presentazione né l'audio. **Non è un errore**: il programma
+> installa tutto quello che serve, scarica i modelli, e poi si ferma con un
+> avviso che dice cosa mettere nella cartella:
+>
+> ```
+> ========================================================================
+>    Sync Video è pronto: dipendenze, Tesseract, ffmpeg e modelli sono
+>    già installati e scaricati. NON è stato prodotto alcun video.
+>
+>    Manca solo il tuo materiale. Nella cartella
+>      <cartella del progetto>
+>    metti:
+>      - la presentazione:  presentazione.pptx  (o .pdf, o .ppt)
+>      - l'audio del podcast: podcast.m4a (o .mp3 / .wav / .ogg / .flac)
+>
+>    Poi rilancia genera_video.bat: non scaricherà più nulla.
+> ========================================================================
+> ```
+>
+> Il secondo avvio non scarica più niente e parte subito. Se invece indichi un
+> percorso esplicito che non esiste (`--pdf slide.pptx`), l'errore resta un
+> errore: un refuso non deve diventare 3 GB di download.
+>
 > Al primo avvio il programma **annuncia questi download prima di farli**,
 > perché un download da qualche gigabyte in silenzio è indistinguibile da un
 > blocco. Se i modelli sono già in cache non stampa nulla.
@@ -296,8 +322,8 @@ installazione: **non** fallisce con un errore incomprensibile.
 >
 > ```bash
 > pip install openvino openvino-genai
-> python main.py --openvino-download   # scarica il modello OpenVINO IR
-> python main.py                       # ora usa OpenVINO in automatico
+> python src/main.py --openvino-download   # scarica il modello OpenVINO IR
+> python src/main.py                       # ora usa OpenVINO in automatico
 > ```
 >
 > **Setup automatico al primo avvio.** Alla prima run `main.py` rileva
@@ -322,8 +348,8 @@ installazione: **non** fallisce con un errore incomprensibile.
 > Meglio tenerli separati:
 >
 > ```bash
-> python main.py --prefetch-models   # scarica tutto e esce (~3 GB, una tantum)
-> python main.py                     # ora la prima run non scarica nulla
+> python src/main.py --prefetch-models   # scarica tutto e esce (~3 GB, una tantum)
+> python src/main.py                     # ora la prima run non scarica nulla
 > ```
 >
 > Ogni modello è indipendente: quello non installabile su quella CPU viene

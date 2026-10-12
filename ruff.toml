@@ -36,6 +36,11 @@ ignore = [
 "test_*.py" = ["BLE001"]
 # Script standalone di analisi: sys.path insert e except difensivi sono voluti
 "analysis_sync.py" = ["E402", "BLE001"]
+# main.py installa i pacchetti pip (installa_dipendenze_se_mancano) PRIMA di
+# importare moviepy/ocr/video/semantic_sync: su un PC nuovo è l'unico modo perché
+# l'installazione automatica parta prima del primo import pesante. Gli import
+# dopo quella chiamata sono quindi necessariamente sotto una istruzione.
+"main.py" = ["E402"]
 # Rilevamento hardware: i probe GPU/CUDA falliscono in modi imprevedibili su
 # macchine diverse; gli except difensivi sono il comportamento voluto.
 "machine_setup.py" = ["BLE001"]

@@ -1058,6 +1058,31 @@ def _ensure_pip_packages() -> None:
         sys.exit(1)
 
 
+def installa_dipendenze_se_mancano() -> bool:
+    """Installa i pacchetti pip mancanti. True se ne ha installati qualcuno.
+
+    Va chiamata in cima a `main.py`, **prima** dei moduli che importano le
+    terze parti. Senza, su un PC nuovo `from moviepy import ...` muore con
+    ModuleNotFoundError PRIMA che `bootstrap()` venga eseguito: l'errore
+    cadeva sul primo import pesante e l'installazione automatica, che sta
+    dentro `main()`, non partiva mai. Il traceback diceva solo
+    "No module named 'moviepy'", senza dire che il progetto si installa da solo.
+
+    Costa una lettura di metadata per pacchetto e niente altro quando è tutto
+    già presente (il caso normale, e quello di ogni test): l'installazione vera
+    e propria parte solo se qualcosa manca.
+
+    Tesseract, ffmpeg e i modelli NON vengono toccati qui: sono compiti di
+    `bootstrap()`, che gira dopo e li copre con i messaggi di primo avvio.
+    """
+    if not any(_missing_or_old(req) for req in _active_required_packages().values()):
+        return False
+    log.info("🔧 Primo avvio su questo PC: installo i pacchetti necessari...")
+    log.info("   (una tantum, qualche minuto: dopo non succede più)")
+    _ensure_pip_packages()
+    return True
+
+
 def bootstrap() -> None:
     """
     Verifica e installa automaticamente tutte le dipendenze.

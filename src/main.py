@@ -18,9 +18,6 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
-from moviepy import AudioFileClip, VideoFileClip
-
-from chunks import Word
 from config import (
     AUTO_BEAM_AB_MARGIN,
     AUTO_BEAM_CONFUSABILITY_MAX,
@@ -28,6 +25,7 @@ from config import (
     BASE_DIR,
     CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+    DEFAULT_PDF,
     DEFAULT_VIDEO_BUFFER_SEC,
     DEFAULT_VIDEO_FPS,
     DEFAULT_VIDEO_THREADS,
@@ -35,9 +33,33 @@ from config import (
     DEFAULT_WHISPER_DEVICE,
     STOPWORDS_ITA,
     bootstrap,
+    installa_dipendenze_se_mancano,
     log,
     parse_args,
 )
+
+# =====================================================================
+# DIPENDENZE PRIMA DEGLI IMPORT PESANTI
+# =====================================================================
+# `config.py` e' l'unico modulo che puo' essere importato su un PC
+# completamente vuoto: non ha import di terze parti in cima (hardware.py
+# e' solo stdlib). Quindi da qui si puo' far partire l'installazione
+# PRIMA di toccare moviepy/PIL/PyMuPDF/numpy.
+#
+# Senza questo blocco, `from moviepy import ...` (e subito dopo ocr, video,
+# semantic_sync...) su un PC nuovo moriva con ModuleNotFoundError prima che
+# `bootstrap()` - che sta dentro main() - potesse installare qualsiasi
+# cosa: il traceback diceva "No module named 'moviepy'" e si fermava li',
+# senza dire che il progetto si prepara da solo. E' esattamente quello che
+# vedeva chi scaricava lo ZIP e l'avviava per la prima volta.
+#
+# Quando i pacchetti ci sono gia' la chiamata costa una lettura di metadata
+# e non installa niente, quindi non rallenta test, CI e run normali.
+installa_dipendenze_se_mancano()
+
+from moviepy import AudioFileClip, VideoFileClip
+
+from chunks import Word
 from llm_sync import (
     endpoints_for,
     is_interactive,
@@ -1790,6 +1812,44 @@ def _prefetch_models(args: Any) -> None:
         log.info("\n✅ Tutti i modelli sono pronti. La prima run non scarichera' nulla.")
 
 
+def _primo_avvio_senza_materiali(args: Any) -> None:
+    """Prepara il PC al primo video anche senza i file di partenza, poi esce.
+
+    Il caso reale: si scarica lo ZIP, si avvia, e NON ci sono ancora la
+    presentazione e l'audio. Prima di questa funzione il programma installava
+    pacchetti, Tesseract e ffmpeg, annunciava i modelli... e poi moriva con
+    "[ERRORE] File presentazione non trovato". L'utente restava con la
+    sensazione di un programma rotto, mentre in realta mancavano solo i suoi
+    due file.
+
+    Qui invece si scarica anche tutto il resto e si esce con 0 dicendo
+    esattamente cosa mettere nella cartella e cosa rilanciare. Il prossimo
+    avvio col materiale non scarica piu' nulla.
+
+    Si chiama solo quando l'utente NON ha indicato un percorso esplicito: un
+    `--pdf slides.pptx` sbagliato e' quasi sempre un refuso, e trasformarlo
+    silenziosamente in 3 GB di download sarebbe una sorpresa costosissima.
+    """
+    _prefetch_models(args)
+    log.info(
+        "\n%s\n"
+        "   Sync Video e' pronto: dipendenze, Tesseract, ffmpeg e modelli sono\n"
+        "   gia' installati e scaricati. NON e' stato prodotto alcun video.\n"
+        "\n"
+        "   Manca solo il tuo materiale. Nella cartella\n"
+        "     %s\n"
+        "   metti:\n"
+        "     - la presentazione:  presentazione.pptx  (o .pdf, o .ppt)\n"
+        "     - l'audio del podcast: podcast.m4a (o .mp3 / .wav / .ogg / .flac)\n"
+        "\n"
+        "   Poi rilancia genera_video.bat: non scarichera' piu' nulla.\n"
+        "%s",
+        "=" * 72,
+        BASE_DIR,
+        "=" * 72,
+    )
+
+
 def main(argv: list | None = None) -> None:
     args = parse_args(argv)
 
@@ -1877,6 +1937,13 @@ def main(argv: list | None = None) -> None:
         found = next((p for p in ppt_tries if p.exists()), None)
         if found:
             pdf_path = found
+        elif args.pdf == DEFAULT_PDF:
+            # Nessun percorso indicato a mano e il default non c'e': questo e'
+            # il primo avvio su un PC nuovo, non un refuso. Prepara tutto e
+            # spiega cosa mettere nella cartella invece di uscire con un errore
+            # che sembra "programma rotto".
+            _primo_avvio_senza_materiali(args)
+            return
         else:
             log.error(
                 "[ERRORE] File presentazione non trovato: %s\n"
@@ -1905,11 +1972,15 @@ def main(argv: list | None = None) -> None:
         audio_path = find_audio_file(BASE_DIR)
 
     if not audio_path or not audio_path.exists():
+        if not args.audio:
+            # Come sopra: senza --audio e senza file trovati, e' il primo avvio.
+            _primo_avvio_senza_materiali(args)
+            return
         log.error(
             "\n[ERRORE CRITICO] Manca il file audio.\n"
             "   Cercato: qualsiasi file .mp3/.m4a/.wav/.aac/.ogg/.flac nella cartella\n"
             "   Oppure specifica con: --audio percorso/file.mp3\n"
-            "   Esempio: python main.py --audio registrazione.m4a"
+            "   Esempio: python src/main.py --audio registrazione.m4a"
         )
         sys.exit(1)
 
