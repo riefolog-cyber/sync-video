@@ -32,6 +32,7 @@ from config import (
     DEFAULT_WHISPER_BEAM_ACCURATE,
     DEFAULT_WHISPER_DEVICE,
     STOPWORDS_ITA,
+    WHISPER_REVISIONI,
     bootstrap,
     installa_dipendenze_se_mancano,
     log,
@@ -1774,7 +1775,12 @@ def _prefetch_models(args: Any) -> None:
 
         repo = f"Systran/faster-whisper-{args.whisper_model}"
         log.info("   ⏳ Download pesi Whisper %s...", repo)
-        snapshot_download(repo)
+        # Revisione esplicita: senza, si prende il 'main' di oggi. Se chi
+        # mantiene il repo pubblica pesi nuovi, il PC di un collega scarica
+        # un modello diverso da quello su cui e' stata misurata la baseline,
+        # e non lo segnala: il caso silenzioso e' il peggiore di tutti.
+        revisione = WHISPER_REVISIONI.get(args.whisper_model)
+        snapshot_download(repo, revision=revisione)
         log.info("   ✅ Pesi Whisper pronti: %s", repo)
     except ImportError:
         log.warning("   ⚠️  faster-whisper/huggingface_hub non installati: pesi Whisper non scaricabili.")

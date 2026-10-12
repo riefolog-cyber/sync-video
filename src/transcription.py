@@ -22,6 +22,7 @@ from config import (
     DEFAULT_WHISPER_BATCH,
     DEFAULT_WHISPER_BEAM,
     DEFAULT_WHISPER_THREADS,
+    OPENVINO_MODEL_REVISIONI,
     TRANSITION_WORDS_ITA,
     get_stopwords,
     log,
@@ -169,7 +170,15 @@ def download_openvino_model(model_dir: Path, model_id: str = DEFAULT_OPENVINO_MO
 
     model_dir.mkdir(parents=True, exist_ok=True)
     log.info("   ⏳ Download modello OpenVINO %s (una tantum)...", model_id)
-    snapshot_download(model_id, local_dir=str(model_dir))
+    # `revision` esplicito: senza, si scarica il "main" di oggi, e se chi
+    # mantiene il modello pubblica una versione nuova il PC scarica un
+    # modello diverso da quello su cui e' stata misurata la baseline, senza
+    # alcun errore. Il caso silenzioso e' il peggiore.
+    snapshot_download(
+        model_id,
+        revision=OPENVINO_MODEL_REVISIONI.get(model_id),
+        local_dir=str(model_dir),
+    )
     log.info("   ✅ Modello OpenVINO pronto in: %s", model_dir)
     return model_dir
 

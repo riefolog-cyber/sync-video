@@ -1556,6 +1556,42 @@ DEFAULT_OPENVINO_DEVICE = os.environ.get("OPENVINO_DEVICE", "GPU")  # 'GPU' (iGP
 DEFAULT_OPENVINO_MODEL_ID = os.environ.get("OPENVINO_MODEL_ID", "OpenVINO/whisper-small-fp16-ov")
 
 # =====================================================================
+# REVISIONI DEI MODELLI (fissate)
+# =====================================================================
+# Senza `revision=`, huggingface_hub scarica il "main" di oggi. Se chi
+# mantiene il modello pubblica una versione nuova, un PC che si prepara fra
+# un anno scarica pesi DIVERSI da quelli su cui e' stata misurata la
+# baseline (similarita' 0.791) - e non lo segnala, perche' il download va a
+# buon fine. E' il rischio piu' insidioso: gli altri falliscono con un
+# errore, questo no.
+#
+# I commit sono il campo `sha` restituito dall'API di HuggingFace, letto il
+# 12/10/2026. Un hash sbagliato qui non e' un dettaglio: fa fallire il
+# download con un 404, e il PC non si prepara piu'. Percio' sono verificati,
+# non ricordati.
+#
+# Se una revisione sparisce, il download fallisce DICHIARATAMENTE: si
+# preferisce un errore chiaro a una sincronizzazione diversa da quella
+# attesa.
+#
+# Un modello non elencato qui (per es. un taglio non standard) viene
+# scaricato senza fissare: continua a funzionare, ma senza la garanzia di
+# riproducibilita'.
+WHISPER_REVISIONI: dict[str, str] = {
+    "tiny": "d90ca5fe260221311c53c58e660288d3deb8d356",
+    "base": "ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66",
+    "small": "536b0662742c02347bc0e980a01041f333bce120",
+    "medium": "08e178d48790749d25932bbc082711ddcfdfbc4f",
+    "large-v3": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+}
+
+OPENVINO_MODEL_REVISIONI: dict[str, str] = {
+    "OpenVINO/whisper-small-fp16-ov": "2410d022171ca8a97343182f88eec8807a324db9",
+    "OpenVINO/whisper-tiny-fp16-ov": "44662d68573bd732e50fc295d1c1ec47e77f67df",
+    "OpenVINO/whisper-base-fp16-ov": "84fbe975a79a8c996fd32c036558f29e2db6670f",
+}
+
+# =====================================================================
 # STOPWORDS ITALIANE
 # =====================================================================
 STOPWORDS_ITA = frozenset(
