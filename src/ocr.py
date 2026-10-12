@@ -38,9 +38,19 @@ _SOFFICE_CANDIDATES = [
 # fra i candidati: un collega che lo installa senza privilegi riceverebbe
 # "nessun converter trovato" mentre LibreOffice ce l'ha, a due passi da lui.
 # Non basta `shutil.which`: l'installer non mette soffice nel PATH.
-_SOFFICE_PER_UTENTE = (
-    Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "LibreOffice" / "program" / "soffice.exe"
-)
+def _soffice_per_utente() -> Path | None:
+    """Percorso di un LibreOffice installato per utente, o None se non c'è.
+
+    None fuori da Windows: senza LOCALAPPDATA il Path risulterebbe
+    RELATIVO ("Programs/LibreOffice/..."), e un percorso relativo
+    viene risolto rispetto alla cartella da cui si lancia il programma:
+    il check potrebbe trovarsi un file o una cartella omonimi per caso.
+    Meglio nessun percorso che un percorso che dipende da dove sei.
+    """
+    locale = os.environ.get("LOCALAPPDATA")
+    if not locale:
+        return None
+    return Path(locale) / "Programs" / "LibreOffice" / "program" / "soffice.exe"
 
 # Candidati percorsi ONLYOFFICE (x2t converter)
 _ONLYOFFICE_CANDIDATES = [
@@ -76,8 +86,9 @@ def _find_soffice() -> str | None:
     for cand in _SOFFICE_CANDIDATES:
         if Path(cand).exists():
             return cand
-    if _SOFFICE_PER_UTENTE.exists():
-        return str(_SOFFICE_PER_UTENTE)
+    per_utente = _soffice_per_utente()
+    if per_utente is not None and per_utente.exists():
+        return str(per_utente)
     return None
 
 
