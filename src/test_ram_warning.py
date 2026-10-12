@@ -40,7 +40,10 @@ class TestWarnRamBassa(unittest.TestCase):
         logger = logging.getLogger()
         vecchio = logger.level
         logger.addHandler(handler)
-        logger.setLevel(logging.WARNING)
+        # INFO, non WARNING: l'utente vede anche le righe informative, e
+        # quello che va provato e' "cosa dice a chi legge", non "quali righe
+        # hanno una certa priorita'".
+        logger.setLevel(logging.INFO)
         try:
             args = _Args()
             args.whisper_model = modello
@@ -87,6 +90,30 @@ class TestWarnRamBassa(unittest.TestCase):
     def test_cita_il_modello_in_use(self) -> None:
         testo = "\n".join(self._cattura(4 * GB, "medium"))
         self.assertIn("medium", testo)
+
+    # --- Criterio di progetto: la qualita' non si baratta con la fattibilita' ---
+
+    def test_dice_che_il_modello_migliore_resta(self) -> None:
+        """Su un PC piccolo si spendono tempo e risorse, non qualita'."""
+        testo = "\n".join(self._cattura(4 * GB, "small")).lower()
+        self.assertIn("resta il migliore", testo)
+
+    def test_il_modello_piu_leggero_porta_con_se_il_costo_misurato(self) -> None:
+        """Non basta proporlo: bisogna dire che peggiora la sincronizzazione.
+
+        Offrire l'alternativa senza il costo fa scegliere all'utente credendo
+        che sia equivalente: sull'A/B col materiale reale la similarita' media
+        scende da 0.791 a 0.421.
+        """
+        testo = "\n".join(self._cattura(4 * GB, "small"))
+        self.assertIn("EMBEDDING_MODEL=", testo)
+        self.assertIn("0.791", testo)
+        self.assertIn("0.421", testo)
+
+    def test_non_presenta_il_modello_piccolo_como_alleggerimento_gratuito(self) -> None:
+        """"Per alleggerire" toglieva la natura del compromesso."""
+        testo = "\n".join(self._cattura(4 * GB, "small")).lower()
+        self.assertNotIn("per alleggerire", testo)
 
 
 class TestNonAlzaMai(unittest.TestCase):

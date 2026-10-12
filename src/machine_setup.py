@@ -57,7 +57,13 @@ import sys
 from pathlib import Path
 from typing import Protocol
 
-from config import CACHE_DIR, cuda_available, log, openvino_device_available
+from config import (
+    CACHE_DIR,
+    DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+    cuda_available,
+    log,
+    openvino_device_available,
+)
 from hardware import choose_video_encoder, ffmpeg_encoders
 
 MACHINE_CONFIG_PATH = CACHE_DIR / "machine_setup.json"
@@ -481,15 +487,23 @@ def _engine_note(rec: dict) -> str:
 def _warn_ram_bassa(args: _TranscriberArgs) -> None:
     """Avvisa se su questo PC i modelli di default sono pesanti.
 
-    Il batch size si e' gia' adattato alla RAM (vedi `config._RAM_TIER`), ma
-    i MODELLI non si adattano: `multilingual-e5-large` tiene ~4,3 GB residenti
-    e whisper `small` altri ~500 MB, qualunque sia la macchina.
+    Il batch size si e' gia' adattato alla RAM (vedi `config._RAM_TIER`).
 
-    Non si abbassa il modello di nascosto: un risultato peggiore che nessuno
-    ha scelto e' la cosa peggiore che un programma automatico possa fare, e
-    il confronto con la baseline del progetto (che usa `small`) perderebbe
-    significato. Si dice cosa sta succedendo e si lascia scegliere, con il
-    valore da mettere in `.env` gia' scritto.
+    Il criterio del progetto e' che la QUALITA' della sincronizzazione non si
+    baratta con la fattibilita': su una macchina piccola si spendono tempo e
+    risorse (batch piu' piccoli, run piu' lunghe), non si abbassa il modello.
+    Quindi l'avviso dice che il modello migliore resta e che costera' piu'
+    tempo, e NON propone di scendere come rimedio.
+
+    Prima l'unico consiglio era `WHISPER_MODEL=tiny`, che riguarda il modello
+    da ~500 MB e taceva su quello da ~4,3 GB: la riga che guida chi ha un PC
+    piccolo puntava al problema minore e ignorava quello vero.
+
+    Non si abbassa comunque il modello di nascosto: un risultato peggiore che
+    nessuno ha scelto e' la cosa peggiore che un programma automatico possa
+    fare. Se l'utente vuole scendere, la via resta esplicita e con i numeri
+    del confronto misurato scritti sotto, non un consiglio travisto da "per
+    alleggerire".
 
     Non avvisa se l'utente ha gia' scelto un modello piccolo: dirgli che deve
     scendere quando ci e' gia' sceso sarebbe rumore.
@@ -506,18 +520,27 @@ def _warn_ram_bassa(args: _TranscriberArgs) -> None:
         return
 
     log.warning(
-        "   ⚠️  RAM %s (%s): i modelli di default sono pesanti per questa macchina.",
+        "   ⚠️  RAM %s (%s): il modello di sincronizzazione resta il migliore, "
+        "il PC lo regge con meno memoria contemporanea.",
         format_ram(totale),
         tier,
     )
     log.warning(
-        "      L'embedding multilingual-e5-large tiene ~4,3 GB in memoria, whisper %s altri ~500 MB. "
-        "Il batch e' gia' ridotto automaticamente.",
+        "      multilingual-e5-large tiene ~4,3 GB residenti, whisper %s altri ~500 MB. "
+        "Il batch e' gia' ridotto automaticamente: la run sara' piu' lenta, "
+        "non meno precisa.",
         modello or "small",
     )
-    log.warning(
-        "      Per alleggerire, in .env:  WHISPER_MODEL=tiny  (trascrizione piu' rapida, "
-        "meno accurata sulle ancore)."
+    log.info(
+        "      Se il PC non regge (memoria esaurita, PC che si blocca), il modo "
+        "veloce di scendere e' sceglierlo tu in .env, sapendo il costo."
+    )
+    log.info("        WHISPER_MODEL=tiny      (trascrizione: ~500 MB -> ~75 MB, anchors meno precisi)")
+    log.info("        EMBEDDING_MODEL=%s", DEFAULT_EMBEDDING_MODEL_ALTERNATE)
+    log.info(
+        "      Attenzione a quest'ultimo: non e' un alleggerimento qualunque. "
+        "Sull'A/B col materiale vero la similarita' media scende da 0.791 a 0.421, "
+        "cioe' la sincronizzazione peggiora parecchio."
     )
 
 
