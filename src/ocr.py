@@ -261,7 +261,7 @@ def _pptx_fallback_to_pdf(ppt_path: Path, pdf_path: Path) -> bool:
         return False
 
 
-def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
+def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza_grafica: bool = False) -> Path:
     """Converte una presentazione PPT/PPTX in PDF usando un converter nativo.
 
     Ordine di preferenza:
@@ -269,24 +269,31 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
       2. GenOffice CLI headless (se installata) — conserva grafica e layout
       3. Microsoft PowerPoint via COM (se installato) — per i PC con solo Office
       4. ONLYOFFICE ``x2t`` (se installato) — alternativa senza LibreOffice
-      5. Fallback Python puro (python-pptx + PyMuPDF) se i converter falliscono
+      5. Fallback Python puro (python-pptx + PyMuPDF), SOLO con
+         ``fallback_senza_grafica=True``
 
     GenOffice sta prima di ONLYOFFICE perche' e' piu' probabile trovarsi
     gia' installato come editor predefinito, e il suo convertitore mantiene
     il layout (il fallback Python no: perdo' forme, colori e sfondi).
     PowerPoint sta per terzo perche' e' l'unico dei quattro che richiede una
     licenza: e' l'ultima risorsa per i PC che hanno Office e nient'altro.
+
+    `fallback_senza_grafica` NON e' il default: senza converter nativi la
+    funzione solleva RuntimeError invece di ricostruire le slide a mano dal
+    solo testo. Il video cosi' prodotto sembra normale ma e' peggiore, e
+    niente lo segnala. Vedi la fine della funzione.
     """
     soffice = _find_soffice()
     genoffice = _find_genoffice()
     onlyoffice = _find_onlyoffice()
     powerpoint = _find_powerpoint()
     has_converter = soffice or genoffice or onlyoffice or powerpoint
-    # Anche senza converter proviamo il fallback Python puro
-    if not has_converter:
+    # Senza converter il fallback non parte da solo: vedi la fine della funzione.
+    if not has_converter and not fallback_senza_grafica:
         log.warning(
             "   Nessun converter nativo (LibreOffice/GenOffice/PowerPoint/ONLYOFFICE) "
-            "trovato: provo fallback Python puro..."
+            "trovato. Il programma si ferma invece di produrre slide ricostruite "
+            "senza grafica, che peggiorerebbero la sincronizzazione."
         )
     out_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = out_dir / (ppt_path.stem + ".pdf")
@@ -382,13 +389,13 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
                 creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
             )
         except subprocess.TimeoutExpired:
-            log.warning("   Conversione %s->PDF timeout (%ds), provo fallback...", ext_upper, timeout)
+            log.warning("   Conversione %s->PDF timeout (%ds)", ext_upper, timeout)
         except OSError as e:
             # soffice/x2t presenti nel PATH ma non eseguibili (ACL, voce
             # spazzatura, architettura sbagliata, permessi). Senza questo
             # l'utente prende un traceback invece del messaggio costruito in
             # fondo, che spiega cosa provare.
-            log.warning("   %s non eseguibile (%s), provo fallback...", converter, e)
+            log.warning("   %s non eseguibile (%s)", converter, e)
         if proc is not None:
             # x2t ritorna exit !=0 anche quando produce il PDF con warning:
             # il successo si valuta dalla presenza del file, non dall'exit code.
@@ -409,33 +416,59 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path) -> Path:
                 proc.returncode,
                 (proc.stderr or proc.stdout or "")[:600],
             )
-            log.warning("   Provo fallback Python puro...")
+            log.warning("   Provo il prossimo converter...")
 
-    # Fallback puro Python (non richiede LibreOffice/ONLYOFFICE)
-    log.info("   Conversione %s -> PDF (fallback Python python-pptx+PyMuPDF)...", ext_upper)
-    if _pptx_fallback_to_pdf(ppt_path, pdf_path):
-        marker_path.write_text(_file_md5(ppt_path), encoding="ascii")
-        log.info("   -> PDF convertito (fallback): %s", pdf_path)
-        log.warning(
-            "   Nota: il fallback preserva testo/immagini ma non il layout esatto. "
-            "Per fedeltà massima apri il PPTX in ONLYOFFICE e salva manualmente come PDF."
-        )
-        return pdf_path
+    # Fallback puro Python (non richiede LibreOffice/ONLYOFFICE).
+    #
+    # NON viene usato in automatico: ricostruisce le slide mettendo solo testo
+    # e la prima immagine, quindi perde forme, colori, sfondi e layout. L'OCR
+    # ne ricava molto meno testo, la sincronizzazione peggiora, e il video
+    # esce lo stesso identico a prima: un green che nasconde un risultato
+    # peggiore. Il progetto per questo non mette python-pptx tra le dipendenze,
+    # e qui porta la scelta fino in fondo invece di fare la metà.
+    #
+    # Resta dietro --fallback-senza-grafica, per chi sa che il proprio file
+    # è solo testo e accetta il risultato.
+    if fallback_senza_grafica:
+        log.info("   Conversione %s -> PDF (fallback Python python-pptx+PyMuPDF)...", ext_upper)
+        if _pptx_fallback_to_pdf(ppt_path, pdf_path):
+            marker_path.write_text(_file_md5(ppt_path), encoding="ascii")
+            log.info("   -> PDF convertito (fallback): %s", pdf_path)
+            log.warning(
+                "   ATTENZIONE: slide ricostruite SENZA layout, colori e sfondi. "
+                "L'OCR ne ricava meno testo e la sincronizzazione e' meno affidabile."
+            )
+            return pdf_path
+        raise RuntimeError(f"Conversione {ext_upper}->PDF fallita anche con il fallback Python.")
 
     raise RuntimeError(
-        f"Conversione {ext_upper}->PDF fallita con tutti i metodi.\n"
+        f"Conversione {ext_upper}->PDF non riuscita: nessun convertitore puo' "
+        f"ricostruire le slide senza perdere la grafica.\n"
         f" - LibreOffice: {'non trovato' if not soffice else 'errore'}\n"
         f" - GenOffice CLI: {'non trovato' if not genoffice else 'errore'}\n"
         f" - PowerPoint COM: {'non trovato' if not powerpoint else 'errore'}\n"
-        f" - ONLYOFFICE x2t: {'non trovato' if not onlyoffice else 'errore (TypeError su questo file)'}\n"
-        f" - Fallback Python: fallito\n"
-        "Soluzioni immediate (senza installare LibreOffice):\n"
-        " 1) Apri presentazione.pptx in GenOffice o ONLYOFFICE DesktopEditors > "
-        "File > Scarica come > PDF e salva come presentazione.pdf\n"
-        " 2) Oppure carica su Google Slides > File > Scarica > PDF\n"
-        " 3) Poi lancia: "
-        f"py -3.11 main.py --pdf \"{pdf_path}\""
+        f" - ONLYOFFICE x2t: {'non trovato' if not onlyoffice else 'errore'}\n"
+        "\n"
+        "Il programma si ferma qui invece di produrre un video peggiore senza\n"
+        "avvisarti: con le slide ricostruite a mano dal solo testo l'OCR vede\n"
+        "molto meno, e la sincronizzazione peggiora senza che se ne accorga\n"
+        "nessuno.\n"
+        "\n"
+        "Soluzioni, dalla piu' rapida:\n"
+        " 1) Apri il .pptx e salva come PDF (PowerPoint, LibreOffice, Google\n"
+        "    Slides, ONLYOFFICE: tutti lo fanno). Salvalo come presentazione.pdf\n"
+        "    nella cartella e rilancia: e' il percorso che dà il risultato migliore.\n"
+        " 2) Installa LibreOffice e rilancia: winget install TheDocumentFoundation.LibreOffice\n"
+        " 3) Se il tuo file e' davvero solo testo e ti va bene cosi', rilancia con\n"
+        "    --fallback-senza-grafica per accettare le slide ricostruite.\n"
+        "\n"
+        f"    py -3.11 {config_module_path()} --pdf \"{ppt_path.parent / (ppt_path.stem + '.pdf')}\""
     )
+
+
+def config_module_path() -> str:
+    """Percorso di src/main.py, per i comandi da copiare nel messaggio d'errore."""
+    return str(Path(__file__).with_name("main.py"))
 
 
 def _render_page(args: tuple[str, int, str, int]) -> str:

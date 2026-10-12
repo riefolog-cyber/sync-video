@@ -1798,6 +1798,14 @@ Esempi:
         help="Disabilita il controllo aggiornamenti pacchetti all'avvio",
     )
     parser.add_argument(
+        "--fallback-senza-grafica",
+        action="store_true",
+        help="Converte il PPTX ricostruendo le slide dal solo testo (niente layout, "
+        "colori o sfondi), anche se nessun convertitore e' installato. Di default il "
+        "programma si ferma: la sincronizzazione peggiorerebbe senza che nessuno lo "
+        "veda.",
+    )
+    parser.add_argument(
         "--no-update",
         action="store_true",
         help="Controlla gli aggiornamenti ma non chiede di installarli (solo notifica)",

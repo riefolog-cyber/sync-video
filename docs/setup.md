@@ -159,6 +159,26 @@ installazione: **non** fallisce con un errore incomprensibile.
 > download, si rilancia con `--ignora-spazio` e si torna al comportamento di
 > prima: avviso e si prosegue.
 >
+> ### Se metti un .pptx senza convertitori
+>
+> Non basta LibreOffice: il programma cerca, in ordine, **LibreOffice →
+> GenOffice → PowerPoint → ONLYOFFICE**. Se nessuno è installato, **si
+> ferma** invece di convertire lo stesso.
+>
+> Il motivo è che la ricostruzione di riserva mette nelle slide solo il testo
+> e la prima immagine: niente layout, colori, sfondi. L'OCR ne ricava molto
+> meno, la sincronizzazione peggiora, e il video esce identico a prima: un
+> risultato peggiore che nessuno segnala. Il progetto per questo non mette
+> `python-pptx` fra le dipendenze, e qui la scelta arriva fino in fondo.
+>
+> Il programma dice cosa fare: salvare il `.pptx` come PDF (PowerPoint,
+> LibreOffice, Google Slides e ONLYOFFICE lo fanno tutti), oppure installare
+> LibreOffice con `winget install TheDocumentFoundation.LibreOffice`.
+>
+> Se il tuo file è davvero solo testo e ti va bene così,
+> `--fallback-senza-grafica` apre la strada e avvisa che il risultato è
+> meno affidabile.
+>
 > ### Se lanci senza i file del video
 >
 > È il caso normale alla prima esecuzione: scarichi lo ZIP, avvii, e non hai

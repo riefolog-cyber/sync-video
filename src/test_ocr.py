@@ -156,9 +156,16 @@ class TestConvertPresentationToPdf(unittest.TestCase):
 
         with (
             mock.patch("ocr._find_soffice", return_value="soffice"),
+            mock.patch("ocr._find_genoffice", return_value=None),
+            mock.patch("ocr._find_powerpoint", return_value=False),
             mock.patch("ocr._find_onlyoffice", return_value=None),
             mock.patch("ocr.subprocess.run", side_effect=_failing_run),
-            mock.patch("ocr._pptx_fallback_to_pdf", return_value=False),self.assertRaises(RuntimeError)
+            mock.patch("ocr._pptx_fallback_to_pdf", return_value=False),
+            # Prima questa riga era `...,self.assertRaises(RuntimeError)` dentro
+            # la tupla: creava il context manager e non lo entrava mai, quindi
+            # non asseriva niente. Il test passava perche' l'eccezione non
+            # veniva proprio sollevata, non perche' fosse attesa.
+            self.assertRaises(RuntimeError),
         ):
             convert_presentation_to_pdf(self.ppt, self.out_dir)
         # La prova che la cache non si avvelena: il PDF stantio è stato
@@ -218,6 +225,101 @@ print("ESITO", "pandas" in sys.modules, "pytesseract" in sys.modules)
         pigro.assert_called_once()
         finto.image_to_string.assert_called_once_with("slide.png", lang="ita")
         self.assertEqual(testo, "testo della slide")
+
+
+class TestNessunaGraficaNonPassaSilenziosamente(unittest.TestCase):
+    """Senza converter il programma si ferma invece di degradare.
+
+    Il difetto che copre: il fallback Python ricostruiva le slide mettendo
+    solo testo e la prima immagine. Il video usciva uguale, l'OCR ne ricavava
+    molto meno, la sincronizzazione peggiorava: e nulla lo diceva, se non una
+    riga di avviso che scorreva fra altre duecento. Un green che nasconde un
+    risultato peggiore.
+
+    Il progetto per questo non mette python-pptx fra le dipendenze, e qui la
+    scelta arriva fino in fondo: il fallback non parte da solo.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out_dir = Path(self.tmp.name) / "ppt_pdf"
+        self.out_dir.mkdir()
+        self.ppt = Path(self.tmp.name) / "presentazione.pptx"
+        self.ppt.write_bytes(b"sorgente")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _nessun_converter(self):
+        return mock.patch.multiple(
+            "ocr",
+            _find_soffice=mock.Mock(return_value=None),
+            _find_genoffice=mock.Mock(return_value=None),
+            _find_onlyoffice=mock.Mock(return_value=None),
+            _find_powerpoint=mock.Mock(return_value=False),
+        )
+
+    def test_senza_converter_si_ferma(self):
+        with (
+            self._nessun_converter(),
+            mock.patch("ocr._pptx_fallback_to_pdf") as fallback,
+            self.assertRaises(RuntimeError),
+        ):
+            convert_presentation_to_pdf(self.ppt, self.out_dir)
+        fallback.assert_not_called()
+
+    def test_il_fallback_prodotivo_non_scappa(self):
+        """Il punto: il fallback restituisce un Path, quindi non darebbe errore.
+
+        Senza questo caso il test passerebbe anche col fallback attivo: tornerebbe
+        un Path e nessuno guarderebbe dentro.
+        """
+        with (
+            self._nessun_converter(),
+            mock.patch("ocr._pptx_fallback_to_pdf", return_value=True),
+            self.assertRaises(RuntimeError),
+        ):
+            convert_presentation_to_pdf(self.ppt, self.out_dir)
+
+    def test_converter_rotto_ferma_anche_se_uno_c_e(self):
+        """Il problema non e' solo l'assenza di converter: e' anche il fallimento."""
+        with (
+            mock.patch("ocr._find_soffice", return_value="soffice"),
+            mock.patch("ocr._find_genoffice", return_value=None),
+            mock.patch("ocr._find_powerpoint", return_value=False),
+            mock.patch("ocr._find_onlyoffice", return_value=None),
+            mock.patch("ocr.subprocess.run", return_value=mock.Mock(returncode=1, stderr="rotto", stdout="")),
+            mock.patch("ocr._pptx_fallback_to_pdf", return_value=True),
+            self.assertRaises(RuntimeError),
+        ):
+            convert_presentation_to_pdf(self.ppt, self.out_dir)
+
+    def test_il_flag_apre_il_fallback(self):
+        """Chi sa che il proprio file e' solo testo deve poter procedere."""
+
+        def _fallback_che_scrive(ppt_path, pdf_path):
+            pdf_path.write_bytes(b"pdf ricostruito")
+            return True
+
+        with self._nessun_converter(), mock.patch(
+            "ocr._pptx_fallback_to_pdf", side_effect=_fallback_che_scrive
+        ):
+            risultato = convert_presentation_to_pdf(self.ppt, self.out_dir, fallback_senza_grafica=True)
+        self.assertEqual(risultato, self.out_dir / "presentazione.pdf")
+        self.assertTrue((self.out_dir / "presentazione.pdf").exists())
+
+    def test_il_messaggio_dice_cosa_fare(self):
+        """Un blocco senza via d'uscita e' un vicolo cieco."""
+        with (
+            self._nessun_converter(),
+            mock.patch("ocr._pptx_fallback_to_pdf", return_value=True),
+            self.assertRaises(RuntimeError) as ctx,
+        ):
+            convert_presentation_to_pdf(self.ppt, self.out_dir)
+        testo = str(ctx.exception)
+        self.assertIn("LibreOffice", testo)
+        self.assertIn("--fallback-senza-grafica", testo)
+        self.assertIn("PDF", testo)
 
 
 if __name__ == "__main__":

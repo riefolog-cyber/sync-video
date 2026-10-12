@@ -1961,7 +1961,9 @@ def main(argv: list | None = None) -> None:
     if pdf_path.suffix.lower() in PRESENTATION_SUFFIXES:
         try:
             converted_dir = CACHE_DIR / "ppt_pdf"
-            pdf_path = convert_presentation_to_pdf(pdf_path, converted_dir)
+            pdf_path = convert_presentation_to_pdf(
+                pdf_path, converted_dir, fallback_senza_grafica=args.fallback_senza_grafica
+            )
         except RuntimeError as e:
             log.error("[ERRORE] %s", e)
             sys.exit(1)
