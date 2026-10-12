@@ -33,6 +33,15 @@ _SOFFICE_CANDIDATES = [
     "/opt/libreoffice/program/soffice",
 ]
 
+# LibreOffice installato SENZA diritti di amministratore va in
+# %LOCALAPPDATA%\Programs\LibreOffice, non in Program Files. Prima non era
+# fra i candidati: un collega che lo installa senza privilegi riceverebbe
+# "nessun converter trovato" mentre LibreOffice ce l'ha, a due passi da lui.
+# Non basta `shutil.which`: l'installer non mette soffice nel PATH.
+_SOFFICE_PER_UTENTE = (
+    Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "LibreOffice" / "program" / "soffice.exe"
+)
+
 # Candidati percorsi ONLYOFFICE (x2t converter)
 _ONLYOFFICE_CANDIDATES = [
     r"C:\Program Files\ONLYOFFICE\DesktopEditors\converter\x2t.exe",
@@ -67,6 +76,8 @@ def _find_soffice() -> str | None:
     for cand in _SOFFICE_CANDIDATES:
         if Path(cand).exists():
             return cand
+    if _SOFFICE_PER_UTENTE.exists():
+        return str(_SOFFICE_PER_UTENTE)
     return None
 
 
