@@ -61,19 +61,53 @@ echo  (qui disattivato per non rallentare la generazione del video).
 echo ========================================
 echo.
 
-rem --- PATH FFmpeg: cerca in PATH, altrimenti nella cartella WinGet (ricerca dinamica, portabile) ---
+rem --- PATH FFmpeg: cerca in PATH, poi WinGet, poi winget ---
+rem Prima si fermava qui con "[ERRORE] FFmpeg non trovato": su un PC nuovo
+rem senza ffmpeg la preparazione automatica si fermava al primo passo, e il
+rem messaggio chiedeva di installarlo a mano. Ma il codice Python sa gia'
+rem farlo (config.bootstrap usa winget con lo stesso id): e' solo che questa
+rem finestra gli impediva di arrivarci. Ora l'installazione la fa anche qui,
+rem perche' e' l'unico punto in cui si puo' ricaricare il PATH dopo
+rem l'installazione (vedi :ricarica_path_utente): winget scrive il PATH
+rem dell'utente nel registro, ma questa sessione cmd.exe ha gia' il vecchio.
+rem
+rem Uso 'goto' e non 'if errorlevel' dentro i blocchi: dentro un blocco
+rem %ERRORLEVEL% viene valutato una volta sola, al momento del parsing.
+rem Stesso motivo di _python.bat.
 where ffmpeg >NUL 2>&1
-if not %ERRORLEVEL% EQU 0 (
-    for /f "delims=" %%F in ('where /r "%LOCALAPPDATA%\Microsoft\WinGet\Packages" ffmpeg.exe 2^>NUL') do set "FFMPEG_FOUND=%%F"
-    if defined FFMPEG_FOUND (
-        set "PATH=%PATH%;!FFMPEG_FOUND:~0,-10!"
-        echo FFmpeg trovato nel percorso WinGet: !FFMPEG_FOUND!
-    ) else (
-        echo [ERRORE] FFmpeg non trovato. Installa con: winget install Gyan.FFmpeg.Shared
-        if "%PAUSE_IT%"=="1" pause
-        exit /b 1
-    )
-)
+if not errorlevel 1 goto ffmpeg_ok
+
+set "FFMPEG_FOUND="
+for /f "delims=" %%F in ('where /r "%LOCALAPPDATA%\Microsoft\WinGet\Packages" ffmpeg.exe 2^>NUL') do set "FFMPEG_FOUND=%%F"
+if defined FFMPEG_FOUND goto ffmpeg_winget
+
+where winget >NUL 2>&1
+if errorlevel 1 goto ffmpeg_fallito
+
+echo.
+echo FFmpeg non presente su questo PC: lo installo adesso (una tantum)...
+winget install --id Gyan.FFmpeg.Shared -e --scope user --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+call :ricarica_path_utente
+set "FFMPEG_FOUND="
+for /f "delims=" %%F in ('where /r "%LOCALAPPDATA%\Microsoft\WinGet\Packages" ffmpeg.exe 2^>NUL') do set "FFMPEG_FOUND=%%F"
+if defined FFMPEG_FOUND goto ffmpeg_winget
+where ffmpeg >NUL 2>&1
+if errorlevel 1 goto ffmpeg_fallito
+goto ffmpeg_ok
+
+:ffmpeg_winget
+set "PATH=%PATH%;!FFMPEG_FOUND:~0,-10!"
+echo FFmpeg trovato nel percorso WinGet: !FFMPEG_FOUND!
+goto ffmpeg_ok
+
+:ffmpeg_fallito
+echo.
+echo [ERRORE] FFmpeg non trovato, e l'installazione automatica non e' riuscita.
+echo   Installa con: winget install Gyan.FFmpeg.Shared
+if "%PAUSE_IT%"=="1" pause
+exit /b 1
+
+:ffmpeg_ok
 
 rem --- Scelta Python: helper condiviso (preferisce 3.11, vedi _python.bat) ---
 rem Se sul PC non c'e' nessun Python, il helper prova a installarlo con
@@ -101,3 +135,22 @@ echo.
 echo ========================================
 if "%PAUSE_IT%"=="1" pause
 endlocal
+
+rem ============================================================
+rem ricarica_path_utente: rilegge il PATH utente dal registro.
+rem Serve solo dopo winget: questa sessione cmd.exe ha gia' in
+rem memoria il PATH di quando e' partita, quindi il ffmpeg appena
+rem installato non si vede con 'where' finche' non lo rileggo.
+rem Stessa tecnica di _python.bat, che ha lo stesso problema
+rem dopo l'installazione di Python.
+rem
+rem 'if defined' + 'goto' invece di espansione dentro il blocco,
+rem per lo stesso motivo di sopra.
+rem ============================================================
+:ricarica_path_utente
+set "_PATH_UTENTE="
+for /f "tokens=2,*" %%A in ('reg query "HKCU\Environment" /v Path 2^>NUL ^| find /i "Path"') do set "_PATH_UTENTE=%%B"
+if not defined _PATH_UTENTE exit /b 0
+set "PATH=%PATH%;!_PATH_UTENTE!"
+set "_PATH_UTENTE="
+exit /b 0
