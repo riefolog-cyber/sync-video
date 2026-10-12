@@ -10,7 +10,7 @@ ffmpeg e i modelli, e poi genera il video. Vedi
 
 Git serve solo se vuoi clonare il repository; dallo ZIP non ti serve.
 
-1. **Installa Python 3.10+** da [python.org](https://python.org) — spunta **"Add Python to PATH"**. *(Solo se non usi l'avvio automatico, o se sei su Linux/macOS.)*
+1. **Installa Python 3.10+** da [python.org](https://python.org) — spunta **"Add Python to PATH"**. *(Solo se non usi l'avvio automatico, o se `winget` non è disponibile.)*
 2. **Installa Git** da [git-scm.com](https://git-scm.com) (se non presente, e solo se vuoi clonare).
 3. **Clona il repository**:
    ```bash
@@ -112,9 +112,9 @@ Se winget non è disponibile (Linux, macOS, Windows 10 precedente, macchine
 gestite) il programma lo dice esplicitamente e indica la pagina di
 installazione: **non** fallisce con un errore incomprensibile.
 
-> Su **Linux e macOS** l'installazione automatica di Python **non** esiste:
-> il repo richiede di installare Python a mano, poi lancia `crea_venv.sh`
-> (o `crea_venv.bat`). Tutto il resto è automatico anche lì.
+> **Il progetto è solo Windows.** Su macOS e Linux non è supportato, e su Mac
+> con chip Apple manca proprio il motore di trascrizione. Vedi l'avviso in
+> cima al [README](../README.md).
 
 ### Cosa viene installato automaticamente al primo avvio
 

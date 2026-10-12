@@ -40,10 +40,24 @@ genera_video.bat
 # numpy vecchio -> pandas non si importa -> pytesseract sembra guasto).
 ```
 
+> ## 🪟 Funziona solo su Windows
+>
+> L'avvio automatico, gli script e la scelta del motore di trascrizione sono
+> pensati per **Windows 10/11**. È l'unica piattaforma verificata: scarichi lo
+> ZIP, fai doppio clic su `genera_video.bat`, e il PC si prepara da solo.
+>
+> **Su macOS non funziona**, e non è una questione di configurazione: i `.bat`
+> non esistono, Python va installato a mano, serve Homebrew per Tesseract e
+> ffmpeg, e soprattutto **sui Mac con chip Apple non c'è alcun motore di
+> trascrizione** — `faster-whisper` non pubblica wheel per quella CPU e
+> OpenVINO non esiste su macOS. Manca il pezzo centrale del programma.
+>
+> **Su Linux** non è supportato per lo stesso motivo.
+
 > Su Windows non devi installare niente a mano: scarichi lo ZIP, fai doppio
-> clic su `genera_video.bat`, e il programma prepara il PC da sé. Su Linux e
-> macOS Python va installato a mano. Dettagli e come disattivare
-> l'installazione automatica: [docs/setup.md](docs/setup.md#primo-avvio-automatico).
+> clic su `genera_video.bat`, e il programma prepara il PC da sé.
+> Dettagli e come disattivare l'installazione automatica:
+> [docs/setup.md](docs/setup.md#primo-avvio-automatico).
 
 ### 🔒 Ambiente dedicato (consigliato)
 
@@ -52,19 +66,16 @@ Il programma funziona anche col Python di sistema, ma quel Python è **condiviso
 ```bash
 # Una volta sola: crea la cartella .venv e installa i pacchetti del progetto
 crea_venv.bat          # Windows
-./crea_venv.sh         # macOS e Linux (stesso scopo, script shell)
 ```
 
-> I due script sono gemelli: `crea_venv.bat` per Windows, `crea_venv.sh` per
-> macOS/Linux. Usa quello del tuo sistema — i `.bat` non esistono su macOS/Linux
-> e i `.sh` su Windows.
+> Il progetto è **solo Windows**: non c'è uno script `.sh` equivalente.
 
-Da quel momento `genera_video.bat`, `aggiornamenti.bat`, `prova.bat`, `controlli.bat` e `check_embedding_models.bat` usano `.venv` da soli: non serve cambiare nulla a mano. Su macOS/Linux il comando è `.venv/bin/python src/main.py`.
+Da quel momento `genera_video.bat`, `aggiornamenti.bat`, `prova.bat`, `controlli.bat` e `check_embedding_models.bat` usano `.venv` da soli: non serve cambiare nulla a mano.
 
 | Comando | Cosa fa |
 |---|---|
-| `crea_venv.bat` / `./crea_venv.sh` | Crea `.venv` (o completa i pacchetti mancanti se esiste) |
-| `crea_venv.bat --ricrea` / `./crea_venv.sh --ricrea` | Cancella `.venv` e la ricrea da zero |
+| `crea_venv.bat` | Crea `.venv` (o completa i pacchetti mancanti se esiste) |
+| `crea_venv.bat --ricrea` | Cancella `.venv` e la ricrea da zero |
 | `set SYNC_VIDEO_NO_VENV=1` | Usa il Python di sistema, ignorando `.venv` (Windows) |
 
 La venv **riusa i modelli già scaricati** (cartella `.cache` e cache di HuggingFace): non riscarica nulla, e la prima run resta veloce. Dentro `.venv` `pip check` non segnala conflitti; nel Python globale ne convivono diversi (pacchetti di altri progetti).

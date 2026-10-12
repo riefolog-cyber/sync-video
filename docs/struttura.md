@@ -28,7 +28,6 @@ controlli.bat            ← Wrapper Windows di controlli.py
 prova.bat                ← Test rapido senza generare il video (dry-run)
 genera_video.bat         ← Launcher 1-click (Windows)
 crea_venv.bat            ← Crea .venv (Windows)
-crea_venv.sh             ← Crea .venv (macOS/Linux)
 requirements.txt         ← Dipendenze pip
 ruff.toml                ← Configurazione lint (guardrail di stile)
 mypy.ini                 ← Configurazione type-check
