@@ -55,7 +55,6 @@ DOCUMENTI = [
     *sorted((RADICE / "docs").glob("*.md")),
     RADICE / "README.md",
     RADICE / "promemoria prima installazione.md",
-    RADICE / "PIANO_OTTIMIZZAZIONI.md",
 ]
 
 # Un valore "semplice": numero puro, o parola senza parentesi né virgole.

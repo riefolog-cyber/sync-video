@@ -66,14 +66,14 @@ fallisce in silenzio (è già successo: vedi P2 #13).
 ## Come verificare
 
 Tutto in un comando, con un solo esito finale: `controlli.bat` (Windows) o
-`python controlli.py`. Esegue i passi qui sotto, piu' il type-check sulle tre
+`python src/controlli.py`. Esegue i passi qui sotto, piu' il type-check sulle tre
 piattaforme e `_debug_hardware.py`. Se preferisci vederli uno per uno:
 
 ```powershell
-.\.venv\Scripts\python.exe -m ruff check .
-.\.venv\Scripts\python.exe -m mypy .
-.\.venv\Scripts\python.exe -m unittest discover -s . -p 'test_*.py'
-.\.venv\Scripts\python.exe .\_debug_hardware.py
+.\.venv\Scripts\python.exe -m ruff check src
+.\.venv\Scripts\python.exe -m mypy src
+.\.venv\Scripts\python.exe -m unittest discover -s src -p 'test_*.py'
+.\.venv\Scripts\python.exe src\_debug_hardware.py
 ```
 
 **`mypy .` da solo non basta.** La CI gira su `ubuntu-latest`, quindi il
@@ -91,4 +91,4 @@ valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
 Stato all'ultimo lancio: ruff pulito, mypy pulito, test verdi,
-`_debug_hardware.py` 15/15.
+`_debug_hardware.py` 16/16.

@@ -13,7 +13,7 @@ controlli che il progetto fa girare a mano:
 
 Perche' tre piattaforme e non un `mypy .`: in locale il type-check vede solo
 il sistema di chi sviluppa. Un import condizionale passa su Windows e fa
-fallire la CI su Linux (e' gia' successo: vedi PIANO_OTTIMIZZAZIONI.md).
+fallire la CI su Linux (e' gia' successo: vedi docs/PIANO_OTTIMIZZAZIONI.md).
 Sulla CI `mypy .` equivale a `mypy --platform linux .`, quindi questi tre
 comandi coprono esattamente la CI e in piu' le piattaforme che la CI non ha.
 
