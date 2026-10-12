@@ -171,11 +171,6 @@ class TestRamProbes(unittest.TestCase):
         if totale is not None:
             self.assertGreater(totale, 0)
 
-    def test_totale_e_disponibile_coerenti(self) -> None:
-        totale, disponibile = hw.ram_total_bytes(), hw.ram_available_bytes()
-        if totale is not None and disponibile is not None:
-            self.assertLessEqual(disponibile, totale)
-
 
 class TestEncoderCache(unittest.TestCase):
     """La cache su disco e' un'ottimizzazione: se fallisce, si riprova."""
@@ -280,20 +275,6 @@ class TestEncoderCache(unittest.TestCase):
             patch.object(Path, "write_text", side_effect=OSError("read-only")),
         ):
             hw._write_encoder_cache(frozenset({"libx264"}))  # non deve sollevare
-
-
-class TestProfileSummary(unittest.TestCase):
-    def test_riga_leggibile(self) -> None:
-        riga = hw.profile_summary("h264_qsv")
-        self.assertIn("RAM", riga)
-        self.assertIn("h264_qsv", riga)
-
-    def test_libx264_dicce_che_su_cpu(self) -> None:
-        self.assertIn("CPU", hw.profile_summary("libx264"))
-        self.assertNotIn("h264_qsv", hw.profile_summary("libx264"))
-
-    def test_niente_encoder_usa_libx264(self) -> None:
-        self.assertIn("libx264", hw.profile_summary(None))
 
 
 class TestNessunaDipendenzaEsterna(unittest.TestCase):

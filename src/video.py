@@ -484,7 +484,20 @@ def _gray_vector(path: Path) -> np.ndarray:
 
 
 def image_similarity(a: Path, b: Path) -> float:
-    """Similarità coseno tra due immagini (0.0 se una non è leggibile)."""
+    """Similarità coseno tra due immagini (0.0 se una non è leggibile).
+
+    NON CHIAMARE DA `main.py`: qui non c'e' nessuna chiamata di questa
+    funzione, e non e' un errore. E' l'implementazione di RIFERIMENTO:
+    il percorso di produzione usa `_reference_matrix` + il prodotto
+    matriciale (stesso coseno, ma senza riaprire la slide per ogni
+    frame: 79s -> 1.4s misurati).
+
+    Resta perche' `test_video.py` confronta il confronto vettoriale con
+    questa riga per riga: e' l'unica garanzia che l'ottimizzazione non
+    abbia cambiato il risultato. Cancellarla toglierebbe quella garanzia
+    senza accorgersene, perche' anche i test continuerebbero a passare
+    (con un confronto in meno). Non rimuoverla.
+    """
     try:
         va, vb = _gray_vector(a), _gray_vector(b)
     except (UnidentifiedImageError, OSError):

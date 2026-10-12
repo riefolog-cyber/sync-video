@@ -92,6 +92,15 @@ def extract_timeline_from_transcript(
     Estrae la timeline deterministicamente dalla trascrizione Whisper,
     usando i timestamp precisi (al decimo di secondo).
 
+    NON CHIAMARE DA `main.py`: qui non c'e' nessuna chiamata di questa
+    funzione, e non e' un errore. Il flusso di produzione usa
+    `split_ordered_mentions` / `free_order_segments_from_texts` /
+    `reconcile_timeline` (le ancore dichiarate dal conduttore vincono
+    sempre su questa euristica). Resta come RIFERIMENTO: `test_sync.py`
+    e `test_integration.py` la usano come caso base conosciuto, e senza
+    di essa quei test avrebbero solo l'implementazione nuova da confrontare
+    - cioe' nessun riferimento. Non rimuoverla.
+
     Args:
         words: lista di parole Whisper con 'word' e 'start'
         total_slides: numero totale di slide

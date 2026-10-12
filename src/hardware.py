@@ -117,30 +117,6 @@ def _ram_win32() -> tuple[int, int] | None:
         return None
 
 
-def ram_available_bytes() -> int | None:
-    """Byte di RAM liberi in questo momento, o None se non rilevabile.
-
-    Solo informativa (log di avviso): NON entra in nessuna chiave di cache
-    ne' in nessun default, perche' cambia da un momento all'altro.
-    """
-    if sys.platform == "win32":
-        coppia = _ram_win32()
-        return coppia[1] if coppia else None
-    if sys.platform == "darwin":
-        # macOS non espone la memoria libera con una syscall semplice:
-        # vm_stat e' rumoroso e vm_stat -f richiede root. Meglio il totale,
-        # dichiarato come "disponibile" che sbaglia sempre per eccesso: un
-        # avviso che over-stima la memoria libera e' quello giusto.
-        return ram_total_bytes()
-    try:  # Linux: MemAvailable richiede kernel >= 3.14
-        for riga in Path("/proc/meminfo").read_text(encoding="utf-8", errors="replace").splitlines():
-            if riga.startswith("MemAvailable:"):
-                return int(riga.split()[1]) * 1024
-    except Exception:
-        return None
-    return None
-
-
 def ram_total_bytes() -> int | None:
     """Byte di RAM installata, o None se non rilevabile.
 
@@ -352,25 +328,3 @@ def _write_encoder_cache(encoders: frozenset[str]) -> None:
         return
 
 
-def profile_summary(video_encoder: str | None = None) -> str:
-    """Riga sintetica dell'hardware, per il riepilogo di avvio."""
-    tier = memory_tier(ram_total_bytes())
-    logici = os.cpu_count() or 0
-    fisici = _physical_cpus_or_none()
-    cores = f"{fisici} fisici" if fisici else f"{logici} logici"
-    parti = [f"{cores}", f"RAM {format_ram(ram_total_bytes())} ({tier})"]
-    if video_encoder and video_encoder != "libx264":
-        parti.append(f"video {video_encoder}")
-    else:
-        parti.append("video libx264 (CPU)")
-    return ", ".join(parti)
-
-
-def _physical_cpus_or_none() -> int | None:
-    """Delega a config: qui non si duplica il probe dei core fisici."""
-    try:
-        from config import _physical_cpus
-
-        return _physical_cpus()
-    except Exception:
-        return None
