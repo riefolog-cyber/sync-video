@@ -37,9 +37,17 @@ from hardware import (
 )
 
 GB = 1024**3
-# Stessa soglia che usa config.py per l'avviso sul disco, cosi' i due
-# strumenti non si contraddicono.
-_MARGINE_DISCO = 1 * GB
+
+# Il margine di sicurezza NON vive qui. Era 1 GB in questo file e 2 GB in
+# config.py, con un commento che giurava fossero "la stessa soglia": non lo
+# erano, e la conseguenza era il referto che diceva "ne servono ~7.4 GB" quando
+# la guardia vera ne chiede 8.4. Un collega con 8 GB liberi leggeva [ ok ] qui e
+# poi il programma gli rifiutava il download: il diagnostico prometteva il
+# contrario di quello che il programma fa.
+#
+# Ora la soglia si legge da config dentro prova_spazio(), che la importa come
+# tutto il resto di config. Una sola sorgente, e un test che verifica che il
+# referto non sia piu' permissivo della guardia reale.
 
 OK, KO, AVV = "OK", "KO", "AVV"
 
@@ -253,11 +261,38 @@ def prova_hardware(r: Relazione) -> None:
 
 
 def prova_spazio(r: Relazione, radice: Path) -> None:
-    from config import DEFAULT_EMBEDDING_CACHE_DIR, _spazio_modelli_necessario
+    from config import (
+        _MARGINE_DISCO,
+        DEFAULT_EMBEDDING_CACHE_DIR,
+        DEFAULT_EMBEDDING_MODEL,
+        _spazio_modelli_necessario,
+    )
 
-    necessario = _spazio_modelli_necessario(Path(DEFAULT_EMBEDDING_CACHE_DIR), "small")
-    if not necessario:
+    # Si passa il modello ESPLICITAMENTE come fa il bootstrap: con il
+    # parametro vuoto la funzione non trovava la dimensione, restituiva None,
+    # e `if not necessario` leggeva quel None come "modelli gia' in cache".
+    # Su un PC nuovo il referto diceva quindi che i modelli erano in cache
+    # mentre la riga sotto diceva che non lo erano: proprio sul controllo che
+    # serve a non riempire il disco.
+    necessario = _spazio_modelli_necessario(
+        Path(DEFAULT_EMBEDDING_CACHE_DIR), "small", DEFAULT_EMBEDDING_MODEL
+    )
+    if necessario == 0:
         r.aggiungi(Esito("Spazio disco", OK, "modelli gia' in cache"))
+        return
+    if necessario is None:
+        # 0 e None non sono la stessa cosa: 0 = tutto scaricato, None = non si
+        # riesce a calcolare. Dire "gia' in cache" davanti a un None e'
+        # inventare una certezza, ed e' il motivo per cui la riga si chiude qui.
+        r.aggiungi(
+            Esito(
+                "Spazio disco",
+                AVV,
+                "spazio necessario non calcolabile",
+                "Non e' un problema se il download va a buon fine, ma il controllo "
+                "preventivo non puo' fare: verifica che ci siano GB liberi.",
+            )
+        )
         return
     richiesto = necessario + _MARGINE_DISCO
     for percorso, etichetta in ((radice, "cartella del progetto"),):
@@ -332,7 +367,56 @@ def prova_motore(r: Relazione) -> None:
                 )
             )
     else:
-        r.aggiungi(Esito("Motore", OK, f"{scelto} su CPU"))
+        r.aggiungi(_motore_senza_openvino(scelto))
+
+
+def _motore_senza_openvino(scelto: str) -> Esito:
+    """Spiega PERCHE' siamo su CPU: tre cause, tre rimedi diversi.
+
+    Senza questa distinzione il referto diceva la cosa piu' fuorviante che
+    potesse: su un PC appena estratto scriveva "whisper su CPU" come se fosse
+    una scelta definitiva, e il collega lo leggeva come "questo PC non ha
+    accelerazione". Misurato: stesso PC e stessa cartella, prima del run
+    "whisper su CPU", dopo il run "openvino (iGPU/CPU Intel)".
+
+    Non basta distinguere "manca il runtime" da "manca il modello": se il PC
+    non ha una iGPU Intel, scaricare il modello non cambierebbe niente.
+    Promettere OpenVINO li' sarebbe falso nello stesso modo di prima, solo con
+    un'altra frase. Per questo la terza condizione e' openvino_device_available.
+    """
+    dettaglio = f"{scelto} su CPU"
+    try:
+        import openvino_genai  # noqa: F401
+    except ImportError:
+        return Esito(
+            "Motore",
+            AVV,
+            dettaglio + " (OpenVINO non e' installato)",
+            "Funziona cosi', ma piu' lento. Rilancia aggiornamenti.bat per "
+            "provare a installare OpenVINO su questo PC.",
+        )
+
+    try:
+        from transcription import openvino_device_available
+    except ImportError:
+        return Esito("Motore", AVV, dettaglio)
+
+    if not openvino_device_available():
+        return Esito(
+            "Motore",
+            AVV,
+            dettaglio + " (nessuna iGPU Intel su questo PC)",
+            "Senza GPU OpenVINO non guadagna nulla, quindi il programma resta "
+            "sul CPU di proposito. Funziona.",
+        )
+
+    return Esito(
+        "Motore",
+        AVV,
+        dettaglio + " (manca solo il modello OpenVINO)",
+        " Temporaneo: appena genera_video.bat scarica il modello, su questo PC "
+        "la trascrizione passa a OpenVINO. Non e' un problema.",
+    )
 
 
 def prova_converter(r: Relazione) -> None:

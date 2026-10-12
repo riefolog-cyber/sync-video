@@ -705,7 +705,15 @@ def _modelli_mancanti_dettagliati(
         # dimensione vale solo per il modello di default: con `--semantic-model`
         # diverso la cache occupa un altro spazio, e senza misura non si
         # scrive una cifra inventata nemmeno nel controllo dello spazio.
-        e_default = embedding_model == DEFAULT_EMBEDDING_MODEL
+        #
+        # `not embedding_model` conta come default, e DEVE: due righe sopra il
+        # nome gia' fa cosi' (`embedding_model or DEFAULT_...`), quindi senza
+        # questo il parametro vuoto dava il nome giusto e la dimensione None.
+        # Conseguenza misurata: verifica_pc chiama questa funzione con due
+        # argomenti, otteneva None, e il suo controllo di spazio diceva "modelli
+        # gia' in cache" su un PC dove non erano in cache affatto. Il nome del
+        # modello e la sua dimensione devono stare nella stessa frase.
+        e_default = not embedding_model or embedding_model == DEFAULT_EMBEDDING_MODEL
         mancanti.append((
             f"modello embedding ({nome})",
             _CACHE_EMBEDDING_DEFAULT if e_default else "",
