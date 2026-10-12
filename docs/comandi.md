@@ -4,27 +4,27 @@
 
 ```bash
 # Default (cerca presentazione.pdf + podcast.* nella cartella)
-python main.py
+python src/main.py
 
 # File personalizzati
-python main.py --pdf slides.pdf --audio registrazione.mp3
+python src/main.py --pdf slides.pdf --audio registrazione.mp3
 
 # Anteprima timeline (niente video)
-python main.py --preview
+python src/main.py --preview
 
 # Dry-run: genera timeline senza produrre video
-python main.py --dry-run --debug
+python src/main.py --dry-run --debug
 
 # Forza nuova analisi (ignora cache)
-python main.py --no-cache
+python src/main.py --no-cache
 
 # Whisper con modello più piccolo (più veloce) o più grande (più preciso)
-python main.py --whisper-model small
-python main.py --whisper-model large-v3
+python src/main.py --whisper-model small
+python src/main.py --whisper-model large-v3
 
 # Trascrizione: forza OpenVINO (iGPU, più veloce) o solo faster-whisper
-python main.py --transcriber openvino
-python main.py --transcriber whisper
+python src/main.py --transcriber openvino
+python src/main.py --transcriber whisper
 
 # Esegui i test (424 test: pipeline, LLM, chunks, integrazione)
 python -m unittest test_sync test_integration test_llm_sync test_chunks
@@ -83,7 +83,7 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 > $env:WHISPER_THREADS="14"   # 14 = core fisici della i7-12700H (6P+8E)
 > $env:EMBED_THREADS="14"
 > $env:VIDEO_THREADS="14"
-> .\.venv\Scripts\python.exe main.py --no-cache
+> .\.venv\Scripts\python.exe src/main.py --no-cache
 > ```
 >
 > Misura tempo e qualità (`--whisper-beam 1` veloce vs `5` accurato): il beam

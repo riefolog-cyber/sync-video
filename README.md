@@ -59,7 +59,7 @@ crea_venv.bat          # Windows
 > macOS/Linux. Usa quello del tuo sistema — i `.bat` non esistono su macOS/Linux
 > e i `.sh` su Windows.
 
-Da quel momento `genera_video.bat`, `aggiornamenti.bat`, `prova.bat`, `controlli.bat` e `check_embedding_models.bat` usano `.venv` da soli: non serve cambiare nulla a mano. Su macOS/Linux il comando è `.venv/bin/python main.py`.
+Da quel momento `genera_video.bat`, `aggiornamenti.bat`, `prova.bat`, `controlli.bat` e `check_embedding_models.bat` usano `.venv` da soli: non serve cambiare nulla a mano. Su macOS/Linux il comando è `.venv/bin/python src/main.py`.
 
 | Comando | Cosa fa |
 |---|---|
@@ -97,7 +97,7 @@ La venv **riusa i modelli già scaricati** (cartella `.cache` e cache di Hugging
 | `audio-slide` | *"Passiamo al blocco successivo"* | Dibattito, poi slide generate dopo |
 | `free` | nessuno (riordino libero) | Dibattito che salta tra i temi senza nominare le slide: il sistema mostra di volta in volta la slide semanticamente più vicina, in qualsiasi ordine e anche ripetuta |
 
-Override manuale: `python main.py --flow audio-slide` oppure `python main.py --flow free`
+Override manuale: `python src/main.py --flow audio-slide` oppure `python src/main.py --flow free`
 
 > **Auto-detection automatica**: il sistema sceglie da solo. Se il podcast segue
 > i vincoli del prompt NotebookLM (`slide N` o `blocco successivo`) usa il flusso
@@ -204,8 +204,8 @@ ai momenti del podcast (es. "covert" → slide Overt/Covert).
 
 ```bash
 # Attiva la selezione LLM (default: auto)
-python main.py --llm auto --preview     # valuta senza generare video
-python main.py --llm 9router           # forza 9Router online
+python src/main.py --llm auto --preview     # valuta senza generare video
+python src/main.py --llm 9router            # forza 9Router online
 ```
 
 > **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto, ma per stima. Prompt NotebookLM: [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>) — vedi "Come scegliere".

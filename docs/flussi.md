@@ -31,7 +31,7 @@ riferimenti "slide N": l'assenza di ancore è il comportamento atteso.
 > provare un modello più leggero e veloce con `--semantic-model
 > sentence-transformers/paraphrase-multilingual-mpnet-base-v2` (già usato
 > come fallback automatico): più rapido ma leggermente meno preciso —
-> controlla con `python main.py --dry-run` che nel riepilogo la fiducia del
+> controlla con `python src/main.py --dry-run` che nel riepilogo la fiducia del
 > motore resti **alta** (picco medio normalizzato sopra la soglia) e non
 > compaia l'avviso "segnale debole".
 

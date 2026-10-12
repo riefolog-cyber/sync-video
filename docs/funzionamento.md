@@ -83,7 +83,7 @@ sono simili e mostra quella slide in quel momento.
 - **Cache**: `.cache/embedding_model/` è condivisa e i modelli si scaricano al primo utilizzo (serve internet una tantum). MiniLM (240 MB) e mpnet (1.0 GB) restano in cache anche se non più default: non disturbano, e per tornare al vecchio comportamento basta un override temporaneo:
   ```powershell
   $env:EMBEDDING_MODEL="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-  python main.py
+  python src/main.py
   ```
 - **Ambiente**: `EMBEDDING_MODEL` e `EMBEDDING_MODEL_ALTERNATE` sovrascrivibili permanentemente.
 
@@ -109,11 +109,11 @@ recupero salti.
    grep -c "slide" transcript_raw.txt   # deve essere ≥ N-1 (una per transizione)
    ```
    Se è 0 il prompt non è stato seguito: rigenera il podcast.
-4. `python main.py` → auto-detection `slide-audio`, ancore deterministiche, nessuna chiamata a 9Router (o `--llm off` per escluderlo del tutto).
+4. `python src/main.py` → auto-detection `slide-audio`, ancore deterministiche, nessuna chiamata a 9Router (o `--llm off` per escluderlo del tutto).
 
 **Se il podcast non pronuncia le ancore** (dibattito libero): il pipeline
 avvisa e usa il flusso libero (LLM via 9Router). Fallback senza LLM:
-`python main.py --flow slide-audio --llm off` (allineamento monotono embedding,
+`python src/main.py --flow slide-audio --llm off` (allineamento monotono embedding,
 meno preciso senza ancore ma deterministico).
 
 Risultato su test reali (NotebookLM, flusso A con presentazione come UNICA fonte): 11/11, 13/14 e 12/13 ancore, durate 37s–2m05s senza pavimenti anti-flicker, fiducia del motore alta (picco 0.53–0.74 su soglia 0.45) e frame-check pieno. Sincronizzazione misurata, non stimata.

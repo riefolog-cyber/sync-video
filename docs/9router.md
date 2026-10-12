@@ -23,9 +23,9 @@ inutilmente:
   scadente in silenzio. Usa `--llm off` per forzare l'embedding esplicitamente.
 
 ```bash
-python main.py --llm auto                 # pausa + ripresa automatica (consigliato)
-python main.py --llm auto --llm-wait-timeout 60   # fallback embedding dopo 60s
-python main.py --llm off                  # solo embedding, nessuna attesa
+python src/main.py --llm auto                     # pausa + ripresa automatica (consigliato)
+python src/main.py --llm auto --llm-wait-timeout 60   # fallback embedding dopo 60s
+python src/main.py --llm off                     # solo embedding, nessuna attesa
 ```
 
 > **PC senza 9Router**: il programma funziona comunque, purché il podcast
