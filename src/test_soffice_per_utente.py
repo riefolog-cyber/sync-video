@@ -32,43 +32,55 @@ _SEGMENTI = ("Programs", "LibreOffice", "program", "soffice.exe")
 
 
 class TestPercorsoPerUtente(unittest.TestCase):
-    """Il percorso deve essere costruito sull'ambiente, non scritto a mano."""
+    """Il percorso deve essere costruito sull'ambiente, non scritto a mano.
+
+    I test usano una directory NATIVA come LOCALAPPDATA, non una stringa
+    Windows: Path(r"C:\\Users\\X") su Linux e' un nome RELATIVO che non si
+    spezza in parti, quindi un test costruito su quello passa qui e
+    fallisce su ubuntu-latest. E' gia' successo: la CI e' andata rossa due
+    volte per questo, ed e' la stessa classe di errore delle altre due
+    volte (import per nome di winreg, thread finto che non finiva).
+    """
 
     def test_costruito_su_localappada(self) -> None:
-        with mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\Users\Collega\AppData\Local"}):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"LOCALAPPDATA": d}):
             percorso = ocr._soffice_per_utente()
         assert percorso is not None
         self.assertEqual(percorso.parts[-4:], _SEGMENTI)
-        self.assertIn("Collega", percorso.parts)
+        self.assertTrue(percorso.is_absolute())
+        self.assertTrue(str(percorso).startswith(d))
 
     def test_seguono_localappada_che_cambia_utente(self) -> None:
         """Due utenti diversi devono dare due percorsi diversi."""
-        with mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\Users\Collega\AppData\Local"}):
-            a = ocr._soffice_per_utente()
-        with mock.patch.dict(os.environ, {"LOCALAPPDATA": r"C:\Users\Altro\AppData\Local"}):
-            b = ocr._soffice_per_utente()
-        assert a is not None and b is not None
-        self.assertNotEqual(a, b)
+        with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": a}):
+                primo = ocr._soffice_per_utente()
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": b}):
+                secondo = ocr._soffice_per_utente()
+        assert primo is not None and secondo is not None
+        self.assertNotEqual(primo, secondo)
 
     def test_senza_localappada_nessun_percorso(self) -> None:
         """Il caso Linux: nessun Path RELATIVO.
 
         Senza LOCALAPPDATA, Path("") / "Programs" / ... produce
-        "Programs/LibreOffice/program/soffice.exe", che viene risolto
-        rispetto alla cartella corrente: il check potrebbe trovare un
-        file omonimo per caso. Meglio nessun percorso.
+        "Programs/LibreOffice/program/soffice.exe", risolto rispetto alla
+        cartella corrente: il check potrebbe trovare per caso un file
+        omonimo. Meglio nessun percorso.
         """
         with mock.patch.dict(os.environ, {}, clear=True):
-            percorso = ocr._soffice_per_utente()
-        self.assertIsNone(percorso)
+            self.assertIsNone(ocr._soffice_per_utente())
 
     def test_il_percorso_e_mai_relativo(self) -> None:
-        """Il percorso esiste solo se e' assoluto: e' la garanzia vera."""
-        for ambiente in ({}, {"LOCALAPPDATA": ""}, {"LOCALAPPDATA": r"C:\Users\X\AppData\Local"}):
-            with self.subTest(ambiente=ambiente), mock.patch.dict(os.environ, ambiente, clear=True):
-                percorso = ocr._soffice_per_utente()
-                if percorso is not None:
-                    self.assertTrue(percorso.is_absolute(), f"{percorso} e' relativo")
+        """Se esiste, e' assoluto: e' la garanzia che conta."""
+        with tempfile.TemporaryDirectory() as d:
+            for ambiente in ({}, {"LOCALAPPDATA": ""}, {"LOCALAPPDATA": d}):
+                with self.subTest(ambiente=bool(ambiente)), mock.patch.dict(
+                    os.environ, ambiente, clear=True
+                ):
+                    percorso = ocr._soffice_per_utente()
+                    if percorso is not None:
+                        self.assertTrue(percorso.is_absolute(), f"{percorso} e' relativo")
 
     def _finto_soffice(self, radice: Path) -> Path:
         p = radice.joinpath(*_SEGMENTI)
