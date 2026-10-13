@@ -114,6 +114,7 @@ from semantic_sync import (
     weak_signal_seen,
 )
 from timeline import (
+    anchor_gaps,
     anti_flicker_floor,
     detect_flow_from_words,
     discarded_citations,
@@ -123,7 +124,13 @@ from timeline import (
     out_of_range_tail_anchor,
     reconcile_timeline,
 )
-from transcription import correct_transcript_names, resolved_transcriber, transcribe_audio
+from transcription import (
+    _write_raw_transcript,
+    correct_transcript_names,
+    resolved_transcriber,
+    retranscribe_zone,
+    transcribe_audio,
+)
 from updates import run_frozen_report, run_update_check
 from video import build_video, frame_consistency_check
 
@@ -2445,6 +2452,48 @@ def main(argv: list | None = None) -> None:
                     reason,
                 )
             sync_notes["beam"] = beam_note
+
+        # --- Gap-recovery: buchi sequenziali da trascrizione greedy ---
+        # Il beam veloce mangia intere frasi nelle zone difficili ("la c' la
+        # c'..." invece di "Passiamo alla slide 3", run del 13/10): l'ancora
+        # non è storpiata, è distrutta, e nessuna mappa di varianti può
+        # recuperarla. Ma un buco con ancore su entrambi i lati si localizza:
+        # si ritrascrive SOLO quella zona col beam accurato e si ricuciono le
+        # parole (la sync a valle usa words_raw, quindi beneficia anche lei).
+        if flow != "free" and words_raw:
+            for _mancanti, _lo, _hi in anchor_gaps(flow_anchors, total_slides):
+                log.info(
+                    "   [Gap] Slide %s senza ancora tra due ancore (%.1f-%.1fs): "
+                    "ritrascrivo la zona col beam accurato...",
+                    ", ".join(str(s) for s in _mancanti),
+                    _lo,
+                    _hi,
+                )
+                _t0 = time.time()
+                _nuove = retranscribe_zone(
+                    audio_path,
+                    _lo,
+                    _hi,
+                    model_size=args.whisper_model,
+                    language=args.lang,
+                )
+                t_transcribe += time.time() - _t0
+                if not _nuove:
+                    continue
+                _nuove = correct_transcript_names(_nuove)
+                words_raw = sorted(
+                    [w for w in words_raw if not (_lo <= float(w["start"]) <= _hi)] + _nuove,
+                    key=lambda w: float(w["start"]),
+                )
+                _write_raw_transcript(words_raw, audio_path)
+            _dopo_gap = extract_slide_anchors(words_raw, total_slides, flow) if words_raw else {}
+            _recuperate = sorted(s for s in _dopo_gap if s not in flow_anchors)
+            if _recuperate:
+                log.info(
+                    "   [Gap] Ancore recuperate dalla ritrascrizione mirata: %s.",
+                    ", ".join(f"slide {s} a {_dopo_gap[s]:.1f}s" for s in _recuperate),
+                )
+                flow_anchors = {**flow_anchors, **{s: _dopo_gap[s] for s in _recuperate}}
 
         # --- Fase 3: Sincronizzazione semantica (unico motore) ---
         t_phase_start = time.time()

@@ -858,6 +858,90 @@ class TestSlideAudioFlow(unittest.TestCase):
             with self.subTest(word=word):
                 self.assertEqual(_number_from_word(word), expected)
 
+    def test_number_from_word_english_mishearings(self):
+        # Run del 13/10: "Passiamo alla slide set" (per "sette") veniva perso
+        # e il confine della slide 7 stimato 25s prima del vero annuncio.
+        from timeline import _number_from_word
+
+        for word, expected in {
+            "tree": 3,
+            "three": 3,
+            "six": 6,
+            "set": 7,
+            "seven": 7,
+        }.items():
+            with self.subTest(word=word):
+                self.assertEqual(_number_from_word(word), expected)
+
+    def test_anchor_english_misheard_seven(self):
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 558.0),
+                ("alla", 558.3),
+                ("slide", 558.5),
+                ("set", 558.7),
+            ]
+        )
+        self.assertEqual(
+            extract_slide_anchors(words, total_slides=15, flow="slide-audio"), {7: 558.7}
+        )
+
+    def test_anchor_fused_number_tolerates_vowels(self):
+        # Run del 13/10: "Passiamo alla slaritridici" (Whisper fonde "slide
+        # tredici" e mangia una vocale): l'ancora della slide 13 veniva persa.
+        from timeline import _embedded_slide_number, extract_slide_anchors
+
+        self.assertEqual(_embedded_slide_number("slaritridici"), 13)
+        words = _words(
+            [
+                ("passiamo", 1015.8),
+                ("alla", 1016.2),
+                ("slaritridici.", 1016.3),
+            ]
+        )
+        self.assertEqual(
+            extract_slide_anchors(words, total_slides=15, flow="slide-audio"), {13: 1016.3}
+        )
+
+    def test_anchor_gaps_buco_interno_localizzato(self):
+        from timeline import anchor_gaps
+
+        # Run del 13/10: manca la 3, con la 2 a 102s e la 4 a 302s.
+        self.assertEqual(
+            anchor_gaps({2: 102.0, 4: 302.0, 5: 390.0}, 15),
+            [([3], 102.0, 302.0)],
+        )
+
+    def test_anchor_gaps_consecutivi_una_zona_sola(self):
+        from timeline import anchor_gaps
+
+        self.assertEqual(
+            anchor_gaps({2: 100.0, 5: 400.0}, 15),
+            [([3, 4], 100.0, 400.0)],
+        )
+
+    def test_anchor_gaps_testa_dalla_parte_della_slide_1(self):
+        from timeline import anchor_gaps
+
+        self.assertEqual(
+            anchor_gaps({3: 200.0}, 15),
+            [([2], 0.0, 200.0)],
+        )
+
+    def test_anchor_gaps_coda_senza_destra_niente_zona(self):
+        from timeline import anchor_gaps
+
+        self.assertEqual(anchor_gaps({2: 100.0}, 15), [])
+
+    def test_anchor_gaps_senza_buchi(self):
+        from timeline import anchor_gaps
+
+        self.assertEqual(
+            anchor_gaps({2: 100.0, 3: 200.0, 4: 300.0}, 4), []
+        )
+
     def test_number_before_slide(self):
         words = _words(
             [

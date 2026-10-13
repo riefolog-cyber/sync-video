@@ -1106,6 +1106,14 @@ _ITALIAN_NUMBERS_BASE = {
     "trenta": 30,
     # Varianti di trascrizione Whisper comuni (misheard):
     "nonna": 9,  # per "nona slide" trascritto "nonna slide"
+    # Numeri detti in italiano ma trascritti in inglese (run del 13/10:
+    # "Passiamo alla slide set" per "sette": l'ancora della slide 7 persa,
+    # confine stimato 25s prima del vero annuncio):
+    "tree": 3,  # per "tre"
+    "three": 3,
+    "six": 6,  # per "sei"
+    "set": 7,  # per "sette"
+    "seven": 7,
 }
 
 # Ordinali italiani, forma maschile e femminile ("terza diapositiva").
@@ -1265,6 +1273,35 @@ def _preceded_by_slide_word(words: list[Word], idx: int, lookback: int = 8) -> b
     return any(_is_slide_word(w["word"]) for w in words[max(0, idx - lookback):idx])
 
 
+def _skeleton(word: str) -> str:
+    """Scheletro consonantico: vocali rimosse, doppie unite ("tridici" -> "trdc")."""
+    cons = re.sub(r"[aeiou]", "", word)
+    return re.sub(r"(.)\1+", r"\1", cons)
+
+
+def _build_skeleton_numbers() -> dict[str, int]:
+    """Mappa scheletro consonantico -> numero, solo scheletri NON ambigui.
+
+    Whisper mangia o aggiunge vocali nelle forme fuse ("slaritridici" per
+    "slide tredici"): lo scheletro resta uguale ("trdc"). Se due numeri
+    diversi condividono lo scheletro ("venti"/"ventotto" -> "vnt") lo
+    scheletro viene escluso: meglio perdere un'ancora che crearne una
+    sbagliata (un falso numero sposta un confine di minuti).
+    """
+    candidati: dict[str, set[int]] = {}
+    for numero, val in _ITALIAN_NUMBERS.items():
+        if val is None or val < 2:
+            continue
+        skel = _skeleton(numero)
+        if len(skel) < 3:
+            continue
+        candidati.setdefault(skel, set()).add(val)
+    return {skel: next(iter(vals)) for skel, vals in candidati.items() if len(vals) == 1}
+
+
+_SKELETON_NUMBERS = _build_skeleton_numbers()
+
+
 def _is_slide_word(word: str) -> bool:
     """
     True se ``word`` è "slide"/"diapositiva" o una variante fonetica ASR.
@@ -1299,9 +1336,7 @@ def _is_slide_word(word: str) -> bool:
         return False
     if not w.startswith("sl"):
         return False
-    cons = re.sub(r"[aeiou]", "", w)
-    cons = re.sub(r"(.)\1+", r"\1", cons)
-    return cons.startswith("sl") and len(cons) <= 4
+    return _skeleton(w).startswith("sl") and len(_skeleton(w)) <= 4
 
 
 def _embedded_slide_number(w_norm: str) -> int | None:
@@ -1326,7 +1361,51 @@ def _embedded_slide_number(w_norm: str) -> int | None:
         val = _ITALIAN_NUMBERS.get(suffix)
         if val is not None and val >= 2 and w_norm[:stem_len].startswith("sl"):
             return cast(int, val)
+    # Fallback tollerante: Whisper mangia o aggiunge vocali nelle forme fuse
+    # ("slaritridici" per "slide tredici", run del 13/10: ancora della slide
+    # 13 persa, confine stimato con la slide mostrata in anticipo). Si
+    # confrontano gli scheletri consonantici: "tridici" e "tredici" hanno
+    # entrambi scheletro "trdc". Solo scheletri non ambigui
+    # (``_SKELETON_NUMBERS``): se lo scheletro vale per due numeri diversi,
+    # non si indovina. I vincoli (suffisso lungo, stem "sl", range verificato
+    # dal chiamante) evitano che parole comuni diventino ancore.
+    for stem_len in range(3, len(w_norm)):
+        suffix = w_norm[stem_len:]
+        if len(suffix) < 4 or not w_norm[:stem_len].startswith("sl"):
+            continue
+        val = _SKELETON_NUMBERS.get(_skeleton(suffix))
+        if val is not None:
+            return val
     return None
+
+
+def anchor_gaps(
+    anchors: Mapping[int, float], total_slides: int
+) -> list[tuple[list[int], float, float]]:
+    """Buchi sequenziali localizzabili: ``[(slide_mancanti, inizio_zona, fine_zona)]``.
+
+    Una slide mancante è un buco solo se ha ancore su ENTRAMBI i lati (la 1
+    parte sempre da 0.0): la zona da ritrascrivere va dall'ancora precedente
+    alla successiva. Buchi consecutivi condividono la stessa zona (una sola
+    ritrascrizione per zona). In coda senza ancora a destra non si localizza
+    nulla e il comportamento resta quello attuale (stima per contenuto).
+    """
+    known: dict[int, float] = {1: 0.0}
+    for s, t in anchors.items():
+        if 1 <= s <= total_slides:
+            known[s] = float(t)
+    zone: dict[tuple[float, float], list[int]] = {}
+    for n in range(2, total_slides + 1):
+        if n in known:
+            continue
+        prev = [s for s in known if s < n]
+        nxt = [s for s in known if s > n]
+        if not prev or not nxt:
+            continue
+        lo, hi = known[max(prev)], known[min(nxt)]
+        if hi > lo:
+            zone.setdefault((lo, hi), []).append(n)
+    return [(missing, lo, hi) for (lo, hi), missing in sorted(zone.items())]
 
 
 # =====================================================================

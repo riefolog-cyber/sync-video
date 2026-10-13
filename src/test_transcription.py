@@ -20,6 +20,91 @@ def _words(items):
     return [{"word": w, "start": float(t), "end": float(t) + 0.3, "conf": 1.0} for w, t in items]
 
 
+class _FakeFWWord:
+    def __init__(self, word, start):
+        self.word = word
+        self.start = start
+
+
+class _FakeFWSeg:
+    def __init__(self, words):
+        self.words = [_FakeFWWord(w, s) for w, s in words]
+        self.text = " ".join(w for w, _ in words)
+
+
+def _fake_faster_whisper(rel_words):
+    """Modulo faster_whisper fasullo con parole a tempi relativi alla clip."""
+    import types
+
+    mod = types.ModuleType("faster_whisper")
+
+    class _FakeModel:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def transcribe(self, *args, **kwargs):
+            return ([_FakeFWSeg(rel_words)], None)
+
+    mod.WhisperModel = _FakeModel
+    return mod
+
+
+def _fake_run_ok(cmd, **kwargs):
+    """ffmpeg fasullo: crea la clip e dice ok."""
+    Path(cmd[-1]).touch()
+    return mock.Mock(returncode=0)
+
+
+class TestRetranscribeZone(unittest.TestCase):
+    """Ritrascrizione mirata delle zone con buchi sequenziali di ancore."""
+
+    def test_offset_assoluti_e_filtro_finestra(self):
+        from transcription import retranscribe_zone
+
+        fake_fw = _fake_faster_whisper(
+            [("scarto", 2.0), ("slide", 16.0), ("tre", 16.2), ("scarto", 30.0)]
+        )
+        with mock.patch.dict(sys.modules, {"faster_whisper": fake_fw}), mock.patch(
+            "shutil.which", return_value="/usr/bin/ffmpeg"
+        ), mock.patch("subprocess.run", side_effect=_fake_run_ok):
+            out = retranscribe_zone(Path("audio.m4a"), 200.0, 220.0)
+        self.assertEqual(
+            [(w["word"], w["start"]) for w in out or []],
+            [("slide", 211.0), ("tre", 211.2)],
+        )
+
+    def test_senza_ffmpeg_none(self):
+        from transcription import retranscribe_zone
+
+        with mock.patch("shutil.which", return_value=None):
+            self.assertIsNone(retranscribe_zone(Path("audio.m4a"), 200.0, 220.0))
+
+    def test_ffmpeg_fallito_none(self):
+        from transcription import retranscribe_zone
+
+        with mock.patch("shutil.which", return_value="/usr/bin/ffmpeg"), mock.patch(
+            "subprocess.run", return_value=mock.Mock(returncode=1)
+        ):
+            self.assertIsNone(retranscribe_zone(Path("audio.m4a"), 200.0, 220.0))
+
+    def test_modello_fallito_none(self):
+        import types
+
+        mod = types.ModuleType("faster_whisper")
+
+        class _Boom:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("no model")
+
+        mod.WhisperModel = _Boom
+        from transcription import retranscribe_zone
+
+        with mock.patch.dict(sys.modules, {"faster_whisper": mod}), mock.patch(
+            "shutil.which", return_value="/usr/bin/ffmpeg"
+        ), mock.patch("subprocess.run", side_effect=_fake_run_ok):
+            self.assertIsNone(retranscribe_zone(Path("audio.m4a"), 200.0, 220.0))
+
+
 class TestCorrectTranscriptNames(unittest.TestCase):
     """Dizionario dei nomi propri che Whisper storpi sistematicamente."""
 

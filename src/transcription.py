@@ -656,3 +656,71 @@ def transcribe_with_whisper(
     log.info("   Blocchi semantici generati: %d", n_blocks)
     return transcript, all_words
 
+
+def retranscribe_zone(
+    audio_path: Path,
+    t0: float,
+    t1: float,
+    model_size: str = "small",
+    device: str = "cpu",
+    compute_type: str = "int8",
+    language: str = "ita",
+    beam_size: int = 5,
+    pad_seconds: float = 5.0,
+) -> list[Word] | None:
+    """Ritrascrive ``[t0, t1]`` col beam accurato per recuperare ancore garbate.
+
+    Il beam veloce (greedy) mangia intere frasi nelle zone difficili ("la c'
+    la c'..." invece di "Passiamo alla slide 3", run del 13/10): l'ancora non
+    è storpiata, è distrutta, e nessuna mappa di varianti può recuperarla. Si
+    ritrascrive SOLO la zona (secondi, non l'intero audio) con un po' di
+    contesto ai bordi per il decoder; tornano le parole con timestamp assoluti
+    dentro ``[t0, t1]``.
+
+    Returns None se qualcosa fallisce (ffmpeg assente, modello non caricato):
+    il chiamante prosegue senza recovery, mai un'interruzione.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    if t1 <= t0 or not shutil.which("ffmpeg"):
+        return None
+    start = max(0.0, t0 - pad_seconds)
+    try:
+        with tempfile.TemporaryDirectory(prefix="sync_zone_") as tmp:
+            clip = Path(tmp) / "zona.m4a"
+            res = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-v", "error",
+                    "-ss", f"{start:.1f}", "-t", f"{t1 - start + pad_seconds:.1f}",
+                    "-i", str(audio_path), str(clip),
+                ],
+                capture_output=True,
+                timeout=180,
+            )
+            if res.returncode != 0 or not clip.exists():
+                log.warning("   [Gap] Estrazione clip [%.1f-%.1f] fallita: proseguo senza recovery.", t0, t1)
+                return None
+            from faster_whisper import WhisperModel
+
+            model = WhisperModel(model_size, device=device, compute_type=compute_type)
+            whisper_lang = {"ita": "it"}.get(language, language)
+            segments, _ = model.transcribe(
+                str(clip),
+                language=whisper_lang,
+                beam_size=beam_size,
+                word_timestamps=True,
+                vad_filter=True,
+            )
+            parole = _collect_words(segments)
+    except Exception as e:  # recovery facoltativo, mai fatale
+        log.warning("   [Gap] Ritrascrizione [%.1f-%.1f] fallita (%s): proseguo senza recovery.", t0, t1, e)
+        return None
+    out: list[Word] = [
+        {"word": str(w["word"]), "start": float(w["start"]) + start}
+        for w in parole
+        if t0 <= float(w["start"]) + start <= t1
+    ]
+    return sorted(out, key=lambda w: float(w["start"]))
+
