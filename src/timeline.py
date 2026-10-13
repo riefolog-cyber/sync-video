@@ -1116,6 +1116,11 @@ _ITALIAN_NUMBERS_BASE = {
     "seven": 7,
 }
 
+# Stem di "slide" osservati nelle fusioni Whisper ("slaidotto", "slaib6"):
+# per gli scheletri corti (2 consonanti) lo stem noto è il vincolo che
+# evita falsi positivi su parole comuni ("sloveno" -> "veno" -> "nv" = 9).
+_SLIDE_FUSED_STEMS = frozenset({"sla", "slai", "slay", "slaid", "slad"})
+
 # Ordinali italiani, forma maschile e femminile ("terza diapositiva").
 # La normale elisione dei composti vale anche qui (21° = "ventunesimo").
 _ITALIAN_ORDINALS_UNITS = {
@@ -1293,7 +1298,10 @@ def _build_skeleton_numbers() -> dict[str, int]:
         if val is None or val < 2:
             continue
         skel = _skeleton(numero)
-        if len(skel) < 3:
+        # Sotto 2 consonanti tutto collide ("d", "s"): esclusi sempre. A 2
+        # consonanti vale solo l'univocità ("tr" è solo 3, "nv" solo 9;
+        # "st" è 7 e 6, "dc" è 10 e 12: ambigui, esclusi).
+        if len(skel) < 2:
             continue
         candidati.setdefault(skel, set()).add(val)
     return {skel: next(iter(vals)) for skel, vals in candidati.items() if len(vals) == 1}
@@ -1371,12 +1379,59 @@ def _embedded_slide_number(w_norm: str) -> int | None:
     # dal chiamante) evitano che parole comuni diventino ancore.
     for stem_len in range(3, len(w_norm)):
         suffix = w_norm[stem_len:]
-        if len(suffix) < 4 or not w_norm[:stem_len].startswith("sl"):
+        if len(suffix) < 3 or not w_norm[:stem_len].startswith("sl"):
             continue
-        val = _SKELETON_NUMBERS.get(_skeleton(suffix))
-        if val is not None:
+        skel = _skeleton(suffix)
+        val = _SKELETON_NUMBERS.get(skel)
+        # Scheletri corti (2 consonanti: "tr", "nv"): solo con stem noto da
+        # mishearing ("slai", non "slo" di "sloveno"), altrimenti parole
+        # comuni diventerebbero ancore.
+        if val is not None and (len(skel) >= 3 or w_norm[:stem_len] in _SLIDE_FUSED_STEMS):
             return val
     return None
+
+
+def repetition_loops(
+    words: list[Word], min_repeats: int = 6, max_cycle: int = 3
+) -> list[tuple[float, float]]:
+    """Zone di testo inaffidabile: 1-3 parole ripetute in ciclo (allucinazioni ASR).
+
+    Il beam greedy in zone difficili ripete lo stesso ciclo ("la c' la c'..."
+    per 15s invece di "Passiamo alla slide 3", run del 13/10): le parole lì
+    non descrivono l'audio e vanno ritrascritte col beam accurato. Nel parlato
+    naturale 6+ ripetizioni dello stesso ciclo non succedono ("molto molto"
+    si ferma a 1): sopra soglia è quasi sempre il decoder, non l'oratore.
+    """
+    norm = [_normalize(str(w.get("word", ""))) for w in words]
+    times = [float(w.get("start", 0.0)) for w in words]
+    n = len(norm)
+    zone: list[tuple[float, float]] = []
+    for size in range(1, max_cycle + 1):
+        i = 0
+        while i + size <= n:
+            ciclo = norm[i:i + size]
+            if not all(ciclo):
+                i += 1
+                continue
+            j = i + size
+            while j + size <= n and norm[j:j + size] == ciclo:
+                j += size
+            ripetizioni = (j - i) // size
+            if ripetizioni >= min_repeats:
+                zone.append((times[i], times[j - 1]))
+                i = j
+            else:
+                i += 1
+    if not zone:
+        return []
+    zone.sort()
+    fuse: list[list[float]] = [[zone[0][0], zone[0][1]]]
+    for lo, hi in zone[1:]:
+        if lo <= fuse[-1][1] + 1.0:
+            fuse[-1][1] = max(fuse[-1][1], hi)
+        else:
+            fuse.append([lo, hi])
+    return [(lo, hi) for lo, hi in fuse]
 
 
 def anchor_gaps(

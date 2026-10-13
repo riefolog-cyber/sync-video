@@ -26,7 +26,7 @@ python src/main.py --whisper-model large-v3
 python src/main.py --transcriber openvino
 python src/main.py --transcriber whisper
 
-# Esegui i test (438 test: pipeline, LLM, chunks, integrazione)
+# Esegui i test (442 test: pipeline, LLM, chunks, integrazione)
 python -m unittest test_sync test_integration test_llm_sync test_chunks
 ```
 

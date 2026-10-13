@@ -123,6 +123,7 @@ from timeline import (
     extract_slide_one_references,
     out_of_range_tail_anchor,
     reconcile_timeline,
+    repetition_loops,
 )
 from transcription import (
     _write_raw_transcript,
@@ -2461,6 +2462,20 @@ def main(argv: list | None = None) -> None:
         # si ritrascrive SOLO quella zona col beam accurato e si ricuciono le
         # parole (la sync a valle usa words_raw, quindi beneficia anche lei).
         if flow != "free" and words_raw:
+            _zone_anchor = [(lo, hi) for _, lo, hi in anchor_gaps(flow_anchors, total_slides)]
+            # Zone di testo inaffidabile anche senza buco sequenziale: un loop
+            # allucinato ("la c' la c'...") distrugge le parole e con esse
+            # qualunque ancora lì dentro.
+            _zone_loop = [
+                (max(0.0, lo), min(total_duration, hi)) for lo, hi in repetition_loops(words_raw)
+            ]
+            _tutte = sorted(_zone_anchor + [z for z in _zone_loop if z[1] > z[0]])
+            _fuse: list[list[float]] = []
+            for _lo, _hi in _tutte:
+                if _fuse and _lo <= _fuse[-1][1] + 1.0:
+                    _fuse[-1][1] = max(_fuse[-1][1], _hi)
+                else:
+                    _fuse.append([_lo, _hi])
             for _mancanti, _lo, _hi in anchor_gaps(flow_anchors, total_slides):
                 log.info(
                     "   [Gap] Slide %s senza ancora tra due ancore (%.1f-%.1fs): "
@@ -2469,6 +2484,14 @@ def main(argv: list | None = None) -> None:
                     _lo,
                     _hi,
                 )
+            for _lo, _hi in _zone_loop:
+                log.info(
+                    "   [Gap] Testo inaffidabile (loop %.1f-%.1fs): "
+                    "ritrascrivo la zona col beam accurato...",
+                    _lo,
+                    _hi,
+                )
+            for _lo, _hi in [(z[0], z[1]) for z in _fuse]:
                 _t0 = time.time()
                 _nuove = retranscribe_zone(
                     audio_path,

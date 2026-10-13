@@ -942,6 +942,68 @@ class TestSlideAudioFlow(unittest.TestCase):
             anchor_gaps({2: 100.0, 3: 200.0, 4: 300.0}, 4), []
         )
 
+    def test_fused_number_coverage(self):
+        """Audit blindato delle storpiature numeriche (run del 13/10).
+
+        Tutte le fusioni stem noto + numero esatto si risolvono; il wobble
+        vocalico si risolve dove non ambiguo (scheletro unico). Restano fuori
+        DI PROPOSITO: wobble isolati ("tra" è una preposizione), wobble di
+        "sette" (ambiguo con "sesto") e parole comuni ("sloveno").
+        """
+        from timeline import _embedded_slide_number as f
+
+        card = ["due", "tre", "quattro", "cinque", "sei", "sette", "otto",
+                "nove", "dieci", "undici", "dodici", "tredici",
+                "quattordici", "quindici"]
+        for stem in ("sla", "slai", "slay", "slaid", "slad"):
+            for c in card:
+                with self.subTest(fuso=f"{stem}+{c}"):
+                    self.assertIsNotNone(f(stem + c))
+        for wob in ("slaitri", "slatro", "slainove", "slaitredici", "slaritridici"):
+            with self.subTest(fuso=wob):
+                self.assertIsNotNone(f(wob))
+        for no in ("sloveno", "slavina", "slogan", "slancio", "tra"):
+            with self.subTest(parola=no):
+                self.assertIsNone(f(no))
+
+    def test_repetition_loops_ciclo_biparola(self):
+        # Run del 13/10: "la c' la c'..." per ~15s al posto dell'annuncio.
+        from timeline import repetition_loops
+
+        words = _words(
+            [("ok", 1.0)]
+            + [(w, 10.0 + i * 0.3) for i, w in enumerate(["la", "c"] * 8)]
+            + [("fine", 20.0)]
+        )
+        zone = repetition_loops(words)
+        self.assertEqual(len(zone), 1)
+        self.assertLessEqual(zone[0][0], 10.5)
+        self.assertGreaterEqual(zone[0][1], 14.0)
+
+    def test_repetition_loops_parlato_normale_niente_zone(self):
+        from timeline import repetition_loops
+
+        words = _words(
+            [
+                ("molto", 1.0),
+                ("molto", 1.3),
+                ("bene", 1.6),
+                ("si", 2.0),
+                ("si", 2.2),
+                ("pero", 2.5),
+                ("no", 3.0),
+                ("no", 3.2),
+                ("no", 3.4),
+            ]
+        )
+        self.assertEqual(repetition_loops(words), [])
+
+    def test_repetition_loops_sotto_soglia_niente_zona(self):
+        from timeline import repetition_loops
+
+        words = _words([(w, 1.0 + i * 0.3) for i, w in enumerate(["a", "b"] * 5)])
+        self.assertEqual(repetition_loops(words), [])
+
     def test_number_before_slide(self):
         words = _words(
             [
