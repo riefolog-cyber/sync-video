@@ -74,11 +74,14 @@ Windows **non devi installare niente a mano**. Il programma, in ordine:
 
 1. **Python adatto** — se non c'è nessun Python utilizzabile sul PC (manca
    del tutto, è troppo vecchio/nuovo per la finestra 3.10–3.13, o su ARM è
-   solo quello ARM64 nativo), lo installa con `winget`
-   (circa 25 MB, una volta sola, per il tuo utente senza chiedere privilegi
-   di amministratore). È l'unica cosa che non può fare il bootstrap interno,
-   perché il bootstrap gira *dentro* Python: a installarlo è il `.bat`, che
-   gira in `cmd.exe`.
+   solo quello ARM64 nativo), lo procura da solo, in ordine: `winget`,
+   se manca o fallisce download diretto da python.org con installazione
+   silenziosa per-utente (niente admin), se c'è già l'installer nella cartella
+   lo usa senza scaricare (chiavetta USB, PC offline con file portato a mano).
+   Circa 25 MB, una volta sola. È l'unica cosa che non può fare il bootstrap
+   interno, perché il bootstrap gira *dentro* Python: a installarlo è il `.bat`,
+   che gira in `cmd.exe`. Resta manuale solo senza rete né file locale
+   (disco pieno, policy che vietano gli eseguibili, opt-out esplicito).
 
    La **versione dipende dall'architettura** di quel PC:
 

@@ -91,6 +91,10 @@ if /i "%_ARCH%"=="ARM64" (
     set "_PY_ORDINE=3.11 3.12 3.13"
 )
 set "_PY_PKG=Python.Python.%_PY_VERSION%"
+rem Versione completa per l'URL python.org (la richiede con micro inclusa):
+rem tenere aggiornata insieme a _PY_VERSION qui sopra.
+set "_PY_FULL=3.12.10"
+if /i "%_ARCH%"=="ARM64" set "_PY_FULL=3.11.9"
 rem L'architettura va detta anche a Python: ogni candidato sotto si scarta da
 rem solo se e' ARM64 nativo su macchina ARM64 (punto 3 qui sopra). Nome con
 rem prefisso per non pestare variabili dell'utente.
@@ -103,23 +107,61 @@ if /i "%_ARCH%"=="ARM64" set "_WINGET_ARCH=--architecture x64"
 call :cerca_python
 if not errorlevel 1 goto pulisci_e_esci
 
-rem --- Nessun Python su questa macchina ---
+rem --- Nessun Python adatto su questa macchina ---
 if "%SYNC_VIDEO_NO_PYTHON_INSTALL%"=="1" goto nessun_python
-where winget >NUL 2>&1
-if errorlevel 1 goto nessun_python
 
 echo.
 echo ========================================
-echo    Python non trovato: lo installo
+echo    Python non trovato o non adatto: lo installo
 echo ========================================
 echo.
 echo Architettura rilevata: %_ARCH%
-echo Sto scaricando Python %_PY_VERSION% (%_PY_PKG%, circa 25 MB) con winget.
-echo Serve una volta sola, solo su questo PC.
-echo Per installarlo a mano, o per saltare questo passo, vedi README.
+echo Installo Python %_PY_VERSION% (%_PY_PKG%, circa 25 MB): provo winget,
+echo se manca o fallisce scarico da python.org. Una volta sola, solo su
+echo questo PC. Per farlo a mano, o per saltare questo passo, vedi README.
 echo.
 winget install --id %_PY_PKG% -e --scope user --silent --accept-package-agreements --accept-source-agreements --disable-interactivity %_WINGET_ARCH%
+if errorlevel 1 goto install_diretta
+
+goto dopo_install_python
+
+rem ------------------------------------------------------------
+rem install_diretta: winget manca o ha fallito. Si prova il download
+rem diretto da python.org, poi l'installer trovato nella cartella
+rem (chiavetta USB, PC offline con file portato a mano: niente download).
+rem ------------------------------------------------------------
+:install_diretta
+set "_SETUP_EXE="
+if exist "%~dp0python-%_PY_FULL%-amd64.exe" set "_SETUP_EXE=%~dp0python-%_PY_FULL%-amd64.exe"
+if not "%_SETUP_EXE%"=="" goto install_esegui
+for %%F in ("%~dp0python-*-amd64.exe") do set "_SETUP_EXE=%%F"
+if not "%_SETUP_EXE%"=="" (
+    echo Trovato installer locale, lo uso senza scaricare nulla.
+    goto install_esegui
+)
+set "_SETUP_URL=https://www.python.org/ftp/python/%_PY_FULL%/python-%_PY_FULL%-amd64.exe"
+set "_SETUP_EXE=%TEMP%\sync-video-python-setup.exe"
+set "_SETUP_SCARICATO="
+echo winget non disponibile o fallito: scarico Python %_PY_VERSION% da python.org...
+where curl >NUL 2>&1 && curl -L --fail -o "%_SETUP_EXE%" "%_SETUP_URL%" >NUL 2>&1 && set "_SETUP_SCARICATO=1"
+if "%_SETUP_SCARICATO%"=="1" goto install_esegui
+where powershell >NUL 2>&1 && powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri '%_SETUP_URL%' -OutFile '%_SETUP_EXE%'" >NUL 2>&1 && set "_SETUP_SCARICATO=1"
+if "%_SETUP_SCARICATO%"=="" goto install_fallito_scaricamento
+
+:install_esegui
+echo Installazione di Python %_PY_VERSION% in corso...
+rem TargetDir esplicita nella cartella standard per-utente (e' dove guarda
+rem anche il passo 5 qui sotto): niente sorprese sui percorsi.
+"%_SETUP_EXE%" /quiet InstallAllUsers=0 TargetDir="%LOCALAPPDATA%\Programs\Python\Python%_PY_VERSION:.=%" PrependPath=1 >NUL 2>&1
 if errorlevel 1 goto install_fallito
+if not "%_SETUP_SCARICATO%"=="" del "%_SETUP_EXE%" >NUL 2>&1
+goto dopo_install_python
+
+:install_fallito_scaricamento
+del "%_SETUP_EXE%" >NUL 2>&1
+goto install_fallito
+
+:dopo_install_python
 
 rem L'installer aggiunge Python al PATH dell'utente, ma questa sessione
 rem cmd.exe eredita gia' il PATH vecchio: va riletto dal registro.
@@ -132,7 +174,10 @@ goto pulisci_e_esci
 
 :install_fallito
 echo.
-echo [ERRORE] Installazione di Python non riuscita (winget ha restituito un errore).
+echo [ERRORE] Installazione di Python non riuscita (ne' winget ne' download diretto).
+echo Se il PC non ha rete: da un altro PC scarica
+echo   https://www.python.org/ftp/python/%_PY_FULL%/python-%_PY_FULL%-amd64.exe
+echo metti il file nella cartella del programma e rilancia: lo usa senza scaricare.
 if /i not "%_ARCH%"=="ARM64" goto nessun_python
 echo.
 echo Su questo PC ARM serve l'installer Windows a 64 bit x86-64, NON quello ARM64:
@@ -167,9 +212,13 @@ set "_ARCH="
 set "_PY_VERSION="
 set "_PY_ORDINE="
 set "_PY_PKG="
+set "_PY_FULL="
 set "_SONDA="
 set "SYNC_VIDEO_ARCH="
 set "_WINGET_ARCH="
+set "_SETUP_URL="
+set "_SETUP_EXE="
+set "_SETUP_SCARICATO="
 exit /b 0
 
 :pulisci_e_esci_1
@@ -177,9 +226,13 @@ set "_ARCH="
 set "_PY_VERSION="
 set "_PY_ORDINE="
 set "_PY_PKG="
+set "_PY_FULL="
 set "_SONDA="
 set "SYNC_VIDEO_ARCH="
 set "_WINGET_ARCH="
+set "_SETUP_URL="
+set "_SETUP_EXE="
+set "_SETUP_SCARICATO="
 exit /b 1
 
 
