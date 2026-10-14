@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from hardware import (
     PYTHON_MAX,
+    PYTHON_MIN,
     disk_free_bytes,
     format_ram,
     memory_tier,
@@ -86,10 +87,10 @@ def prova_python(r: Relazione) -> None:
     # quindi un 3.13.1 reale risulterebbe "troppo recente" pur essendo la
     # versione verde in CI. Confronto stretto: (3, 13) < (3, 13) e' falso,
     # quindi il 3.13 stesso verrebbe respinto.
-    dentro = (3, 10) <= (v.major, v.minor) <= PYTHON_MAX
+    dentro = PYTHON_MIN <= (v.major, v.minor) <= PYTHON_MAX
     if dentro:
         r.aggiungi(Esito("Python", OK, testo))
-    elif (v.major, v.minor) < (3, 10):
+    elif (v.major, v.minor) < PYTHON_MIN:
         r.aggiungi(Esito("Python", KO, testo, "Servono Python 3.10 o superiore."))
     else:
         # Meglio qui che al bootstrap: il bootstrap si ferma DENTRO pip, e li'
@@ -295,7 +296,17 @@ def prova_spazio(r: Relazione, radice: Path) -> None:
         )
         return
     richiesto = necessario + _MARGINE_DISCO
-    for percorso, etichetta in ((radice, "cartella del progetto"),):
+    # Due destinazioni come la guardia vera (_avvisa_spazio_insufficiente in
+    # config.py): la cache embedding segue il progetto, quella whisper segue
+    # la home dell'utente, e possono stare su dischi diversi. Controllarne una
+    # sola dava "ok" qui e blocco all'avvio (o viceversa).
+    from config import _cache_whisper_faster
+
+    destinazioni = [(radice, "cartella del progetto")]
+    cache_whisper = _cache_whisper_faster("small")
+    if cache_whisper is not None:
+        destinazioni.append((cache_whisper, "cache HuggingFace (whisper)"))
+    for percorso, etichetta in destinazioni:
         libero = disk_free_bytes(percorso)
         if libero is None:
             r.aggiungi(Esito("Spazio disco", AVV, f"{etichetta}: non interrogabile"))
@@ -322,7 +333,7 @@ def prova_modelli(r: Relazione) -> None:
                 "Modelli",
                 AVV,
                 "modello di sincronizzazione non ancora scaricato",
-                "Rilancia genera_video.bat: lo scarica (~2,1 GB, una tantum)",
+                "Rilancia genera_video.bat: lo scarica (download ~2 GB, ~6 GB su disco, una tantum)",
             )
         )
         return
@@ -451,16 +462,22 @@ def prova_converter(r: Relazione) -> None:
 
 
 def prova_materiali(r: Relazione, radice: Path) -> None:
+    # Stessa regola di main.find_presentation_file (che qui non si importa:
+    # main.py trascina moviepy e gli altri pesi, e questo modulo deve girare
+    # anche a pacchetti mancanti): prima i nomi esatti, poi qualsiasi altra
+    # presentazione, la piu' recente. Altrimenti il referto direbbe "manca"
+    # dove il programma invece procederebbe.
     nomi_presentazione = ("presentazione.pdf", "presentazione.pptx", "presentazione.ppt")
-    presentazione = next((radice / n for n in nomi_presentazione if (radice / n).exists()), None)
-    audio = next(
-        (
-            p
-            for p in radice.iterdir()
-            if p.is_file() and p.suffix.lower() in {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac"}
-        ),
-        None,
-    )
+    file = [p for p in radice.iterdir() if p.is_file()]
+    presentazione = next((p for n in nomi_presentazione for p in file if p.name.lower() == n), None)
+    if presentazione is None:
+        candidati = [p for p in file if p.suffix.lower() in {".pdf", ".pptx", ".ppt"}]
+        if candidati:
+            presentazione = max(candidati, key=lambda p: p.stat().st_mtime)
+    audio_candidati = [
+        p for p in file if p.suffix.lower() in {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac"}
+    ]
+    audio = max(audio_candidati, key=lambda p: p.stat().st_mtime) if audio_candidati else None
     if presentazione and audio:
         r.aggiungi(Esito("Materiali", OK, f"{presentazione.name} + {audio.name}"))
     else:

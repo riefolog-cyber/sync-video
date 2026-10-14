@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from hardware import PYTHON_MAX as _PYTHON_MAX
+from hardware import PYTHON_MIN as _PYTHON_MIN
 from hardware import disk_free_bytes, memory_tier, project_root, ram_total_bytes
 
 # stdout/stderr in UTF-8 con fallback 'replace': evita UnicodeEncodeError
@@ -1248,7 +1249,7 @@ def bootstrap(*, ignora_spazio: bool = False) -> None:
     non parte se lo spazio non c'è: vedi `_avvisa_spazio_insufficiente`.
     """
     # --- Python version ---
-    if sys.version_info < (3, 10):  # noqa: UP036 - guardia runtime per utenti finali
+    if sys.version_info[:2] < _PYTHON_MIN:  # guardia runtime per utenti finali
         log.error("Richiesto Python 3.10 o superiore. Versione attuale: %s", sys.version)
         sys.exit(1)
     _rifiuta_python_troppo_recente()
@@ -1321,7 +1322,8 @@ def bootstrap(*, ignora_spazio: bool = False) -> None:
         log.error(
             "\n❌ TESSERACT OCR NON TROVATO — necessario per estrarre il testo dalle slide.\n"
             "   Auto-install fallita. Scaricalo da: %s\n"
-            "   Il modello lingua italiana (ita.traineddata) è già incluso in tessdata/.\n"
+            "   La lingua italiana (ita.traineddata) viene scaricata da sola in tessdata/\n"
+            "   al prossimo avvio riuscito.\n"
             "   Poi riavvia main.py.\n",
             _TESSERACT_DOWNLOAD_URL,
         )
@@ -1554,6 +1556,19 @@ DEFAULT_MAX_LOOP_CYCLE_WORDS = _env_int("MAX_LOOP_CYCLE_WORDS", 12)
 # stato inutile proprio nel caso da cui nasce. 1.5x lo copre senza aprire
 # tutta la coda. Override con TAIL_RECOVERY_RATIO.
 DEFAULT_TAIL_RECOVERY_RATIO = _env_float("TAIL_RECOVERY_RATIO", 1.5)
+
+# Quota massima di audio che le zone cieche possono coprire perché la
+# ritrascrizione mirata abbia ancora senso. Le zone nascono dalle ancore che ci
+# SONO: con poche ancore e lontane fra loro, "la zona" diventa quasi tutto
+# l'audio, e allora non è più un recupero mirato — è la decodifica accurata
+# fatta a pezzi, senza il confronto fra le due trascrizioni e pagando due volte
+# (le zone, poi l'audio intero). Sopra questa quota, e SOLO quando la copertura
+# resta insufficiente (quindi la decodifica accurata intera è comunque in
+# arrivo), il recupero si salta e si lascia fare al passaggio intero: un giro
+# solo. Con poche ancore vicine la quota non si raggiunge e il recupero resta
+# quello di sempre. Override con RECOVERY_MAX_ZONE_SHARE (0 = disattiva il
+# vincolo e ritrascrive sempre le zone).
+DEFAULT_RECOVERY_MAX_ZONE_SHARE = _env_float("RECOVERY_MAX_ZONE_SHARE", 0.5)
 
 # --- Parametri tecnici (sovrascrivibili da .env) ---
 DEFAULT_TRANSCRIPT_WINDOW = 3.0  # secondi per raggruppamento parole
