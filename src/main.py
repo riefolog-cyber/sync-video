@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from concurrent.futures import thread as _futures_thread
 from contextlib import suppress
 from itertools import pairwise
@@ -87,7 +87,9 @@ from pipeline_cache import cache_path as _cache_path_impl
 from pipeline_cache import clean_orphan_cache as _clean_orphan_cache_impl
 from pipeline_cache import clean_stale_llm_cache as _clean_stale_llm_cache_impl
 from pipeline_cache import file_hash as _file_hash
+from pipeline_cache import latest_transcript_words as _latest_transcript_words_impl
 from pipeline_cache import load_cache as _load_cache_impl
+from pipeline_cache import load_sync_report as _load_sync_report_impl
 from pipeline_cache import save_cache as _save_cache_impl
 from pipeline_cache import save_final_timeline as _save_final_timeline_impl
 from pipeline_cache import save_sync_report as _save_sync_report_impl
@@ -104,6 +106,7 @@ from semantic_sync import (
     make_anchor_remap_filter,
     merge_short_segments,
     model_load_seconds,
+    refine_diagnostics,
     refine_llm_segments_from_words,
     refine_llm_timeline_from_words,
     repair_segments_from_frames_from_words,
@@ -115,6 +118,7 @@ from semantic_sync import (
 )
 from timeline import (
     anchor_gaps,
+    announcements_off_timeline,
     anti_flicker_floor,
     detect_flow_from_words,
     discarded_citations,
@@ -124,6 +128,7 @@ from timeline import (
     out_of_range_tail_anchor,
     reconcile_timeline,
     repetition_loops,
+    tail_recovery_zone,
 )
 from transcription import (
     _write_raw_transcript,
@@ -133,7 +138,7 @@ from transcription import (
     transcribe_audio,
 )
 from updates import run_frozen_report, run_update_check
-from video import build_video, frame_consistency_check
+from video import boundary_review_sheet, build_video, frame_consistency_check
 
 
 # =====================================================================
@@ -159,6 +164,16 @@ def _save_final_timeline(timeline: dict[int, float], total_duration: float) -> N
 def _save_sync_report(report: dict[str, object]) -> None:
     """Wrapper shim: vedi pipeline_cache.save_sync_report (inietta CACHE_DIR)."""
     _save_sync_report_impl(report, cache_dir=CACHE_DIR)
+
+
+def _load_sync_report() -> dict[str, object] | None:
+    """Wrapper shim: vedi pipeline_cache.load_sync_report (inietta CACHE_DIR)."""
+    return _load_sync_report_impl(cache_dir=CACHE_DIR)
+
+
+def _latest_transcript_words() -> list[Word]:
+    """Wrapper shim: vedi pipeline_cache.latest_transcript_words (inietta CACHE_DIR)."""
+    return cast("list[Word]", _latest_transcript_words_impl(cache_dir=CACHE_DIR))
 
 
 def _cache_path(key: str) -> Path:
@@ -292,6 +307,142 @@ def _transizioni_senza_ancora(anchors: dict[str, object] | None) -> list[int]:
         return []
 
 
+# Sotto questa frazione della durata mediana una slide è "corta" rispetto alle
+# altre. Per le slide ANCORATE non significa niente: la loro durata è il tempo
+# fra due annunci pronunciati, un fatto. Per quelle STIMATE è il sintomo tipico
+# di un confine fuori posto (caso reale 14/10: slide 10 a 63.1s contro una
+# mediana di 110.6s, confine arrivato 40s dopo l'annuncio). La soglia è larga
+# apposta (0.6, non 0.25 come l'anomalia dura): non deve segnalare una slide un
+# po' corta, solo una che sta chiaramente fuori dal gruppo. Misurato su quella
+# run: le altre nove durate stanno fra 0.91 e 1.43 volte la mediana, la slide 10
+# a 0.57.
+_WEAK_ESTIMATE_DURATION_RATIO = 0.6
+
+# Le decisioni del raffinamento dette in parole semplici (il codice dice
+# "tenuto: margine dentro il rumore", l'utente deve capire cosa vuol dire).
+_DECISION_PHRASES = {
+    "tenuto: margine dentro il rumore": (
+        "il candidato migliore non batte quello attuale più di quanto il punteggio "
+        "si muova da solo"
+    ),
+    "tenuto: vince solo a finestra stretta": (
+        "il candidato migliore vince solo guardando poca parlata attorno al confine"
+    ),
+    "tenuto: violerebbe un'ancora": (
+        "il candidato migliore sposterebbe il confine contro un annuncio 'slide N', "
+        "che resta il punto fermo"
+    ),
+}
+
+
+def _estimated_boundary_facts(
+    durations: Sequence[float],
+    slide_ids: Sequence[int],
+    estimated: Collection[int],
+    refine: Sequence[dict[str, object]],
+    floor_report: dict[str, object] | None = None,
+    ratio: float = _WEAK_ESTIMATE_DURATION_RATIO,
+) -> list[dict[str, object]]:
+    """Cosa si sa del confine di ogni slide STIMATA: evidenza del contenuto e durata.
+
+    Un confine senza ancora "slide N" è una stima: questa funzione raccoglie, per
+    ognuno, se il contenuto lo sostiene (dalla diagnostica del raffinamento:
+    ``sigma`` = quanto il candidato migliore batte il confine attuale in unità di
+    rumore locale) e se la durata risultante è molto sotto la mediana delle
+    altre. Restituisce una voce solo quando c'è qualcosa da dire, così il
+    riepilogo non nomina confini che nessuno ha motivo di dubitare.
+
+    Le slide la cui durata è stata GARANTITA, ACCORCIATA o NON SALVATA dal
+    pavimento anti-flicker sono escluse: la loro durata è una scelta di
+    leggibilità (o il suo fallimento dichiarato altrove), non una misura del
+    parlato — senza questa esclusione la stessa slide comparirebbe due volte con
+    due spiegazioni diverse.
+
+    Returns:
+        Voci ``{slide, duration, median, ratio, sigma, decision}``, in ordine di
+        slide.
+    """
+    if not durations or not estimated:
+        return []
+    garantite, non_garantite, _ = _floor_split(floor_report)
+    esclusi = set(garantite) | set(non_garantite) | set(_floor_shortened(floor_report))
+    per_slide = {
+        int(cast(int, voce.get("slide") or 0)): voce
+        for voce in refine
+        if isinstance(voce, dict)
+    }
+    mediana = _median_duration(durations)
+    if mediana <= 0:
+        return []
+    fatti: list[dict[str, object]] = []
+    for slide, durata in zip(slide_ids, durations, strict=True):
+        s = int(slide)
+        if s not in estimated or s in esclusi:
+            continue
+        d = float(durata)
+        voce = per_slide.get(s, {})
+        decisione = str(voce.get("decision") or "")
+        sigma_raw = voce.get("sigma")
+        sigma = float(cast(float, sigma_raw)) if isinstance(sigma_raw, (int, float)) else None
+        debole = (
+            decisione.startswith("non valutabile")
+            or decisione in _DECISION_PHRASES
+            or (sigma is not None and sigma < 1.0)
+        )
+        corta = d < ratio * mediana
+        if not debole and not corta:
+            continue
+        fatti.append(
+            {
+                "slide": s,
+                "duration": round(d, 1),
+                "median": round(mediana, 1),
+                "ratio": round(d / mediana, 2),
+                "sigma": None if sigma is None else round(sigma, 2),
+                "decision": decisione,
+            }
+        )
+    return fatti
+
+
+def _median_duration(durations: Sequence[float]) -> float:
+    """Durata mediana (metà delle slide sopra, metà sotto)."""
+    ordered = sorted(float(d) for d in durations)
+    n = len(ordered)
+    if not n:
+        return 0.0
+    return ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2
+
+
+def _weak_estimate_text(f: dict[str, object]) -> str:
+    """Frase (in parole semplici) su un confine stimato che non si sostiene."""
+    slide = int(cast(int, f["slide"]))
+    durata = float(cast(float, f["duration"]))
+    mediana = float(cast(float, f["median"]))
+    decisione = str(f.get("decision") or "")
+    sigma_raw = f.get("sigma")
+    sigma = float(cast(float, sigma_raw)) if isinstance(sigma_raw, (int, float)) else None
+    pezzi: list[str] = []
+    if decisione.startswith("non valutabile"):
+        pezzi.append("il confine non si è potuto misurare (" + decisione.split(": ", 1)[-1] + ")")
+    elif sigma is not None and sigma < 1.0:
+        pezzi.append(
+            f"il contenuto lo sostiene solo per {sigma:.1f} volte il rumore locale, "
+            "quindi è una stima e non una misura"
+        )
+    elif decisione in _DECISION_PHRASES:
+        pezzi.append(_DECISION_PHRASES[decisione])
+    if float(cast(float, f.get("ratio") or 1.0)) < 1.0:
+        pezzi.append(
+            f"la slide dura {_format_time(durata)} contro una mediana di {_format_time(mediana)}"
+        )
+    return (
+        f"la slide {slide}: l'inizio non è un annuncio 'slide N' e "
+        + ", ".join(pezzi)
+        + " — se nel video compare tardi o presto, il confine da guardare è qui"
+    )
+
+
 def _artifact_verified(frame_check: dict[str, object] | None, total_segments: int) -> bool:
     """True se il frame check ha verificato TUTTI i segmenti, senza mismatch.
 
@@ -368,6 +519,7 @@ def _log_plain_summary(
     repairs: Sequence[dict[str, object]] = (),
     floor_report: dict[str, object] | None = None,
     anchors: dict[str, object] | None = None,
+    refine: Sequence[dict[str, object]] = (),
     title: str = "IL VIDEO È PRONTO — COSA C'È DENTRO",
 ) -> None:
     """Riepilogo finale in parole semplici (quello che l'utente vuole sapere).
@@ -376,8 +528,12 @@ def _log_plain_summary(
     slide e quanto durano, se il video finito mostra la slide giusta, cosa è
     stato corretto da solo, cosa conviene controllare a mano. I dubbi sono
     raccolti da TUTTI i segnali della run (verdetto di contenuto, verifica
-    frame, fiducia del motore embedding, revisione LLM, copertura delle ancore)
-    invece che da uno solo.
+    frame, fiducia del motore embedding, revisione LLM, copertura delle ancore,
+    evidenza del raffinamento sui confini stimati) invece che da uno solo.
+
+    ``refine`` è la diagnostica del raffinamento confini (``refine_diagnostics()``):
+    serve a dire, dei confini STIMATI, se il contenuto li sostiene, invece di
+    presentarli tutti come misurati.
     """
     verdicts = verdicts or {}
     log.info("\n" + "=" * 70)
@@ -558,6 +714,32 @@ def _log_plain_summary(
             f"per {_slide_list_text(uncertain)} la durata è anomala e il "
             "contenuto non conferma: controlla a mano"
         )
+    # --- Confini STIMATI che il contenuto non sostiene ---
+    # Un confine senza ancora "slide N" non è una misura: è la posizione che
+    # l'allineamento ha scelto. Finora il riepilogo li elencava tutti allo stesso
+    # modo, quindi una stima non sostenuta era indistinguibile da una che il
+    # parlato confermava — il difetto che questo progetto combatte. Qui il
+    # raffinamento dice quali confini battono il rumore locale e quali no
+    # (``refine_diagnostics``), e la durata dice quanto la slide sta fuori dal
+    # gruppo delle altre quando il confine è stimato.
+    for fatto in _estimated_boundary_facts(
+        durations,
+        slide_ids,
+        set(_transizioni_senza_ancora(anchors)),
+        refine,
+        floor_report=floor_report,
+    ):
+        doubts.append(_weak_estimate_text(fatto))
+    # --- Contraddizione fra le parole e la timeline dichiarata ---
+    # Il parlato annuncia una slide in un momento e il video la mostra in un
+    # altro. L'annuncio è il dato più affidabile della catena (le ancore sono
+    # l'unico punto 1:1 col parlato), quindi il confine che lo contraddice va
+    # guardato — e nessun controllo automatico poteva vederlo, perché il frame
+    # check verifica che il video rispetti la timeline DICHIARATA.
+    for item in cast(
+        "Sequence[dict[str, object]]", anchor_info.get("mentions_off") or []
+    ):
+        doubts.append(_boundary_doubt_text(item))
     if frame_check is not None:
         mismatches = cast("Sequence[dict[str, object]]", frame_check.get("mismatches") or [])
         if mismatches:
@@ -725,6 +907,169 @@ def _frame_check_video(
             m["similarity"],
         )
     return frame_check
+
+
+def _boundary_preview_moments(item: dict[str, object]) -> list[tuple[str, float]]:
+    """I due istanti di un confine dubbio: l'annuncio e il confine dichiarato.
+
+    Sono le due cose che il dubbio mette in contraddizione. Il primo dice cosa
+    c'era a schermo mentre il parlato annunciava la slide (è la domanda a cui
+    rispondere: a schermo c'era già?), il secondo dove la timeline la fa
+    comparire.
+    """
+    slide = int(cast("int", item.get("slide") or 0))
+    mention = float(cast("float", item.get("mention") or 0.0))
+    declared = float(cast("float", item.get("declared") or 0.0))
+    return [
+        (f"parlato: annuncio 'slide {slide}' a {_format_time(mention)}", mention),
+        (f"video: la slide {slide} compare qui ({_format_time(declared)})", declared),
+    ]
+
+
+def _write_boundary_previews(
+    video_path: str | Path,
+    items: Sequence[dict[str, object]],
+    review_dir: Path,
+) -> None:
+    """Scrive il foglio di controllo di ogni confine dubbio e lo lega al dubbio.
+
+    I nomi sono deterministici (``confine_slideNN_II.png``): due run di seguito
+    si sovrascrivono invece di accumulare, che è il difetto costato 191 file /
+    297 MB alla cartella dei frame prima che venisse ripulita a ogni verifica.
+    Solo i dubbi con un'anteprima davvero scritta ricevono la chiave ``preview``:
+    nel dry-run il video non esiste e il riepilogo non deve citare un file che
+    non c'è.
+    """
+    for i, item in enumerate(items):
+        slide = int(cast("int", item.get("slide") or 0))
+        sheet = boundary_review_sheet(
+            video_path,
+            _boundary_preview_moments(item),
+            review_dir / f"confine_slide{slide:02d}_{i:02d}.png",
+        )
+        if sheet is not None:
+            item["preview"] = str(sheet)
+
+
+def _boundary_doubt_text(item: dict[str, object]) -> str:
+    """Testo (in parole semplici) di un dubbio "annuncio contro confine".
+
+    Estratto perché lo stampa sia il riepilogo finale sia il comando di sola
+    revisione (`--review`): due copie della stessa frase prima o poi divergono,
+    e la revisione deve ripetere esattamente quello che ha detto la run.
+    """
+    slide = int(cast("int", item.get("slide") or 0))
+    mention = float(cast("float", item.get("mention") or 0.0))
+    declared = float(cast("float", item.get("declared") or 0.0))
+    preview = f" (anteprima: {item.get('preview')})" if item.get("preview") else ""
+    return (
+        f"nel parlato la slide {slide} viene annunciata a {_format_time(mention)} "
+        f"ma il video la mostra da {_format_time(declared)}: "
+        + (
+            "il confine che la fa partire è più tardi dell'annuncio"
+            if mention < declared
+            else "il confine che la fa partire è più presto dell'annuncio"
+        )
+        + " — l'annuncio è un fatto, la stima no: guarda quel punto"
+        + preview
+    )
+
+
+def _review_boundary_doubts(video_path: Path) -> None:
+    """Rivede i confini dubbi di una run GIÀ fatta, senza rifare la pipeline.
+
+    Il report e la trascrizione della run sono già in `.cache/`: la revisione
+    legge quelli e rigenera solo le anteprime dal video che esiste. Funziona
+    anche sui report scritti PRIMA del controllo incrociato (lì `mentions_off`
+    non c'è e viene ricalcolato dalle parole in cache), che è il caso della run
+    del 14/10: rifarla per guardare un confine sarebbe costato 8 minuti.
+    """
+    report_path = CACHE_DIR / "sync_report.json"
+    report = _load_sync_report()
+    if not report:
+        log.error(
+            "\n   [Revisione] Nessun report da rivedere in %s: lancia la pipeline "
+            "una volta, poi ripeti con --review.",
+            report_path,
+        )
+        return
+    segments = cast("list[dict[str, object]]", report.get("segments") or [])
+    starts: dict[int, float] = {}
+    for seg in segments:
+        starts[int(cast("int", seg.get("slide") or 0))] = float(
+            cast("float", seg.get("start") or 0.0)
+        )
+    if not starts:
+        log.error("   [Revisione] Il report non contiene segmenti: niente da rivedere.")
+        return
+
+    anchors = cast("dict[str, object]", report.get("anchors") or {})
+    items = [
+        dict(item)
+        for item in cast("list[dict[str, object]]", anchors.get("mentions_off") or [])
+    ]
+    ricalcolati = False
+    if not items:
+        words = _latest_transcript_words()
+        if words:
+            items = [
+                {"slide": s, "mention": m, "declared": d}
+                for s, m, d in announcements_off_timeline(words, starts, max(starts))
+            ]
+            ricalcolati = True
+
+    quando = ""
+    with suppress(OSError):
+        quando = time.strftime(" (%d/%m %H:%M)", time.localtime(report_path.stat().st_mtime))
+    log.info("\n" + "=" * 70)
+    log.info(" REVISIONE DEI CONFINI — nessuna pipeline rifatta")
+    log.info("=" * 70)
+    log.info("   Report: %s%s", report_path, quando)
+    log.info(
+        "   %d slide, %s di parlato.",
+        len(segments),
+        _format_time(
+            max((float(cast("float", seg.get("end") or 0.0)) for seg in segments), default=0.0)
+        ),
+    )
+    transitions = int(cast("int", anchors.get("transitions") or 0))
+    if transitions:
+        log.info(
+            "   Confini ancorati nell'ultima run: %s su %s.",
+            int(cast("int", anchors.get("anchored") or 0)),
+            transitions,
+        )
+    # Un confine senza annuncio è una stima, non una misura: nei dubbi sui
+    # confini va detto anche quando non c'è nessuna contraddizione, altrimenti
+    # "niente da rivedere" suonerebbe come "tutto misurato".
+    senza_ancora = sorted(
+        int(s) for s in cast("Sequence[int]", anchors.get("unanchored_slides") or [])
+    )
+    if senza_ancora:
+        log.info(
+            "   Confini stimati dal contenuto (nessun annuncio 'slide N'): %s.",
+            _slide_list_text(senza_ancora),
+        )
+    if not items:
+        log.info(
+            "   Nessuna contraddizione fra gli annunci 'slide N' e i confini "
+            "dichiarati: niente da rivedere.%s",
+            " (controllo ricalcolato dalle parole in cache)" if ricalcolati else "",
+        )
+        log.info("=" * 70)
+        return
+    if video_path.exists():
+        _write_boundary_previews(video_path, items, CACHE_DIR / "review")
+    else:
+        log.info("   Video assente (%s): i dubbi restano, senza anteprima.", video_path)
+    if ricalcolati:
+        log.info(
+            "   (il report non li aveva salvati: ricalcolati dalle parole in cache)"
+        )
+    log.info("   Da controllare a mano:")
+    for item in items:
+        log.info("     - %s", _boundary_doubt_text(item))
+    log.info("=" * 70)
 
 
 def _repair_durations_from_frames(
@@ -1910,6 +2255,15 @@ def main(argv: list | None = None) -> None:
         run_frozen_report()
         return
 
+    # --- Revisione di una run già fatta e uscita ---
+    # Stesso criterio dei comandi sopra: solo lettura dal disco (report,
+    # trascrizione, video), nessun download, nessuna domanda. Rivedere un
+    # confine non deve costare una pipeline intera né far ricaricare il modello
+    # di embedding: il report e i tempi di quella run sono già in .cache/.
+    if args.review:
+        _review_boundary_doubts(Path(args.output_video))
+        return
+
     # Bootstrap esplicito: verifica dipendenze prima di tutto
     # `ignora_spazio`: di default, se lo spazio non basta per i modelli il
     # bootstrap FERMA il download invece di avvisare e proseguire. Un download
@@ -2469,7 +2823,17 @@ def main(argv: list | None = None) -> None:
             _zone_loop = [
                 (max(0.0, lo), min(total_duration, hi)) for lo, hi in repetition_loops(words_raw)
             ]
-            _tutte = sorted(_zone_anchor + [z for z in _zone_loop if z[1] > z[0]])
+            # La transizione FINALE non ha un'ancora a destra che la delimiti
+            # (a destra c'è la fine dell'audio): la zona si ricava dalla
+            # cadenza degli annunci già noti. Senza questo, l'annuncio
+            # dell'ultima slide era recuperabile solo se il decoder produceva
+            # anche un ciclo ripetuto nella stessa zona, cioè per caso.
+            _zone_tail = tail_recovery_zone(flow_anchors, total_slides, total_duration)
+            _tutte = sorted(
+                _zone_anchor
+                + [z for z in _zone_loop if z[1] > z[0]]
+                + ([(_zone_tail[1], _zone_tail[2])] if _zone_tail else [])
+            )
             _fuse: list[list[float]] = []
             for _lo, _hi in _tutte:
                 if _fuse and _lo <= _fuse[-1][1] + 1.0:
@@ -2490,6 +2854,14 @@ def main(argv: list | None = None) -> None:
                     "ritrascrivo la zona col beam accurato...",
                     _lo,
                     _hi,
+                )
+            if _zone_tail:
+                log.info(
+                    "   [Gap] Coda senza ancora a destra (%s): ritrascrivo "
+                    "%.1f-%.1fs per cercarne l'annuncio col beam accurato...",
+                    ", ".join(f"slide {s}" for s in _zone_tail[0]),
+                    _zone_tail[1],
+                    _zone_tail[2],
                 )
             for _lo, _hi in [(z[0], z[1]) for z in _fuse]:
                 _t0 = time.time()
@@ -3369,6 +3741,13 @@ llm_enabled=llm_disponibile,
         if quality:
             sync_notes["quality"] = quality
             sync_notes["weak_signal"] = weak_signal_seen()
+        # Diagnostica del raffinamento dei confini (una voce per confine: quanto
+        # il candidato migliore batte quello attuale in unità di rumore locale,
+        # e cosa è stato deciso). Va nell'artefatto perché è ciò che rende
+        # riconoscibile a posteriori una stima debole, senza rifare la run.
+        refine_note = refine_diagnostics()
+        if refine_note:
+            sync_notes["refine"] = refine_note
         # Il report dei segmenti va salvato SEMPRE, anche senza anomalie: è
         # l'artefatto che rende verificabile a posteriori cosa è stato mostrato,
         # con quale verdetto di contenuto, quale motore è stato scelto e cosa ha
@@ -3543,6 +3922,25 @@ llm_enabled=llm_disponibile,
             log.info("   Usa --dry-run per testare senza video, o rimuovi --preview per generare.")
             return
 
+        # --- Controllo incrociato annunci / confini dichiarati ---
+        # Il confronto va fatto sulla timeline FINALE (il pavimento anti-flicker e
+        # il raffinamento possono aver spostato un confine dopo l'estrazione delle
+        # ancore) e va fatto qui perché lo deve poter dichiarare il riepilogo, dry
+        # run compreso. Run del 14/10: "Passiamo alla slide 10" a 16:56, il video
+        # la mostrava da 17:38, e il riepilogo scriveva "nessuno" fra i dubbi.
+        if words_raw and isinstance(sync_notes.get("anchors"), dict):
+            _declared: dict[int, float] = {}
+            _cursor = 0.0
+            for _sid, _dur in zip(slide_ids, durations, strict=True):
+                _declared.setdefault(int(_sid), _cursor)
+                _cursor += float(_dur)
+            cast("dict[str, object]", sync_notes["anchors"])["mentions_off"] = [
+                {"slide": s, "mention": m, "declared": d}
+                for s, m, d in announcements_off_timeline(
+                    list(words_raw), _declared, total_slides
+                )
+            ]
+
         # --- Dry-run: fermati qui ---
         if args.dry_run:
             t_total = time.time() - t_total_start
@@ -3567,6 +3965,7 @@ llm_enabled=llm_disponibile,
                 review_diffs=len(review_diffs),
                 floor_report=floor_note,
                 anchors=cast("dict[str, object] | None", sync_notes.get("anchors")),
+                refine=cast("Sequence[dict[str, object]]", sync_notes.get("refine") or ()),
                 title="TIMELINE PRONTA — COSA CONTERRÀ IL VIDEO",
             )
             log.info("\n" + "=" * 70)
@@ -3684,6 +4083,14 @@ llm_enabled=llm_disponibile,
             sync_report["frame_check"] = frame_check
             if repairs:
                 sync_report["repairs"] = repairs
+            # La riparazione guidata dai frame rifà il raffinamento dei confini
+            # corretti, sostituendo la voce di quella slide: la diagnostica
+            # salvata e mostrata deve descrivere l'ULTIMA decisione applicata,
+            # non quella della timeline pre-riparazione.
+            refine_refresh = refine_diagnostics()
+            if refine_refresh:
+                sync_notes["refine"] = refine_refresh
+                sync_report["refine"] = refine_refresh
             _save_sync_report(sync_report)
             if mismatches and args.strict_sync:
                 _abort(
@@ -3711,6 +4118,20 @@ llm_enabled=llm_disponibile,
             len(durations),
         )
 
+        # Anteprima dei confini dubbi: il dubbio nomina DUE istanti e senza il
+        # foglio di controllo la verifica a mano costa trovare quei due punti in
+        # un video da 13 minuti. Si genera dal video FINALE, quindi qui, dopo
+        # l'eventuale riparazione e il controllo frame.
+        _review_items = cast(
+            "list[dict[str, object]]",
+            cast("dict[str, object]", sync_notes.get("anchors") or {}).get("mentions_off")
+            or [],
+        )
+        if _review_items:
+            _write_boundary_previews(
+                args.output_video, _review_items, CACHE_DIR / "review"
+            )
+
         # Pulizia cache orfana
         cleaned = _clean_orphan_cache(active_cache_keys)
         if cleaned:
@@ -3732,6 +4153,7 @@ llm_enabled=llm_disponibile,
             repairs=repairs,
             floor_report=floor_note,
             anchors=cast("dict[str, object] | None", sync_notes.get("anchors")),
+            refine=cast("Sequence[dict[str, object]]", sync_notes.get("refine") or ()),
         )
 
     finally:

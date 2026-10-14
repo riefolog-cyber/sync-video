@@ -1530,6 +1530,31 @@ DEFAULT_FREE_ORDERED_FALLBACK = os.environ.get("FREE_ORDERED_FALLBACK", "1") == 
 # 0.5 = almeno meta' transizioni ancorate; 0 disattiva (procede sempre).
 DEFAULT_MIN_ANCHOR_COVERAGE = _env_float("MIN_ANCHOR_COVERAGE", 0.5)
 
+# Lunghezza massima del ciclo che il rilevatore di testo inaffidabile
+# (timeline.repetition_loops) considera "allucinazione del decoder". Nasceva sui
+# cicli di 1-3 parole ("la c' la c'...", run del 13/10), ma il beam greedy
+# ripete anche FRASI intere: nella run del 14/10 ha sostituito 15.8s di parlato
+# con la stessa frase di 11 parole ripetuta 6 volte, cancellando l'annuncio
+# "Passiamo alla slide 10" (16:56) che il beam accurato recupera intatto. Con il
+# ciclo limitato a 3 parole quella zona non veniva ritrascritta, la slide 10
+# restava l'unico confine stimato dal contenuto e finiva 40s in ritardo (il
+# budget di 12 parole copre anche le frasi lunghe senza toccare la soglia delle
+# ripetizioni: 6 ripetizioni identiche di 12 parole non sono parlato).
+# Override con MAX_LOOP_CYCLE_WORDS.
+DEFAULT_MAX_LOOP_CYCLE_WORDS = _env_int("MAX_LOOP_CYCLE_WORDS", 12)
+
+# Di quanto si allunga la zona di coda quando l'annuncio dell'ultima slide è
+# stato distrutto dal beam greedy e non c'è un'ancora a destra a delimitarlo.
+# A destra c'è solo la fine dell'audio, quindi la zona si limita con la CADENZA
+# degli annunci già trovati: l'annuncio successivo cade dopo la sezione
+# precedente, che è lunga circa come le altre. Sul materiale del 14/10 la
+# sezione finale è durata 157.9s contro una cadenza mediana di 111.0s (1.42x):
+# con un fattore 1.0 la zona si sarebbe fermata a 1011s e avrebbe mancato
+# l'annuncio delle 16:56 (1017.8s) di sette secondi, cioè il recupero sarebbe
+# stato inutile proprio nel caso da cui nasce. 1.5x lo copre senza aprire
+# tutta la coda. Override con TAIL_RECOVERY_RATIO.
+DEFAULT_TAIL_RECOVERY_RATIO = _env_float("TAIL_RECOVERY_RATIO", 1.5)
+
 # --- Parametri tecnici (sovrascrivibili da .env) ---
 DEFAULT_TRANSCRIPT_WINDOW = 3.0  # secondi per raggruppamento parole
 DEFAULT_MIN_WORD_LENGTH = 2  # ignora parole più corte
@@ -2029,6 +2054,13 @@ Esempi:
         "quello che misura cosa funziona davvero su questa macchina.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Ferma dopo la generazione timeline, non produce video")
+    parser.add_argument(
+        "--review",
+        action="store_true",
+        help="Rivede i confini dubbi di una run già fatta: legge report, timeline "
+        "e trascrizione da .cache/ e rigenera le anteprime dal video esistente. "
+        "Non tocca PDF, audio né modelli, e non rigenera nulla.",
+    )
     parser.add_argument(
         "--preview", action="store_true", help="Mostra la timeline in formato visuale e esci (non genera il video)"
     )

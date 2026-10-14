@@ -15,6 +15,9 @@ python src/main.py --preview
 # Dry-run: genera timeline senza produrre video
 python src/main.py --dry-run --debug
 
+# Rivedi i confini dubbi dell'ultima run (legge la cache, non rigenera nulla)
+python src/main.py --review
+
 # Forza nuova analisi (ignora cache)
 python src/main.py --no-cache
 
@@ -26,7 +29,7 @@ python src/main.py --whisper-model large-v3
 python src/main.py --transcriber openvino
 python src/main.py --transcriber whisper
 
-# Esegui i test (442 test: pipeline, LLM, chunks, integrazione)
+# Esegui i test (483 test: pipeline, LLM, chunks, integrazione)
 python -m unittest test_sync test_integration test_llm_sync test_chunks
 ```
 
@@ -39,6 +42,7 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--output` | `video_finale.mp4` | File video output |
 | `--flow` | auto-detect | `slide-audio` o `audio-slide` |
 | `--dry-run` | — | Solo timeline, niente video |
+| `--review` | — | Rilegge report e trascrizione dell'ultima run e ristampa i dubbi sui confini con le anteprime, dal video già esistente: nessuna pipeline, nessun download |
 | `--preview` | — | Mostra timeline e esci |
 | `--no-cache` | — | Ignora cache |
 | `--debug` | — | Log dettagliato |

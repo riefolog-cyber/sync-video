@@ -10,6 +10,7 @@ import pathlib
 import tempfile
 import time
 import unittest
+import zlib
 from itertools import pairwise
 from typing import ClassVar
 from unittest import mock
@@ -942,6 +943,97 @@ class TestSlideAudioFlow(unittest.TestCase):
             anchor_gaps({2: 100.0, 3: 200.0, 4: 300.0}, 4), []
         )
 
+    def test_anchor_gaps_coda_non_si_apre_ma_la_zona_di_coda_si(self):
+        """I due meccanismi sono complementari, non alternativi.
+
+        ``anchor_gaps`` non apre niente in coda (a destra c'è solo la fine
+        dell'audio): la transizione finale la localizza
+        ``tail_recovery_zone`` con la cadenza degli annunci. Senza il secondo,
+        l'annuncio dell'ultima slide era recuperabile solo se il decoder
+        produceva ANCHE un ciclo ripetuto nella stessa zona, cioè per caso.
+        """
+        from timeline import anchor_gaps, tail_recovery_zone
+
+        # Ancore della run del 14/10, senza slide 1 (non annunciata) e senza la
+        # 10: la 7 manca per un buco INTERNO, la 10 perché è la coda.
+        anchors = {2: 135.0, 3: 256.25, 4: 364.65, 5: 477.37, 6: 587.76, 8: 799.82, 9: 900.24}
+        self.assertEqual(anchor_gaps(anchors, 10), [([7], 587.76, 799.82)])
+        self.assertEqual(tail_recovery_zone(anchors, 10, 1121.25)[:1], ([10],))
+
+    def test_tail_recovery_zone_copre_l_annuncio_della_run_14_10(self):
+        """La zona di coda arriva all'annuncio che il greedy aveva distrutto.
+
+        Numeri reali: sezione finale di 157.9s contro una cadenza mediana di
+        111.6s. Il "Passiamo alla slide 10" delle 16:56 (1017.8s) sta dentro
+        la zona; con un fattore 1.0 la zona si fermerebbe a 1011.8s e mancherebbe
+        l'annuncio di 6s, cioè il recupero sarebbe inutile proprio nel caso da
+        cui nasce (è il motivo del default 1.5). E non si prende tutta la coda:
+        la zona non tocca la fine dell'audio.
+        """
+        from timeline import tail_recovery_zone
+
+        anchors = {2: 135.0, 3: 256.25, 4: 364.65, 5: 477.37, 6: 587.76, 8: 799.82, 9: 900.24}
+        missing, lo, hi = tail_recovery_zone(anchors, 10, 1121.25)
+        self.assertEqual(missing, [10])
+        self.assertEqual(lo, 900.24)
+        self.assertAlmostEqual(hi, 1067.5725, places=3)
+        self.assertLess(lo, 1017.8)
+        self.assertLessEqual(1017.8, hi)
+        self.assertLess(hi, 1121.25)  # mirata, non "tutta la coda"
+        corte = tail_recovery_zone(anchors, 10, 1121.25, ratio=1.0)
+        self.assertLess(corte[2], 1017.8)
+
+    def test_tail_recovery_zone_coda_ancorata_niente_zona(self):
+        from timeline import tail_recovery_zone
+
+        # L'ultima slide ha la sua ancora: non c'è nessun annuncio da cercare.
+        self.assertIsNone(tail_recovery_zone({5: 400.0, 10: 1000.0}, 10, 1121.25))
+
+    def test_tail_recovery_zone_senza_cadenza_niente_zona(self):
+        """Se la cadenza non è misurabile non si sa dove cercare: nessuna zona.
+
+        Una sola ancora (o più ancore tutte nello stesso istante) non dice
+        quanto dura una sezione: aprire una zona sarebbe tirare a indovinare su
+        tutta la coda, al costo di una ritrascrizione intera.
+        """
+        from timeline import tail_recovery_zone
+
+        self.assertIsNone(tail_recovery_zone({2: 135.0}, 10, 1121.25))
+        self.assertIsNone(tail_recovery_zone({2: 135.0, 3: 135.0}, 10, 1121.25))
+        self.assertIsNone(tail_recovery_zone({}, 10, 1121.25))
+        self.assertIsNone(tail_recovery_zone({2: 135.0, 3: 300.0}, 10, 0.0))
+
+    def test_tail_recovery_zone_non_esce_dall_audio(self):
+        from timeline import tail_recovery_zone
+
+        # Cadenza 600s, coda di 100s: la zona si ferma alla fine dell'audio.
+        self.assertEqual(
+            tail_recovery_zone({1: 0.0, 2: 600.0}, 3, 700.0),
+            ([3], 600.0, 700.0),
+        )
+
+    def test_tail_recovery_zone_troppo_corta_niente_zona(self):
+        from timeline import tail_recovery_zone
+
+        # 2s di zona: un annuncio non ci sta. Meglio niente che una
+        # ritrascrizione inutile.
+        self.assertIsNone(tail_recovery_zone({1: 0.0, 2: 600.0}, 3, 602.0))
+        # La stessa coda con una finestra sufficiente si apre.
+        self.assertEqual(tail_recovery_zone({1: 0.0, 2: 600.0}, 3, 606.0)[1:], (600.0, 606.0))
+
+    def test_tail_recovery_zone_piu_slide_mancanti_una_zona_sola(self):
+        """Con più slide scoperte la zona copre la prima (chiude la precedente).
+
+        Le altre restano stimate e il chiamante le dichiara nel log: coprire
+        tutte le mancanti vorrebbe dire ritrascrivere mezza coda.
+        """
+        from timeline import tail_recovery_zone
+
+        self.assertEqual(
+            tail_recovery_zone({1: 0.0, 2: 100.0}, 5, 1000.0),
+            ([3, 4, 5], 100.0, 250.0),
+        )
+
     def test_fused_number_coverage(self):
         """Audit blindato delle storpiature numeriche (run del 13/10).
 
@@ -1234,6 +1326,91 @@ class TestSlideAudioFlow(unittest.TestCase):
         )
         tl = extract_timeline_from_transcript(words, total_slides=4, total_duration=200.0, flow="slide-audio")
         self.assertEqual(tl, {1: 0.0, 2: 30.3, 3: 80.3, 4: 130.3})
+
+
+    def test_repetition_loops_frase_intera_ripetuta(self):
+        # La frase di 11 parole ripetuta 6 volte in 15.5s al posto di tre frasi
+        # diverse (run del 14/10: è così che l'annuncio "passiamo alla slide 10"
+        # è stato cancellato dal beam greedy). Il ciclo lungo va riconosciuto,
+        # altrimenti la zona non viene ritrascritta e il confine resta stimato.
+        from timeline import repetition_loops
+
+        frase = (
+            "la", "tecnologia", "è", "un", "semplice", "strumento", "al", "nostro",
+            "servizio", "o", "finisce",
+        )
+        passo = (116.0 - 100.5) / (len(frase) * 6 - 1)
+        words = []
+        for i in range(len(frase) * 6):
+            words.append({"word": frase[i % len(frase)], "start": 100.5 + i * passo})
+        zone = repetition_loops(words)
+        self.assertEqual(len(zone), 1)
+        self.assertAlmostEqual(zone[0][0], 100.5)
+        self.assertAlmostEqual(zone[0][1], 116.0)
+
+    def test_repetition_loops_frase_sotto_soglia_niente_zona(self):
+        # 5 ripetizioni: sotto la soglia (6) non è un'allucinazione del decoder.
+        from timeline import repetition_loops
+
+        frase = ("e", "chiudiamo", "con", "questa", "parte", "del", "discorso", "qui")
+        words = []
+        for i in range(len(frase) * 5):
+            words.append({"word": frase[i % len(frase)], "start": 10.0 + i * 0.3})
+        self.assertEqual(repetition_loops(words), [])
+
+    def test_repetition_loops_parlato_scorrevole_niente_zone(self):
+        # Parlato normale: nessun ciclo, nemmeno di parole singole.
+        from timeline import repetition_loops
+
+        words = _words(
+            [
+                ("il", 0.0), ("progetto", 0.3), ("nasce", 0.7), ("da", 1.0),
+                ("una", 1.3), ("esigenza", 1.7), ("concreta", 2.2), ("e", 2.6),
+                ("misurabile", 2.9), ("ogni", 3.4), ("volta", 3.8), ("che", 4.2),
+                ("il", 4.5), ("video", 4.9), ("esce", 5.3), ("sbagliato", 5.7),
+            ]
+        )
+        self.assertEqual(repetition_loops(words), [])
+
+    def test_annunci_fuori_timeline_annuncio_lontano(self):
+        # "Passiamo alla slide 10" a 900s, il confine dichiarato a 1058.2s: è
+        # esattamente il caso del 14/10. L'annuncio è un fatto, il confine una
+        # stima: la contraddizione va segnalata.
+        from timeline import announcements_off_timeline
+
+        words = _words(
+            [("passiamo", 899.0), ("alla", 899.4), ("slide", 899.8), ("dieci", 900.0)]
+        )
+        out = announcements_off_timeline(words, {10: 1058.2}, 10)
+        self.assertEqual([s for s, _, _ in out], [10])
+        self.assertAlmostEqual(out[0][1], 900.0)
+        self.assertAlmostEqual(out[0][2], 1058.2)
+
+    def test_annunci_fuori_timeline_richiamo_non_segnalato(self):
+        # "Come dicevo nella slide 4" è un richiamo: cade lontano dal confine
+        # per costruzione e senza verbo di transizione non è una contraddizione.
+        from timeline import announcements_off_timeline
+
+        words = _words(
+            [("come", 99.0), ("dicevo", 99.3), ("nella", 99.6), ("slide", 99.8), ("quattro", 100.0)]
+        )
+        self.assertEqual(announcements_off_timeline(words, {4: 300.0}, 10), [])
+
+    def test_annunci_fuori_timeline_annuncio_al_confine_non_segnalato(self):
+        # Annuncio e confine dichiarato quasi coincidono: nessuna contraddizione.
+        from timeline import announcements_off_timeline
+
+        words = _words(
+            [("passiamo", 100.0), ("alla", 100.4), ("slide", 100.7), ("quattro", 101.0)]
+        )
+        self.assertEqual(announcements_off_timeline(words, {4: 101.0}, 10), [])
+
+    def test_annunci_fuori_timeline_conteggio_non_segnalato(self):
+        # "Le 13 slide" è un conteggio, non una transizione: resta fuori.
+        from timeline import announcements_off_timeline
+
+        words = _words([("le", 799.0), ("13", 799.4), ("slide", 799.8)])
+        self.assertEqual(announcements_off_timeline(words, {13: 800.0}, 14), [])
 
 
 class TestAudioSlideFlow(unittest.TestCase):
@@ -3114,6 +3291,160 @@ class TestArtifactVerified(unittest.TestCase):
         self.assertTrue(_artifact_verified({"checked": 5, "coherent": 5, "mismatches": []}, 3))
 
 
+    def test_momenti_anteprima_sono_annuncio_e_confine(self):
+        # Il foglio di controllo deve mostrare i due istanti che il dubbio mette
+        # in contraddizione: dove il parlato annuncia la slide e dove la timeline
+        # la fa comparire.
+        from main import _boundary_preview_moments
+
+        momenti = _boundary_preview_moments({"slide": 10, "mention": 1017.8, "declared": 1058.2})
+        self.assertEqual(len(momenti), 2)
+        self.assertIn("slide 10", momenti[0][0])
+        self.assertIn("16m57s", momenti[0][0])
+        self.assertAlmostEqual(momenti[0][1], 1017.8)
+        self.assertIn("17m38s", momenti[1][0])
+        self.assertAlmostEqual(momenti[1][1], 1058.2)
+
+    def test_anteprima_scritta_e_legata_al_dubbio(self):
+        # Se il foglio viene scritto, il dubbio lo cita: senza questo il file
+        # resterebbe lì e l'utente non saprebbe dove guardare.
+        import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            td = pathlib.Path(tmp)
+            item: dict[str, object] = {"slide": 10, "mention": 1017.8, "declared": 1058.2}
+            with mock.patch(
+                "main.boundary_review_sheet", return_value=td / "review" / "foglio.png"
+            ) as sheet:
+                main._write_boundary_previews(td / "video.mp4", [item], td / "review")
+            self.assertEqual(item["preview"], str(td / "review" / "foglio.png"))
+            scritto = pathlib.Path(str(sheet.call_args[0][2]))
+            self.assertEqual(scritto.name, "confine_slide10_00.png")
+            self.assertEqual(sheet.call_args[0][0], td / "video.mp4")
+
+    def test_video_assente_niente_anteprima(self):
+        # Senza video (dry-run, output spostato) non c'è anteprima: il dubbio
+        # resta scritto ma non cita un file che non esiste.
+        import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            td = pathlib.Path(tmp)
+            item: dict[str, object] = {"slide": 10, "mention": 1017.8, "declared": 1058.2}
+            main._write_boundary_previews(td / "non_esiste.mp4", [item], td / "review")
+            self.assertNotIn("preview", item)
+
+
+class TestReviewOnly(unittest.TestCase):
+    """Revisione dei confini dubbi di una run già fatta (``main.py --review``).
+
+    Il report e la trascrizione sono in cache: la revisione legge quelli e
+    rigenera solo le anteprime dal video esistente. Questi test tengono fermo il
+    contratto del comando: cosa stampa, cosa NON ricalcola, e che non esploda
+    quando il report non c'è (una revisione che si rompe è peggio di nessuna
+    revisione: l'utente non sa più cosa guardare).
+    """
+
+    def _cache(self, td: pathlib.Path, *, mentions_off=None, words=None):
+        """Report (e trascrizione) di una run finta, scritti col serializzatore vero."""
+        import json
+
+        from pipeline_cache import save_sync_report
+
+        cache = td / ".cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        report: dict[str, object] = {
+            "audio_duration": 120.0,
+            "segments": [
+                {"slide": 1, "start": 0.0, "end": 60.0, "duration": 60.0},
+                {"slide": 2, "start": 60.0, "end": 120.0, "duration": 60.0},
+            ],
+            "anchors": {"anchored": 1, "transitions": 1, "unanchored_slides": [2]},
+        }
+        anchors = report["anchors"]
+        if mentions_off is not None and isinstance(anchors, dict):
+            anchors["mentions_off"] = mentions_off
+        save_sync_report(report, cache_dir=cache)
+        if words is not None:
+            (cache / "transcript_finta.json").write_text(
+                json.dumps({"words_raw": words}), encoding="utf-8"
+            )
+        return cache
+
+    def _review(self, cache: pathlib.Path, video: pathlib.Path) -> str:
+        import main
+
+        with mock.patch.object(main, "CACHE_DIR", cache), mock.patch(
+            "main.boundary_review_sheet", return_value=cache / "review" / "foglio.png"
+        ), self.assertLogs("slide2video", level="INFO") as logs:
+            main._review_boundary_doubts(video)
+        return "\n".join(logs.output)
+
+    def test_menzioni_salvate_stampate_con_anteprima(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            td = pathlib.Path(tmp)
+            cache = self._cache(
+                td,
+                mentions_off=[{"slide": 2, "mention": 1017.8, "declared": 1058.2}],
+            )
+            video = td / "video_finale.mp4"
+            video.write_bytes(b"video finto: serve solo che esista")
+            out = self._review(cache, video)
+        self.assertIn("REVISIONE DEI CONFINI", out)
+        self.assertIn("Confini ancorati nell'ultima run: 1 su 1", out)
+        self.assertIn("slide 2 viene annunciata a 16m57s", out)
+        self.assertIn("il video la mostra da 17m38s", out)
+        self.assertIn("anteprima:", out)
+
+    def test_report_vecchio_ricalcola_dalla_trascrizione(self):
+        # Report scritto PRIMA del controllo incrociato (come quello del 14/10):
+        # `mentions_off` non c'è, quindi si ricava dalle parole in cache.
+        with tempfile.TemporaryDirectory() as tmp:
+            td = pathlib.Path(tmp)
+            words = [
+                ("passiamo", 300.0), ("alla", 300.4), ("slide", 300.7),
+                ("2", 300.9), ("poi", 301.4),
+            ]
+            cache = self._cache(
+                td, words=[{"word": w, "start": t} for w, t in words]
+            )
+            out = self._review(cache, td / "video_finale.mp4")
+        self.assertIn("slide 2 viene annunciata a 5m01s", out)
+        self.assertIn("il video la mostra da 1m00s", out)
+        self.assertIn("dalle parole in cache", out)
+
+    def test_senza_contraddizioni_dichiara_il_confine_stimato(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            td = pathlib.Path(tmp)
+            cache = self._cache(td, mentions_off=[])
+            out = self._review(cache, td / "video_finale.mp4")
+        self.assertIn("Confini stimati dal contenuto", out)
+        self.assertIn("la slide 2", out)
+        self.assertIn("niente da rivedere", out)
+
+    def test_video_assente_dubbi_senza_anteprima(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            td = pathlib.Path(tmp)
+            cache = self._cache(
+                td, mentions_off=[{"slide": 2, "mention": 1017.8, "declared": 1058.2}]
+            )
+            out = self._review(cache, td / "non_esiste.mp4")
+        self.assertIn("Video assente", out)
+        self.assertIn("slide 2 viene annunciata", out)
+
+    def test_senza_report_lo_dice_e_non_esplode(self):
+        import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            td = pathlib.Path(tmp)
+            cache = td / ".cache"
+            cache.mkdir(parents=True, exist_ok=True)
+            with mock.patch.object(main, "CACHE_DIR", cache), self.assertLogs(
+                "slide2video", level="ERROR"
+            ) as logs:
+                main._review_boundary_doubts(td / "video_finale.mp4")
+        self.assertIn("Nessun report da rivedere", "\n".join(logs.output))
+
+
 class TestWeakSignalSurvivesFrameCheck(unittest.TestCase):
     """Il dubbio del motore resta anche con l'artefatto verificato.
 
@@ -3438,6 +3769,77 @@ class TestPlainSummary(unittest.TestCase):
         out = self._render(verdicts={3: "incerto"})
         self.assertNotIn("Durata garantita dall'anti-flicker", out)
         self.assertIn("slide 3 la durata è anomala", out)
+
+
+    def test_annuncio_lontano_dal_confine_diventa_un_dubbio(self):
+        # Caso reale del 14/10: annuncio a 16m56s, confine dichiarato a 17m38s.
+        import main
+
+        anchors = {
+            "anchored": 8,
+            "transitions": 9,
+            "unanchored_slides": [10],
+            "mentions_off": [{"slide": 3, "mention": 1016.5, "declared": 1058.2}],
+        }
+        with self.assertLogs("slide2video", level="INFO") as logs:
+            main._log_plain_summary(
+                [60.0, 60.0, 60.0],
+                [1, 2, 3],
+                180.0,
+                anchors=anchors,
+            )
+        out = "\n".join(logs.output)
+        self.assertIn("Da controllare a mano", out)
+        self.assertIn("slide 3", out)
+        self.assertIn("l'annuncio è un fatto", out)
+        self.assertNotIn("risultata solida", out)
+
+    def test_annunci_al_confine_niente_dubbio(self):
+        # Nessuna contraddizione fra annunci e confini: nessun dubbio inventato.
+        import main
+
+        anchors = {
+            "anchored": 2,
+            "transitions": 2,
+            "unanchored_slides": [3],
+            "mentions_off": [],
+        }
+        with self.assertLogs("slide2video", level="INFO") as logs:
+            main._log_plain_summary(
+                [60.0, 60.0, 60.0],
+                [1, 2, 3],
+                180.0,
+                anchors=anchors,
+            )
+        out = "\n".join(logs.output)
+        self.assertIn("nessuno, la sincronizzazione è", out)
+        self.assertNotIn("l'annuncio è un fatto", out)
+
+    def test_dubbio_sui_confini_allega_l_anteprima(self):
+        import main
+
+        anchors = {
+            "anchored": 1,
+            "transitions": 2,
+            "unanchored_slides": [3],
+            "mentions_off": [
+                {
+                    "slide": 3,
+                    "mention": 1016.5,
+                    "declared": 1058.2,
+                    "preview": ".cache/review/confine_slide03_00.png",
+                }
+            ],
+        }
+        with self.assertLogs("slide2video", level="INFO") as logs:
+            main._log_plain_summary(
+                [60.0, 60.0, 60.0],
+                [1, 2, 3],
+                180.0,
+                anchors=anchors,
+            )
+        out = "\n".join(logs.output)
+        self.assertIn("anteprima: .cache/review/confine_slide03_00.png", out)
 
 
 class TestAnomalousDurations(unittest.TestCase):
@@ -5362,3 +5764,427 @@ class TestFloorDurations(unittest.TestCase):
         self.assertEqual(_floor_shortened(None), {})
         self.assertEqual(_floor_shortened({"shortened": "non una lista"}), {})
         self.assertEqual(_floor_shortened({"shortened": ["non un dict"]}), {})
+
+
+# =====================================================================
+# ROBUSTEZZA DEL RAFFINAMENTO E DICHIARAZIONE DEI CONFINI STIMATI
+# =====================================================================
+class TestRefineRobustness(unittest.TestCase):
+    """Il raffinamento sposta un confine solo se la misura lo sostiene.
+
+    Caso reale del 14/10 (slide 10, unico confine stimato della run): nella
+    finestra in cui il confine viene deciso la curva del punteggio ha deviazione
+    standard 0.013 (±30s) / 0.019 (±45s), e le decisioni prese in due run
+    consecutive valevano 0.021-0.023 (circa 1.8sigma sul MAD) e 0.054. Un margine
+    assoluto di 0.01 non distingue un confine dal rumore della propria misura:
+    qui si verifica che il margine venga confrontato col rumore MISURATO nella
+    stessa finestra e che il confine non si muova quando ci sta dentro.
+    """
+
+    def setUp(self):
+        import semantic_sync
+
+        semantic_sync.reset_refine_diagnostics()
+        self.addCleanup(semantic_sync.reset_refine_diagnostics)
+
+    @staticmethod
+    def _temi(temi, dim: int = 16, bias: float = 4.0):
+        """Embedder finto RUMOROSO: tema nel testo + vettore pseudocasuale per testo.
+
+        Il rumore per-testo è quello che rende il fixture realistico: con
+        vettori one-hot i punteggi diventano identici dentro una zona omogenea,
+        il MAD collassa a zero e la soglia sul rumore non ha più niente da
+        misurare (proprio il caso che i vettori veri non producono).
+        """
+
+        def embed_fn(texts):
+            vecs = []
+            for text in texts:
+                rng = np.random.default_rng(zlib.crc32(text.encode()))
+                v = rng.normal(size=dim).astype(np.float32)
+                for i, tema in enumerate(temi):
+                    v[i] += bias * text.count(tema)
+                vecs.append(v / max(float(np.linalg.norm(v)), 1e-9))
+            return np.stack(vecs)
+
+        return embed_fn
+
+    @staticmethod
+    def _due_sezioni(cambio: int, confine: int) -> tuple[list, list]:
+        """Parlato di tema_a fino a ``cambio``, tema_b dopo; confine dichiarato."""
+        words = _words(
+            [("tema_a", float(t)) for t in range(0, cambio, 2)]
+            + [("tema_b", float(t)) for t in range(cambio, 100, 2)]
+        )
+        segments = [
+            {"slide": 1, "start": 0.0, "end": float(confine)},
+            {"slide": 2, "start": float(confine), "end": 100.0},
+        ]
+        return words, segments
+
+    def test_guadagno_dentro_il_rumore_non_sposta_e_lo_dichiara(self):
+        # Il cambio reale di argomento sta 6s dopo il confine dichiarato, ma il
+        # punteggio si muove da solo più di così (misurato su questo fixture:
+        # margine 0.51 contro 2x0.30 di rumore, cioè 1.7sigma): il confine resta, e
+        # la decisione dice perché (prima si sarebbe spostato di 6s senza dirlo).
+        from semantic_sync import refine_diagnostics
+
+        words, segments = self._due_sezioni(56, 50)
+        out = refine_llm_segment_boundaries(
+            segments,
+            words,
+            ["tema_a", "tema_b"],
+            self._temi(["tema_a", "tema_b"]),
+            window_seconds=30.0,
+            min_segment_seconds=5.0,
+            context_seconds=10.0,
+        )
+        self.assertAlmostEqual(out[1]["start"], 50.0)
+        voce = next(d for d in refine_diagnostics() if d["slide"] == 2)
+        self.assertEqual(voce["decision"], "tenuto: margine dentro il rumore")
+        self.assertLess(float(voce["sigma"]), 2.0)
+        self.assertGreater(float(voce["margin"]), 0.0)
+
+    def test_guadagno_fuori_dal_rumore_sposta(self):
+        # Cambio di argomento netto (40s) lontano dal confine dichiarato (30s):
+        # il picco è molto più alto della dispersione, quindi si sposta.
+        from semantic_sync import refine_diagnostics
+
+        words, segments = self._due_sezioni(40, 30)
+        out = refine_llm_segment_boundaries(
+            segments,
+            words,
+            ["tema_a", "tema_b"],
+            self._temi(["tema_a", "tema_b"]),
+            window_seconds=30.0,
+            min_segment_seconds=5.0,
+            context_seconds=10.0,
+        )
+        # Il cambio è a 40s: il confine si sposta verso di lui (il fixture
+        # arrotonda al timestamp di parola, quindi non si chiede il secondo).
+        self.assertGreater(out[1]["start"], 30.0)
+        self.assertAlmostEqual(out[0]["end"], out[1]["start"])
+        voce = next(d for d in refine_diagnostics() if d["slide"] == 2)
+        self.assertEqual(voce["decision"], "spostato")
+        self.assertGreaterEqual(float(voce["sigma"]), 2.0)
+
+    def test_decisione_instabile_non_sposta(self):
+        # La prova di stabilità è un cancello: se il candidato vince solo con la
+        # finestra stretta, il confine resta dov'è (qui la prova è forzata).
+        from semantic_sync import refine_diagnostics
+
+        words, segments = self._due_sezioni(40, 30)
+        with mock.patch(
+            "semantic_sync._refine_wins_under_perturbation", return_value=False
+        ):
+            out = refine_llm_segment_boundaries(
+                segments,
+                words,
+                ["tema_a", "tema_b"],
+                self._temi(["tema_a", "tema_b"]),
+                window_seconds=30.0,
+                min_segment_seconds=5.0,
+                context_seconds=10.0,
+            )
+        self.assertAlmostEqual(out[1]["start"], 30.0)
+        voce = next(d for d in refine_diagnostics() if d["slide"] == 2)
+        self.assertEqual(voce["decision"], "tenuto: vince solo a finestra stretta")
+
+    def test_perturbazione_finestre_vuote_non_vince(self):
+        # Ai bordi dell'audio la finestra allargata non contiene parlato: senza
+        # poter verificare la stabilità non si sposta.
+        import semantic_sync as ss
+
+        words = _words([("tema_a", 1.0), ("tema_b", 1.5)])
+        wt = [float(w["start"]) for w in words]
+        self.assertFalse(
+            ss._refine_wins_under_perturbation(
+                words, wt, 0, 1, 1.5, 1.0, np.eye(2, dtype=np.float32), self._temi(["a", "b"]), 10.0
+            )
+        )
+
+    def test_perturbazione_embedding_fallito_non_vince(self):
+        import semantic_sync as ss
+
+        words = _words([("tema_a", float(t)) for t in range(0, 40, 2)])
+        wt = [float(w["start"]) for w in words]
+
+        def exploding(texts):
+            raise RuntimeError("modello non disponibile")
+
+        self.assertFalse(
+            ss._refine_wins_under_perturbation(
+                words, wt, 0, 1, 30.0, 20.0, np.eye(2, dtype=np.float32), exploding, 10.0
+            )
+        )
+
+    def test_riparazione_guidata_non_bloccata_dalle_soglie(self):
+        # La riparazione guidata dai frame sa già che il confine è sbagliato (il
+        # video mostrava un'altra slide): l'evidenza sostituisce il punteggio,
+        # quindi le soglie di robustezza non la bloccano — mentre il raffinamento
+        # libero, sulle stesse parole, non si muove.
+        from semantic_sync import repair_segments_from_frame_mismatches
+
+        words, segments = self._due_sezioni(40, 60)
+        mismatches = [{"time": 55.0, "shown": 2, "similarity": 0.9}]
+        with mock.patch(
+            "semantic_sync._refine_wins_under_perturbation", return_value=False
+        ):
+            refined, applied = repair_segments_from_frame_mismatches(
+                segments,
+                mismatches,
+                words,
+                ["tema_a", "tema_b"],
+                self._temi(["tema_a", "tema_b"]),
+                min_segment_seconds=5.0,
+                context_seconds=10.0,
+            )
+            libero = refine_llm_segment_boundaries(
+                segments,
+                words,
+                ["tema_a", "tema_b"],
+                self._temi(["tema_a", "tema_b"]),
+                window_seconds=30.0,
+                min_segment_seconds=5.0,
+                context_seconds=10.0,
+            )
+        self.assertEqual(len(applied), 1)
+        self.assertLess(float(applied[0]["new_start"]), 60.0)
+        self.assertLess(float(refined[1]["start"]), 60.0)
+        self.assertAlmostEqual(float(libero[1]["start"]), 60.0)
+        self.assertEqual(applied[0]["slide"], 2)
+
+    def test_diagnostica_per_confine_registrata_con_i_numeri(self):
+        # Ogni confine valutato lascia margine, rumore locale e sigma: è il dato
+        # che permette di dire QUALE confine è debole invece di un solo numero
+        # globale che non dice dove guardare.
+        from semantic_sync import refine_diagnostics
+
+        words, segments = self._due_sezioni(40, 30)
+        refine_llm_segment_boundaries(
+            segments,
+            words,
+            ["tema_a", "tema_b"],
+            self._temi(["tema_a", "tema_b"]),
+            window_seconds=30.0,
+            min_segment_seconds=5.0,
+            context_seconds=10.0,
+        )
+        voce = next(d for d in refine_diagnostics() if d["slide"] == 2)
+        for campo in ("current", "best", "margin", "scatter", "sigma", "decision"):
+            self.assertIn(campo, voce)
+        self.assertGreater(float(voce["scatter"]), 0.0)
+
+
+class TestRefineConEmbeddingInCache(unittest.TestCase):
+    """Le regole nuove girano anche quando gli embedding arrivano dalla cache.
+
+    È la classe di errori che nessuno vedrebbe: una regola messa per sbaglio
+    dietro un ``if not from_cache`` non si applicherebbe mai alle run già fatte
+    (proprio quelle che si rivedono per recuperare un'ancora), e la differenza
+    non comparirebbe da nessuna parte.
+    """
+
+    def setUp(self):
+        import semantic_sync
+
+        self._ss = semantic_sync
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._orig_dir = semantic_sync._EMBED_CACHE_DIR
+        semantic_sync._EMBED_CACHE_DIR = pathlib.Path(self._tmp.name)
+        semantic_sync.reset_embed_cache()
+        semantic_sync.reset_refine_diagnostics()
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        self._ss._EMBED_CACHE_DIR = self._orig_dir
+        self._ss.set_embed_cache_enabled(True)
+        self._ss.reset_embed_cache()
+        self._ss.reset_refine_diagnostics()
+
+    @staticmethod
+    def _counting_embed():
+        """Embedder finto rumoroso (stessa forma dei test di robustezza) + conteggio."""
+        calls = []
+
+        def _embed(texts):
+            calls.append(list(texts))
+            out = []
+            for text in texts:
+                rng = np.random.default_rng(zlib.crc32(text.encode()))
+                v = rng.normal(size=16).astype(np.float32)
+                for i, tema in enumerate(("tema_a", "tema_b")):
+                    v[i] += 4.0 * text.count(tema)
+                out.append(v / max(float(np.linalg.norm(v)), 1e-9))
+            return np.stack(out)
+
+        _embed.embed_id = "modello-di-prova"
+        _embed.calls = calls
+        return _embed
+
+    def test_secondo_giro_dagli_stessi_embedding_stesse_decisioni(self):
+        from semantic_sync import refine_diagnostics
+
+        words = _words(
+            [("tema_a", float(t)) for t in range(0, 40, 2)]
+            + [("tema_b", float(t)) for t in range(40, 100, 2)]
+        )
+        segments = [
+            {"slide": 1, "start": 0.0, "end": 30.0},
+            {"slide": 2, "start": 30.0, "end": 100.0},
+        ]
+        embed = self._counting_embed()
+        primo = refine_llm_segment_boundaries(
+            segments,
+            words,
+            ["tema_a", "tema_b"],
+            embed,
+            window_seconds=30.0,
+            min_segment_seconds=5.0,
+            context_seconds=10.0,
+        )
+        diagnosi_prima = refine_diagnostics()
+        self._ss.reset_embed_cache()  # nuova run nello stesso processo, disco pieno
+        secondo = refine_llm_segment_boundaries(
+            segments,
+            words,
+            ["tema_a", "tema_b"],
+            embed,
+            window_seconds=30.0,
+            min_segment_seconds=5.0,
+            context_seconds=10.0,
+        )
+        diagnosi_dopo = refine_diagnostics()
+        self.assertEqual(primo, secondo)
+        self.assertEqual(diagnosi_prima, diagnosi_dopo)
+        self.assertEqual(diagnosi_dopo[0]["decision"], "spostato")
+        # Il primo giro fa tre chiamate (slide, finestre dei candidati, prova di
+        # stabilità); il secondo ne fa due in meno perché gli embedding delle
+        # SLIDE arrivano dalla cache (content-addressed). Le finestre di parlato
+        # si ricalcolano: sono il lavoro per-confine, non una cache. Il test
+        # tiene ferme entrambe le cose, così un "salto" introdotto per sbaglio
+        # nella cache calda si vede subito.
+        self.assertEqual(len(embed.calls), 5)
+
+
+class TestConfiniStimatiNonSostenuti(unittest.TestCase):
+    """Il riepilogo dichiara i confini stimati che il contenuto non sostiene.
+
+    Caso reale del 14/10: la slide 10 era l'unico confine stimato e il video la
+    mostrava 40s dopo l'annuncio. Il riepilogo la elencava come tutte le altre,
+    quindi una stima non sostenuta era indistinguibile da una misurata.
+    """
+
+    def test_durata_molto_sotto_la_mediana_su_confine_stimato(self):
+        from main import _estimated_boundary_facts
+
+        # Durate reali della run del 14/10 (slide 10 = 63.1s su mediana 110.6s).
+        durations = [135.0, 121.25, 108.4, 112.72, 110.39, 101.22, 110.84, 100.42, 157.94, 63.07]
+        slide_ids = list(range(1, 11))
+        fatti = _estimated_boundary_facts(durations, slide_ids, {10}, [])
+        self.assertEqual([f["slide"] for f in fatti], [10])
+        self.assertEqual(fatti[0]["duration"], 63.1)
+        self.assertAlmostEqual(float(fatti[0]["median"]), 110.62, places=1)
+        self.assertLess(float(fatti[0]["ratio"]), 0.6)
+
+    def test_confine_ancorato_non_entra(self):
+        from main import _estimated_boundary_facts
+
+        durations = [100.0, 60.0, 100.0]
+        # La slide 2 è corta ma il suo inizio è un annuncio pronunciato: non è
+        # una stima da dubitare, è un fatto.
+        self.assertEqual(_estimated_boundary_facts(durations, [1, 2, 3], set(), []), [])
+
+    def test_confine_sostenuto_e_durata_normale_non_entrano(self):
+        from main import _estimated_boundary_facts
+
+        durations = [100.0, 100.0, 100.0]
+        refine = [
+            {"slide": 2, "margin": 0.4, "scatter": 0.013, "sigma": 30.0, "decision": "spostato"}
+        ]
+        self.assertEqual(_estimated_boundary_facts(durations, [1, 2, 3], {2}, refine), [])
+
+    def test_confine_non_sostenuto_entra_anche_se_la_durata_e_normale(self):
+        from main import _estimated_boundary_facts
+
+        durations = [100.0, 100.0, 100.0]
+        refine = [
+            {
+                "slide": 2,
+                "margin": 0.007,
+                "scatter": 0.013,
+                "sigma": 0.5,
+                "decision": "tenuto: margine dentro il rumore",
+            }
+        ]
+        fatti = _estimated_boundary_facts(durations, [1, 2, 3], {2}, refine)
+        self.assertEqual([f["slide"] for f in fatti], [2])
+        self.assertEqual(fatti[0]["sigma"], 0.5)
+
+    def test_confine_non_misurabile_entra_col_motivo(self):
+        from main import _estimated_boundary_facts, _weak_estimate_text
+
+        durations = [100.0, 100.0]
+        refine = [
+            {"slide": 2, "decision": "non valutabile: finestre di parlato vuote (silenzi)"}
+        ]
+        fatti = _estimated_boundary_facts(durations, [1, 2], {2}, refine)
+        self.assertEqual([f["slide"] for f in fatti], [2])
+        testo = _weak_estimate_text(fatti[0])
+        self.assertIn("non si è potuto misurare", testo)
+        self.assertIn("finestre di parlato vuote", testo)
+        self.assertIn("non è un annuncio 'slide N'", testo)
+
+    def test_durata_garantita_dal_pavimento_esclusa(self):
+        from main import _estimated_boundary_facts
+
+        # La durata della slide 2 è una scelta di leggibilità (il pavimento
+        # anti-flicker l'ha allungata): non è una misura da confrontare con la
+        # mediana, e viene già dichiarata altrove.
+        durations = [100.0, 8.0, 100.0]
+        floor_report = {
+            "min_seconds": 8.0,
+            "guaranteed": [{"slide": 2, "before": 2.0, "duration": 8.0}],
+            "shortened": [],
+            "unguaranteed": [],
+        }
+        self.assertEqual(
+            _estimated_boundary_facts(durations, [1, 2, 3], {2}, [], floor_report), []
+        )
+
+    def test_il_riepilogo_stampa_il_confine_stimato_non_sostenuto(self):
+        import main
+
+        refine = [
+            {
+                "slide": 3,
+                "margin": 0.008,
+                "scatter": 0.013,
+                "sigma": 0.6,
+                "decision": "tenuto: margine dentro il rumore",
+            }
+        ]
+        anchors = {"unanchored_slides": [3], "anchored": 1, "transitions": 2}
+        with self.assertLogs("slide2video", level="INFO") as logs:
+            main._log_plain_summary(
+                [100.0, 100.0, 60.0],
+                [1, 2, 3],
+                260.0,
+                anchors=anchors,
+                refine=refine,
+            )
+        out = "\n".join(logs.output)
+        self.assertIn("la slide 3", out)
+        self.assertIn("0.6 volte il rumore locale", out)
+        self.assertIn("contro una mediana di", out)
+
+    def test_senza_diagnostica_il_riepilogo_non_inventa_dubbi(self):
+        import main
+
+        anchors = {"unanchored_slides": [3], "anchored": 1, "transitions": 2}
+        with self.assertLogs("slide2video", level="INFO") as logs:
+            main._log_plain_summary([100.0, 100.0, 100.0], [1, 2, 3], 300.0, anchors=anchors)
+        out = "\n".join(logs.output)
+        self.assertNotIn("volte il rumore locale", out)
+        self.assertIn("nessuno, la sincronizzazione è risultata solida", out)

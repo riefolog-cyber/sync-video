@@ -1952,6 +1952,113 @@ def merge_short_segments(
     return final
 
 
+# ---------------------------------------------------------------------
+# ROBUSTEZZA DEL RAFFINAMENTO: il margine va misurato in unità di rumore
+# ---------------------------------------------------------------------
+# Il raffinamento sposta un confine quando un candidato "batte" quello attuale
+# di un margine fisso (0.01). Misurato sul caso reale del 14/10 (slide 10, il
+# confine stimato 40s in ritardo), quel margine è una frazione del rumore: nello
+# stesso intorno in cui il confine viene deciso, la curva del punteggio ha
+# deviazione standard 0.013 (±30s) / 0.019 (±45s) e le due decisioni discusse
+# in due run consecutive valevano 0.021-0.023 e 0.054, cioè 1.6sigma e 4.1sigma. Un
+# margine assoluto non può distinguere "questo candidato è meglio" da "questo
+# punteggio si muove così da solo".
+#
+# Quindi la soglia si esprime in unità della dispersione MISURATA nella stessa
+# finestra: spostare richiede `REFINE_STABILITY_SIGMA` volte il rumore locale.
+# È diverso (ed è il motivo per cui non si alza il margine a 0.05): la banda
+# 0.05-0.10 documentata in config.py è misurata su un'altra scala (`avg_z`),
+# mentre qui il rumore viene misurato sulla scala della decisione che si sta
+# prendendo. Sul caso reale questo respinge i margini da 1.8sigma senza buttare via
+# le correzioni vere (che sono grandi, non piccole).
+#
+# La dispersione è un MAD (mediana degli scarti assoluti, x 1.4826 per parlare
+# la stessa unità della deviazione standard) e non una deviazione standard. Il
+# motivo è misurato: un gruppo di candidati degeneri — parlato che non somiglia
+# a nessuna delle due slide, punteggio ~0 — gonfia la deviazione standard e fa
+# rifiutare correzioni vere. Sul caso sintetico dei quattro temi la correzione
+# giusta (2.0 contro 1.0, confine al punto in cui cambia l'argomento) vale
+# 1.60sigma con la deviazione standard e 2.78sigma col MAD. Sul caso reale i due numeri
+# quasi coincidono (0.53sigma contro 0.47sigma), quindi il MAD non indebolisce la
+# soglia: toglie solo l'effetto dei candidati che non c'entrano.
+REFINE_STABILITY_SIGMA = 2.0
+
+# Quanto si allarga la finestra di contesto nella prova di stabilità: il
+# candidato vincente deve vincere anche guardando più parlato ai due lati.
+REFINE_PERTURBATION_SCALE = 1.5
+
+# Diagnostica dell'ultimo raffinamento, per slide: quello che il punteggio ha
+# saputo dire su ogni confine (margine, rumore, decisione). Accumula fra le
+# chiamate della stessa run tenendo l'ULTIMA decisione per slide, che è quella
+# applicata: la riparazione guidata dai frame, se interviene, sostituisce la
+# voce della slide che ha corretto.
+_REFINE_DIAGNOSTICS: dict[int, dict[str, object]] = {}
+
+
+def refine_diagnostics() -> list[dict[str, object]]:
+    """Decisioni del raffinamento confini, una per slide (elenco ordinato).
+
+    Risponde a una domanda che prima non aveva risposta: *quali* confini la
+    misura sostiene e quali no. Il riepilogo finale la usa per non presentare
+    come misurate le slide il cui confine è solo stimato (margine sotto il
+    rumore locale) — è il difetto che il progetto combatte da sempre.
+    """
+    return [dict(_REFINE_DIAGNOSTICS[s]) for s in sorted(_REFINE_DIAGNOSTICS)]
+
+
+def reset_refine_diagnostics() -> None:
+    """Azzera la diagnostica (usato dai test, come per gli altri stati di modulo)."""
+    _REFINE_DIAGNOSTICS.clear()
+
+
+def _record_refine(slide: int, **fields: object) -> None:
+    """Registra la decisione su un confine (l'ultima per slide vince)."""
+    _REFINE_DIAGNOSTICS[slide] = {"slide": slide, **fields}
+
+
+def _refine_wins_under_perturbation(
+    words: Sequence[Word],
+    word_times: Sequence[float],
+    prev_slide: int,
+    next_slide: int,
+    best_t: float,
+    cur_t: float,
+    slide_emb: np.ndarray,
+    embed_fn: EmbedFn,
+    context_seconds: float,
+) -> bool:
+    """True se il candidato migliore vince ANCHE con la finestra allargata.
+
+    Un picco che sparisce guardando un po' più di parlato non è un confine:
+    è dove il rumore ha deciso. La prova costa quattro embedding e si paga solo
+    quando il margine ha già superato la soglia sul rumore locale.
+
+    Restituisce False (confine non spostato) anche quando la prova non è
+    valutabile — finestre vuote ai bordi dell'audio, embedding fallito, forma
+    inattesa: senza poter verificare la stabilità non si sposta, perché la
+    fiducia nel punteggio è esattamente ciò che qui manca.
+    """
+    ctx = context_seconds * REFINE_PERTURBATION_SCALE
+    texts: list[str] = []
+    for t in (best_t, cur_t):
+        before = _window_words(words, word_times, t - ctx, t)
+        after = _window_words(words, word_times, t, t + ctx)
+        if not before or not after:
+            return False
+        texts.extend((before, after))
+    try:
+        embs = np.asarray(embed_fn(texts), dtype=np.float32)
+    except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
+        log.debug("   [LLM/Refine] Prova di stabilità non calcolabile (%s).", e)
+        return False
+    if embs.ndim != 2 or embs.shape[0] != 4:
+        return False
+    embs = (embs / np.maximum(np.linalg.norm(embs, axis=1, keepdims=True), 1e-9)).astype(np.float32)
+    best_score = float(embs[0] @ slide_emb[prev_slide]) + float(embs[1] @ slide_emb[next_slide])
+    cur_score = float(embs[2] @ slide_emb[prev_slide]) + float(embs[3] @ slide_emb[next_slide])
+    return best_score > cur_score
+
+
 def refine_llm_segment_boundaries(
     segments: list[dict[str, Any]],
     words: list[Word],
@@ -1961,6 +2068,7 @@ def refine_llm_segment_boundaries(
     min_segment_seconds: float = DEFAULT_MIN_SEGMENT_SECONDS,
     context_seconds: float = 10.0,
     margin: float = 0.01,
+    stability_sigma: float = REFINE_STABILITY_SIGMA,
     refine_slides: Collection[int] | None = None,
     anchors: dict[int, float] | None = None,
     max_candidates: int = 48,
@@ -1974,6 +2082,16 @@ def refine_llm_segment_boundaries(
     la slide uscente + similarità della finestra appena DOPO con la slide
     entrante. Se lo spostamento non migliora di almeno ``margin`` rispetto al
     confine corrente, il confine resta dov'è.
+
+    ``margin`` da solo non basta, perché è un numero assoluto mentre il
+    punteggio si muove da solo: un candidato viene accettato solo se batte il
+    confine attuale di almeno ``stability_sigma`` volte la dispersione ROBUSTA
+    (MAD) dei punteggi dei candidati della stessa finestra (il rumore locale, misurato
+    dove si sta decidendo — vedi ``REFINE_STABILITY_SIGMA``) **e** se vince
+    ancora con la finestra di contesto allargata di
+    ``REFINE_PERTURBATION_SCALE``. Un picco largo una frazione di sigma non è
+    un confine: è dove il punteggio è passato per caso. Ogni decisione
+    (spostato / tenuto e perché) resta in ``refine_diagnostics()``.
 
     ``max_candidates`` limita quanti timestamp-candidato vengono valutati per
     confine (campionamento uniforme con stride, confine corrente SEMPRE
@@ -2036,15 +2154,32 @@ def refine_llm_segment_boundaries(
         t_current = float(out[i]["start"])
         lo = max(float(out[i - 1]["start"]) + min_segment_seconds, t_current - window_seconds)
         hi = min(float(out[i]["end"]) - min_segment_seconds, t_current + window_seconds)
-        if search_window is not None and int(out[i]["slide"]) in search_window:
+        # Un confine la cui posizione è GUIDATA dall'esterno (verifica del
+        # video) non ha bisogno delle soglie sul punteggio per sapere che va
+        # spostato: l'evidenza dice che il video mostrava un'altra slide, quindi
+        # il confine è sbagliato per forza, e il punteggio serve solo a scegliere
+        # DOVE metterlo dentro la finestra che l'evidenza consente. Le due prove
+        # di robustezza valgono quindi per il raffinamento libero (dove è il
+        # punteggio a decidere se e dove muovere), non per la riparazione.
+        window = (
+            search_window.get(int(out[i]["slide"])) if search_window is not None else None
+        )
+        guided = window is not None
+        if window is not None:
             # Finestra imposta dall'esterno (verifica del video): il confine
             # può uscire dalla finestra simmetrica di default, ma mai dai
             # limiti dei segmenti adiacenti né dall'inclusione del confine
             # attuale (serve come termine di confronto).
-            wlo, whi = search_window[int(out[i]["slide"])]
+            wlo, whi = window
             lo = max(float(out[i - 1]["start"]) + min_segment_seconds, min(float(wlo), t_current))
             hi = min(float(out[i]["end"]) - min_segment_seconds, max(float(whi), t_current))
         if hi <= lo:
+            _record_refine(
+                int(out[i]["slide"]),
+                from_slide=prev_slide + 1,
+                current=round(t_current, 2),
+                decision="non valutabile: nessun punto dove spostare il confine",
+            )
             continue
         candidates = sorted({t_current, *[t for t in word_times if lo <= t <= hi]})
         # Campionamento con stride: oltre max_candidates timestamp, valuta un
@@ -2056,6 +2191,12 @@ def refine_llm_segment_boundaries(
             sampled.add(t_current)
             candidates = sorted(sampled)
         if len(candidates) < 2:
+            _record_refine(
+                int(out[i]["slide"]),
+                from_slide=prev_slide + 1,
+                current=round(t_current, 2),
+                decision="non valutabile: un solo timestamp candidato",
+            )
             continue
 
         # Finestre locali per ogni candidato. I candidati con una finestra
@@ -2071,10 +2212,23 @@ def refine_llm_segment_boundaries(
                 continue
             cand_pairs.append((t, before, after))
         if len(cand_pairs) < 2:
+            _record_refine(
+                int(out[i]["slide"]),
+                from_slide=prev_slide + 1,
+                current=round(t_current, 2),
+                decision="non valutabile: finestre di parlato vuote (silenzi)",
+            )
             continue
         cur_pair = next((p for p in cand_pairs if p[0] == t_current), None)
         if cur_pair is None:
-            continue  # finestre vuote anche sul confine attuale: niente confronto equo
+            # finestre vuote anche sul confine attuale: niente confronto equo
+            _record_refine(
+                int(out[i]["slide"]),
+                from_slide=prev_slide + 1,
+                current=round(t_current, 2),
+                decision="non valutabile: nessun confronto equo col confine attuale",
+            )
+            continue
 
         # Testi deduplicati (un solo batch di embedding).
         texts: list[str] = []
@@ -2095,6 +2249,12 @@ def refine_llm_segment_boundaries(
             embs = (embs / np.maximum(np.linalg.norm(embs, axis=1, keepdims=True), 1e-9)).astype(np.float32)
         except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
             log.warning("   [LLM/Refine] Embedding finestre non disponibile: confini invariati (%s).", e)
+            _record_refine(
+                int(out[i]["slide"]),
+                from_slide=prev_slide + 1,
+                current=round(t_current, 2),
+                decision="non valutabile: embedding delle finestre fallito",
+            )
             continue
 
         scores = [
@@ -2103,7 +2263,43 @@ def refine_llm_segment_boundaries(
         ]
         best_idx = int(np.argmax(scores))
         cur_idx = next(i for i, p in enumerate(indexed) if p[0] == t_current)
-        if best_idx == cur_idx or scores[best_idx] <= scores[cur_idx] + margin:
+        delta = float(scores[best_idx] - scores[cur_idx])
+        # Rumore locale: la dispersione dei punteggi dei candidati nella STESSA
+        # finestra in cui si sta decidendo. Non è una costante presa altrove: è
+        # quanto questo punteggio si muove da solo su questo materiale. È un
+        # MAD (vedi REFINE_STABILITY_SIGMA): robusto ai candidati degeneri.
+        median_score = float(np.median(scores))
+        scatter = 1.4826 * float(np.median([abs(s - median_score) for s in scores]))
+        needed = max(margin, stability_sigma * scatter)
+        record: dict[str, object] = {
+            "from_slide": prev_slide + 1,
+            "current": round(t_current, 2),
+            "best": round(indexed[best_idx][0], 2),
+            "margin": round(delta, 4),
+            "scatter": round(scatter, 4),
+            "sigma": round(delta / scatter, 2) if scatter > 0 else None,
+        }
+        if best_idx == cur_idx:
+            _record_refine(
+                int(out[i]["slide"]), **record, decision="tenuto: nessun candidato migliore"
+            )
+            continue
+        record["guided"] = guided
+        if not guided and delta < needed:
+            _record_refine(
+                int(out[i]["slide"]), **record, decision="tenuto: margine dentro il rumore"
+            )
+            log.info(
+                "   [LLM/Refine] Confine TENUTO a %.1fs: il candidato migliore (%.1fs) "
+                "batte di %.3f, sotto %.3f = %.1fx il rumore locale %.4f (margine %.1fsigma).",
+                t_current,
+                indexed[best_idx][0],
+                delta,
+                needed,
+                stability_sigma,
+                scatter,
+                (delta / scatter) if scatter > 0 else 0.0,
+            )
             continue
         best_t = indexed[best_idx][0]
         # Vincolo ancore: il nuovo confine non deve violare la monotonia
@@ -2123,18 +2319,56 @@ def refine_llm_segment_boundaries(
                     violates = True
                     break
             if violates:
+                _record_refine(
+                    int(out[i]["slide"]), **record, decision="tenuto: violerebbe un'ancora"
+                )
                 continue
+        # Prova di stabilità: il vincitore deve vincere anche guardando più
+        # parlato ai due lati del confine. Un picco che sparisce lì non è un
+        # confine.
+        if not guided and not _refine_wins_under_perturbation(
+            words,
+            word_times,
+            prev_slide,
+            next_slide,
+            best_t,
+            t_current,
+            slide_emb,
+            embed_fn,
+            context_seconds,
+        ):
+            _record_refine(
+                int(out[i]["slide"]), **record, decision="tenuto: vince solo a finestra stretta"
+            )
+            log.info(
+                "   [LLM/Refine] Confine TENUTO a %.1fs: il candidato %.1fs vince con la "
+                "finestra di %.0fs ma non con quella allargata a %.0fs (margine %.1fsigma).",
+                t_current,
+                best_t,
+                context_seconds,
+                context_seconds * REFINE_PERTURBATION_SCALE,
+                (delta / scatter) if scatter > 0 else 0.0,
+            )
+            continue
         out[i]["start"] = best_t
         out[i - 1]["end"] = best_t
         moved += 1
+        _record_refine(
+            int(out[i]["slide"]),
+            **record,
+            decision="spostato (guidato dall'evidenza)" if guided else "spostato",
+        )
         log.info(
-            "   [LLM/Refine] Confine spostato a %.1fs (era %.1fs): slide %d -> %d (score %.3f vs %.3f).",
+            "   [LLM/Refine] Confine spostato a %.1fs (era %.1fs): slide %d -> %d "
+            "(score %.3f vs %.3f, margine %.1fsigma sul rumore locale %.4f).",
             best_t,
             t_current,
             prev_slide + 1,
             next_slide + 1,
             scores[best_idx],
             scores[cur_idx],
+            (delta / scatter) if scatter > 0 else 0.0,
+            scatter,
         )
     if moved:
         log.info("   [LLM/Refine] %d confine/i raffinato/i a livello di parola.", moved)

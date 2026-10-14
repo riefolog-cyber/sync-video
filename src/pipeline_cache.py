@@ -86,6 +86,44 @@ def save_sync_report(report: dict[str, object], cache_dir: Path | None = None) -
         log.debug("   Impossibile salvare il report di sincronizzazione (ignorato).")
 
 
+def load_sync_report(cache_dir: Path | None = None) -> dict[str, object] | None:
+    """Legge ``sync_report.json`` dalla cache (None se assente o illeggibile).
+
+    È l'artefatto che descrive cosa è finito a schermo: rileggerlo deve costare
+    un file, non una pipeline (vedi la revisione dei confini in main.py).
+    """
+    cd = cache_dir if cache_dir is not None else CACHE_DIR
+    path = cd / "sync_report.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def latest_transcript_words(cache_dir: Path | None = None) -> list[dict]:
+    """Parole della trascrizione più recente in cache (vuota se non c'è).
+
+    Serve alla revisione dei report scritti prima del controllo incrociato: lì
+    ``mentions_off`` non esiste e va ricalcolato dalle parole. Il nome del file
+    contiene la chiave della cache (modello, lingua, beam): la più recente è
+    quella coerente col report che le sta accanto.
+    """
+    cd = cache_dir if cache_dir is not None else CACHE_DIR
+    for path in sorted(
+        cd.glob("transcript_*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+    ):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            log.debug("   Trascrizione in cache illeggibile (%s): %s", path, e)
+            continue
+        words = data.get("words_raw") if isinstance(data, dict) else None
+        if isinstance(words, list) and words:
+            return [w for w in words if isinstance(w, dict)]
+    return []
+
+
 def file_hash(path: Path) -> str:
     """MD5 streaming del contenuto di un file."""
     md5 = hashlib.md5()

@@ -59,5 +59,20 @@ class TestNuovoFlagVideoEncoder(unittest.TestCase):
             config.parse_args(["--video-encoder", "h264_inesistente"])
 
 
+class TestFlagReview(unittest.TestCase):
+    """`--review`: comando di sola lettura, spento di default."""
+
+    def test_spenta_di_default(self) -> None:
+        # Se partisse accesa, una run normale si fermerebbe a ristampare un
+        # report invece di generare il video.
+        self.assertFalse(config.parse_args([]).review)
+
+    def test_si_accende(self) -> None:
+        self.assertTrue(config.parse_args(["--review"]).review)
+
+    def test_compare_nell_help(self) -> None:
+        self.assertIn("--review", config.build_parser().format_help())
+
+
 if __name__ == "__main__":
     unittest.main()

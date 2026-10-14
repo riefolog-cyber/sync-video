@@ -18,7 +18,7 @@ from moviepy import (
     ImageClip,
     concatenate_videoclips,
 )
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 
 from config import (
     DEFAULT_VIDEO_BUFFER_SEC,
@@ -674,3 +674,84 @@ def frame_consistency_check(
                     }
                 )
     return {"checked": checked, "coherent": coherent, "mismatches": mismatches}
+
+
+# =====================================================================
+# ANTEPRIMA PER CONFINI DA CONTROLLARE
+# =====================================================================
+def _compose_sheet(
+    frames: Sequence[tuple[str, Path]],
+    out_path: Path,
+    *,
+    tile_width: int = 720,
+    caption_height: int = 34,
+) -> Path | None:
+    """Affianca i fotogrammi in un unico PNG, ognuno con la sua didascalia.
+
+    Separata da ``boundary_review_sheet`` perché è la parte che può sbagliare in
+    silenzio (didascalie scambiate, un fotogramma su due mancante) e non ha
+    bisogno di ffmpeg: si prova con immagini già pronte.
+
+    Returns:
+        Il percorso del foglio, oppure None se nessun fotogramma è leggibile:
+        un'anteprima mancante non deve mai interrompere la run.
+    """
+    tiles: list[tuple[str, Image.Image]] = []
+    for caption, path in frames:
+        try:
+            with Image.open(path) as img:
+                tile = img.convert("RGB")
+                height = max(1, round(tile.height * tile_width / tile.width))
+                tiles.append((caption, tile.resize((tile_width, height))))
+        except (UnidentifiedImageError, OSError) as e:
+            log.debug("   [Anteprima] Fotogramma non leggibile (%s): %s", path, e)
+    if not tiles:
+        return None
+    height = max(tile.height for _, tile in tiles) + caption_height
+    sheet = Image.new("RGB", (tile_width * len(tiles), height), (255, 255, 255))
+    draw = ImageDraw.Draw(sheet)
+    try:
+        font = ImageFont.load_default(size=20)
+    except (TypeError, ValueError):  # Pillow troppo vecchia per load_default(size=)
+        font = ImageFont.load_default()
+    for i, (caption, tile) in enumerate(tiles):
+        x = i * tile_width
+        sheet.paste(tile, (x, 0))
+        draw.text((x + 10, tile.height + 8), caption, fill=(0, 0, 0), font=font)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(out_path)
+    return out_path
+
+
+def boundary_review_sheet(
+    video_path: str | Path,
+    moments: Sequence[tuple[str, float]],
+    out_path: Path,
+    *,
+    tile_width: int = 720,
+) -> Path | None:
+    """Anteprima di un confine dubbio: un fotogramma per momento, affiancati.
+
+    Il riepilogo scrive "nel parlato la slide 10 viene annunciata a 16m57s ma il
+    video la mostra da 17m38s": con questo foglio i due istanti sono già a
+    schermo, etichettati, e la verifica a mano costa due secondi invece di
+    cercare il punto in un video da 13 minuti. Il fotogramma all'annuncio è
+    quello che risponde alla domanda (mentre il parlato annunciava la slide, a
+    schermo c'era già?), il secondo mostra dove la timeline la fa comparire.
+
+    Un fallimento non interrompe nulla: se il video non c'è (dry-run, output
+    spostato) o ffmpeg non risponde, il dubbio resta scritto senza anteprima.
+    """
+    video = Path(video_path)
+    if not moments or not video.exists():
+        return None
+    with tempfile.TemporaryDirectory(prefix="syncvideo_preview_") as tmp:
+        frames: list[tuple[str, Path]] = []
+        for i, (caption, t) in enumerate(moments):
+            frame = Path(tmp) / f"frame_{i}.png"
+            if _extract_frame(video, float(t), frame):
+                frames.append((caption, frame))
+        if not frames:
+            log.debug("   [Anteprima] Nessun fotogramma estratto da %s.", video)
+            return None
+        return _compose_sheet(frames, out_path, tile_width=tile_width)

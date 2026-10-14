@@ -71,6 +71,15 @@ La presentazione esiste prima e il podcast deve **annunciare ogni slide**
   potrebbe assegnare a cinque slide lo stesso blocco, producendo segmenti di
   mezzo secondo che il pavimento anti-flicker non può spostare (i due vicini
   sono ancorati).
+- L'ultima slide non ha un'ancora a destra (a destra c'è la fine dell'audio),
+  quindi la sua transizione veniva ritrascritta col beam accurato solo se il
+  decoder sbagliava **due** volte nella stessa zona (annuncio distrutto **e**
+  ciclo ripetuto). Ora la coda si localizza da sola: la zona di ricerca va
+  dall'ultima ancora a `TAIL_RECOVERY_RATIO` (default 1.5) volte la cadenza
+  degli annunci già trovati, e se dentro c'è la transizione l'ancora torna
+  esatta. Se la cadenza non è misurabile la zona non si apre (niente
+  ritrascrizioni a caso su tutta la coda); se l'annuncio non c'è, si è speso
+  tempo e nient'altro.
 
 ---
 

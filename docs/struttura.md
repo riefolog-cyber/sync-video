@@ -10,7 +10,7 @@ chunks.py                ← Finestre temporali condivise (semantic_sync + llm_s
 ocr.py                   ← Fase 1: PDF → immagini → OCR
 transcription.py         ← Fase 2: Audio → Whisper → trascrizione
 timeline.py              ← Ancore "slide N" + riconciliazione timeline
-semantic_sync.py         ← Sincronizzazione semantica (embeddings, DP)
+semantic_sync.py         ← Sincronizzazione semantica (embeddings, DP, raffinamento confini)
 llm_sync.py              ← Selezione slide con LLM (9Router) + cache
 embedder.py              ← Interfaccia embedding (Protocol `Embedder`, backend fastembed)
 video.py                 ← Fase 4: Assemblaggio MP4 (1080p)
@@ -53,7 +53,7 @@ Comandi verificati per chi modifica il codice:
 # Verifica completa in un colpo: CI + mypy 3 piattaforme + debug hardware
 python src/controlli.py
 
-# Test (suite completa, unittest — 1022 test)
+# Test (suite completa, unittest — 1069 test)
 python -m unittest discover -s src -p "test_*.py"
 
 # Type-check (mypy: codice di produzione e test, tranne la deny-list in mypy.ini)

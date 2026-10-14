@@ -10,10 +10,16 @@ citazioni a posteriori), la timeline viene completata usando le ancore reali
 
 import re
 from collections.abc import Mapping
+from itertools import pairwise
 from typing import cast
 
 from chunks import Word
-from config import DEFAULT_MIN_SEGMENT_SECONDS, log
+from config import (
+    DEFAULT_MAX_LOOP_CYCLE_WORDS,
+    DEFAULT_MIN_SEGMENT_SECONDS,
+    DEFAULT_TAIL_RECOVERY_RATIO,
+    log,
+)
 
 # Parole che introducono un riferimento di slide. Include le varianti di
 # trascrizione misheard comuni: "sla" e "asl" per "slide" ("passiamo
@@ -76,6 +82,20 @@ def _is_closing_recap(
         if token in _CLOSING_MARKERS:
             return True
     return False
+
+
+def _has_transition_verb(words: list[Word], index: int, lookback: int = 6) -> bool:
+    """True se entro ``lookback`` parole PRIMA di ``index`` c'è un verbo di
+    transizione ("passiamo alla slide 5").
+
+    È il modo in cui il progetto distingue un annuncio da un richiamo: "come
+    dicevo nella slide 4" non ha nessun verbo di transizione davanti, quindi non
+    è una contraddizione con la timeline anche se cade lontano dal confine.
+    """
+    return any(
+        _normalize(w["word"]) in _TRANSITION_VERBS
+        for w in words[max(0, index - lookback):index]
+    )
 
 
 # =====================================================================
@@ -749,6 +769,77 @@ def _collect_slide_mention_kinds(
     }
 
 
+def announcements_off_timeline(
+    words: list[Word],
+    starts: Mapping[int, float],
+    total_slides: int,
+    tolerance: float = 5.0,
+    lookback: int = 6,
+) -> list[tuple[int, float, float]]:
+    """Annunci "slide N" lontani dal confine dichiarato per quella slide.
+
+    Il tempo in cui il parlato annuncia una slide è un FATTO (è l'unico punto
+    1:1 della catena: le ancore sono i momenti pronunciati), mentre il confine
+    che il video usa è il risultato di ancore, filtro LIS, raffinamento e
+    pavimento anti-flicker. Quando i due si contraddicono — "Passiamo alla slide
+    10" a 16:56 e la slide mostrata da 17:38, run del 14/10 — nessuno dei
+    controlli automatici poteva accorgersene: il frame check certifica che il
+    video rispetta la timeline DICHIARATA, non che la timeline sia quella
+    giusta.
+
+    Contano solo le menzioni di transizione (``_has_transition_verb``): un
+    richiamo come "come dicevo nella slide 4" cade lontano dal confine per
+    costruzione e non è una contraddizione, quindi non va segnalato. La
+    grammatica delle menzioni è quella di ``_collect_slide_mention_kinds``
+    ("slide N" e "N ... slide", forme fuse comprese) e i conteggi restano
+    esclusi: senza verbo di transizione davanti, "le 13 slide" non entra.
+
+    Args:
+        words: parole Whisper con 'word' e 'start'.
+        starts: inizio dichiarato (secondi) di ogni slide della timeline finale.
+        total_slides: numero di slide del deck, per delimitare i numeri validi.
+        tolerance: scarto (secondi) oltre il quale l'annuncio e il confine sono
+            considerati in contraddizione. Un'ancora vera sta a frazioni di
+            secondo dal proprio annuncio (``_reference_boundary``), quindi la
+            soglia può essere larga senza falsi allarmi.
+
+    Returns:
+        ``[(slide, tempo_annuncio, inizio_dichiarato), ...]`` in ordine di tempo.
+    """
+    found: list[tuple[int, float, float]] = []
+    for i, w in enumerate(words):
+        if not _is_slide_word(w["word"]):
+            continue
+        slide_num: int | None = None
+        mention_idx = i
+        boundary: float | None = None
+        embedded = _embedded_slide_number(_normalize(w["word"]))
+        if embedded is not None and 2 <= embedded <= total_slides:
+            slide_num, boundary = embedded, _reference_boundary(words, i)
+        else:
+            for j in range(i + 1, min(i + 8, len(words))):
+                num = _number_from_word(_normalize(words[j]["word"]))
+                if num is None:
+                    continue
+                if 2 <= num <= total_slides:
+                    slide_num, mention_idx = num, j
+                    boundary = _reference_boundary(words, j)
+                break
+        if slide_num is None or boundary is None:
+            continue
+        declared = starts.get(slide_num)
+        if declared is None:
+            continue
+        if _is_closing_recap(words, i):
+            continue
+        if not _has_transition_verb(words, mention_idx, lookback):
+            continue
+        if abs(boundary - float(declared)) <= tolerance:
+            continue
+        found.append((slide_num, boundary, float(declared)))
+    return sorted(found, key=lambda item: item[1])
+
+
 def _collect_slide_mentions(
     words: list[Word],
     total_slides: int,
@@ -1392,15 +1483,25 @@ def _embedded_slide_number(w_norm: str) -> int | None:
 
 
 def repetition_loops(
-    words: list[Word], min_repeats: int = 6, max_cycle: int = 3
+    words: list[Word], min_repeats: int = 6, max_cycle: int = DEFAULT_MAX_LOOP_CYCLE_WORDS
 ) -> list[tuple[float, float]]:
-    """Zone di testo inaffidabile: 1-3 parole ripetute in ciclo (allucinazioni ASR).
+    """Zone di testo inaffidabile: ciclo ripetuto identico (allucinazioni ASR).
 
     Il beam greedy in zone difficili ripete lo stesso ciclo ("la c' la c'..."
     per 15s invece di "Passiamo alla slide 3", run del 13/10): le parole lì
     non descrivono l'audio e vanno ritrascritte col beam accurato. Nel parlato
     naturale 6+ ripetizioni dello stesso ciclo non succedono ("molto molto"
     si ferma a 1): sopra soglia è quasi sempre il decoder, non l'oratore.
+
+    Il ciclo non è solo di 1-3 parole: il greedy ripete anche frasi intere, e
+    per questo ``max_cycle`` arriva a ``DEFAULT_MAX_LOOP_CYCLE_WORDS``. Nella
+    run del 14/10 la frase di 11 parole "la tecnologia è un semplice strumento
+    al nostro servizio o finisce" è comparsa 6 volte in 15.8s, cancellando
+    l'annuncio "Passiamo alla slide 10" (16:56): con il limite a 3 parole la
+    zona non veniva ritrascritta e la slide 10 restava l'unico confine stimato
+    dal contenuto, 40s in ritardo. La soglia delle ripetizioni resta 6, quindi
+    estendere il ciclo non rende il rilevatore più aggressivo sulle parole
+    singole.
     """
     norm = [_normalize(str(w.get("word", ""))) for w in words]
     times = [float(w.get("start", 0.0)) for w in words]
@@ -1461,6 +1562,80 @@ def anchor_gaps(
         if hi > lo:
             zone.setdefault((lo, hi), []).append(n)
     return [(missing, lo, hi) for (lo, hi), missing in sorted(zone.items())]
+
+
+def _median(values: list[float]) -> float:
+    """Mediana di una lista non vuota (la media dei due centrali se pari)."""
+    ordered = sorted(values)
+    n = len(ordered)
+    if not n:
+        return 0.0
+    return ordered[n // 2] if n % 2 else (ordered[n // 2 - 1] + ordered[n // 2]) / 2
+
+
+def tail_recovery_zone(
+    anchors: Mapping[int, float],
+    total_slides: int,
+    total_duration: float,
+    ratio: float = DEFAULT_TAIL_RECOVERY_RATIO,
+    min_seconds: float = 5.0,
+) -> tuple[list[int], float, float] | None:
+    """Zona di coda da ritrascrivere: l'annuncio distrutto dell'ultima slide.
+
+    ``anchor_gaps`` localizza i buchi INTERNI (ancora a sinistra **e** a
+    destra). La transizione finale non ha un'ancora a destra — a destra c'è solo
+    la fine dell'audio — quindi non veniva mai ritrascritta: se il beam greedy
+    distruggeva l'annuncio dell'ultima slide **senza** produrre un ciclo
+    ripetuto (l'unico altro modo di aprire una zona), quell'ancora era perduta e
+    la slide restava stimata dal contenuto. Il caso del 14/10 lo mostra: la
+    transizione finale è stata recuperata solo perché il decoder aveva ripetuto
+    una frase sei volte nella stessa zona, e quel recupero dipende da un difetto
+    del decoder, non da una regola.
+
+    La zona si limita con la CADENZA degli annunci già noti (mediana degli
+    intervalli fra ancore): l'annuncio della slide successiva cade dopo la
+    sezione precedente, che è lunga circa come le altre, per ``ratio`` volte.
+    Una cadenza non misurabile (una sola ancora, o tutte le ancore nello stesso
+    istante) significa che non si sa dove cercare: in quel caso la zona non si
+    apre, invece di aprirne una a caso su tutta la coda. La zona copre la PRIMA
+    slide senza ancora della coda, che è la più utile (chiude anche la durata
+    della slide precedente); con più slide mancanti le altre restano stimate e
+    il log lo dice.
+
+    Cosa NON promette: che l'annuncio ci sia. La zona è un'IPOTESI su dove può
+    stare — il chiamante la dichiara nel log — e se dentro non c'è nessuna
+    menzione non si inventa niente: si è speso tempo, non credibilità.
+
+    Args:
+        anchors: ``{slide: tempo}`` delle ancore già trovate (la slide 1 non è
+            un'ancora: se c'è vale il suo 0.0 come riferimento di cadenza).
+        total_slides: slide del deck, per delimitare l'insieme delle mancanti.
+        total_duration: durata dell'audio: la zona non esce mai da lì.
+        ratio: quante cadenze dopo l'ultima ancora si va a cercare.
+        min_seconds: sotto questa larghezza la zona non si apre: un annuncio
+            non sta in due secondi di parlato.
+
+    Returns:
+        ``(slide_senza_ancora, inizio_secondi, fine_secondi)`` oppure None.
+    """
+    known: dict[int, float] = {
+        int(s): float(t) for s, t in anchors.items() if 1 <= int(s) <= total_slides
+    }
+    if not known or total_duration <= 0:
+        return None
+    last_slide = max(known)
+    missing = [s for s in range(last_slide + 1, total_slides + 1)]
+    if not missing:
+        return None  # la coda è ancorata: non c'è nessun annuncio da cercare
+    times = sorted(known.values())
+    gaps = [b - a for a, b in pairwise(times) if b > a]
+    if not gaps:
+        return None  # cadenza non misurabile: non si sa dove cercare
+    lo = known[last_slide]
+    hi = min(float(total_duration), lo + ratio * _median(gaps))
+    if hi - lo < min_seconds:
+        return None
+    return missing, lo, hi
 
 
 # =====================================================================

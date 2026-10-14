@@ -16,6 +16,7 @@ from PIL import Image, UnidentifiedImageError
 from video import (
     _build_video_ffmpeg,
     _canvas_size,
+    _compose_sheet,
     _concat_quote,
     _fitted_size,
     _letterbox,
@@ -26,6 +27,7 @@ from video import (
     _run_ffmpeg,
     _similarities,
     _write_concat_file,
+    boundary_review_sheet,
     build_video,
     frame_consistency_check,
     image_similarity,
@@ -548,6 +550,64 @@ class TestOpenSlideRetry(unittest.TestCase):
             ) as sleep, self.assertRaises(RuntimeError):
                 _open_slide_retry(str(p))
             self.assertEqual(sleep.call_count, 3)  # 4 tentativi - 1
+
+
+class TestBoundaryReviewSheet(unittest.TestCase):
+    """Anteprima di un confine dubbio: fotogrammi affiancati ed etichettati."""
+
+    def _png(self, path: Path, size: tuple[int, int] = (640, 360)) -> Path:
+        img = Image.new("RGB", size, (240, 240, 240))
+        for x in range(0, size[0], 40):
+            for y in range(0, size[1], 40):
+                img.putpixel((x, y), (10, 20, 30))
+        img.save(path)
+        return path
+
+    def test_affianca_i_fotogrammi_in_un_foglio_solo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            one = self._png(td / "a.png")
+            two = self._png(td / "b.png")
+            out = td / "out" / "foglio.png"
+            sheet = _compose_sheet(
+                [("annuncio a 16m57s", one), ("confine dichiarato 17m38s", two)],
+                out,
+                tile_width=320,
+            )
+            self.assertEqual(sheet, out)
+            assert sheet is not None
+            with Image.open(sheet) as img:
+                # Due tessere larghe 320px (640x360 -> 320x180) affiancate.
+                self.assertEqual(img.width, 640)
+                # Sotto c'è la fascia delle didascalie: senza, il foglio non si
+                # spiegherebbe da solo e tanto varrebbe guardare il video.
+                self.assertGreater(img.height, 180)
+
+    def test_fotogrammi_illeggibili_niente_foglio(self):
+        """Un'anteprima mancante non deve mai interrompere la run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            broken = td / "rotta.png"
+            broken.write_bytes(b"non e' un png")
+            self.assertIsNone(
+                _compose_sheet([("didascalia", broken)], td / "foglio.png")
+            )
+            self.assertIsNone(_compose_sheet([], td / "foglio.png"))
+            self.assertFalse((td / "foglio.png").exists())
+
+    def test_video_assente_niente_anteprima(self):
+        # Nel dry-run il video non esiste: il dubbio resta scritto senza
+        # anteprima, invece di fallire o di citare un file inesistente.
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            self.assertIsNone(
+                boundary_review_sheet(
+                    td / "non_esiste.mp4",
+                    [("annuncio", 10.0)],
+                    td / "foglio.png",
+                )
+            )
+            self.assertFalse((td / "foglio.png").exists())
 
 
 if __name__ == "__main__":
