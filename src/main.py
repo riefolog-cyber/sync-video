@@ -16,7 +16,7 @@ from concurrent.futures import thread as _futures_thread
 from contextlib import suppress
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, NoReturn, cast
+from typing import Any, NamedTuple, NoReturn, cast
 
 from config import (
     AUTO_BEAM_AB_MARGIN,
@@ -26,6 +26,7 @@ from config import (
     CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
     DEFAULT_PDF,
+    DEFAULT_RECOVERY_MAX_ZONE_SHARE,
     DEFAULT_VIDEO_BUFFER_SEC,
     DEFAULT_VIDEO_FPS,
     DEFAULT_VIDEO_THREADS,
@@ -203,6 +204,40 @@ def find_audio_file(directory: Path) -> Path | None:
         return None
     # Ordina per data di modifica (più recente prima)
     return max(candidates, key=lambda f: f.stat().st_mtime)
+
+
+# Estensioni accettate dalla ricerca libera di presentazioni: il PDF e' nativo,
+# .ppt/.pptx passano per convert_presentation_to_pdf. Stesso insieme della
+# validazione (nome esatto) e di verifica_pc.prova_materiali: tre copie della
+# stessa regola sarebbero tre modi di divergere, quindi chi cambia questo
+# insieme aggiorna anche gli altri due punti.
+PRESENTATION_SEARCH_SUFFIXES = frozenset({".pdf", ".pptx", ".ppt"})
+
+
+def find_presentation_file(directory: Path) -> Path | None:
+    """Cerca una presentazione nella directory, anche con nome non standard.
+
+    Il nome esatto ha la precedenza (presentazione.pdf, poi .pptx, poi .ppt,
+    come la validazione); solo se nessuno esiste si ripiega su qualsiasi altro
+    .pdf/.pptx/.ppt, il piu' recente. Serve al caso "presentazione (1).pptx"
+    da doppio download o al nome personalizzato: senza, il primo avvio dice
+    "manca il materiale" con il file li' accanto, e l'utente legge un falso.
+    """
+    try:
+        files = [
+            f
+            for f in directory.iterdir()
+            if f.is_file() and f.suffix.lower() in PRESENTATION_SEARCH_SUFFIXES
+        ]
+    except OSError:
+        return None
+    if not files:
+        return None
+    for nome in ("presentazione.pdf", "presentazione.pptx", "presentazione.ppt"):
+        for f in files:
+            if f.name.lower() == nome:
+                return f
+    return max(files, key=lambda f: f.stat().st_mtime)
 
 
 # =====================================================================
@@ -1786,6 +1821,62 @@ def _needs_accurate_beam(pinned_slides: int, total_slides: int) -> bool:
     return pinned_ratio < AUTO_BEAM_PINNED_RATIO
 
 
+def _beam_escalation_threshold(min_coverage: float) -> float:
+    """Copertura sotto la quale si paga la decodifica accurata dell'audio intero.
+
+    Due criteri si sovrappongono e vale il più severo: il criterio qualitativo
+    (``AUTO_BEAM_PINNED_RATIO``: sotto quella frazione di slide vincolate sono i
+    contenuti a decidere la timeline) e la soglia dichiarata dall'utente con
+    ``--min-anchor-coverage``. Serve al log, che deve dire con quale metro si è
+    deciso: senza, una run forzata (``AUTO_BEAM_PINNED_RATIO=1.1``) stampa "le
+    ancore non bastano" con la copertura piena, e sembra un bug invece di una
+    soglia scelta.
+    """
+    declared = float(min_coverage or 0.0)
+    if declared <= 0:
+        return AUTO_BEAM_PINNED_RATIO
+    return max(AUTO_BEAM_PINNED_RATIO, declared)
+
+
+def _accurate_beam_worth_it(pinned_slides: int, total_slides: int, min_coverage: float) -> bool:
+    """True se vale la pena rifare l'audio INTERO col beam accurato.
+
+    Si chiama DOPO il recupero delle zone cieche, quindi la domanda non è più
+    "il testo decide la timeline?" (``_needs_accurate_beam``, che resta il
+    criterio qualitativo) ma "il testo che ho adesso basta a vincolarla?".
+
+    Due regole, in OR:
+
+    1. il criterio qualitativo: sotto ``AUTO_BEAM_PINNED_RATIO`` delle slide
+       vincolate i confini sono STIMATI dal testo, e lì vale il testo migliore;
+    2. la soglia DICHIARATA dall'utente con ``--min-anchor-coverage``: chi
+       chiede l'80% di copertura sta dicendo che sotto l'80% il risultato non lo
+       accetta. Da quando il recupero arriva prima, quella soglia non decide più
+       solo SE fermarsi: decide prima se tentare. Fermare la run senza aver
+       provato la decodifica accurata era l'unico esito possibile del caso in cui
+       il decoder aveva distrutto metà degli annunci.
+
+    Con ``--min-anchor-coverage 0`` la soglia dichiarata tace e resta il criterio
+    qualitativo (la copertura non è una richiesta dell'utente, ma il contenuto
+    resta il contenuto). Un deck di una slide sola non ha transizioni: nessuno
+    dei due rami scatta.
+
+    Args:
+        pinned_slides: slide con un'ancora esplicita (la slide 1 non ha ancora).
+        total_slides: slide totali.
+        min_coverage: soglia dichiarata (``--min-anchor-coverage``), 0 = tacita.
+    """
+    if _needs_accurate_beam(pinned_slides, total_slides):
+        return True
+    transitions = max(total_slides - 1, 0)
+    if transitions <= 0:
+        return False
+    # Stesso verdetto di `_beam_escalation_threshold` (un test lo tiene fermo):
+    # scritto così, però, il criterio qualitativo resta quello di
+    # `_needs_accurate_beam` invece di essere riscritto qui una seconda volta.
+    return pinned_slides / transitions < _beam_escalation_threshold(min_coverage)
+
+
 def _beam_ab_cache_key(slides_key: str, audio_hash: str, args: Any) -> str:
     """Chiave della misura di confronto fra le due trascrizioni.
 
@@ -2078,6 +2169,224 @@ def _thin_slide_advice(flow_rilevato: str) -> str:
     )
 
 
+class ZoneRecovery(NamedTuple):
+    """Esito di una passata di recupero delle zone cieche.
+
+    ``skipped`` dice che le zone non sono state ritrascritte perché coprivano
+    troppo audio: chi chiama DEVE poterlo distinguere da "ritrascritte e non ha
+    trovato niente", perché nel primo caso il rimedio è ancora da fare.
+    """
+
+    words: list[Word]
+    anchors: dict[int, float]
+    seconds: float
+    recovered: list[int]
+    skipped: bool
+
+
+def _recover_anchor_zones(
+    words: list[Word],
+    flow_anchors: dict[int, float],
+    total_slides: int,
+    total_duration: float,
+    audio_path: Path,
+    args: Any,
+    flow: str,
+    max_zone_share: float | None = DEFAULT_RECOVERY_MAX_ZONE_SHARE,
+) -> ZoneRecovery:
+    """Ritrascrive le zone cieche e restituisce le ancore che ne tornano.
+
+    Il beam veloce mangia intere frasi nelle zone difficili ("la c' la c'..."
+    invece di "Passiamo alla slide 3", run del 13/10): l'ancora non è storpiata,
+    è distrutta, e nessuna mappa di varianti può recuperarla. Si ritrascrive SOLO
+    la zona col beam accurato, e le zone si localizzano con quello che le ancore
+    già dicono (tre indizi, tutti deterministici):
+
+    - ``anchor_gaps``: un buco sequenziale fra due ancore (serve la coppia);
+    - ``repetition_loops``: un ciclo ripetuto, che distrugge il testo anche
+      senza lasciare un buco nella sequenza;
+    - ``tail_recovery_zone``: la coda, dove a destra c'è solo la fine dell'audio
+      e nessuna ancora può delimitare niente.
+
+    Le zone si fondono prima di ritrascrivere (una passata sola dove si
+    sovrappongono: il loop di una zona di coda non si paga due volte) e le parole
+    nuove sostituiscono quelle vecchie dentro la zona. La sincronizzazione a
+    valle usa ``words_raw``, quindi beneficia anche lei.
+
+    Cosa NON promette: che l'annuncio ci sia. Una zona è un'IPOTESI su dove può
+    stare, e il log la dichiara; se dentro non c'è nessuna menzione, si è speso
+    tempo e nient'altro. Il costo lo conta il chiamante (i secondi tornano qui).
+
+    Cosa NON fa, e lo dice: quando le zone coprono più di ``max_zone_share``
+    dell'audio, non è più un recupero mirato. Succede con poche ancore lontane
+    fra loro, ed è il caso in cui la decodifica accurata dell'audio intero è
+    comunque in arrivo: ritagliare i pezzi costerebbe quasi come decodificare
+    tutto, e in più senza il confronto fra le due trascrizioni. Lì il recupero si
+    salta (0 secondi spesi) e il passo successivo fa il suo lavoro. Con
+    ``max_zone_share=None`` il vincolo è disattivo e le zone si ritrascrivono
+    sempre.
+
+    Args:
+        words: parole della trascrizione corrente (veloce, o accurata).
+        flow_anchors: ``{slide: tempo}`` delle ancore già note.
+        total_slides: slide del deck.
+        total_duration: durata dell'audio (nessuna zona esce da lì).
+        audio_path: audio da cui ritagliare le zone.
+        args: argomenti della run (modello e lingua della ritrascrizione).
+        flow: flusso rilevato: le ancore si rileggono con la stessa grammatica.
+        max_zone_share: quota massima di audio copribile dalle zone (vedi sopra),
+            oppure None per ritrascrivere sempre.
+
+    Returns:
+        Uno ``ZoneRecovery``: le parole ricucite, le ancore complete, il tempo
+        speso a ritrascrivere, le slide la cui ancora esiste solo grazie a questa
+        passata (in ordine crescente) e se il recupero è stato saltato per quota.
+    """
+    zone_anchor = [(lo, hi) for _, lo, hi in anchor_gaps(flow_anchors, total_slides)]
+    zone_loop = [(max(0.0, lo), min(total_duration, hi)) for lo, hi in repetition_loops(words)]
+    zone_tail = tail_recovery_zone(flow_anchors, total_slides, total_duration)
+    tutte = sorted(
+        zone_anchor
+        + [z for z in zone_loop if z[1] > z[0]]
+        + ([(zone_tail[1], zone_tail[2])] if zone_tail else [])
+    )
+    fuse: list[list[float]] = []
+    for lo, hi in tutte:
+        if fuse and lo <= fuse[-1][1] + 1.0:
+            fuse[-1][1] = max(fuse[-1][1], hi)
+        else:
+            fuse.append([lo, hi])
+    coperta = sum(hi - lo for lo, hi in fuse)
+    if (
+        max_zone_share is not None
+        and total_duration > 0
+        and fuse
+        and coperta / total_duration > max_zone_share
+    ):
+        log.info(
+            "   [Gap] Le zone cieche coprono %s dell'audio (%d zone): non è più una "
+            "ritrascrizione mirata, quindi non la faccio: il testo lo rifà per "
+            "intero la decodifica accurata, in un passaggio solo.",
+            f"{coperta / total_duration:.0%}",
+            len(fuse),
+        )
+        return ZoneRecovery(words, dict(flow_anchors), 0.0, [], True)
+    for mancanti, lo, hi in anchor_gaps(flow_anchors, total_slides):
+        log.info(
+            "   [Gap] Slide %s senza ancora tra due ancore (%.1f-%.1fs): "
+            "ritrascrivo la zona col beam accurato...",
+            ", ".join(str(s) for s in mancanti),
+            lo,
+            hi,
+        )
+    for lo, hi in zone_loop:
+        log.info(
+            "   [Gap] Testo inaffidabile (loop %.1f-%.1fs): ritrascrivo la zona col beam accurato...",
+            lo,
+            hi,
+        )
+    if zone_tail:
+        log.info(
+            "   [Gap] Coda senza ancora a destra (%s): ritrascrivo %.1f-%.1fs "
+            "per cercarne l'annuncio col beam accurato...",
+            ", ".join(f"slide {s}" for s in zone_tail[0]),
+            zone_tail[1],
+            zone_tail[2],
+        )
+    seconds = 0.0
+    for lo, hi in fuse:
+        t0 = time.time()
+        nuove = retranscribe_zone(
+            audio_path,
+            lo,
+            hi,
+            model_size=args.whisper_model,
+            language=args.lang,
+        )
+        seconds += time.time() - t0
+        if not nuove:
+            continue
+        nuove = correct_transcript_names(nuove)
+        words = sorted(
+            [w for w in words if not (lo <= float(w["start"]) <= hi)] + nuove,
+            key=lambda w: float(w["start"]),
+        )
+        _write_raw_transcript(words, audio_path)
+    dopo = extract_slide_anchors(words, total_slides, flow) if words else {}
+    recuperate = sorted(s for s in dopo if s not in flow_anchors)
+    if recuperate:
+        log.info(
+            "   [Gap] Ancore recuperate dalla ritrascrizione mirata: %s.",
+            ", ".join(f"slide {s} a {dopo[s]:.1f}s" for s in recuperate),
+        )
+    return ZoneRecovery(
+        words, {**flow_anchors, **{s: dopo[s] for s in recuperate}}, seconds, recuperate, False
+    )
+
+
+def _deferred_zone_recovery(
+    words: list[Word],
+    flow_anchors: dict[int, float],
+    total_slides: int,
+    total_duration: float,
+    audio_path: Path,
+    args: Any,
+    flow: str,
+) -> ZoneRecovery:
+    """Il recupero delle zone cieche rifatto quando era stato differito.
+
+    Il recupero si salta quando le zone coprono quasi tutto l'audio, perché lì
+    la decodifica accurata dell'audio intero è già decisa ed è la stessa cosa
+    pagata meglio. Se però il confronto SCARTA la decodifica accurata, quel
+    rimedio differito diventa l'ultimo che resta prima del gate: senza rifarlo,
+    una run che ha pagato — e buttato — la decodifica intera resterebbe con meno
+    ancore di quante ne avrebbe avute senza pagarla.
+
+    Qui il vincolo di quota è disattivato di proposito: la decisione è già stata
+    presa, e queste zone sono l'unica cosa che è rimasta da provare.
+    """
+    log.info(
+        "   [Gap] La decodifica accurata è stata scartata: recupero adesso le zone "
+        "cieche che avevo differito."
+    )
+    return _recover_anchor_zones(
+        words,
+        flow_anchors,
+        total_slides,
+        total_duration,
+        audio_path,
+        args,
+        flow,
+        max_zone_share=None,
+    )
+
+
+def _recovery_attempts_note(recovered: list[int], accurate_beam_tried: bool) -> str:
+    """Cosa è già stato tentato per riparare le ancore, in una riga.
+
+    Il gate di copertura e l'avviso finale accusano l'audio ("poche slide
+    annunciate, conviene rigenerare il podcast"): da quando il recupero delle
+    zone cieche e la decodifica accurata arrivano PRIMA, quell'accusa deve dire
+    anche cosa è stato provato. Altrimenti il consiglio è sbagliato due volte:
+    la riparazione può semplicemente non essere bastata (e allora rigenerare
+    l'audio è davvero l'unica strada), oppure non è stata applicabile.
+
+    Vuota se non si è tentato niente: lì l'avviso resta quello di sempre.
+    """
+    if not recovered and not accurate_beam_tried:
+        return ""
+    tentativi: list[str] = []
+    dettaglio = (
+        ", ".join(f"slide {s}" for s in recovered) + " recuperate"
+        if recovered
+        else "nessuna ancora recuperata"
+    )
+    tentativi.append(f"ritrascrizione mirata delle zone cieche ({dettaglio})")
+    if accurate_beam_tried:
+        tentativi.append(f"decodifica accurata dell'audio intero (beam {DEFAULT_WHISPER_BEAM_ACCURATE})")
+    return "\n   Già tentato prima di arrivare qui: " + " e ".join(tentativi) + ".\n"
+
+
 # =====================================================================
 # MAIN ORCHESTRATOR
 # =====================================================================
@@ -2172,7 +2481,51 @@ def _prefetch_models(args: Any) -> None:
         log.info("\n✅ Tutti i modelli sono pronti. La prima run non scarichera' nulla.")
 
 
-def _primo_avvio_senza_materiali(args: Any) -> None:
+# Quanti nomi di file mostra il messaggio di primo avvio: abbastanza per
+# riconoscere la cartella, non tutti i .bat/.md del progetto.
+_MATERIALI_VISTI_LIMITE = 12
+
+
+def _nomi_file_visti(directory: Path, limite: int = _MATERIALI_VISTI_LIMITE) -> tuple[list[str], int]:
+    """Nomi dei file nella directory (ordinati) + quanti restano fuori dal limite."""
+    try:
+        nomi = sorted(p.name for p in directory.iterdir() if p.is_file())
+    except OSError:
+        return [], 0
+    return nomi[:limite], max(0, len(nomi) - len(nomi[:limite]))
+
+
+def _materiali_nei_sottocartelle(limite: int = 4) -> list[str]:
+    """File presentazione/audio nei sottocartelle immediati, come "sub/nome".
+
+    Il caso reale e' lo ZIP con doppia cartella (sync-video-main dentro
+    sync-video-main): il materiale finisce un livello sopra o sotto quello
+    giusto. Solo un livello: scendere ricorsivi elencherebbe anche .cache/.
+    """
+    try:
+        sottocartelle = sorted(p for p in BASE_DIR.iterdir() if p.is_dir() and not p.name.startswith("."))
+    except OSError:
+        return []
+    audio_est = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac"}
+    trovati: list[str] = []
+    for sub in sottocartelle:
+        if sub.name == "temp_slides":
+            continue
+        try:
+            dentro = sorted(p for p in sub.iterdir() if p.is_file())
+        except OSError:
+            continue
+        for p in dentro:
+            if p.suffix.lower() in PRESENTATION_SEARCH_SUFFIXES or p.suffix.lower() in audio_est:
+                trovati.append(f"{sub.name}/{p.name}")
+                if len(trovati) >= limite:
+                    return trovati
+    return trovati
+
+
+def _primo_avvio_senza_materiali(
+    args: Any, *, manca_presentazione: bool = True, manca_audio: bool = True
+) -> None:
     """Prepara il PC al primo video anche senza i file di partenza, poi esce.
 
     Il caso reale: si scarica lo ZIP, si avvia, e NON ci sono ancora la
@@ -2186,28 +2539,68 @@ def _primo_avvio_senza_materiali(args: Any) -> None:
     esattamente cosa mettere nella cartella e cosa rilanciare. Il prossimo
     avvio col materiale non scarica piu' nulla.
 
-    Si chiama solo quando l'utente NON ha indicato un percorso esplicito: un
-    `--pdf slides.pptx` sbagliato e' quasi sempre un refuso, e trasformarlo
-    silenziosamente in 3 GB di download sarebbe una sorpresa costosissima.
+    Si chiama solo quando il lato mancante usa i percorsi di default: un
+    `--pdf slides.pptx` o `--audio voce.m4a` sbagliato e' quasi sempre un
+    refuso, e trasformarlo silenziosamente in 3 GB di download sarebbe una
+    sorpresa costosissima (quelli escono con errore secco prima di qui).
+
+    Il messaggio dice QUALE dei due manca e cosa c'e' davvero nella cartella:
+    il testo generico ("manca il materiale") lasciava l'utente con il file li'
+    accanto a chiedersi perche' non venisse visto.
     """
     _prefetch_models(args)
-    log.info(
-        "\n%s\n"
-        "   Sync Video e' pronto: dipendenze, Tesseract, ffmpeg e modelli sono\n"
-        "   gia' installati e scaricati. NON e' stato prodotto alcun video.\n"
-        "\n"
-        "   Manca solo il tuo materiale. Nella cartella\n"
-        "     %s\n"
-        "   metti:\n"
-        "     - la presentazione:  presentazione.pptx  (o .pdf, o .ppt)\n"
-        "     - l'audio del podcast: podcast.m4a (o .mp3 / .wav / .ogg / .flac)\n"
-        "\n"
-        "   Poi rilancia genera_video.bat: non scarichera' piu' nulla.\n"
-        "%s",
+    righe = [
+        "",
         "=" * 72,
-        BASE_DIR,
-        "=" * 72,
+        "   Sync Video e' pronto: dipendenze, Tesseract, ffmpeg e modelli sono",
+        "   gia' installati e scaricati. NON e' stato prodotto alcun video.",
+        "",
+    ]
+    if manca_presentazione and manca_audio:
+        righe.append("   Manca il tuo materiale (entrambi i file). Nella cartella")
+    elif manca_presentazione:
+        righe.append("   Manca la presentazione (l'audio invece e' a posto). Nella cartella")
+    else:
+        righe.append("   Manca l'audio del podcast (la presentazione invece e' a posto). Nella cartella")
+    righe.append(f"     {BASE_DIR}")
+    righe.append("   servono:")
+    if manca_presentazione:
+        righe.append("     - la presentazione:  presentazione.pptx  (o .pdf, o .ppt)")
+    else:
+        trovata = find_presentation_file(BASE_DIR)
+        if trovata is not None:
+            righe.append(f"   Presentazione trovata: {trovata.name}")
+    if manca_audio:
+        righe.append("     - l'audio del podcast: podcast.m4a (o .mp3 / .wav / .ogg / .flac)")
+    else:
+        trovato = find_audio_file(BASE_DIR)
+        if trovato is not None:
+            righe.append(f"   Audio trovato: {trovato.name}")
+    # Cosa c'e' davvero nella cartella, nomi fra virgolette: uno spazio finale
+    # o una doppia estensione ("presentazione.pptx.pptx") si vedono solo cosi'.
+    visti, altri = _nomi_file_visti(BASE_DIR)
+    if visti:
+        righe.append("   Nella cartella vedo:")
+        righe.extend(f'     - "{nome}"' for nome in visti)
+        if altri:
+            righe.append(f"     - ... e altri {altri} file")
+    else:
+        righe.append("   La cartella non contiene alcun file.")
+    # Materiale finito un livello sopra o sotto (il classico ZIP con doppia
+    # cartella): si segnala invece di far cercare a mano.
+    vicini = _materiali_nei_sottocartelle()
+    if vicini:
+        righe.append("   Ma in queste sottocartelle c'e' del materiale:")
+        righe.extend(f'     - "{nome}"' for nome in vicini)
+        righe.append("   Spostalo nella cartella qui sopra, non nelle sottocartelle.")
+    righe.extend(
+        [
+            "",
+            "   Poi rilancia genera_video.bat: non scarichera' piu' nulla.",
+            "=" * 72,
+        ]
     )
+    log.info("\n".join(righe))
 
 
 def main(argv: list | None = None) -> None:
@@ -2310,21 +2703,31 @@ def main(argv: list | None = None) -> None:
         if found:
             pdf_path = found
         elif args.pdf == DEFAULT_PDF:
-            # Nessun percorso indicato a mano e il default non c'e': questo e'
-            # il primo avvio su un PC nuovo, non un refuso. Prepara tutto e
-            # spiega cosa mettere nella cartella invece di uscire con un errore
-            # che sembra "programma rotto".
-            _primo_avvio_senza_materiali(args)
-            return
-        else:
-            log.error(
-                "[ERRORE] File presentazione non trovato: %s\n"
-                "   Cercati anche: %s (conversione automatica PPT/PPTX -> PDF).\n"
-                "   Specifica con: --pdf presentazione.pdf",
-                pdf_path,
-                "', '".join(str(p) for p in ppt_tries),
-            )
-            sys.exit(1)
+            # Nome esatto assente e nessun percorso indicato a mano: prima la
+            # ricerca libera ("presentazione (1).pptx" da doppio download, nome
+            # personalizzato, doppia estensione), che avvisa e procede.
+            libero = find_presentation_file(BASE_DIR)
+            if libero is not None:
+                log.warning(
+                    "   [Nome file] Uso %s: nessun file col nome esatto\n"
+                    "   presentazione.pdf/.pptx/.ppt. Per il nome standard,\n"
+                    '   rinominalo in presentazione%s (oppure --pdf "%s").',
+                    libero.name,
+                    libero.suffix.lower(),
+                    libero.name,
+                )
+                pdf_path = libero
+    if not pdf_path.exists() and args.pdf != DEFAULT_PDF:
+        # Percorso indicato a mano che non esiste: quasi sempre un refuso, e
+        # trasformarlo in GB di download sarebbe una sorpresa costosissima.
+        log.error(
+            "[ERRORE] File presentazione non trovato: %s\n"
+            "   Cercati anche: %s (conversione automatica PPT/PPTX -> PDF).\n"
+            "   Specifica con: --pdf presentazione.pdf",
+            pdf_path,
+            "', '".join(str(p) for p in ppt_tries),
+        )
+        sys.exit(1)
 
     # Conversione PPT/PPTX -> PDF (temporaneo) per il resto della pipeline
     if pdf_path.suffix.lower() in PRESENTATION_SUFFIXES:
@@ -2342,21 +2745,27 @@ def main(argv: list | None = None) -> None:
         audio_path = Path(args.audio)
         if not audio_path.is_absolute():
             audio_path = BASE_DIR / audio_path
+        if not audio_path.exists():
+            log.error(
+                "\n[ERRORE CRITICO] Manca il file audio.\n"
+                "   Cercato: qualsiasi file .mp3/.m4a/.wav/.aac/.ogg/.flac nella cartella\n"
+                "   Oppure specifica con: --audio percorso/file.mp3\n"
+                "   Esempio: python src/main.py --audio registrazione.m4a"
+            )
+            sys.exit(1)
     else:
         audio_path = find_audio_file(BASE_DIR)
 
-    if not audio_path or not audio_path.exists():
-        if not args.audio:
-            # Come sopra: senza --audio e senza file trovati, e' il primo avvio.
-            _primo_avvio_senza_materiali(args)
-            return
-        log.error(
-            "\n[ERRORE CRITICO] Manca il file audio.\n"
-            "   Cercato: qualsiasi file .mp3/.m4a/.wav/.aac/.ogg/.flac nella cartella\n"
-            "   Oppure specifica con: --audio percorso/file.mp3\n"
-            "   Esempio: python src/main.py --audio registrazione.m4a"
+    # Primo avvio senza materiali: si arriva qui solo coi default per il lato
+    # mancante (i percorsi espliciti sbagliati escono qui sopra con un errore
+    # secco). Il messaggio dice QUALE manca e cosa c'e' nella cartella.
+    if not pdf_path.exists() or not audio_path or not audio_path.exists():
+        _primo_avvio_senza_materiali(
+            args,
+            manca_presentazione=not pdf_path.exists(),
+            manca_audio=not audio_path or not audio_path.exists(),
         )
-        sys.exit(1)
+        return
 
     # --- Hash per cache ---
     pdf_hash = _file_hash(pdf_path)
@@ -2627,119 +3036,114 @@ def main(argv: list | None = None) -> None:
                     sync_notes["llm_rilevato"] = llm_rilevato
 
         # --- Ancore deterministiche disponibili ---
-        # Calcolate una volta: servono all'avviso qui sotto e alla scelta
-        # automatica del beam. Nel flusso libero non vincolano l'allineamento
-        # (le slide seguono il contenuto), quindi non si cercano.
+        # Calcolate una volta: servono al recupero delle zone cieche, alla scelta
+        # automatica del beam e ai gate sulle ancore. Nel flusso libero non
+        # vincolano l'allineamento (le slide seguono il contenuto), quindi non si
+        # cercano.
         flow_anchors: dict[int, float] = (
             extract_slide_anchors(words_raw, total_slides, flow) if flow != "free" and words_raw else {}
         )
 
-        # --- Check preventivo ancore: avviso PRIMA della sincronizzazione se il
-        # podcast ha annunciato poche slide (probabile deriva del prompt
-        # NotebookLM). Con poche ancore la timeline sarà stimata (9Router o
-        # fallback MiniLM) e le slide non annunciate avranno durate brevi o
-        # micro-segmenti: conviene rigenerare l'audio. ---
-        if flow != "free" and words_raw:
-            early_anchors = flow_anchors
-            early_missing = [s for s in range(2, total_slides + 1) if s not in early_anchors]
-            # Gate opzionale (batch/CI): con --require-full-anchors un podcast che
-            # non annuncia (tutte) le slide NON genera un video degradato (slide
-            # stimate + micro-segmenti). Meglio fermarsi e rigenerare l'audio: il
-            # prompt NotebookLM richiede l'annuncio di ogni slide.
-            #
-            # Il gate riguarda il VERO flusso slide -> podcast. Nel podcast ->
-            # slide le ancore sono escluse dal prompt per scelta: l'assenza non
-            # e' un difetto dell'audio e chiedere di aggiungerle sarebbe
-            # contraddittorio (il fallback qui sopra ha gia' riscritto `flow` in
-            # "slide-audio", quindi il test va fatto su `flow_rilevato`).
-            if (
-                args.require_full_anchors
-                and _anchor_gate_applies(flow_rilevato)
-                and (not early_anchors or early_missing)
-            ):
-                _abort(
-                    "Ancore 'slide N' incomplete: "
-                    + (
-                        "nessuna ancora trovata nella trascrizione"
-                        if not early_anchors
-                        else f"{len(early_anchors)} su {total_slides - 1} annunciate "
-                        f"(mancanti: {', '.join(str(s) for s in early_missing)})"
-                    )
-                    + ".\n"
-                    "   Con --require-full-anchors la sincronizzazione non parte: "
-                    "le slide non annunciate verrebbero posizionate per contenuto, "
-                    "con durate stimate e possibili micro-segmenti.\n"
-                    "   Rigenera il podcast facendo annunciare OGNI slide "
-                    '(\"passiamo alla slide N\" in cifre) e rilancia la pipeline; '
-                    "oppure togli --require-full-anchors per procedere comunque."
-                )
-            # Soglia minima di copertura (default 50%, disattivabile con
-            # --min-anchor-coverage 0): il caso del 06/10 (4 ancore su 13
-            # transizioni) generava un video degradato in silenzio, perche'
-            # genera_video.bat usa --no-confirm e la pausa interattiva qui
-            # sotto veniva saltata. Il gate scatta PRIMA della sincronizzazione,
-            # quando rigenerare l'audio costa ancora poco.
-            min_cov = float(getattr(args, "min_anchor_coverage", 0.5) or 0)
-            if (
-                min_cov > 0
-                and _anchor_gate_applies(flow_rilevato)
-                and not _anchor_coverage_ok(len(early_anchors), total_slides, min_cov)
-            ):
-                _abort(
-                    "Copertura ancore insufficiente: "
-                    f"{len(early_anchors)} su {max(total_slides - 1, 0)} transizioni "
-                    f"annunciate (soglia {min_cov:.0%}, "
-                    f"mancanti: {', '.join(str(s) for s in early_missing)}).\n"
-                    "   Sotto soglia la timeline sarebbe stimata per contenuto, "
-                    "con durate inaffidabili e possibili micro-segmenti.\n"
-                    "   Rigenera il podcast facendo annunciare OGNI slide "
-                    '("passiamo alla slide N" in cifre) e rilancia la pipeline; '
-                    "oppure abbassa la soglia con --min-anchor-coverage 0 "
-                    "per procedere comunque."
-                )
-            if early_anchors and early_missing:
-                log.warning(
-                    "\n   [Avviso] Solo %d slide su %d annunciate esplicitamente "
-                    "(mancanti: %s).\n"
-                    "   Le slide non annunciate saranno posizionate per contenuto: "
-                    "risultato stimato, con durate possibilmente brevi.\n"
-                    "   Flusso slide -> podcast: il podcast doveva annunciare "
-                    "tutte le slide; se le manca, conviene rigenerare l'audio "
-                    "PRIMA di procedere.",
-                    len(early_anchors),
-                    total_slides - 1,
-                    ", ".join(str(s) for s in early_missing),
-                )
-                if is_interactive() and not args.no_confirm:
-                    try:
-                        input(
-                            "   Premi Invio per continuare con la sincronizzazione stimata, "
-                            "oppure Ctrl+C per fermarti: "
-                        )
-                    except (EOFError, KeyboardInterrupt):
-                        _abort("Interrotto dall'utente prima della sincronizzazione.")
+        # Stato del recupero delle zone cieche e della decodifica accurata:
+        # li leggono sia le decisioni qui sotto sia i messaggi all'utente, e
+        # devono esistere in OGNI ramo, compreso il flusso libero — dove il
+        # recupero non si applica ma la scelta del beam sì (le ancore restano
+        # vuote, quindi i confini li decide il testo e la decodifica accurata si
+        # fa sempre). Per questo la soglia dichiarata si legge qui e non dentro
+        # il recupero.
+        _min_cov = float(getattr(args, "min_anchor_coverage", 0.0) or 0.0)
+        _gap_seconds = 0.0
+        _gap_recovered: list[int] = []
+        _gap_deferred = False
+        _accurate_beam_tried = False
 
-        # --- Beam automatico: veloce quando le ancore vincolano, accurato
-        # quando è il contenuto a decidere -------------------------------------
-        # La decisione non si può prendere PRIMA di trascrivere (le ancore
-        # esistono solo dentro il testo), quindi si corregge a posteriori: se le
-        # ancore fissano la timeline il testo rifinisce confini già decisi e la
-        # decodifica veloce non costa precisione; se ne fissano poche (o nessuna:
-        # flusso libero) i confini sono STIMATI dal testo, e lì vale la decodifica
-        # di massima accuratezza. Il costo si paga una volta per audio: la cache
-        # è per chiave, quindi la run successiva ritrova entrambe le trascrizioni.
-        if _beam_auto_enabled(args) and _needs_accurate_beam(len(flow_anchors), total_slides):
+        # --- Recupero delle zone cieche, PRIMA di giudicare l'audio --------
+        # Il beam veloce mangia intere frasi nelle zone difficili ("la c' la
+        # c'..." invece di "Passiamo alla slide 3", run del 13/10): l'ancora non
+        # è storpiata, è distrutta, e nessuna mappa di varianti può recuperarla.
+        # Ma le zone si localizzano con le ancore che ci sono già, e la
+        # ritrascrizione mirata costa solo quelle. Si tenta quindi PRIMA di dire
+        # all'utente che il podcast è da rigenerare e prima di pagare la
+        # decodifica accurata dell'audio INTERO: l'ordine è la sostanza, non un
+        # dettaglio. Su un audio che annuncia tutte le slide, l'avviso "solo N su
+        # M annunciate" e la soglia di copertura accusavano il podcast di un
+        # danno fatto dal decoder, e la run si fermava prima di aver provato a
+        # riparare il testo. Ora l'audio viene giudicato per quello che DICE.
+        if flow != "free" and words_raw:
+            # Se la copertura è già insufficiente, la decodifica accurata
+            # dell'audio intero arriva comunque (è la decisione immediatamente
+            # successiva): ritrascrivere a pezzi quasi tutto l'audio sarebbe la
+            # stessa cosa pagata due volte, senza il confronto fra le due
+            # trascrizioni. In quel caso il recupero si limita alle zone davvero
+            # mirate; con la copertura sufficiente, invece, nessuna decodifica
+            # intera è in arrivo e le zone si ritrascrivono tutte.
+            _zone_share = (
+                DEFAULT_RECOVERY_MAX_ZONE_SHARE
+                if _beam_auto_enabled(args)
+                and _accurate_beam_worth_it(len(flow_anchors), total_slides, _min_cov)
+                else None
+            )
+            _zones = _recover_anchor_zones(
+                words_raw,
+                flow_anchors,
+                total_slides,
+                total_duration,
+                audio_path,
+                args,
+                flow,
+                max_zone_share=_zone_share,
+            )
+            words_raw, flow_anchors = _zones.words, _zones.anchors
+            _gap_seconds = _zones.seconds
+            _gap_recovered = _zones.recovered
+            _gap_deferred = _zones.skipped
+            t_transcribe += _gap_seconds
+
+        # --- Beam automatico: la decisione arriva DOPO il recupero -------------
+        # Prima si poteva decidere solo sulla decodifica veloce, e la scelta era
+        # binaria: se le ancore non vincolavano abbastanza, si pagava la
+        # decodifica accurata di TUTTO l'audio — anche quando sarebbe bastato
+        # ritrascrivere due zone. Adesso la domanda arriva dopo l'esito del
+        # recupero, quindi ha un'informazione in più, e la risposta cambia di
+        # conseguenza: se le zone cieche hanno riportato le ancore che mancavano,
+        # l'audio è a posto e resta la decodifica veloce (col testo ricucito); se
+        # la copertura resta insufficiente, allora è il contenuto a decidere
+        # davvero e serve il testo migliore. Il caso che ha imposto l'ordine: un
+        # audio che dichiara 7 transizioni su 9, due delle quali distrutte dal
+        # decoder, pagava la decodifica intera per scoprire che le due ancore
+        # mancanti erano a 6 secondi da quelle vicine.
+        #
+        # Il flusso libero resta com'era: lì le ancore non si cercano (restano
+        # vuote), la copertura è zero e il testo è l'unico segnale, quindi la
+        # decodifica accurata si fa sempre. Il costo si paga una volta per audio:
+        # la cache è per chiave, quindi la run successiva ritrova entrambe.
+        if (
+            words_raw
+            and _beam_auto_enabled(args)
+            and _accurate_beam_worth_it(len(flow_anchors), total_slides, _min_cov)
+        ):
+            _accurate_beam_tried = True
             # Istantanea della decodifica veloce: serve al confronto misurabile e
-            # a poter tornare indietro senza rifare nulla (è già in cache).
+            # a poter tornare indietro senza rifare nulla (è già in cache). È
+            # presa QUI, cioè dopo il recupero: le parole ricucite sono il
+            # termine di paragone giusto, e tornare indietro non deve buttare via
+            # il lavoro delle zone.
             greedy_transcript = transcript
             greedy_words = list(words_raw or [])
             greedy_anchors = dict(flow_anchors)
             log.info(
-                "\n   [Beam] %d slide su %d hanno un'ancora esplicita: la timeline è "
-                "decisa dal contenuto, quindi serve la decodifica accurata (beam %d). "
+                "\n   [Beam] La copertura delle ancore non basta a vincolare la timeline "
+                "(%d su %d, %s; la soglia in vigore è %s): la decidono i contenuti, "
+                "quindi rifaccio la trascrizione dell'audio intero col beam %d. "
                 "Con le ancore complete basta la decodifica veloce.",
                 len(flow_anchors),
                 max(total_slides - 1, 0),
+                (
+                    f"{len(_gap_recovered)} recuperate dalla ritrascrizione mirata"
+                    if _gap_recovered
+                    else "nessuna recuperata dalla ritrascrizione mirata"
+                ),
+                f"{_beam_escalation_threshold(_min_cov):.0%}",
                 DEFAULT_WHISPER_BEAM_ACCURATE,
             )
             transcript, accurate_words, beam_note = _transcribe_with_accurate_beam(
@@ -2764,6 +3168,13 @@ def main(argv: list | None = None) -> None:
             beam_note["pinned_slides"] = len(flow_anchors)
             beam_note["total_slides"] = total_slides
             beam_note["chosen"] = "accurate"
+            # Il report dice su cosa si è deciso: la copertura PRIMA della
+            # decodifica accurata (dopo il recupero) e le ancore che il recupero
+            # ha riportato. Senza, una run che ha pagato la decodifica intera
+            # sembra identica a una che non ne aveva bisogno.
+            beam_note["decided_after_recovery"] = True
+            beam_note["recovered_slides"] = list(_gap_recovered)
+            beam_note["recovery_seconds"] = round(_gap_seconds, 1)
             # Confronto misurabile fra le due trascrizioni. Richiede l'embedding
             # di entrambe (~25s l'una), quindi si fa solo qui, dove la seconda
             # trascrizione esiste già e il caso è quello in cui il testo decide
@@ -2801,94 +3212,154 @@ def main(argv: list | None = None) -> None:
                     # della decodifica veloce: il report deve dirlo, o risulta
                     # che la timeline usata poggia su un'ancora sola.
                     beam_note["pinned_slides"] = len(flow_anchors)
+                    # --- Rimedio differito -------------------------------------
+                    # Il recupero delle zone cieche era stato saltato perché
+                    # coprivano quasi tutto l'audio (decodifica intera in arrivo):
+                    # ora che la decodifica accurata è stata scartata, quelle
+                    # zone sono l'ULTIMO rimedio prima del gate. Senza questo, una
+                    # run che ha pagato la decodifica intera e l'ha scartata
+                    # resterebbe con meno ancore di quante ne avrebbe avute senza
+                    # pagarla.
+                    if _gap_deferred:
+                        _zones = _deferred_zone_recovery(
+                            words_raw,
+                            flow_anchors,
+                            total_slides,
+                            total_duration,
+                            audio_path,
+                            args,
+                            flow,
+                        )
+                        words_raw, flow_anchors = _zones.words, _zones.anchors
+                        _gap_seconds += _zones.seconds
+                        _gap_recovered = _zones.recovered
+                        _gap_deferred = _zones.skipped
+                        t_transcribe += _zones.seconds
+                        beam_note["pinned_slides"] = len(flow_anchors)
+                        beam_note["recovered_after_revert"] = list(_gap_recovered)
                 log.info(
                     "   [Beam] Uso la trascrizione %s: %s.",
                     "ACCURATA" if use_accurate else "VELOCE",
                     reason,
                 )
+                if use_accurate:
+                    # Le zone cieche NON si ritrascrivono: su un testo decodificato
+                    # per intero col beam accurato ritagliare una clip e
+                    # ridecodificarla con lo stesso beam non aggiunge niente (le
+                    # zone servono a riparare gli errori del beam VELOCE). Il
+                    # report lo dichiara, perché è una scelta, non una dimenticanza.
+                    beam_note["zones_after_accurate"] = (
+                        "non rifatte: la decodifica accurata copre già l'audio intero"
+                    )
             sync_notes["beam"] = beam_note
 
-        # --- Gap-recovery: buchi sequenziali da trascrizione greedy ---
-        # Il beam veloce mangia intere frasi nelle zone difficili ("la c' la
-        # c'..." invece di "Passiamo alla slide 3", run del 13/10): l'ancora
-        # non è storpiata, è distrutta, e nessuna mappa di varianti può
-        # recuperarla. Ma un buco con ancore su entrambi i lati si localizza:
-        # si ritrascrive SOLO quella zona col beam accurato e si ricuciono le
-        # parole (la sync a valle usa words_raw, quindi beneficia anche lei).
+
+        # --- Ancore: avviso e gate, DOPO i rimedi ---------------------------
+        # Il podcast viene giudicato per quello che DICE, non per quello che il
+        # beam veloce è riuscito a scrivere: prima di questa riga hanno già girato
+        # la ritrascrizione mirata delle zone cieche e, se la copertura restava
+        # insufficiente, la decodifica accurata dell'audio intero. Prima
+        # l'avviso e la soglia arrivavano per primi, e il caso reale che ha
+        # imposto l'ordine è questo: un audio che annunciava tutte e 9 le
+        # transizioni, due delle quali mangiate dal decoder, si sentiva dire
+        # "solo 7 su 9 annunciate, conviene rigenerare l'audio" — cioè al
+        # podcast veniva attribuito il danno del trascrittore, e con
+        # --no-confirm (genera_video.bat) nessuno leggeva l'avviso. Con poche
+        # ancore la timeline sarà stimata (9Router o fallback MiniLM) e le slide
+        # non annunciate avranno durate brevi o micro-segmenti: QUESTO resta
+        # vero, e i due gate restano, ma scattano dopo i rimedi e lo dicono.
         if flow != "free" and words_raw:
-            _zone_anchor = [(lo, hi) for _, lo, hi in anchor_gaps(flow_anchors, total_slides)]
-            # Zone di testo inaffidabile anche senza buco sequenziale: un loop
-            # allucinato ("la c' la c'...") distrugge le parole e con esse
-            # qualunque ancora lì dentro.
-            _zone_loop = [
-                (max(0.0, lo), min(total_duration, hi)) for lo, hi in repetition_loops(words_raw)
-            ]
-            # La transizione FINALE non ha un'ancora a destra che la delimiti
-            # (a destra c'è la fine dell'audio): la zona si ricava dalla
-            # cadenza degli annunci già noti. Senza questo, l'annuncio
-            # dell'ultima slide era recuperabile solo se il decoder produceva
-            # anche un ciclo ripetuto nella stessa zona, cioè per caso.
-            _zone_tail = tail_recovery_zone(flow_anchors, total_slides, total_duration)
-            _tutte = sorted(
-                _zone_anchor
-                + [z for z in _zone_loop if z[1] > z[0]]
-                + ([(_zone_tail[1], _zone_tail[2])] if _zone_tail else [])
-            )
-            _fuse: list[list[float]] = []
-            for _lo, _hi in _tutte:
-                if _fuse and _lo <= _fuse[-1][1] + 1.0:
-                    _fuse[-1][1] = max(_fuse[-1][1], _hi)
-                else:
-                    _fuse.append([_lo, _hi])
-            for _mancanti, _lo, _hi in anchor_gaps(flow_anchors, total_slides):
-                log.info(
-                    "   [Gap] Slide %s senza ancora tra due ancore (%.1f-%.1fs): "
-                    "ritrascrivo la zona col beam accurato...",
-                    ", ".join(str(s) for s in _mancanti),
-                    _lo,
-                    _hi,
+            early_anchors = flow_anchors
+            early_missing = [s for s in range(2, total_slides + 1) if s not in early_anchors]
+            # Gate opzionale (batch/CI): con --require-full-anchors un podcast che
+            # non annuncia (tutte) le slide NON genera un video degradato (slide
+            # stimate + micro-segmenti). Meglio fermarsi e rigenerare l'audio: il
+            # prompt NotebookLM richiede l'annuncio di ogni slide.
+            #
+            # Il gate riguarda il VERO flusso slide -> podcast. Nel podcast ->
+            # slide le ancore sono escluse dal prompt per scelta: l'assenza non
+            # e' un difetto dell'audio e chiedere di aggiungerle sarebbe
+            # contraddittorio (il fallback qui sopra ha gia' riscritto `flow` in
+            # "slide-audio", quindi il test va fatto su `flow_rilevato`).
+            if (
+                args.require_full_anchors
+                and _anchor_gate_applies(flow_rilevato)
+                and (not early_anchors or early_missing)
+            ):
+                _abort(
+                    "Ancore 'slide N' incomplete: "
+                    + (
+                        "nessuna ancora trovata nella trascrizione"
+                        if not early_anchors
+                        else f"{len(early_anchors)} su {total_slides - 1} annunciate "
+                        f"(mancanti: {', '.join(str(s) for s in early_missing)})"
+                    )
+                    + ".\n"
+                    + _recovery_attempts_note(_gap_recovered, _accurate_beam_tried)
+                    + "   Con --require-full-anchors la sincronizzazione non parte: "
+                    "le slide non annunciate verrebbero posizionate per contenuto, "
+                    "con durate stimate e possibili micro-segmenti.\n"
+                    "   Rigenera il podcast facendo annunciare OGNI slide "
+                    '(\"passiamo alla slide N\" in cifre) e rilancia la pipeline; '
+                    "oppure togli --require-full-anchors per procedere comunque."
                 )
-            for _lo, _hi in _zone_loop:
-                log.info(
-                    "   [Gap] Testo inaffidabile (loop %.1f-%.1fs): "
-                    "ritrascrivo la zona col beam accurato...",
-                    _lo,
-                    _hi,
+            # Soglia minima di copertura (default 50%, disattivabile con
+            # --min-anchor-coverage 0): il caso del 06/10 (4 ancore su 13
+            # transizioni) generava un video degradato in silenzio, perche'
+            # genera_video.bat usa --no-confirm e la pausa interattiva qui
+            # sotto veniva saltata. Il gate scatta PRIMA della sincronizzazione,
+            # quando rigenerare l'audio costa ancora poco.
+            #
+            # La stessa soglia decide anche SE tentare: `_accurate_beam_worth_it`
+            # (chiamata sopra) usa il massimo fra questa e il criterio
+            # qualitativo, quindi sotto soglia la decodifica accurata viene
+            # provata PRIMA di fermarsi. Fermarsi al primo tentativo, quando ne
+            # restava uno tarato esattamente su questo caso, era il vero difetto.
+            min_cov = float(getattr(args, "min_anchor_coverage", 0.5) or 0)
+            if (
+                min_cov > 0
+                and _anchor_gate_applies(flow_rilevato)
+                and not _anchor_coverage_ok(len(early_anchors), total_slides, min_cov)
+            ):
+                _abort(
+                    "Copertura ancore insufficiente: "
+                    f"{len(early_anchors)} su {max(total_slides - 1, 0)} transizioni "
+                    f"annunciate (soglia {min_cov:.0%}, "
+                    f"mancanti: {', '.join(str(s) for s in early_missing)}).\n"
+                    + _recovery_attempts_note(_gap_recovered, _accurate_beam_tried)
+                    + "   Sotto soglia la timeline sarebbe stimata per contenuto, "
+                    "con durate inaffidabili e possibili micro-segmenti.\n"
+                    "   Rigenera il podcast facendo annunciare OGNI slide "
+                    '("passiamo alla slide N" in cifre) e rilancia la pipeline; '
+                    "oppure abbassa la soglia con --min-anchor-coverage 0 "
+                    "per procedere comunque."
                 )
-            if _zone_tail:
-                log.info(
-                    "   [Gap] Coda senza ancora a destra (%s): ritrascrivo "
-                    "%.1f-%.1fs per cercarne l'annuncio col beam accurato...",
-                    ", ".join(f"slide {s}" for s in _zone_tail[0]),
-                    _zone_tail[1],
-                    _zone_tail[2],
+            # `early_missing` è calcolato sulle ancore DI ADESSO, dopo il recupero:
+            # le due che il decoder aveva mangiato non compaiono fra le mancanti,
+            # quindi sulla run del 14/10 questo avviso non scatta più (diceva
+            # "solo 7 su 9" quando l'audio ne annunciava 9).
+            if early_anchors and early_missing:
+                log.warning(
+                    "\n   [Avviso] Solo %d slide su %d annunciate esplicitamente "
+                    "(mancanti: %s).%s\n"
+                    "   Le slide non annunciate saranno posizionate per contenuto: "
+                    "risultato stimato, con durate possibilmente brevi.\n"
+                    "   Flusso slide -> podcast: il podcast doveva annunciare "
+                    "tutte le slide; se le manca, conviene rigenerare l'audio "
+                    "PRIMA di procedere.",
+                    len(early_anchors),
+                    total_slides - 1,
+                    ", ".join(str(s) for s in early_missing),
+                    _recovery_attempts_note(_gap_recovered, _accurate_beam_tried),
                 )
-            for _lo, _hi in [(z[0], z[1]) for z in _fuse]:
-                _t0 = time.time()
-                _nuove = retranscribe_zone(
-                    audio_path,
-                    _lo,
-                    _hi,
-                    model_size=args.whisper_model,
-                    language=args.lang,
-                )
-                t_transcribe += time.time() - _t0
-                if not _nuove:
-                    continue
-                _nuove = correct_transcript_names(_nuove)
-                words_raw = sorted(
-                    [w for w in words_raw if not (_lo <= float(w["start"]) <= _hi)] + _nuove,
-                    key=lambda w: float(w["start"]),
-                )
-                _write_raw_transcript(words_raw, audio_path)
-            _dopo_gap = extract_slide_anchors(words_raw, total_slides, flow) if words_raw else {}
-            _recuperate = sorted(s for s in _dopo_gap if s not in flow_anchors)
-            if _recuperate:
-                log.info(
-                    "   [Gap] Ancore recuperate dalla ritrascrizione mirata: %s.",
-                    ", ".join(f"slide {s} a {_dopo_gap[s]:.1f}s" for s in _recuperate),
-                )
-                flow_anchors = {**flow_anchors, **{s: _dopo_gap[s] for s in _recuperate}}
+                if is_interactive() and not args.no_confirm:
+                    try:
+                        input(
+                            "   Premi Invio per continuare con la sincronizzazione stimata, "
+                            "oppure Ctrl+C per fermarti: "
+                        )
+                    except (EOFError, KeyboardInterrupt):
+                        _abort("Interrotto dall'utente prima della sincronizzazione.")
 
         # --- Fase 3: Sincronizzazione semantica (unico motore) ---
         t_phase_start = time.time()

@@ -17,8 +17,10 @@ Esegui con: python -m unittest test_primo_avvio -v
 
 from __future__ import annotations
 
+import os
 import re
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import Any
@@ -172,6 +174,175 @@ class TestSenzaMateriali(unittest.TestCase):
         """
         prefetch = self._esegui_senza_materiali([])
         prefetch.assert_called_once()
+
+
+class TestRicercaLiberaPresentazione(unittest.TestCase):
+    """La presentazione vale anche con nome non standard (doppio download, nome proprio).
+
+    Senza, il primo avvio diceva "manca il materiale" con il file li' accanto:
+    il caso "presentazione (1).pptx" scaricato due volte dal browser.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.radice = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _tocca(self, nome: str) -> Path:
+        percorso = self.radice / nome
+        percorso.write_bytes(b"finto")
+        return percorso
+
+    def test_nome_esatto_ha_la_precedenza(self) -> None:
+        import main
+
+        vecchio = self._tocca("mie_slide.pptx")
+        vecchio.touch()
+        esatto = self._tocca("presentazione.pptx")
+        # Il libero e' piu' recente, ma l'esatto vince comunque.
+        passato = time.time() - 100
+        os.utime(esatto, (passato, passato))
+        self.assertEqual(main.find_presentation_file(self.radice), esatto)
+
+    def test_nome_personalizzato_viene_trovato(self) -> None:
+        import main
+
+        atteso = self._tocca("mie_slide.pptx")
+        self.assertEqual(main.find_presentation_file(self.radice), atteso)
+
+    def test_doppio_download_viene_trovato(self) -> None:
+        import main
+
+        atteso = self._tocca("presentazione (1).pptx")
+        self.assertEqual(main.find_presentation_file(self.radice), atteso)
+
+    def test_fra_piu_liberi_vince_il_piu_recente(self) -> None:
+        import main
+
+        vecchio = self._tocca("vecchie.pptx")
+        vecchio.touch()
+        passato = time.time() - 100
+        os.utime(vecchio, (passato, passato))
+        recente = self._tocca("nuove.pdf")
+        self.assertEqual(main.find_presentation_file(self.radice), recente)
+
+    def test_senza_presentazioni_torna_none(self) -> None:
+        import main
+
+        self._tocca("podcast.m4a")
+        self.assertIsNone(main.find_presentation_file(self.radice))
+
+    def test_ignora_maiuscole_e_sottocartelle(self) -> None:
+        import main
+
+        sub = self.radice / "sub"
+        sub.mkdir()
+        (sub / "PRESENTAZIONE.PPTX").write_bytes(b"finto")
+        # Solo un livello sopra: dentro le sottocartelle non si cerca.
+        self.assertIsNone(main.find_presentation_file(self.radice))
+        atteso = self._tocca("PRESENTAZIONE.PPTX")
+        self.assertEqual(main.find_presentation_file(self.radice), atteso)
+
+
+class TestMessaggioDiagnostico(unittest.TestCase):
+    """Il messaggio di primo avvio dice QUALE manca e cosa c'e' nella cartella.
+
+    Prima era un testo unico ("manca il materiale") per due casi diversi
+    (presentazione assente o audio assente): dallo screenshot non si capiva
+    quale ramo fosse scattato.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.radice = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _main_senza_rete(self, argv: list[str]) -> Any:
+        """Esegue main() con bootstrap/setup/prefetch spenti (nessun download)."""
+        import main
+
+        with (
+            mock.patch.object(config, "BASE_DIR", self.radice),
+            mock.patch.object(main, "BASE_DIR", self.radice),
+            mock.patch.object(main, "bootstrap"),
+            mock.patch.object(main, "machine_setup"),
+            mock.patch.object(main, "_prefetch_models"),
+            self.assertLogs("slide2video", level="INFO") as catturati,
+        ):
+            main.main(
+                [
+                    "--no-update-check",
+                    "--no-confirm",
+                    "--no-auto-setup",
+                    *argv,
+                ]
+            )
+        return "\n".join(catturati.output)
+
+    def test_senza_nulla_dice_che_mancano_entrambi(self) -> None:
+        import main
+
+        with mock.patch.object(main, "find_audio_file", return_value=None):
+            uscita = self._main_senza_rete([])
+        self.assertIn("entrambi i file", uscita)
+        self.assertIn("non contiene alcun file", uscita)
+
+    def test_con_sola_presentazione_libera_manca_l_audio(self) -> None:
+        import main
+
+        # .pdf e non .pptx: il .pptx passerebbe per la conversione (niente
+        # LibreOffice qui) prima del controllo audio; la ricerca libera e'
+        # esercitata comunque dal nome non standard.
+        (self.radice / "mie_slide.pdf").write_bytes(b"finto")
+        with mock.patch.object(main, "find_audio_file", return_value=None):
+            uscita = self._main_senza_rete([])
+        self.assertIn("Manca l'audio del podcast", uscita)
+        self.assertIn("Presentazione trovata: mie_slide.pdf", uscita)
+
+    def test_con_solo_audio_manca_la_presentazione_ed_elenca_i_file(self) -> None:
+        # find_audio_file qui gira davvero: trova podcast.m4a e il ramo che
+        # scatta e' solo "manca la presentazione".
+        (self.radice / "podcast.m4a").write_bytes(b"finto")
+        uscita = self._main_senza_rete([])
+        self.assertIn("Manca la presentazione", uscita)
+        self.assertIn("Audio trovato: podcast.m4a", uscita)
+        self.assertIn('"podcast.m4a"', uscita)
+
+    def test_materiale_nella_sottocartella_viene_segnalato(self) -> None:
+        import main
+
+        sub = self.radice / "vecchia"
+        sub.mkdir()
+        (sub / "presentazione.pptx").write_bytes(b"finto")
+        (sub / "podcast.m4a").write_bytes(b"finto")
+        with mock.patch.object(main, "find_audio_file", return_value=None):
+            uscita = self._main_senza_rete([])
+        self.assertIn("vecchia/presentazione.pptx", uscita)
+        self.assertIn("Spostalo nella cartella qui sopra", uscita)
+
+    def test_presentazione_libera_supera_la_validazione(self) -> None:
+        """Il file dal nome libero arriva oltre la validazione, senza prefetch.
+
+        `_file_hash` solleva un sentinella: se la validazione avesse fermato
+        tutto, il prefetch sarebbe stato chiamato e l'hash mai toccato.
+        """
+        import main
+
+        (self.radice / "mie_slide.pdf").write_bytes(b"finto")
+        audio = self.radice / "voce.mp3"
+        audio.write_bytes(b"finto")
+        with (
+            mock.patch.object(config, "BASE_DIR", self.radice),
+            mock.patch.object(main, "BASE_DIR", self.radice),
+            mock.patch.object(main, "bootstrap"),
+            mock.patch.object(main, "machine_setup"),
+            mock.patch.object(main, "find_audio_file", return_value=audio),
+            mock.patch.object(main, "_prefetch_models") as prefetch,
+            mock.patch.object(main, "_file_hash", side_effect=RuntimeError("VALIDAZIONE_SUPERATA")),
+            self.assertRaisesRegex(RuntimeError, "VALIDAZIONE_SUPERATA"),
+        ):
+            main.main(["--no-update-check", "--no-confirm", "--no-auto-setup"])
+        prefetch.assert_not_called()
 
 
 if __name__ == "__main__":
