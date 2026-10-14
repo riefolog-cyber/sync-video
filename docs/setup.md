@@ -72,7 +72,9 @@ Le variabili d'ambiente hanno sempre precedenza sul rilevamento automatico
 Scaricato lo ZIP del repository e fatto doppio clic su `genera_video.bat`, su
 Windows **non devi installare niente a mano**. Il programma, in ordine:
 
-1. **Python 3.11** — se non c'è nessun Python sul PC, lo installa con `winget`
+1. **Python adatto** — se non c'è nessun Python utilizzabile sul PC (manca
+   del tutto, è troppo vecchio/nuovo per la finestra 3.10–3.13, o su ARM è
+   solo quello ARM64 nativo), lo installa con `winget`
    (circa 25 MB, una volta sola, per il tuo utente senza chiedere privilegi
    di amministratore). È l'unica cosa che non può fare il bootstrap interno,
    perché il bootstrap gira *dentro* Python: a installarlo è il `.bat`, che
@@ -83,11 +85,15 @@ Windows **non devi installare niente a mano**. Il programma, in ordine:
    | Architettura | Versione | Perché |
    |---|---|---|
    | x86-64 (Intel, AMD) | **3.12** | È quella della CI, non ci sono motivi per evitarne un'altra |
-   | ARM64 (Snapdragon, ecc.) | **3.11** | È la versione collaudata su Windows ARM, dove `faster-whisper` e OpenVINO non sono installabili (CTranslate2 non pubblica wheel `win_arm64`) e la trascrizione va su CPU |
+    | ARM64 (Snapdragon, ecc.) | **3.11** | È la versione collaudata su Windows ARM, dove `faster-whisper` e OpenVINO non sono installabili (CTranslate2 non pubblica wheel `win_arm64`) e la trascrizione va su CPU. Attenzione all'installer: serve **"Windows installer (64-bit)" x86-64**, NON quello ARM64 — i pacchetti del progetto non hanno wheel per ARM nativo (`py-rust-stemmers` per nessuna versione, `pyyaml` su 3.11), e con il Python nativo `pip` tenta di compilarli e muore senza toolchain C++/Rust |
 
-   L'architettura è letta da `%PROCESSOR_ARCHITEW6432%` quando disponibile,
-   perché su Windows ARM un `cmd.exe` x64 emulato si dichiara `AMD64`: leggere
-   quella variabile da sola installerebbe il pacchetto sbagliato.
+    L'architettura è letta da `%PROCESSOR_ARCHITEW6432%` quando disponibile,
+    perché su Windows ARM un `cmd.exe` x64 emulato si dichiara `AMD64`: leggere
+    quella variabile da sola installerebbe il pacchetto sbagliato.
+
+    Su macchina ARM64 gli interpreti ARM64 nativi vengono scartati in
+    automatico (vale solo quello x86-64 emulato), e anche l'eventuale
+    installazione via `winget` chiede l'architettura x64.
 
    Se sul PC c'è già un Python con i pacchetti del progetto, viene usato
    quello e non si installa niente.
@@ -197,22 +203,37 @@ installazione: **non** fallisce con un errore incomprensibile.
 > È il caso normale alla prima esecuzione: scarichi lo ZIP, avvii, e non hai
 > ancora la presentazione né l'audio. **Non è un errore**: il programma
 > installa tutto quello che serve, scarica i modelli, e poi si ferma con un
-> avviso che dice cosa mettere nella cartella:
+> avviso che dice **quale** dei due manca, cosa vede nella cartella e cosa
+> mettere (esempio con entrambi assenti):
 >
 > ```
 > ========================================================================
 >    Sync Video è pronto: dipendenze, Tesseract, ffmpeg e modelli sono
 >    già installati e scaricati. NON è stato prodotto alcun video.
 >
->    Manca solo il tuo materiale. Nella cartella
+>    Manca il tuo materiale (entrambi i file). Nella cartella
 >      <cartella del progetto>
->    metti:
+>    servono:
 >      - la presentazione:  presentazione.pptx  (o .pdf, o .ppt)
 >      - l'audio del podcast: podcast.m4a (o .mp3 / .wav / .ogg / .flac)
+>    Nella cartella vedo:
+>      - "genera_video.bat"
+>      - ...
 >
 >    Poi rilancia genera_video.bat: non scaricherà più nulla.
 > ========================================================================
 > ```
+>
+> Se manca un file solo, lo dice (`Manca la presentazione...` oppure
+> `Manca l'audio...`) e conferma l'altro (`Presentazione trovata: ...`).
+> Se il materiale è finito in una sottocartella (il classico ZIP con doppia
+> cartella), lo segnala (`Ma in queste sottocartelle c'è del materiale...`)
+> invece di far cercare a mano.
+>
+> La presentazione vale anche con nome non standard (`presentazione (1).pptx`
+> da doppio download, nome personalizzato): il programma la usa lo stesso e
+> avvisa con `[Nome file]`. Vale la stessa tolleranza già usata per l'audio
+> (qualsiasi nome, il più recente).
 >
 > Il secondo avvio non scarica più niente e parte subito. Se invece indichi un
 > percorso esplicito che non esiste (`--pdf slide.pptx`), l'errore resta un
