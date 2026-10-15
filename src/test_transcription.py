@@ -977,6 +977,7 @@ class TestFallbackIntegrazione(unittest.TestCase):
         with (
             mock.patch.object(transcription, "resolved_transcriber", return_value="openvino"),
             mock.patch.object(transcription, "ram_available_bytes", return_value=100 * 1024**2),
+            mock.patch.object(transcription, "openvino_usable", return_value=False),
             mock.patch.object(
                 transcription, "transcribe_with_whisper", return_value=("testo cpu", [])
             ) as cpu,
@@ -989,6 +990,8 @@ class TestFallbackIntegrazione(unittest.TestCase):
         self.assertEqual(uscita, ("testo cpu", []))
         cpu.assert_called_once()
         gpu.assert_not_called()
+        # Stesso valore che userebbe il percorso CPU normale, non un True fisso.
+        self.assertFalse(cpu.call_args.kwargs["openvino_available"])
         self.assertIn("faster-whisper su CPU", "\n".join(catturati.output))
         # Nessun tentativo GPU: nessun marker da pulire.
         self.assertFalse((self.radice / "openvino_attempt.json").exists())

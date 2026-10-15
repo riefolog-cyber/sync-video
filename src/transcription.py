@@ -503,12 +503,11 @@ def transcribe_audio(
         if transcriber == "auto":
             motore, motivo = decide_transcriber(transcriber, model_dir, audio_path)
             if motore != "openvino":
-                assert motivo is not None  # decide con auto+openvino motiva sempre
                 log.warning(
                     "\n   [Trascrizione] %s.\n"
                     "   Uso faster-whisper su CPU: piu' lento, ma arriva in fondo.\n"
                     "   Per forzare comunque la GPU: --transcriber openvino.",
-                    motivo,
+                    motivo or "motivo non registrato",
                 )
                 return transcribe_with_whisper(
                     audio_path,
@@ -516,7 +515,7 @@ def transcribe_audio(
                     language=language,
                     device=whisper_device,
                     compute_type=whisper_compute_type,
-                    openvino_available=True,
+                    openvino_available=openvino_usable(openvino_model_dir),
                     beam_size=whisper_beam,
                     batch_size=whisper_batch,
                     device_explicit=whisper_device_explicit,

@@ -350,10 +350,42 @@ def prova_motore(r: Relazione) -> None:
     parte, e senza questa prova il difetto si vede solo al primo video.
     """
     try:
-        from transcription import openvino_usable, resolved_transcriber
+        from transcription import _OPENVINO_ATTEMPT_FILENAME, openvino_usable, resolved_transcriber
     except ImportError as e:
         r.aggiungi(Esito("Motore", AVV, f"non verificabile, transcription.py non si importa ({e})"))
         return
+    # Tentativo GPU morto in precedenza: la prossima trascrizione di QUEL
+    # materiale parte su CPU da sola. Si segnala qui perche' spiega un giro
+    # lento che altrimenti sembrerebbe un regresso inspiegabile.
+    try:
+        from config import CACHE_DIR
+
+        segnale = CACHE_DIR / _OPENVINO_ATTEMPT_FILENAME
+        incompiuto = segnale.exists()
+        audio_nome: str | None = None
+        if incompiuto:
+            try:
+                import json
+
+                audio_nome = Path(
+                    str(json.loads(segnale.read_text(encoding="utf-8")).get("audio", ""))
+                ).name or None
+            except (OSError, ValueError, AttributeError):
+                audio_nome = None
+    except (ImportError, OSError):
+        incompiuto, audio_nome = False, None
+    if incompiuto:
+        r.aggiungi(
+            Esito(
+                "Motore",
+                AVV,
+                "tentativo GPU precedente incompiuto"
+                + (f" su {audio_nome}" if audio_nome else "")
+                + " (probabile crash): per quel materiale la prossima trascrizione parte su CPU",
+                "Un giro piu' lento, poi tutto torna da solo. Per riprovare subito "
+                "la GPU: genera_video.bat --transcriber openvino.",
+            )
+        )
     try:
         from config import DEFAULT_OPENVINO_MODEL_DIR
 

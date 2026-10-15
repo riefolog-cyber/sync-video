@@ -104,7 +104,16 @@ class TestKeepCacheStems(_CacheTemp):
 
         self.assertEqual(
             KEEP_CACHE_STEMS,
-            frozenset({"machine_setup", "updates_check", "fastembed_ab", "sync_report", "hardware"}),
+            frozenset(
+                {
+                    "machine_setup",
+                    "updates_check",
+                    "fastembed_ab",
+                    "sync_report",
+                    "hardware",
+                    "openvino_attempt",
+                }
+            ),
         )
         self.assertEqual(KEEP_STEMS, KEEP_CACHE_STEMS)
 
@@ -121,6 +130,24 @@ class TestKeepCacheStems(_CacheTemp):
 
 
 class TestCleanOrphanCache(_CacheTemp):
+    def test_il_marker_gpu_sopravvive_alla_pulizia_di_avvio(self) -> None:
+        """Senza, il ripiego CPU dopo un crash nativo non scatterebbe mai.
+
+        La pulizia orfani gira a ogni avvio PRIMA della trascrizione: se
+        cancellasse openvino_attempt.json, il segnale del crash sparirebbe
+        prima che decide_transcriber lo legga.
+        """
+        from transcription import _OPENVINO_ATTEMPT_FILENAME
+
+        (self.base / _OPENVINO_ATTEMPT_FILENAME).write_text('{"audio": "x"}', encoding="utf-8")
+        (self.base / "orfano.json").write_text("{}", encoding="utf-8")
+
+        rimossi = clean_orphan_cache(set(), cache_dir=self.base)
+
+        self.assertEqual(rimossi, 1)
+        self.assertTrue((self.base / _OPENVINO_ATTEMPT_FILENAME).exists())
+        self.assertFalse((self.base / "orfano.json").exists())
+
     def test_rimuove_solo_le_chiavi_non_attive(self) -> None:
         for nome in ("slide1", "slide2", "orfano"):
             (self.base / f"{nome}.json").write_text("{}", encoding="utf-8")

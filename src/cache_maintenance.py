@@ -21,9 +21,10 @@ from pathlib import Path
 
 # Cartelle con i pesi ML: cancellarle costa GB di re-download.
 MODEL_DIRS = ("embedding_model", "whisper_openvino_small", "whisper_openvino_base", "whisper_openvino_medium")
-# Chiavi che non sono cache di contenuto: vanno conservate.
+# Chiavi che non sono cache di contenuto: vanno conservate (stesso elenco di
+# pipeline_cache.KEEP_CACHE_STEMS: il test di equivalenza li tiene allineati).
 KEEP_STEMS = frozenset(
-    {"machine_setup", "updates_check", "fastembed_ab", "sync_report", "hardware"}
+    {"machine_setup", "updates_check", "fastembed_ab", "sync_report", "hardware", "openvino_attempt"}
 )
 
 

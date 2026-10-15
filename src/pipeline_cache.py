@@ -17,9 +17,11 @@ from config import CACHE_DIR, LLM_REVIEW_CACHE_PREFIX, atomic_write_text, log
 # Chiavi "housekeeping" che NON sono cache di contenuto: vanno conservate
 # (updates_check = TTL PyPI, fastembed_ab = report A/B, sync_report =
 # report ultima run, machine_setup = fatti hardware, hardware = profilo
-# hardware + encoder ffmpeg di questa macchina).
+# hardware + encoder ffmpeg di questa macchina, openvino_attempt = tentativo
+# GPU incompiuto: cancellarlo alla pulizia di avvio disattiverebbe per sempre
+# il ripiego automatico su CPU dopo un crash nativo).
 KEEP_CACHE_STEMS = frozenset(
-    {"machine_setup", "updates_check", "fastembed_ab", "sync_report", "hardware"}
+    {"machine_setup", "updates_check", "fastembed_ab", "sync_report", "hardware", "openvino_attempt"}
 )
 
 
