@@ -59,6 +59,33 @@ def _fake_run_ok(cmd, **kwargs):
 class TestRetranscribeZone(unittest.TestCase):
     """Ritrascrizione mirata delle zone con buchi sequenziali di ancore."""
 
+    def setUp(self):
+        # Questi test sostituiscono il modulo di faster-whisper, ma la cache dei
+        # modelli delle zone e' per configurazione: senza svuotarla il modello
+        # finto di un test verrebbe riusato dal successivo, e l'esito
+        # dipenderebbe dall'ordine di esecuzione dei test.
+        transcription.reset_zone_models()
+
+    def tearDown(self):
+        transcription.reset_zone_models()
+
+    @staticmethod
+    def _fake_registrato(registro: list[dict]):
+        """Modulo faster_whisper finto che registra come viene costruito il modello."""
+        import types
+
+        mod = types.ModuleType("faster_whisper")
+
+        class _Modello:
+            def __init__(self, *args, **kwargs):
+                registro.append(kwargs)
+
+            def transcribe(self, *args, **kwargs):
+                return ([_FakeFWSeg([("slide", 16.0)])], None)
+
+        mod.WhisperModel = _Modello
+        return mod
+
     def test_offset_assoluti_e_filtro_finestra(self):
         from transcription import retranscribe_zone
 
@@ -104,6 +131,65 @@ class TestRetranscribeZone(unittest.TestCase):
             "shutil.which", return_value="/usr/bin/ffmpeg"
         ), mock.patch("subprocess.run", side_effect=_fake_run_ok):
             self.assertIsNone(retranscribe_zone(Path("audio.m4a"), 200.0, 220.0))
+
+    def test_budget_thread_esplicito_arriva_al_motore(self):
+        """Il budget dei thread deve essere dichiarato, non lasciato al default.
+
+        Misurato sulla zona reale del run del 15/10: default 32.6s, 8 thread
+        24.7s, testo identico. Il default del motore si comporta come 4 thread.
+        """
+        registro: list[dict] = []
+        fake = self._fake_registrato(registro)
+        with (
+            mock.patch.dict(sys.modules, {"faster_whisper": fake}),
+            mock.patch("shutil.which", return_value="/usr/bin/ffmpeg"),
+            mock.patch("subprocess.run", side_effect=_fake_run_ok),
+        ):
+            transcription.retranscribe_zone(Path("audio.m4a"), 200.0, 220.0, cpu_threads=8)
+        self.assertEqual(registro[0].get("cpu_threads"), 8)
+
+    def test_senza_budget_usa_il_default_della_run(self):
+        from config import DEFAULT_WHISPER_THREADS
+
+        registro: list[dict] = []
+        fake = self._fake_registrato(registro)
+        with (
+            mock.patch.dict(sys.modules, {"faster_whisper": fake}),
+            mock.patch("shutil.which", return_value="/usr/bin/ffmpeg"),
+            mock.patch("subprocess.run", side_effect=_fake_run_ok),
+        ):
+            transcription.retranscribe_zone(Path("audio.m4a"), 200.0, 220.0)
+        self.assertEqual(registro[0].get("cpu_threads"), DEFAULT_WHISPER_THREADS)
+
+    def test_due_zone_non_ricaricano_i_pesi(self):
+        """La seconda zona riusa il modello: e' il punto della cache."""
+        registro: list[dict] = []
+        fake = self._fake_registrato(registro)
+        with (
+            mock.patch.dict(sys.modules, {"faster_whisper": fake}),
+            mock.patch("shutil.which", return_value="/usr/bin/ffmpeg"),
+            mock.patch("subprocess.run", side_effect=_fake_run_ok),
+        ):
+            transcription.retranscribe_zone(Path("audio.m4a"), 200.0, 220.0, cpu_threads=8)
+            transcription.retranscribe_zone(Path("audio.m4a"), 300.0, 320.0, cpu_threads=8)
+        self.assertEqual(len(registro), 1, "la seconda zona ha ricostruito il modello")
+
+    def test_configurazione_diversa_non_riusa_il_modello(self):
+        """Il riuso non e' un globale unico: thread diversi vogliono un altro modello.
+
+        Su un decoder vero condividere l'istanza fra due configurazioni
+        significherebbe decodificare con i parametri di un'altra.
+        """
+        registro: list[dict] = []
+        fake = self._fake_registrato(registro)
+        with (
+            mock.patch.dict(sys.modules, {"faster_whisper": fake}),
+            mock.patch("shutil.which", return_value="/usr/bin/ffmpeg"),
+            mock.patch("subprocess.run", side_effect=_fake_run_ok),
+        ):
+            transcription.retranscribe_zone(Path("audio.m4a"), 200.0, 220.0, cpu_threads=8)
+            transcription.retranscribe_zone(Path("audio.m4a"), 300.0, 320.0, cpu_threads=4)
+        self.assertEqual(len(registro), 2)
 
 
 class TestCorrectTranscriptNames(unittest.TestCase):
@@ -467,6 +553,86 @@ class TestTranscriptCacheKey(unittest.TestCase):
                 whisper = _transcript_cache_key("a" * 32, self._args(transcriber="whisper"))
         self.assertNotEqual(auto, whisper)
         self.assertIn("openvino", auto)
+
+
+class TestSpiegaTrascrizioneRifatta(unittest.TestCase):
+    """Perché i minuti si rifanno: la run lo dice invece di tacere.
+
+    La chiave contiene hash dell'audio e parametri di decodifica: cambiarne uno
+    costa 7 minuti e, prima di questa riga, l'unico segnale era il tempo che
+    passava.
+    """
+
+    def setUp(self):
+        import main
+
+        self._main = main
+        self._old_cache_dir = main.CACHE_DIR
+        main.CACHE_DIR = self._tmpdir = Path(tempfile.mkdtemp())
+        self.addCleanup(self._restore_cache_dir)
+
+    def _restore_cache_dir(self):
+        self._main.CACHE_DIR = self._old_cache_dir
+
+    def _chiave(self, audio_hash="a" * 32, **overrides):
+        base = {
+            "lang": "ita",
+            "whisper_model": "small",
+            "transcriber": "whisper",
+            "whisper_device": "cpu",
+            "whisper_compute_type": "int8",
+            "whisper_beam": 1,
+            "whisper_batch": 8,
+            "openvino_device": "GPU",
+            "openvino_model_dir": str(Path(tempfile.gettempdir()) / "non_esiste_ov"),
+        }
+        base.update(overrides)
+        return self._main._transcript_cache_key(audio_hash, mock.MagicMock(**base))
+
+    def _spiega(self, chiave, audio_hash="a" * 32):
+        return self._main._spiega_trascrizione_rifatta(chiave, audio_hash)
+
+    def test_stesso_audio_parametri_diversi_nominati(self):
+        in_cache = self._chiave(whisper_batch=16)
+        self._main._save_cache(in_cache, {"transcript": "vecchia", "words_raw": []})
+        messaggio = self._spiega(self._chiave(whisper_batch=8))
+        self.assertIn("stesso audio", messaggio)
+        # Direzione esplicita: prima cosa c'era in cache, poi cosa c'è adesso.
+        self.assertIn("in cache -> adesso", messaggio)
+        self.assertIn("batch: batch16 -> batch8", messaggio)
+
+    def test_modello_diverso_e_una_differenza_di_parametri(self):
+        in_cache = self._chiave(whisper_model="large-v3")
+        self._main._save_cache(in_cache, {"transcript": "vecchia", "words_raw": []})
+        messaggio = self._spiega(self._chiave(whisper_model="small"))
+        self.assertIn("modello: large-v3 -> small", messaggio)
+
+    def test_audio_diverso_detto_come_tale(self):
+        altro_audio = self._chiave(audio_hash="b" * 32)
+        self._main._save_cache(altro_audio, {"transcript": "vecchia", "words_raw": []})
+        messaggio = self._spiega(self._chiave())
+        self.assertIn("l'audio è cambiato", messaggio)
+        self.assertIn("bbbbbbbbbbbb", messaggio)
+
+    def test_prima_volta_per_questo_audio(self):
+        self.assertIn("nessuna trascrizione in cache", self._spiega(self._chiave()))
+
+    def test_cache_incompleta_detta_come_tale(self):
+        # File presente sotto la chiave giusta ma senza testo dentro (scratch
+        # interrotto): il messaggio deve dirlo, non incolpare i parametri.
+        chiave = self._chiave()
+        self._main._save_cache(chiave, {"words_raw": []})
+        self.assertIn("file incompleto", self._spiega(chiave))
+
+    def test_formato_di_chiave_diverso_non_si_indovina(self):
+        # Chiave con meno campi e stesso audio: mappare i nomi sarebbe una
+        # bugia, quindi il messaggio resta generico invece di indovinare.
+        self._main._save_cache("transcript_aaaaaaaaaaaa_ita_small_whisper", {"transcript": "x"})
+        self.assertIn("formato di chiave diverso", self._spiega(self._chiave()))
+
+    def test_non_guarda_le_cache_delle_slide(self):
+        self._main._save_cache("slides_aaaaaaaaaaaa_300_ita", {"slides": []})
+        self.assertIn("nessuna trascrizione in cache", self._spiega(self._chiave()))
 
 
 class TestAutoBeamPolicy(unittest.TestCase):

@@ -318,3 +318,28 @@ riparazione è disattivata e l'esito resta un semplice avviso.
 
 ---
 
+## Misure che giustificano due numeri del codice (15/10)
+
+Due valori non sono scelte di gusto e si possono rifare da zero, senza
+rigenerare il video:
+
+- **Thread della ritrascrizione mirata** (`transcription.retranscribe_zone`).
+  Una clip da 60s presa DENTRO una zona reale (800-860s del podcast del 15/10),
+  beam 5, `small` int8: **32.6s** col default del motore (che su questa macchina
+  si comporta come 4 thread), 34.2s a 4 thread espliciti, **24.7s** col budget
+  della run (8). Rapporto **1.32-1.38x**, con il testo **identico** (somiglianza
+  1.000, le stesse 164 parole). Da qui `cpu_threads` esplicito e il modello
+  riusato fra le zone della stessa run: le zone sono la fase che decodifica più
+  volte, quindi era il costo nascosto più alto.
+- **Quota delle zone cieche** (`RECOVERY_MAX_ZONE_SHARE`, default 0.5).
+  Ricalcolando le zone su sottoinsiemi di ancore **sparse** del run del 15/10
+  (deck da 15 slide, 26m30s, ancore vere a 2-8 e 10-15): con tutte le ancore le
+  zone coprono il **14%** dell'audio, con 7 sparse il **92%**, con 4 l'**92%**,
+  con 3 l'**86%**. Sopra la quota un passaggio mirato costerebbe quasi quanto
+  l'audio intero e in più perderebbe il confronto fra le due trascrizioni
+  (l'unica cosa che permette di tornare al testo veloce): **non esiste un
+  gradino intermedio**, e 0.5 è il confine misurato.
+
+Le due prove stanno in `.cache/_misure/` (`thread_zone.py` e `scala.py`), fuori
+dal versionamento come tutta la cache.
+

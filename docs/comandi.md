@@ -67,6 +67,19 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `EMBED_BATCH` (env) | `16` / `32` / `64` per RAM <6 / <12 / ≥12 GB | Testi per volta nel modello di embedding |
 | `--video-encoder` | `auto` | `auto` sceglie NVENC/QSV/AMF/VideoToolbox se la GPU li supporta, altrimenti `libx264` su CPU. Se l'encoder accelerato fallisce a runtime **ripiega automaticamente** su libx264 |
 
+> **Si vede se la trascrizione arriva dalla cache, e perché no.** La chiave
+> della trascrizione contiene l'hash del **contenuto** dell'audio e i parametri
+> di decodifica (motore, modello, device, compute type, beam, batch): basta
+> cambiarne uno — o riscaricare il podcast da NotebookLM, che produce byte
+> diversi — per rifare la decodifica da capo. La run lo dice in entrambi i casi:
+> `[CACHE] Trascrizione recuperata dalla cache: nessuna decodifica`,
+> `[CACHE] Trascrizione da rifare: stesso audio, parametri diversi (in cache ->
+> adesso: batch: batch16 -> batch8)`, `l'audio è cambiato: in .cache/ c'è la
+> trascrizione di un altro file (… contro …)`, oppure `nessuna trascrizione in
+> cache per questo audio` alla prima run. Su CPU 26 minuti di audio costano ~7
+> minuti di decodifica: se la riga dice "parametri diversi", conviene rimettere i
+> parametri di prima invece di aspettare.
+
 > **I thread non hanno tutti lo stesso default**, e il tetto non è 8.
 > Oggi sono differenziati perché i due limiti misurati sono diversi: la
 > **banda memoria** (embed/video: `min(12, core fisici)` — sullo Snapdragon X

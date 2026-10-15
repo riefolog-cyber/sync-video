@@ -81,6 +81,21 @@ La presentazione esiste prima e il podcast deve **annunciare ogni slide**
   decodifica intera si paga solo se le zone cieche non sono bastate: se il
   recupero riporta le ancore che mancavano, resta la decodifica veloce col testo
   ricucito.
+- La ritrascrizione mirata non ricarica il modello per ogni zona (una sola
+  istanza per run) e usa il budget di thread della decodifica principale. Senza
+  `cpu_threads` esplicito faster-whisper sceglie da solo, e su questa macchina il
+  default si comporta come 4 thread: su una clip da 60s dentro una zona reale
+  (beam 5, small int8) sono 32.6s contro 24.7s col budget pieno, con il testo
+  **identico** (somiglianza 1.000, le stesse 164 parole). Le zone sono la fase
+  che decodifica più volte, quindi era anche il costo nascosto più alto.
+- Non esiste un rimedio intermedio fra "zone mirate" e "audio intero": quando
+  la copertura è così bassa da far scattare la decodifica accurata, le zone
+  coprono l'86-92% dell'audio (misurato rifacendo il conto su sottoinsiemi
+  sparse delle ancore reali del run del 15/10), quindi un passaggio mirato
+  costerebbe quasi quanto quello intero e in più perderebbe il confronto fra le
+  due trascrizioni, che è l'unica cosa che permette di tornare al testo veloce
+  quando l'accurato peggiora le ancore. La quota `RECOVERY_MAX_ZONE_SHARE`
+  (default 0.5) è il confine fra i due casi.
 - L'ultima slide non ha un'ancora a destra (a destra c'è la fine dell'audio),
   quindi la sua transizione veniva ritrascritta col beam accurato solo se il
   decoder sbagliava **due** volte nella stessa zona (annuncio distrutto **e**

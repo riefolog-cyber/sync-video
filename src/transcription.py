@@ -830,6 +830,41 @@ def transcribe_with_whisper(
     return transcript, all_words
 
 
+# Modelli delle zone, condivisi dentro la stessa run. La ritrascrizione
+# mirata gira a grappoli (una zona per volta) e ogni chiamata costruiva il
+# modello da zero: ~500 MB di pesi riletti da disco e riportati in memoria per
+# OGNI zona, piu' il tempo di costruzione. La chiave sono le quattro cose che
+# `WhisperModel` usa per costruire la rete: due configurazioni diverse non
+# possono condividere l'istanza (e non devono: sarebbe un modello che decodifica
+# con i parametri di un'altra).
+_ZONE_MODELS: dict[tuple[str, str, str, int], Any] = {}
+
+
+def _zone_model(model_size: str, device: str, compute_type: str, cpu_threads: int) -> Any:
+    """Il modello per le zone, riusato se la configurazione e' la stessa."""
+    from faster_whisper import WhisperModel
+
+    chiave = (model_size, device, compute_type, cpu_threads)
+    modello = _ZONE_MODELS.get(chiave)
+    if modello is None:
+        modello = WhisperModel(
+            model_size, device=device, compute_type=compute_type, cpu_threads=cpu_threads
+        )
+        _ZONE_MODELS[chiave] = modello
+    else:
+        log.debug("   [Gap] Modello delle zone riusato (nessun ricaricamento).")
+    return modello
+
+
+def reset_zone_models() -> None:
+    """Dimentica i modelli delle zone. usato dai test per non ereditare l'istanza.
+
+    NON CHIAMARE DA `main.py`: il riuso e' il punto di questa cache, e svuotarla
+    a ogni zona riporterebbe il costo che esiste per togliere.
+    """
+    _ZONE_MODELS.clear()
+
+
 def retranscribe_zone(
     audio_path: Path,
     t0: float,
@@ -840,6 +875,7 @@ def retranscribe_zone(
     language: str = "ita",
     beam_size: int = 5,
     pad_seconds: float = 5.0,
+    cpu_threads: int | None = None,
 ) -> list[Word] | None:
     """Ritrascrive ``[t0, t1]`` col beam accurato per recuperare ancore garbate.
 
@@ -849,6 +885,19 @@ def retranscribe_zone(
     ritrascrive SOLO la zona (secondi, non l'intero audio) con un po' di
     contesto ai bordi per il decoder; tornano le parole con timestamp assoluti
     dentro ``[t0, t1]``.
+
+    ``cpu_threads`` esplicito, come nella decodifica principale: senza questo
+    argomento faster-whisper sceglie da solo e su questa macchina il default si
+    comporta come 4 thread. Misurato su una clip dentro una zona reale (beam 5,
+    modello small int8): default 32.6s, 4 thread 34.2s, 8 thread 24.7s, con il
+    testo IDENTICO (somiglianza 1.000, le stesse parole). Le zone sono la fase
+    in cui si decodifica piu' volte, quindi era anche quella col costo nascosto
+    piu' alto: 1.32-1.38x, senza toccare una parola dell'output.
+
+    Limite noto, non risolto qui: le zone girano sempre su CPU con
+    ``compute_type`` ``int8`` quando il chiamante non dice altro, quindi una run
+    con ``--whisper-device cuda`` decodifica le zone su CPU. Non e' cambiato da
+    questo intervento, che tocca solo thread e riuso del modello.
 
     Returns None se qualcosa fallisce (ffmpeg assente, modello non caricato):
     il chiamante prosegue senza recovery, mai un'interruzione.
@@ -875,9 +924,8 @@ def retranscribe_zone(
             if res.returncode != 0 or not clip.exists():
                 log.warning("   [Gap] Estrazione clip [%.1f-%.1f] fallita: proseguo senza recovery.", t0, t1)
                 return None
-            from faster_whisper import WhisperModel
-
-            model = WhisperModel(model_size, device=device, compute_type=compute_type)
+            n_threads = cpu_threads if cpu_threads else DEFAULT_WHISPER_THREADS
+            model = _zone_model(model_size, device, compute_type, n_threads)
             whisper_lang = {"ita": "it"}.get(language, language)
             segments, _ = model.transcribe(
                 str(clip),

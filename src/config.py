@@ -1615,6 +1615,17 @@ DEFAULT_TAIL_RECOVERY_RATIO = _env_float("TAIL_RECOVERY_RATIO", 1.5)
 # solo. Con poche ancore vicine la quota non si raggiunge e il recupero resta
 # quello di sempre. Override con RECOVERY_MAX_ZONE_SHARE (0 = disattiva il
 # vincolo e ritrascrive sempre le zone).
+#
+# MISURATO sui materiali reali (run del 15/10: deck da 15 slide, 26m30s di
+# audio, ancore vere a 2-8 e 10-15), rifacendo il conto delle zone su sottoinsiemi
+# di quelle ancore: con le ancore tutte presenti le zone coprono il 14%
+# dell'audio e il recupero mirato vale la pena; con ancore SPARSE (7, 4 o 3 su 14)
+# coprono l'86-92%. Lì il "mirato" costerebbe quasi quanto la decodifica intera e
+# in piu' perderebbe il confronto fra le due trascrizioni, che e' l'unica cosa che
+# permette di tornare al testo veloce quando l'accurato peggiora le ancore. Per
+# questo non esiste un gradino intermedio piu' economico: la scala e' quella che
+# c'e' (zone mirate -> decodifica intera), e il numero sotto decide dove passa il
+# confine. Suite: test_sync.TestRecuperoZoneCieche.
 DEFAULT_RECOVERY_MAX_ZONE_SHARE = _env_float("RECOVERY_MAX_ZONE_SHARE", 0.5)
 
 # --- Parametri tecnici (sovrascrivibili da .env) ---

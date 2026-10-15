@@ -32,6 +32,7 @@ from config import (
     DEFAULT_VIDEO_THREADS,
     DEFAULT_WHISPER_BEAM_ACCURATE,
     DEFAULT_WHISPER_DEVICE,
+    DEFAULT_WHISPER_THREADS,
     STOPWORDS_ITA,
     WHISPER_REVISIONI,
     bootstrap,
@@ -1793,6 +1794,69 @@ def _transcript_cache_key(audio_hash: str, args: Any, beam: int | None = None) -
     return "_".join(str(p) for p in parts)
 
 
+# I campi che `_transcript_cache_key` unisce, nell'ordine in cui li unisce: qui
+# servono a dare un NOME alla differenza quando la cache non si può riusare.
+_CAMPI_CHIAVE_TRASCRIZIONE = (
+    "chiave",
+    "audio",
+    "lingua",
+    "modello",
+    "motore",
+    "device",
+    "compute",
+    "beam",
+    "batch",
+)
+
+
+def _spiega_trascrizione_rifatta(cache_key: str, audio_hash: str) -> str:
+    """Perché il testo si rifà invece di arrivare dalla cache, in una riga.
+
+    La chiave contiene l'hash del CONTENUTO dell'audio e i parametri di
+    decodifica: basta cambiare una variabile `WHISPER_*`, o riscaricare il
+    podcast da NotebookLM (byte diversi, stessa parlata), per rifare minuti di
+    lavoro. Fino a ora l'unico segnale era il tempo che passava: qui la
+    differenza si nomina, confrontando la chiave corrente con le trascrizioni
+    rimaste in `.cache/`.
+
+    Non decide niente e non tocca la cache: legge le chiavi e le descrive.
+    """
+    if _cache_path(cache_key).exists():
+        return "la cache esiste ma non contiene la trascrizione (file incompleto)"
+    chiavi = sorted(p.stem for p in CACHE_DIR.glob("transcript_*.json") if p.stem != cache_key)
+    attuale = cache_key.split("_")
+    for altra in chiavi:
+        campi = altra.split("_")
+        if len(campi) < 2 or campi[1] != audio_hash[:12]:
+            continue  # cache di un altro audio: non spiega niente su questa
+        # I nomi dei campi valgono solo se le tre sequenze hanno la stessa
+        # lunghezza: un formato di chiave diverso si dichiara, non si indovina
+        # (la mappa mentirebbe sui nomi, ed è peggio di un messaggio generico).
+        if len(campi) != len(attuale) or len(attuale) != len(_CAMPI_CHIAVE_TRASCRIZIONE):
+            return "stesso audio, ma i parametri sono cambiati (formato di chiave diverso)"
+        diversi = [
+            f"{nome}: {vecchio} -> {nuovo}"
+            for nome, vecchio, nuovo in zip(
+                _CAMPI_CHIAVE_TRASCRIZIONE, campi, attuale, strict=True
+            )
+            if vecchio != nuovo
+        ]
+        if diversi:
+            # La direzione è dichiarata: senza "in cache -> adesso" l'ordine
+            # della freccia è un indovinello, e qui si sta spiegando un ritardo.
+            return (
+                "stesso audio, parametri diversi (in cache -> adesso: "
+                + ", ".join(diversi)
+                + ")"
+            )
+    if chiavi and len(chiavi[0].split("_")) >= 2:
+        return (
+            "l'audio è cambiato: in .cache/ c'è la trascrizione di un altro file "
+            f"({chiavi[0].split('_')[1]} contro {audio_hash[:12]})"
+        )
+    return "nessuna trascrizione in cache per questo audio"
+
+
 def _beam_auto_enabled(args: Any) -> bool:
     """True se la pipeline può scegliere da sola il beam.
 
@@ -2302,6 +2366,12 @@ def _recover_anchor_zones(
             hi,
             model_size=args.whisper_model,
             language=args.lang,
+            # Stesso budget della decodifica principale. Senza questo argomento
+            # faster-whisper sceglie da solo e su questa macchina il default si
+            # comporta come 4 thread: la zona del run del 15/10 (220s) pagava
+            # ~28% in piu' del necessario, e le zone sono la fase che decodifica
+            # piu' volte (misurato: 32.6s -> 24.7s, testo identico).
+            cpu_threads=DEFAULT_WHISPER_THREADS,
         )
         seconds += time.time() - t0
         if not nuove:
@@ -2892,9 +2962,21 @@ def main(argv: list | None = None) -> None:
                 # Fix A: recupera anche le parole raw dalla cache se presenti
                 if "words_raw" in cached:
                     words_raw = cached["words_raw"]
-                log.info("2. [CACHE] Trascrizione recuperata dalla cache.")
+                log.info(
+                    "2. [CACHE] Trascrizione recuperata dalla cache: nessuna decodifica "
+                    "(stesso audio, stesso modello, stessi parametri)."
+                )
 
         if transcript is None:
+            # Perché si rifà: senza questa riga un parametro cambiato (o un audio
+            # riscaricato) costa minuti e non lascia traccia del motivo.
+            if args.no_cache:
+                log.info("2. [CACHE] --no-cache: decodifico la trascrizione.")
+            else:
+                log.info(
+                    "2. [CACHE] Trascrizione da rifare: %s.",
+                    _spiega_trascrizione_rifatta(cache_key_transcript, audio_hash),
+                )
             transcript, words_raw = transcribe_audio(
                 audio_path,
                 language=args.lang,
