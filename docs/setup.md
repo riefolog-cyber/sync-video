@@ -201,6 +201,22 @@ installazione: **non** fallisce con un errore incomprensibile.
 > `--fallback-senza-grafica` apre la strada e avvisa che il risultato è
 > meno affidabile.
 >
+> ### Se la trascrizione muore in silenzio sulla GPU
+>
+> Sintomo: il log si ferma dopo `2. Trascrizione con OpenVINO GenAI...` senza
+> traceback, e il programma finisce senza video. Il processo è morto dentro il
+> codice nativo della scheda Intel (driver o memoria condivisa esaurita: la
+> iGPU usa la stessa RAM del sistema) — non è un errore del programma, e per
+> questo non c'è messaggio.
+>
+> Il programma si salva da solo in due modi, solo con scelta `auto` (un
+> `--transcriber openvino` esplicito non si discute): se la RAM libera non
+> basta a caricare il modello va diretto su CPU dicendolo; se un tentativo GPU
+> precedente sullo stesso audio non è mai finito (file-segnale
+> `.cache/openvino_attempt.json`), la run dopo parte su CPU. Prima prova
+> comunque a chiudere tutto (browser per primo) e rilanciare; scorciatoia
+> immediata: `genera_video.bat --transcriber whisper`.
+>
 > ### Se lanci senza i file del video
 >
 > È il caso normale alla prima esecuzione: scarichi lo ZIP, avvii, e non hai
