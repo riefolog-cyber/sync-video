@@ -161,6 +161,30 @@ def ram_total_bytes() -> int | None:
     return None
 
 
+def ram_available_bytes() -> int | None:
+    """Byte di RAM attualmente disponibili, o None se non rilevabile.
+
+    A differenza di ram_total_bytes (stabile, nei default e nelle chiavi) questa
+    misura oscilla con quello che l'utente sta facendo (browser aperto/chiuso):
+    va usata solo per decisioni puntuali "adesso ho abbastanza per caricare X?",
+    mai per default o chiavi di cache. Su macOS non implementata (vm_stat va
+    parsato): None significa "non so", e chi chiama deve saltare il controllo
+    invece di decidere alla cieca.
+    """
+    if sys.platform == "win32":
+        coppia = _ram_win32()
+        return coppia[1] if coppia else None
+    if sys.platform.startswith("linux"):
+        try:
+            for riga in Path("/proc/meminfo").read_text(encoding="utf-8", errors="replace").splitlines():
+                if riga.startswith("MemAvailable:"):
+                    return int(riga.split()[1]) * 1024
+        except Exception:
+            return None
+        return None
+    return None
+
+
 def memory_tier(total_bytes: int | None) -> str:
     """'basso' | 'medio' | 'alto' | 'ignoto' dalla RAM totale.
 

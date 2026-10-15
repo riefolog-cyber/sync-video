@@ -9,12 +9,16 @@ Due motori disponibili:
 - faster-whisper (fallback): CTranslate2 su CPU.
 """
 
+import contextlib
+import json
 import re
+import time
 from pathlib import Path
 from typing import Any, cast
 
 from chunks import Word
 from config import (
+    CACHE_DIR,
     DEFAULT_MIN_WORD_LENGTH,
     DEFAULT_OPENVINO_MODEL_DIR,
     DEFAULT_OPENVINO_MODEL_ID,
@@ -24,10 +28,12 @@ from config import (
     DEFAULT_WHISPER_THREADS,
     OPENVINO_MODEL_REVISIONI,
     TRANSITION_WORDS_ITA,
+    atomic_write_text,
     get_stopwords,
     log,
     openvino_device_available,
 )
+from hardware import ram_available_bytes
 
 
 # =====================================================================
@@ -326,6 +332,140 @@ def resolved_transcriber(transcriber: str, openvino_model_dir: Path | str | None
     return "whisper"
 
 
+# File-segnale di un tentativo OpenVINO: scritto prima di caricare la pipeline,
+# cancellato a trascrizione riuscita (o a eccezione Python, che si rivede alla
+# prossima run). Se il processo muore dentro il codice nativo (segfault della
+# GPU, OOM-killer di Windows: nessun traceback, nessuna eccezione), il file
+# resta e la run dopo sa che la GPU ha ucciso quel lavoro.
+_OPENVINO_ATTEMPT_FILENAME = "openvino_attempt.json"
+
+# Fabbisogno per caricare il modello IR sulla GPU, che condivide la RAM di
+# sistema: due volte i byte del modello (copia sul device + blob compilato)
+# piu' 1 GiB di margine per OS e resto del programma. Se la cartella del
+# modello non si legge, 2 GiB fissi (ordine di grandezza di whisper-small).
+_GPU_SPIKE_FACTOR = 2
+_GPU_OS_MARGIN_BYTES = 1024**3
+_GPU_MIN_NEED_BYTES = 2 * 1024**3
+
+
+def _openvino_attempt_path() -> Path:
+    """Percorso del file-segnale (nella cache del progetto)."""
+    return CACHE_DIR / _OPENVINO_ATTEMPT_FILENAME
+
+
+def _model_dir_bytes(model_dir: Path) -> int | None:
+    """Byte dei file del modello IR, o None se non leggibili."""
+    try:
+        return sum(p.stat().st_size for p in model_dir.rglob("*") if p.is_file())
+    except OSError:
+        return None
+
+
+def _openvino_ram_need_bytes(model_dir: Path | None) -> int:
+    """RAM libera richiesta per caricare il modello sulla GPU."""
+    if model_dir is not None:
+        misurati = _model_dir_bytes(model_dir)
+        if misurati:
+            return _GPU_SPIKE_FACTOR * misurati + _GPU_OS_MARGIN_BYTES
+    return _GPU_MIN_NEED_BYTES
+
+
+def _read_attempt() -> dict[str, Any] | None:
+    """Il tentativo precedente incompiuto, o None se non ce n'e' / illeggibile."""
+    try:
+        return cast("dict[str, Any]", json.loads(_openvino_attempt_path().read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return None
+
+
+def _write_attempt(audio_path: Path) -> None:
+    """Registra l'inizio di un tentativo GPU (sovrascrive il precedente)."""
+    try:
+        info = audio_path.stat()
+    except OSError:
+        return
+    atomic_write_text(
+        _openvino_attempt_path(),
+        json.dumps(
+            {
+                "audio": str(audio_path),
+                "size": info.st_size,
+                "mtime": info.st_mtime,
+                "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+        ),
+    )
+
+
+def _clear_attempt() -> None:
+    """Cancella il file-segnale (trascrizione riuscita o fallita con eccezione)."""
+    with contextlib.suppress(OSError):
+        _openvino_attempt_path().unlink(missing_ok=True)
+
+
+def _same_audio(segnalato: object, audio_path: Path) -> bool:
+    """True se il segnale si riferisce a questo stesso file audio invariato.
+
+    Il confronto diretto regge anche i segnali vecchi o corrotti: chiavi
+    mancanti o di tipo diverso non uguagliano mai dimensione/mtime veri, e un
+    segnale non-dict non e' un segnale.
+    """
+    if not isinstance(segnalato, dict):
+        return False
+    try:
+        info = audio_path.stat()
+    except OSError:
+        return False
+    return (
+        segnalato.get("audio") == str(audio_path)
+        and segnalato.get("size") == info.st_size
+        and segnalato.get("mtime") == info.st_mtime
+    )
+
+
+def decide_transcriber(
+    transcriber: str,
+    openvino_model_dir: Path | str | None,
+    audio_path: Path,
+) -> tuple[str, str | None]:
+    """Motore effettivo + eventuale motivo del ripiego su CPU.
+
+    Ritorna ``(motore, motivo)``: motivo None = via libera alla GPU. Il ripiego
+    scatta solo con scelta ``auto`` (un ``--transcriber openvino`` esplicito non
+    si discute: chi lo chiede sa cosa fa). Due salvagenti, in quest'ordine:
+
+    1. poca RAM libera *adesso* per caricare il modello sulla GPU;
+    2. un tentativo GPU precedente sullo stesso audio mai finito (il processo
+       e' morto dentro il codice nativo: nessun traceback allora, e sarebbe
+       inutile riprovare identico).
+
+    La chiave di cache della trascrizione resta calcolata sul motore risolto da
+    ``resolved_transcriber`` (main.py): in caso di ripiego il testo CPU finisce
+    sotto chiave OpenVINO, ma e' sempre una trascrizione valida dello stesso
+    audio e l'ultima run vince — approssimazione documentata, non corruzione.
+    """
+    if resolved_transcriber(transcriber, openvino_model_dir) != "openvino":
+        return "whisper", None
+    if transcriber == "openvino":
+        return "openvino", None
+    cartella = Path(openvino_model_dir) if openvino_model_dir is not None else None
+    libera = ram_available_bytes()
+    necessari = _openvino_ram_need_bytes(cartella)
+    if libera is not None and libera < necessari:
+        return (
+            "whisper",
+            f"RAM libera {libera / 1024**3:.1f} GB sotto il fabbisogno "
+            f"({necessari / 1024**3:.1f} GB per caricare il modello sulla GPU)",
+        )
+    if cartella is not None and _same_audio(_read_attempt(), audio_path):
+        return (
+            "whisper",
+            "l'ultimo tentativo OpenVINO su questo audio non e' finito "
+            "(il processo e' morto dentro la GPU, senza traceback)",
+        )
+    return "openvino", None
+
+
 def transcribe_audio(
     audio_path: Path,
     language: str = "ita",
@@ -360,6 +500,40 @@ def transcribe_audio(
             model_dir = download_openvino_model(
                 Path(DEFAULT_OPENVINO_MODEL_DIR) if model_dir is None else model_dir
             )
+        if transcriber == "auto":
+            motore, motivo = decide_transcriber(transcriber, model_dir, audio_path)
+            if motore != "openvino":
+                assert motivo is not None  # decide con auto+openvino motiva sempre
+                log.warning(
+                    "\n   [Trascrizione] %s.\n"
+                    "   Uso faster-whisper su CPU: piu' lento, ma arriva in fondo.\n"
+                    "   Per forzare comunque la GPU: --transcriber openvino.",
+                    motivo,
+                )
+                return transcribe_with_whisper(
+                    audio_path,
+                    model_size=model_size,
+                    language=language,
+                    device=whisper_device,
+                    compute_type=whisper_compute_type,
+                    openvino_available=True,
+                    beam_size=whisper_beam,
+                    batch_size=whisper_batch,
+                    device_explicit=whisper_device_explicit,
+                )
+            _write_attempt(audio_path)
+            try:
+                return transcribe_with_openvino(
+                    audio_path,
+                    model_dir=model_dir,
+                    language=language,
+                    device=openvino_device,
+                )
+            finally:
+                # Resta solo se il processo muore dentro il nativo (segfault,
+                # OOM-killer, chiusura forzata): su successo o eccezione Python
+                # si cancella, e la prossima run rivaluta da zero.
+                _clear_attempt()
         return transcribe_with_openvino(
             audio_path,
             model_dir=model_dir,

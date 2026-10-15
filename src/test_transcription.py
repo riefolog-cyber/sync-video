@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import cast
 from unittest import mock
 
+import transcription
 from transcription import correct_transcript_names, openvino_usable, resolved_transcriber
 
 
@@ -863,6 +864,184 @@ class TestBeamChoice(unittest.TestCase):
             self.assertNotEqual(base, other)
         self.assertNotEqual(base, m._beam_ab_cache_key("slides_xyz_300_ita", "a" * 32, args))
         self.assertNotEqual(base, m._beam_ab_cache_key("slides_abc_300_ita", "b" * 32, args))
+
+
+class TestDecideTranscriber(unittest.TestCase):
+    """Ripiego automatico GPU -> CPU: marker dei crash + gate sulla RAM libera.
+
+    Il caso reale e' una morte dentro il codice nativo OpenVINO (nessun
+    traceback): senza marker la run dopo riproverebbe identico all'infinito.
+    """
+
+    GIUSTA = 10 * 1024**3
+    POCA = 100 * 1024**2
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.radice = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.audio = self.radice / "podcast.m4a"
+        self.audio.write_bytes(b"finto-audio")
+        self.modelli = self.radice / "ir"
+        self.modelli.mkdir()
+        (self.modelli / "modello.xml").write_bytes(b"x" * 1000)
+        # Isolamento: il marker vive nel tmpdir, mai nella .cache/ vera.
+        patch_cache = mock.patch.object(transcription, "CACHE_DIR", self.radice)
+        patch_cache.start()
+        self.addCleanup(patch_cache.stop)
+
+    def _decidi(
+        self,
+        transcriber: str = "auto",
+        ram: int | None = GIUSTA,
+        resolved: str = "openvino",
+    ) -> tuple[str, str | None]:
+        with (
+            mock.patch.object(transcription, "resolved_transcriber", return_value=resolved),
+            mock.patch.object(transcription, "ram_available_bytes", return_value=ram),
+        ):
+            return transcription.decide_transcriber(transcriber, self.modelli, self.audio)
+
+    def test_cpu_di_default_resta_cpu(self) -> None:
+        self.assertEqual(self._decidi(resolved="whisper"), ("whisper", None))
+
+    def test_scelta_esplicita_non_si_discute(self) -> None:
+        """--transcriber openvino bypassa marker e gate (via di fuga)."""
+        transcription._write_attempt(self.audio)
+        motore, motivo = self._decidi(transcriber="openvino", ram=self.POCA)
+        self.assertEqual((motore, motivo), ("openvino", None))
+
+    def test_via_libera_senza_marker_e_con_ram(self) -> None:
+        self.assertEqual(self._decidi(), ("openvino", None))
+
+    def test_poca_ram_manda_su_cpu(self) -> None:
+        motore, motivo = self._decidi(ram=self.POCA)
+        self.assertEqual(motore, "whisper")
+        self.assertIsNotNone(motivo)
+        self.assertIn("RAM libera", cast(str, motivo))
+
+    def test_ram_sconosciuta_non_blocca(self) -> None:
+        """Sensore rotto = si procede (fail-open), mai un fermo alla cieca."""
+        self.assertEqual(self._decidi(ram=None), ("openvino", None))
+
+    def test_crash_precedente_sullo_stesso_audio_manda_su_cpu(self) -> None:
+        transcription._write_attempt(self.audio)
+        motore, motivo = self._decidi()
+        self.assertEqual(motore, "whisper")
+        self.assertIsNotNone(motivo)
+        self.assertIn("non e' finito", cast(str, motivo))
+
+    def test_marker_di_altro_audio_non_conta(self) -> None:
+        altro = self.radice / "altro.m4a"
+        altro.write_bytes(b"altro-audio-diverso")
+        transcription._write_attempt(altro)
+        self.assertEqual(self._decidi(), ("openvino", None))
+
+    def test_marker_corrotto_non_conta(self) -> None:
+        (self.radice / "openvino_attempt.json").write_text("{non json", encoding="utf-8")
+        self.assertEqual(self._decidi(), ("openvino", None))
+
+    def test_audio_sostituito_non_conta(self) -> None:
+        """Stesso nome ma contenuto riscritto: e' un altro lavoro."""
+        transcription._write_attempt(self.audio)
+        self.audio.write_bytes(b"contenuto-completamente-diverso-e-piu-lungo")
+        self.assertEqual(self._decidi(), ("openvino", None))
+
+
+class TestFallbackIntegrazione(unittest.TestCase):
+    """Il fallback dentro transcribe_audio: avviso, CPU vera, marker pulito."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.radice = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.audio = self.radice / "podcast.m4a"
+        self.audio.write_bytes(b"finto-audio")
+        self.modelli = self.radice / "ir"
+        self.modelli.mkdir()
+        patch_cache = mock.patch.object(transcription, "CACHE_DIR", self.radice)
+        patch_cache.start()
+        self.addCleanup(patch_cache.stop)
+
+    def test_modello_mancante_usa_soglia_fissa(self) -> None:
+        """Senza cartella modello non si misura: 2 GiB fissi, qui sufficienti."""
+        with (
+            mock.patch.object(transcription, "resolved_transcriber", return_value="openvino"),
+            mock.patch.object(transcription, "ram_available_bytes", return_value=10 * 1024**3),
+        ):
+            self.assertEqual(
+                transcription.decide_transcriber("auto", None, self.audio), ("openvino", None)
+            )
+
+    def test_poca_ram_usa_davvero_la_cpu_e_avvisa(self) -> None:
+        with (
+            mock.patch.object(transcription, "resolved_transcriber", return_value="openvino"),
+            mock.patch.object(transcription, "ram_available_bytes", return_value=100 * 1024**2),
+            mock.patch.object(
+                transcription, "transcribe_with_whisper", return_value=("testo cpu", [])
+            ) as cpu,
+            mock.patch.object(transcription, "transcribe_with_openvino") as gpu,
+            self.assertLogs("slide2video", level="WARNING") as catturati,
+        ):
+            uscita = transcription.transcribe_audio(
+                self.audio, transcriber="auto", openvino_model_dir=self.modelli
+            )
+        self.assertEqual(uscita, ("testo cpu", []))
+        cpu.assert_called_once()
+        gpu.assert_not_called()
+        self.assertIn("faster-whisper su CPU", "\n".join(catturati.output))
+        # Nessun tentativo GPU: nessun marker da pulire.
+        self.assertFalse((self.radice / "openvino_attempt.json").exists())
+
+    def test_marker_presente_durante_il_tentativo_e_via_dopo(self) -> None:
+        visti: list[bool] = []
+
+        def finta_gpu(audio_path: object, **kwargs: object) -> tuple[str, list[dict[str, object]]]:
+            visti.append((self.radice / "openvino_attempt.json").exists())
+            return ("testo gpu", [])
+
+        with (
+            mock.patch.object(transcription, "resolved_transcriber", return_value="openvino"),
+            mock.patch.object(transcription, "ram_available_bytes", return_value=10 * 1024**3),
+            mock.patch.object(transcription, "transcribe_with_openvino", side_effect=finta_gpu),
+        ):
+            uscita = transcription.transcribe_audio(
+                self.audio, transcriber="auto", openvino_model_dir=self.modelli
+            )
+        self.assertEqual(uscita, ("testo gpu", []))
+        self.assertEqual(visti, [True])
+        self.assertFalse((self.radice / "openvino_attempt.json").exists())
+
+    def test_keyboardinterrupt_rilancia_e_pulisce(self) -> None:
+        """Ctrl+C non deve avvelenare la prossima run (il finally pulisce)."""
+        with (
+            mock.patch.object(transcription, "resolved_transcriber", return_value="openvino"),
+            mock.patch.object(transcription, "ram_available_bytes", return_value=10 * 1024**3),
+            mock.patch.object(
+                transcription, "transcribe_with_openvino", side_effect=KeyboardInterrupt
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            transcription.transcribe_audio(
+                self.audio, transcriber="auto", openvino_model_dir=self.modelli
+            )
+        self.assertFalse((self.radice / "openvino_attempt.json").exists())
+
+
+class TestRamAvailable(unittest.TestCase):
+    """Il sensore di RAM libera risponde un numero sensato (o None)."""
+
+    def test_su_questa_macchina(self) -> None:
+        from hardware import ram_available_bytes, ram_total_bytes
+
+        libera = ram_available_bytes()
+        totale = ram_total_bytes()
+        if libera is None:
+            self.assertIsNone(libera)  # piattaforma senza sensore: fail-open
+        else:
+            self.assertGreaterEqual(libera, 0)
+            if totale:
+                self.assertLessEqual(libera, totale)
 
 
 if __name__ == "__main__":
