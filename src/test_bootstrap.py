@@ -555,5 +555,42 @@ class TestPipTail(unittest.TestCase):
         self.assertIn("fermo qui", uscita)
 
 
+class TestSystemInstallTail(unittest.TestCase):
+    """Anche l'auto-install di sistema mostra la causa, non solo un ❌."""
+
+    def _esegui(self) -> tuple[bool, str]:
+        import io
+        from contextlib import redirect_stdout
+
+        with io.StringIO() as buf, redirect_stdout(buf):
+            esito = config._try_system_install("Finto", "Finto.Id", "", "")
+            uscita = buf.getvalue()
+        return esito, uscita
+
+    def test_successo_non_stampa_coda(self) -> None:
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)):
+            esito, uscita = self._esegui()
+        self.assertTrue(esito)
+        self.assertNotIn("|", uscita)
+
+    def test_fallimento_mostra_la_coda_di_winget(self) -> None:
+        import subprocess
+
+        corpo = b"linea 1\n0x80070422: servizio disabilitato dal criterio aziendale"
+        with mock.patch(
+            "subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, ["winget"], output=corpo),
+        ):
+            esito, uscita = self._esegui()
+        self.assertFalse(esito)
+        self.assertIn("criterio aziendale", uscita)
+
+    def test_manager_assente_non_esplode(self) -> None:
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("winget")):
+            esito, uscita = self._esegui()
+        self.assertFalse(esito)
+        self.assertNotIn("|", uscita)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -956,28 +956,38 @@ def _try_system_install(name: str, winget_id: str, apt_pkg: str, brew_pkg: str) 
     elif apt_pkg:
         commands.append(({}, ["sudo", "apt-get", "install", "-y", apt_pkg], f"sudo apt-get install -y {apt_pkg}"))
 
+    ultimo_output: bytes | str | None = None
     for env_extra, cmd, label in commands:
         try:
             print(f"   ⏳ {label} ...", end=" ", flush=True)
             subprocess.run(
                 cmd,
                 env={**os.environ, **env_extra},
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 timeout=_SYSTEM_INSTALL_TIMEOUT,
                 check=True,
             )
             print("✅")
             return True
-        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        except subprocess.CalledProcessError as e:
+            ultimo_output = e.stdout
             print("❌ (tento alternativa)")
+        except subprocess.TimeoutExpired as e:
+            ultimo_output = e.stdout
+            print("⏰ timeout (tento alternativa)")
+        except FileNotFoundError:
+            ultimo_output = None
+            print("❌ (package manager assente, tento alternativa)")
+    _print_output_tail(ultimo_output, _SYSINSTALL_TAIL_LINES)
     return False
 
 
-# Righe di output pip mostrate quando l'installazione fallisce: abbastanza per
+# Righe di output mostrate quando un'installazione fallisce: abbastanza per
 # capire la causa (rete? compilazione? permessi?), non tutto il log che
 # seppellirebbe il messaggio successivo (quali pacchetti installare a mano).
 _PIP_TAIL_LINES = 15
+_SYSINSTALL_TAIL_LINES = 10
 
 
 def _try_pip_install(package: str, upgrade: bool = False) -> bool:
@@ -1004,21 +1014,21 @@ def _try_pip_install(package: str, upgrade: bool = False) -> bool:
         return True
     except subprocess.CalledProcessError as e:
         print("❌")
-        _print_pip_tail(e.stdout)
+        _print_output_tail(e.stdout, _PIP_TAIL_LINES)
         return False
     except subprocess.TimeoutExpired as e:
         print("⏰ timeout")
-        _print_pip_tail(e.stdout)
+        _print_output_tail(e.stdout, _PIP_TAIL_LINES)
         return False
 
 
-def _print_pip_tail(output: bytes | str | None) -> None:
-    """Stampa le ultime righe dell'output di pip (niente se non ce n'e')."""
+def _print_output_tail(output: bytes | str | None, max_lines: int) -> None:
+    """Stampa le ultime righe di un output catturato (niente se non ce n'e')."""
     if not output:
         return
     testo = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else output
     righe = [riga.strip() for riga in testo.splitlines() if riga.strip()]
-    for riga in righe[-_PIP_TAIL_LINES:]:
+    for riga in righe[-max_lines:]:
         print(f"      | {riga[:200]}")
 
 
@@ -1346,9 +1356,10 @@ def bootstrap(*, ignora_spazio: bool = False) -> None:
         log.error(
             "\n❌ TESSERACT OCR NON TROVATO — necessario per estrarre il testo dalle slide.\n"
             "   Auto-install fallita. Scaricalo da: %s\n"
+            "   Oppure installalo con: winget install --id UB-Mannheim.TesseractOCR -e\n"
             "   La lingua italiana (ita.traineddata) viene scaricata da sola in tessdata/\n"
             "   al prossimo avvio riuscito.\n"
-            "   Poi riavvia main.py.\n",
+            "   Poi rilancia genera_video.bat.\n",
             _TESSERACT_DOWNLOAD_URL,
         )
         sys.exit(1)
@@ -1428,7 +1439,7 @@ def bootstrap(*, ignora_spazio: bool = False) -> None:
                     "   Auto-install fallita. Scaricalo da: %s\n"
                     "   Oppure installalo con: winget install Gyan.FFmpeg.Shared\n"
                     "   (apt: `apt-get install ffmpeg` / brew: `brew install ffmpeg`)\n"
-                    "   Poi riavvia.\n",
+                    "   Poi rilancia genera_video.bat.\n",
                     _FFMPEG_DOWNLOAD_URL,
                 )
                 sys.exit(1)
