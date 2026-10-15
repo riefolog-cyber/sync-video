@@ -588,12 +588,26 @@ class TestPipTail(unittest.TestCase):
 class TestSystemInstallTail(unittest.TestCase):
     """Anche l'auto-install di sistema mostra la causa, non solo un ❌."""
 
+    def _argomenti(self) -> tuple[str, str, str, str]:
+        """Pacchetti finti per la piattaforma CHE ESEGUE il test.
+
+        La lista comandi dipende da sys.platform: con stringhe vuote su Linux
+        non parte niente e i test di coda fallirebbero solo lì (successo qui).
+        """
+        import sys
+
+        if sys.platform == "win32":
+            return ("Finto", "Finto.Id", "", "")
+        if sys.platform == "darwin":
+            return ("Finto", "", "", "finto-brew")
+        return ("Finto", "", "finto-apt", "")
+
     def _esegui(self) -> tuple[bool, str]:
         import io
         from contextlib import redirect_stdout
 
         with io.StringIO() as buf, redirect_stdout(buf):
-            esito = config._try_system_install("Finto", "Finto.Id", "", "")
+            esito = config._try_system_install(*self._argomenti())
             uscita = buf.getvalue()
         return esito, uscita
 
@@ -620,6 +634,24 @@ class TestSystemInstallTail(unittest.TestCase):
             esito, uscita = self._esegui()
         self.assertFalse(esito)
         self.assertNotIn("|", uscita)
+
+    def test_su_linux_usa_apt(self) -> None:
+        """La forma che falliva solo in CI: con comandi vuoti non parte niente
+        e la coda resta vuota. Qui si simula Linux per inchiodarla ovunque."""
+        import subprocess
+        import sys
+
+        corpo = b"linea apt di log"
+        with (
+            mock.patch.object(sys, "platform", "linux"),
+            mock.patch(
+                "subprocess.run",
+                side_effect=subprocess.CalledProcessError(1, ["apt-get"], output=corpo),
+            ),
+        ):
+            esito, uscita = self._esegui()
+        self.assertFalse(esito)
+        self.assertIn("linea apt di log", uscita)
 
 
 if __name__ == "__main__":
