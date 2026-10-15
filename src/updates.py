@@ -35,6 +35,7 @@ DEFAULT_UPDATE_TTL_HOURS = 6.0  # ri-check di rete ogni N ore
 # Pacchetti da controllare: i nomi pip usati dal progetto (requirements.txt +
 # dipendenze opzionali del machine setup + dev).
 _PACKAGES: tuple[str, ...] = (
+    "av",
     "pymupdf",
     "pillow",
     "pytesseract",

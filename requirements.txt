@@ -51,6 +51,16 @@ requests>=2.31.0
 # PEP 508 lo esclude senza far fallire `pip install -r` sull'intera riga.
 faster-whisper>=1.2.1; platform_machine != "ARM64" and platform_machine != "aarch64"
 
+# Finestra PyAV usata da faster-whisper per decodificare l'audio (stesso
+# marcatore ARM di faster-whisper: senza, `pip install -r` su ARM nativo
+# tenterebbe una build dai sorgenti). Sotto, faster-whisper chiama
+# av.open(..., metadata_errors="ignore"), kwarg presente da av 12 (sorgente
+# v12.0.0) ma non garantito prima, mentre upstream dichiara solo av>=11:
+# un av vecchio resta installato e esplode a runtime con TypeError
+# (misurato su PC collega, 10/2026). Sopra, av 19 ha RIMOSSO quel kwarg
+# (changelog v19.0.0) e rompe faster-whisper 1.2.1 allo stesso modo.
+av>=12,<19; platform_machine != "ARM64" and platform_machine != "aarch64"
+
 # Trascrizione veloce su iGPU Intel (opzionale ma raccomandato): OpenVINO esiste
 # solo per x86, quindi su ARM non e installabile (e su ARM e comunque inutile:
 # l'Adreno non e accelerabile da OpenVINO).

@@ -429,6 +429,18 @@ _REQUIRED_PACKAGES = {
     "tqdm": "tqdm",
     "fastembed": "fastembed",
     "faster_whisper": "faster-whisper>=1.2.1",
+    # Finestra per PyAV, usato da faster-whisper per decodificare l'audio:
+    # - sotto, faster-whisper chiama av.open(..., metadata_errors="ignore"),
+    #   kwarg presente da av 12 (sorgente v12.0.0 verificato) ma non
+    #   garantito prima; upstream dichiara solo av>=11, quindi pip puo'
+    #   lasciare un av vecchio che esplode a runtime con
+    #   "TypeError: open() got an unexpected keyword argument
+    #   'metadata_errors'" (misurato su PC collega, 10/2026);
+    # - sopra, av 19 ha RIMOSSO quel kwarg (changelog v19.0.0), rompendo
+    #   faster-whisper 1.2.1 allo stesso modo.
+    # Senza questa finestra il bootstrap installa gli estremi rotti senza
+    # accorgersene: l'import riesce sempre, il guasto esce solo in trascrizione.
+    "av": "av>=12,<19",
     # Confronto versioni (qui sotto e in updates.py): senza questo pacchetto la
     # verifica delle versioni minime si disattiva in silenzio.
     "packaging": "packaging>=23.0",
@@ -467,7 +479,7 @@ if sys.version_info >= (3, 13):
 # updates.py lo leggono come elenco completo delle dipendenze dichiarate.
 IS_ARM = platform.machine().upper() in ("ARM64", "AARCH64")
 
-_X64_ONLY_PACKAGES = frozenset({"faster_whisper"})
+_X64_ONLY_PACKAGES = frozenset({"faster_whisper", "av"})
 
 
 def _active_required_packages() -> dict[str, str]:

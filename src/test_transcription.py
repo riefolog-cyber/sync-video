@@ -1047,5 +1047,24 @@ class TestRamAvailable(unittest.TestCase):
                 self.assertLessEqual(libera, totale)
 
 
+class TestContrattoAv(unittest.TestCase):
+    """faster-whisper chiama av.open(..., metadata_errors='ignore'): l'av
+    installato deve accettare quel kwarg, altrimenti la trascrizione muore
+    a runtime con TypeError mentre l'import riesce (caso PC LENOVO)."""
+
+    def test_kwarg_accettato(self) -> None:
+        try:
+            import av
+        except ImportError:
+            self.skipTest("av non installato in questo ambiente")
+            return
+        try:
+            av.open("file-che-non-esiste-12345.m4a", mode="r", metadata_errors="ignore")
+        except TypeError as e:
+            self.fail(f"av {av.__version__} non accetta metadata_errors: {e}")
+        except Exception:
+            pass  # qualsiasi altro errore (file mancante, ecc.) va bene
+
+
 if __name__ == "__main__":
     unittest.main()

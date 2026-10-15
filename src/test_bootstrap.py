@@ -61,6 +61,36 @@ class TestMissingOrOld(unittest.TestCase):
             self.assertIsNone(config._missing_or_old("numpy>=1.26.0"))
 
 
+class TestFinestraAv(unittest.TestCase):
+    """PyAV deve stare nella finestra che faster-whisper usa davvero.
+
+    Sotto (av vecchio senza metadata_errors) e sopra (av 19 che l'ha rimosso)
+    la trascrizione muore a runtime con TypeError, mentre l'import riesce: il
+    bootstrap deve accorgersene prima, non dopo 10 minuti di run.
+    """
+
+    REQ = config._REQUIRED_PACKAGES["av"]
+
+    def test_chiave_presente(self) -> None:
+        self.assertIn("av", config._REQUIRED_PACKAGES)
+
+    def test_vecchio_av_va_aggiornato(self) -> None:
+        with mock.patch("config._installed_version", return_value="11.0.0"):
+            self.assertEqual(config._missing_or_old(self.REQ), "versione 11.0.0")
+
+    def test_av_recente_compatibile_va_bene(self) -> None:
+        with mock.patch("config._installed_version", return_value="18.1.0"):
+            self.assertIsNone(config._missing_or_old(self.REQ))
+
+    def test_av19_va_sostituito(self) -> None:
+        with mock.patch("config._installed_version", return_value="19.0.0"):
+            self.assertEqual(config._missing_or_old(self.REQ), "versione 19.0.0")
+
+    def test_su_arm_nativo_non_richiesto(self) -> None:
+        with mock.patch.object(config, "IS_ARM", True):
+            self.assertNotIn("av", config._active_required_packages())
+
+
 class TestImportErrorDetail(unittest.TestCase):
     def test_include_la_causa_radice(self):
         causa = ImportError("Please upgrade numpy to >= 1.26.0 to use this pandas version")
