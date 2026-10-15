@@ -10,9 +10,9 @@ vedi [docs/setup.md](docs/setup.md).
 
 **Su Windows non devi installare niente a mano.** Scarichi lo ZIP, metti
 `presentazione.pdf` e `podcast.m4a` nella cartella e fai doppio clic su
-`genera_video.bat`: il programma installa da sé Python 3.12 (3.11 su
-Windows ARM), Tesseract, ffmpeg, i pacchetti e i modelli, poi genera il
-video.
+`genera_video.bat`: il programma installa da sé Python 3.12 (3.11 x64
+su Windows ARM: serve l'installer a 64 bit, non quello ARM64), Tesseract,
+ffmpeg, i pacchetti e i modelli, poi genera il video.
 
 Restano due cose che il programma non può fare al posto tuo:
 
@@ -20,8 +20,8 @@ Restano due cose che il programma non può fare al posto tuo:
   spazio non basta te lo dice prima di scaricare, con la cifra.
 - **I tuoi due file**: la presentazione e l'audio.
 
-Su **Linux e macOS** Python va installato a mano (`python.org`), poi si
-lancia `crea_venv.sh`; tutto il resto è automatico anche lì.
+Su **Linux e macOS il programma non è supportato** (vedi l'avviso in cima al
+README): serve Windows 10/11.
 
 > Se preferisci installare Python tu, o se winget non è disponibile, puoi
 > disattivare l'installazione automatica:
