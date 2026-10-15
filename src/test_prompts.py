@@ -84,7 +84,6 @@ REGOLE: list[tuple[str, str, str]] = [
     ("podcast", "rigorosamente solo in italiano", "deck in italiano"),
     # --- flusso A: deck ---
     ("presentazione", "una slide per argomento", "una slide per argomento"),
-    ("presentazione", "mai pagine che sono solo un elenco di voci, nemmeno una", "no pagine-lista"),
     ("presentazione", "numera ogni slide", "slide numerate"),
     ("presentazione", "rigorosamente solo in italiano", "deck in italiano"),
     # --- flusso A: podcast con le ancore ---
@@ -118,7 +117,6 @@ REGOLE: list[tuple[str, str, str]] = [
     ("presentazione", "restando breve: un solo esempio, niente divagazioni", "sezioni brevi"),
     ("presentazione", "accorcia l'esempio e non la sezione", "priorita' all'annuncio"),
     ("presentazione", "ogni pagina deve poter diventare una sezione breve del podcast", "deck leggero"),
-    ("presentazione", "al massimo 8 righe e 80 parole", "deck leggero quantificato"),
     ("presentazione", "ogni sezione dura 60-180 secondi", "durate quantificate (A)"),
     ("podcast", "ogni sezione dura 60-180 secondi", "durate quantificate (B)"),
     ("presentazione", "detta sempre dallo stesso conduttore", "ancora stesso conduttore"),
@@ -139,11 +137,11 @@ REGOLE: list[tuple[str, str, str]] = [
     # il tema rispetti sempre: l'unica cosa che conta è "una sola volta". ---
     ("presentazione", "il numero compare una sola volta per pagina", "numero unico (A)"),
     ("podcast", "il numero compare una sola volta per pagina", "numero unico (B)"),
-    # --- grafica ricca: rimosso il divieto di infografiche/scritte decorative
-    # dopo il confronto (regola preventiva mai validata; la prova decisiva e'
-    # la fiducia del motore sui run). Resta l'arricchimento visivo. ---
-    ("presentazione", "arricchisci ogni pagina con un elemento visivo pertinente", "grafica ricca (A)"),
-    ("podcast", "arricchisci ogni pagina con un elemento visivo pertinente", "grafica ricca (B)"),
+    # --- grafica ricca: il divieto di infografiche/scritte decorative era gia'
+    # caduto il 04/10 (regola preventiva mai validata; la prova decisiva e' la
+    # fiducia del motore sui run); il 15/10 e' caduta anche la richiesta
+    # dell'elemento visivo, da entrambi i prompt. Le due voci stanno ora in
+    # REGOLE_RIMOSSE. ---
     # --- il conduttore non annuncia le pause. Il prompt A chiedeva una "pausa
     # prima dell'esempio" e NotebookLM la eseguiva alla lettera: nella trascrizione
     # del run del 09/10 la parola "Pausa." compare 6 volte in 19m47s, come
@@ -167,13 +165,28 @@ REGOLE: list[tuple[str, str, str]] = [
     ("presentazione", "tono e stile del dibattito", "blocco tono (A)"),
 ]
 
-# Scelte deliberate del 04/10, non dimenticanze. Queste regole sono state tolte
-# dai prompt e NON sono piu' richieste; il fatto resta scritto perche' il peso
-# delle parole del deck e' diverso nei due flussi.
+# Scelte deliberate del 04/10 e del 15/10, non dimenticanze. Queste regole sono
+# state tolte dai prompt e NON sono piu' richieste; il fatto resta scritto
+# perche' il peso delle parole del deck e' diverso nei due flussi, e perche'
+# `test_nessuna_regola_rimossa_torna_indietro` verifica che non rientrino di
+# soppiatto in una riscrittura del prompt.
 REGOLE_RIMOSSE = [
     ("titoli non generici", 'mai "Introduzione", "Conclusioni", "Argomento 2"'),
     ("parole distinctive", "evitando termini generici ripetuti sulle altre pagine"),
     ("una idea per slide", "una sola idea centrale"),
+    # --- 15/10: prompt accorciati di proposito. Il deck e' guidato solo dalle
+    # regole qualitative rimaste ("una slide per argomento", "ogni pagina deve
+    # poter diventare una sezione breve del podcast", gli annunci ordinati):
+    # nessun limite numerico di righe o parole e nessun divieto di pagina-lista.
+    # Se una pagina torna gonfia, la causa e' questa scelta, non un errore di
+    # caricamento del prompt: il numero di righe non e' piu' sorvegliato da
+    # nessun test.
+    ("no pagine-lista", "mai pagine che sono solo un elenco di voci, nemmeno una"),
+    ("deck leggero quantificato", "al massimo 8 righe e 80 parole"),
+    # La richiesta di arricchimento visivo e' uscita da ENTRAMBI i prompt: la
+    # grafica non aiuta la sincronizzazione (le ancore sono le frasi
+    # pronunciate, non le figure) e la scelta visiva resta a NotebookLM.
+    ("grafica ricca (A e B)", "arricchisci ogni pagina con un elemento visivo pertinente"),
 ]
 # Nel flusso A le ancore sono le frasi pronunciate: le parole del deck non
 # posizionano nulla e la regola serve solo alla qualita' della slide, quindi

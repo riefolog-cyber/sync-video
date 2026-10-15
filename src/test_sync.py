@@ -17,6 +17,7 @@ from unittest import mock
 
 import numpy as np
 
+from config import DEFAULT_RECOVERY_MAX_ZONE_SHARE
 from semantic_sync import (
     SemanticOptions,
     build_candidates,
@@ -1588,6 +1589,346 @@ class TestMinAnchorCoverage(unittest.TestCase):
         from main import _anchor_coverage_ok
 
         self.assertTrue(_anchor_coverage_ok(0, 1, 0.5))
+
+
+class TestAccurateBeamDopoIlRecupero(unittest.TestCase):
+    """La decodifica accurata si decide sull'esito del recupero, non prima.
+
+    Prima la scelta arrivava sulla sola trascrizione veloce, e sotto soglia non
+    arrivava affatto: il gate di copertura fermava la run. L'ordine nuovo è
+    recupero -> decisione -> gate, e la decisione usa la copertura che c'è DOPO
+    la ritrascrizione mirata.
+    """
+
+    def test_recupero_che_basta_non_paga_l_audio_intero(self):
+        # Il caso della run del 14/10: la copertura veloce è 7/9, il recupero
+        # delle zone cieche riporta le due ancore mancanti e la copertura arriva
+        # a 9/9. La decodifica accurata di 18 minuti di audio non serve.
+        from main import _accurate_beam_worth_it, _needs_accurate_beam
+
+        self.assertTrue(_needs_accurate_beam(7, 10) is False)  # 7/9 = 0.78
+        self.assertFalse(_accurate_beam_worth_it(9, 10, 0.5))
+
+    def test_copertura_ancora_insufficiente_paga_l_audio_intero(self):
+        from main import _accurate_beam_worth_it
+
+        self.assertTrue(_accurate_beam_worth_it(4, 10, 0.5))  # 4/9 = 0.44
+        self.assertTrue(_accurate_beam_worth_it(0, 10, 0.5))  # nessuna ancora
+
+    def test_soglia_dichiarata_piu_severa_del_criterio(self):
+        # Chi chiede il 90% di copertura non accetta l'8/9: la decodifica
+        # accurata va tentata PRIMA di dichiarare il fallimento.
+        from main import _accurate_beam_worth_it, _needs_accurate_beam
+
+        self.assertFalse(_needs_accurate_beam(8, 10))
+        self.assertTrue(_accurate_beam_worth_it(8, 10, 0.9))
+        self.assertFalse(_accurate_beam_worth_it(9, 10, 0.9))  # 1.0 >= 0.9
+
+    def test_soglia_zero_lascia_solo_il_criterio_qualitativo(self):
+        from main import _accurate_beam_worth_it
+
+        self.assertFalse(_accurate_beam_worth_it(8, 10, 0.0))
+        self.assertTrue(_accurate_beam_worth_it(4, 10, 0.0))
+
+    def test_una_sola_slide_non_escalate_mai(self):
+        from main import _accurate_beam_worth_it
+
+        self.assertFalse(_accurate_beam_worth_it(0, 1, 1.0))
+
+    def test_soglia_in_vigore_e_quella_dichiarata_se_piu_severa(self):
+        # Il log dice con che metro si è deciso: senza questo, una run forzata
+        # (AUTO_BEAM_PINNED_RATIO=1.1) stampa "le ancore non bastano" con la
+        # copertura piena, e sembra un difetto invece di una soglia scelta.
+        import main as m
+        from config import AUTO_BEAM_PINNED_RATIO
+
+        self.assertEqual(m._beam_escalation_threshold(0.0), AUTO_BEAM_PINNED_RATIO)
+        self.assertEqual(m._beam_escalation_threshold(0.5), AUTO_BEAM_PINNED_RATIO)
+        self.assertEqual(m._beam_escalation_threshold(0.9), 0.9)
+        # Una soglia dichiarata più bassa del criterio non lo ammorbidisce.
+        self.assertEqual(m._beam_escalation_threshold(0.2), AUTO_BEAM_PINNED_RATIO)
+
+    def test_decisione_e_soglia_danno_lo_stesso_verdetto(self):
+        """Il grado di guardia contro la deriva fra decisione e log.
+
+        `_accurate_beam_worth_it` è scritta in due rami (criterio qualitativo +
+        soglia dichiarata) e la soglia in una riga sola: se un giorno le due
+        formule divergono, il log mentirebbe sulla decisione presa.
+        """
+        import main as m
+
+        for declared in (0.0, 0.2, 0.5, 0.9, 1.0):
+            for pinned in range(11):
+                with self.subTest(soglia=declared, ancore=pinned):
+                    atteso = pinned / 9 < m._beam_escalation_threshold(declared)
+                    self.assertEqual(
+                        m._accurate_beam_worth_it(pinned, 10, declared),
+                        atteso,
+                        f"{pinned}/9 con soglia {declared}",
+                    )
+
+
+class TestRecuperoZoneCieche(unittest.TestCase):
+    """`_recover_anchor_zones`: zone con o senza buco, e cosa torna indietro."""
+
+    def setUp(self):
+        import main as m
+
+        self._m = m
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._audio = pathlib.Path(self._tmp.name) / "podcast.m4a"
+        self._audio.touch()
+        self._args = mock.MagicMock(whisper_model="small", lang="ita")
+
+    def _recover(
+        self,
+        words,
+        anchors,
+        total_slides,
+        zone,
+        duration=1000.0,
+        max_zone_share=DEFAULT_RECOVERY_MAX_ZONE_SHARE,
+        differito=False,
+    ):
+        """Chiama il recupero con la ritrascrizione finta al posto di Whisper.
+
+        ``zone`` è la lista di parole che la zona "produce", oppure una funzione
+        ``(lo, hi) -> parole`` quando le zone sono più di una e ognuna deve
+        riportare la propria menzione. ``max_zone_share=None`` disattiva il
+        vincolo di quota (è quello che serve ai test che devono vedere le zone
+        ritrascritte per davvero, con qualunque copertura).
+        """
+        calls = []
+
+        def _fake(audio_path, lo, hi, **kwargs):
+            calls.append((lo, hi))
+            return zone(lo, hi) if callable(zone) else zone
+
+        with mock.patch.object(self._m, "retranscribe_zone", side_effect=_fake):
+            if differito:
+                out = self._m._deferred_zone_recovery(
+                    words, anchors, total_slides, duration, self._audio, self._args, "slide-audio"
+                )
+            else:
+                out = self._m._recover_anchor_zones(
+                    words,
+                    anchors,
+                    total_slides,
+                    duration,
+                    self._audio,
+                    self._args,
+                    "slide-audio",
+                    max_zone_share=max_zone_share,
+                )
+        return out, calls
+
+    def test_buco_interno_riporta_l_ancora_mancante(self):
+        words = _words([("ciao", 10.0), ("slide", 100.5), ("due", 101.0), ("fine", 410.0)])
+        zone = _words([("passiamo", 305.0), ("alla", 305.4), ("slide", 305.8), ("tre", 306.2)])
+        out, calls = self._recover(
+            words, {2: 101.0, 4: 420.0}, 4, zone
+        )
+        self.assertEqual(out.recovered, [3])
+        self.assertEqual(out.anchors[3], 306.2)
+        self.assertIn(3, out.anchors)
+        self.assertGreaterEqual(out.seconds, 0.0)
+        self.assertFalse(out.skipped)
+        self.assertEqual(len(calls), 1)
+        lo, hi = calls[0]
+        self.assertEqual((lo, hi), (101.0, 420.0))
+        # Le out.words dentro la zona sono quelle nuove: il vecchio "fine" a 410s
+        # è stato ritrascritto (la zona arriva all'ancora successiva).
+        self.assertNotIn(("fine", 410.0), [(w["word"], w["start"]) for w in out.words])
+        self.assertIn(("tre", 306.2), [(w["word"], w["start"]) for w in out.words])
+
+    def test_zona_senza_menzione_non_cambia_le_ancore(self):
+        words = _words([("slide", 100.5), ("due", 101.0), ("bla", 300.0)])
+        out, calls = self._recover(
+            words, {2: 101.0, 4: 420.0}, 4, _words([("bla", 300.0)])
+        )
+        self.assertEqual(out.recovered, [])
+        self.assertEqual(out.anchors, {2: 101.0, 4: 420.0})
+        self.assertEqual(len(calls), 1)
+        # La zona è [101, 420] e comprende il confine: le out.words dentro (compresa
+        # "due" a 101.0) sono sostituite da quelle ritrascritte, quindi l'ancora
+        # della slide 2 non si rilegge più nel testo. Le out.anchors di partenza
+        # restano comunque: il recupero non può farne sparire una.
+        self.assertEqual(out.words, _words([("slide", 100.5), ("bla", 300.0)]))
+
+    def test_ritrascrizione_fallita_non_cambia_niente(self):
+        words = _words([("slide", 100.5), ("due", 101.0)])
+        out, calls = self._recover(
+            words, {2: 101.0, 4: 420.0}, 4, None
+        )
+        self.assertEqual(out.recovered, [])
+        self.assertEqual(out.anchors, {2: 101.0, 4: 420.0})
+        self.assertEqual(out.words, words)
+        self.assertGreaterEqual(out.seconds, 0.0)
+        self.assertEqual(len(calls), 1)
+
+    def test_loop_dentro_la_zona_di_coda_una_passata_sola(self):
+        # Coda dalle slide 4 (500-1100s) e loop allucinato a metà: le due zone si
+        # sovrappongono, quindi si ritrascrive una volta sola. È il caso della
+        # run del 14/10, dove il loop delle 16:56 stava dentro la coda.
+        ripetute = [(w, 700.0 + i * 0.3) for i, w in enumerate(["la", "c"] * 8)]
+        words = _words([("slide", 100.5), ("due", 101.0), ("slide", 500.5), ("tre", 501.0), *ripetute])
+        zone = _words([("passiamo", 705.0), ("alla", 705.4), ("slide", 705.8), ("quattro", 706.2)])
+        out, calls = self._recover(
+            words, {2: 101.0, 3: 501.0}, 4, zone, duration=1200.0
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0], (501.0, 1101.0))
+        self.assertEqual(out.recovered, [4])
+        self.assertEqual(out.anchors[4], 706.2)
+
+    def test_zona_interna_e_coda_adiacenti_una_passata_sola(self):
+        # Buco fra la 2 e la 5 (mancano 3 e 4) e coda della 6: la coda parte
+        # dall'ultima ancora, cioè esattamente dove finisce il buco, quindi le
+        # due zone sono adiacenti e si fondono: una passata che porta a casa
+        # entrambe le out.anchors. Il loop dentro il buco non aggiunge una terza zona.
+        ripetute = [(w, 300.0 + i * 0.3) for i, w in enumerate(["la", "c"] * 8)]
+        words = _words(
+            [("slide", 100.5), ("due", 101.0), *ripetute, ("slide", 1000.5), ("cinque", 1001.0)]
+        )
+        trovate = _words(
+            [
+                ("passiamo", 305.0), ("alla", 305.4), ("slide", 305.8), ("tre", 306.2),
+                ("passiamo", 1105.0), ("alla", 1105.4), ("slide", 1105.8), ("sei", 1106.2),
+            ]
+        )
+        out, calls = self._recover(
+            words, {2: 101.0, 5: 1001.0}, 6, trovate, duration=1200.0, max_zone_share=None
+        )
+        self.assertEqual(calls, [(101.0, 1200.0)])
+        self.assertEqual(out.recovered, [3, 6])
+        self.assertEqual(out.anchors[3], 306.2)
+        self.assertEqual(out.anchors[6], 1106.2)
+        self.assertFalse(out.skipped)
+        # Le out.anchors di partenza non si perdono.
+        self.assertEqual(out.anchors[2], 101.0)
+        self.assertEqual(out.anchors[5], 1001.0)
+
+    def test_due_zone_lontane_due_passate(self):
+        # Loop a metà audio e coda lontana: due zone separate, quindi due passate.
+        # (Un buco interno e la coda invece si toccano sempre — il buco finisce
+        # sull'ultima ancora, da cui parte la coda — e si fondono in una sola.)
+        ripetute = [(w, 150.0 + i * 0.3) for i, w in enumerate(["la", "c"] * 8)]
+        words = _words([("slide", 100.5), ("due", 101.0), *ripetute, ("slide", 500.5), ("tre", 501.0)])
+
+        def zone(lo, hi):
+            if lo < 300:
+                return None  # il loop non nascondeva nessun annuncio
+            return _words([("passiamo", 700.0), ("alla", 700.4), ("slide", 700.8), ("quattro", 701.2)])
+
+        out, calls = self._recover(
+            words, {2: 101.0, 3: 501.0}, 4, zone, duration=2400.0, max_zone_share=None
+        )
+        self.assertEqual(len(calls), 2)
+        self.assertLess(calls[0][1], 501.0)  # la prima è il loop
+        self.assertEqual(calls[1], (501.0, 1101.0))  # la seconda è la coda
+        self.assertEqual(out.recovered, [4])
+        self.assertEqual(out.anchors[4], 701.2)
+
+    def test_zone_quasi_tutta_la_coda_il_recupero_si_salta(self):
+        """Con poche ancore lontane "la zona" è quasi tutto l'audio.
+
+        Non è più un recupero mirato: costa come decodificare tutto, e per di
+        più senza il confronto fra le due trascrizioni. Il recupero si salta (0
+        secondi spesi, nomi invariati) e lo lascia alla decodifica accurata
+        intera, che sta per arrivare comunque.
+        """
+        import main as m
+
+        words = _words([("slide", 100.5), ("due", 101.0), ("slide", 1000.5), ("cinque", 1001.0)])
+        out, calls = self._recover(
+            words, {2: 101.0, 5: 1001.0}, 6, _words([("mai", 5.0)]), duration=1200.0
+        )
+        self.assertEqual(calls, [])
+        self.assertEqual(out.words, words)
+        self.assertEqual(out.anchors, {2: 101.0, 5: 1001.0})
+        self.assertEqual(out.recovered, [])
+        self.assertEqual(out.seconds, 0.0)
+        # `skipped` è la differenza fra "non ritrascritto perché troppo largo" e
+        # "ritrascritto senza trovare niente": nel primo caso il rimedio è ancora
+        # da fare, ed è quello che main.py usa per rifarlo dopo un revert.
+        self.assertTrue(out.skipped)
+        # Il vincolo si disattiva esplicitamente, e allora la stessa chiamata
+        # ritrascrive (i due test sopra mostrano cosa succede).
+        with mock.patch.object(m, "retranscribe_zone", return_value=None) as finto:
+            m._recover_anchor_zones(
+                words, {2: 101.0, 5: 1001.0}, 6, 1200.0, self._audio, self._args,
+                "slide-audio", max_zone_share=None,
+            )
+        self.assertTrue(finto.called)
+
+    def test_rimedio_differito_dopo_un_revert(self):
+        """Le zone saltate per quota si rifanno se la decodifica accurata non vince.
+
+        È l'ultimo rimedio prima del gate: senza, una run che ha pagato la
+        decodifica accurata e l'ha scartata resterebbe con meno ancore di quante
+        ne avrebbe avute senza pagarla. Il vincolo di quota qui è disattivato di
+        proposito, quindi la stessa chiamata che si era rifiutata di ritrascrivere
+        adesso lo fa.
+        """
+        words = _words([("slide", 100.5), ("due", 101.0), ("slide", 1000.5), ("cinque", 1001.0)])
+        zone = _words(
+            [
+                ("passiamo", 305.0), ("alla", 305.4), ("slide", 305.8), ("tre", 306.2),
+                ("passiamo", 1105.0), ("alla", 1105.4), ("slide", 1105.8), ("sei", 1106.2),
+            ]
+        )
+        out, calls = self._recover(
+            words, {2: 101.0, 5: 1001.0}, 6, zone, duration=1200.0, differito=True
+        )
+        self.assertFalse(out.skipped)
+        self.assertEqual(calls, [(101.0, 1200.0)])
+        self.assertEqual(out.recovered, [3, 6])
+        self.assertEqual(out.anchors[6], 1106.2)
+
+    def test_quota_esattamente_al_limite_si_ritrascrive(self):
+        # Il confronto è strettamente "maggiore": una zona larga esattamente
+        # metà audio è ancora mirata, quindi si ritrascrive.
+        words = _words([("slide", 100.5), ("due", 101.0), ("slide", 500.5), ("tre", 501.0)])
+        zone = _words([("passiamo", 700.0), ("alla", 700.4), ("slide", 700.8), ("quattro", 701.2)])
+        out, calls = self._recover(
+            words, {2: 101.0, 3: 501.0}, 4, zone, duration=1200.0
+        )
+        self.assertEqual(calls, [(501.0, 1101.0)])  # 600s su 1200s = 50%
+        self.assertEqual(out.recovered, [4])
+
+
+class TestNotaTentativiDiRecupero(unittest.TestCase):
+    """`_recovery_attempts_note`: l'avviso dice cosa è stato già provato."""
+
+    def test_niente_tentato_nota_vuota(self):
+        from main import _recovery_attempts_note
+
+        self.assertEqual(_recovery_attempts_note([], False), "")
+
+    def test_ancore_recuperate_elencate(self):
+        from main import _recovery_attempts_note
+
+        nota = _recovery_attempts_note([7, 10], False)
+        self.assertIn("slide 7", nota)
+        self.assertIn("slide 10", nota)
+        self.assertIn("zone cieche", nota)
+        self.assertNotIn("decodifica accurata", nota)
+
+    def test_recupero_a_vuoto_dichiarato(self):
+        from main import _recovery_attempts_note
+
+        nota = _recovery_attempts_note([], True)
+        self.assertIn("nessuna ancora recuperata", nota)
+        self.assertIn("decodifica accurata", nota)
+
+    def test_entrambi_i_tentativi(self):
+        from main import _recovery_attempts_note
+
+        nota = _recovery_attempts_note([3], True)
+        self.assertIn("slide 3", nota)
+        self.assertIn("decodifica accurata", nota)
+        self.assertTrue(nota.endswith(".\n"))
 
 
 class TestAntiFlickerFloor(unittest.TestCase):

@@ -193,6 +193,72 @@ c'è nessuna menzione non si inventa niente — si è speso tempo, non credibili
 Con più slide scoperte la zona copre la prima (che chiude anche la durata della
 precedente), le altre restano stimate e il log le dichiara.
 
+### L'audio si giudica DOPO i rimedi, non prima
+
+Il recupero delle zone cieche e la decodifica accurata esistevano entrambi, ma
+arrivavano nel posto sbagliato. L'avviso "solo 7 slide su 9 annunciate, conviene
+rigenerare l'audio" e il gate di copertura (`--min-anchor-coverage`, che
+**interrompe** la run) scattavano PRIMA di qualunque rimedio, e sotto soglia la
+decodifica accurata non arrivava mai: il gate fermava la run prima. Il podcast
+veniva così accusato di un danno fatto dal decoder, e la run si fermava senza
+aver usato i due strumenti che esistono esattamente per quel danno.
+
+L'ordine adesso è: ancore → **recupero delle zone cieche** → **decisione sul
+beam** → **avviso e gate**. La decisione usa la copertura che c'è DOPO il
+recupero (`_accurate_beam_worth_it` = criterio qualitativo OR soglia dichiarata),
+quindi la decodifica accurata dell'audio intero si paga solo se le zone non sono
+bastate; e quando il gate scatta dice cosa è già stato tentato
+(`_recovery_attempts_note`) invece di consigliare una rigenerazione che potrebbe
+non servire.
+
+Misura sul materiale del 14/10, stessi cache, stessa macchina, prima e dopo:
+
+```text
+prima:  [Avviso] Solo 7 slide su 9 annunciate esplicitamente (mancanti: 7, 10).
+        Le slide non annunciate saranno posizionate per contenuto...
+dopo:   (nessun avviso)
+        [Gap] Ancore recuperate dalla ritrascrizione mirata: slide 7 a 688.8s,
+        slide 10 a 1017.8s.
+        Confini ancorati: 9 su 9
+```
+
+Cioè: le due ancore che mancavano c'erano, e l'avviso era un'accusa sbagliata.
+Sulla stessa run la decodifica accurata intera NON si paga (9 ancore su 9
+transizioni dopo il recupero: `_accurate_beam_worth_it` dice no), e il costo del
+recupero è di 291.9s misurati, dichiarati in `sync_report.json`
+(`beam.recovery_seconds`).
+
+Per esercitare la strada nuova end-to-end si forza il criterio qualitativo con
+`AUTO_BEAM_PINNED_RATIO=1.1` (l'override che serve proprio a provare il percorso
+accurato sui dati reali). Il log dice in che ordine è successo tutto, e il
+risultato è una lezione:
+
+```text
+[Gap] Ancore recuperate dalla ritrascrizione mirata: slide 7 a 688.8s, slide 10 a 1017.9s.
+[Beam] La copertura delle ancore non basta a vincolare la timeline (9 su 9, 2
+       recuperate dalla ritrascrizione mirata; la soglia in vigore è 110%): la
+       decidono i contenuti, quindi rifaccio la trascrizione dell'audio intero col beam 5.
+[Beam] Trascrizione accurata (beam 5) completata in 277s.
+[Beam] Confronto sulle stesse slide, senza ancore: veloce 0.708, accurata 0.698
+       (Δ -0.011) -> avrebbe vinto la decodifica VELOCE (30s).
+[Beam] Uso la trascrizione VELOCE: ha PERSO ancore che la decodifica veloce aveva (8 contro 9).
+```
+
+Il confronto misura il testo veloce **ricucito**, non quello grezzo: 277s di
+decodifica accurata hanno prodotto 8 ancore contro le 9 del testo ricucito, e
+sono state scartate. Con l'ordine vecchio lo stesso confronto avrebbe visto
+8 contro 7 — le due ancore recuperate non erano ancora nella partita — e avrebbe
+tenuto la trascrizione accurata, cioè pagato 277s per perdere un'ancora. La
+scelta adesso si prende sulle informazioni migliori disponibili in quel momento.
+
+Un vincolo che i dati hanno imposto: le zone nascono dalle ancore che CI SONO,
+quindi con poche ancore lontane fra loro "la zona" diventa quasi tutto l'audio.
+In quel caso ritrascrivere le zone costa come decodificare tutto, e in più senza
+il confronto fra le due trascrizioni: sopra `DEFAULT_RECOVERY_MAX_ZONE_SHARE`
+(0.5) il recupero si salta e lo dichiara nel log, lasciando fare al passaggio
+intero. Il vincolo si attiva solo quando la decodifica accurata è già decisa,
+quindi non può togliere un rimedio senza metterne un altro.
+
 Da quella run nasce anche il controllo incrociato `announcements_off_timeline`
 (`timeline.py`): ogni menzione "slide N" con un verbo di transizione davanti
 viene confrontata col confine che la timeline **finale** dichiara per quella

@@ -148,11 +148,13 @@ una sezione che si limita a elencare produce una pagina che nel video scorre
 veloce (vedi `starved_slides` nel report).
 
 **I due prompt.** Sono due, e non ce n'è un terzo: ciascuno contiene tutto
-quello che serve perché il video sia sincronizzato, più il tono del dibattito
-e l'istruzione grafica (un elemento visivo per pagina, senza testo
-decorativo: l'OCR legge tutto ciò che appare e il testo fuori corpo diluisce
-il segnale). Ogni regola è blindata da `test_prompts.py`: se una frase
-protettiva sparisce dai file, i test falliscono.
+quello che serve perché il video sia sincronizzato, più il tono del dibattito.
+Non chiedono più l'elemento visivo per pagina: la scelta grafica resta a
+NotebookLM. Il testo decorativo fuori corpo però pesa ancora sull'OCR, che
+legge tutto ciò che appare sulla pagina e diluisce il segnale. Le regole
+protettive sono sorvegliate da `test_prompts.py`: se una frase sparisce dai
+file, i test falliscono; se la si toglie di proposito, va registrata in
+`REGOLE_RIMOSSE` con il motivo, e da lì il test verifica che non rientri.
 
 | Prompt | Flusso | Perché questo e non l'altro |
 |---|---|---|

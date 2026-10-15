@@ -71,6 +71,16 @@ La presentazione esiste prima e il podcast deve **annunciare ogni slide**
   potrebbe assegnare a cinque slide lo stesso blocco, producendo segmenti di
   mezzo secondo che il pavimento anti-flicker non può spostare (i due vicini
   sono ancorati).
+- Prima di dire che il podcast annuncia poche slide, la pipeline prova a
+  riparare il TESTO: l'avviso "solo N su M annunciate" e la soglia
+  `--min-anchor-coverage` (che interrompe la run) arrivano dopo la ritrascrizione
+  mirata delle zone cieche e, sotto soglia, dopo la decodifica accurata
+  dell'audio intero con il confronto fra le due trascrizioni. L'audio viene
+  giudicato per quello che dice, non per quello che il beam veloce è riuscito a
+  scrivere; quando un gate scatta, dice anche cosa è stato già tentato. La
+  decodifica intera si paga solo se le zone cieche non sono bastate: se il
+  recupero riporta le ancore che mancavano, resta la decodifica veloce col testo
+  ricucito.
 - L'ultima slide non ha un'ancora a destra (a destra c'è la fine dell'audio),
   quindi la sua transizione veniva ritrascritta col beam accurato solo se il
   decoder sbagliava **due** volte nella stessa zona (annuncio distrutto **e**
