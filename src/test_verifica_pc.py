@@ -90,7 +90,7 @@ class TestRifertoSulPCReale(unittest.TestCase):
 
     def test_i_controlli_attesi_ci_sono_tutti(self) -> None:
         _, testo = _esegui()
-        for nome in ("Python", "Pacchetti", "Tesseract", "ffmpeg", "Motore", "Converter", "Materiali"):
+        for nome in ("Python", "Pacchetti", "Tesseract", "ffmpeg", "Motore", "Converter", "Materiali", "Rete"):
             with self.subTest(controllo=nome):
                 self.assertIn(nome, testo)
 
@@ -190,6 +190,40 @@ class TestConvertitorePptx(unittest.TestCase):
         self.assertEqual(esito.stato, OK)
         self.assertIn("LibreOffice", esito.dettaglio)
         self.assertIn("GenOffice", esito.dettaglio)
+
+
+class TestRete(unittest.TestCase):
+    """La rete serve solo a scaricare: mai un KO, solo AVV con rimedio."""
+
+    def test_online_da_ok(self) -> None:
+        rep = Relazione()
+        with mock.patch.object(verifica_pc, "_host_raggiungibile", return_value=True):
+            verifica_pc.prova_rete(rep)
+        esito = rep.esiti[0]
+        self.assertEqual(esito.stato, OK)
+
+    def test_offline_da_avv_e_non_ko(self) -> None:
+        """Su PC offline il referto non deve bloccare (exit 1): i modelli
+        potrebbero essere gia' in cache, e il video si fa lo stesso."""
+        rep = Relazione()
+        with mock.patch.object(verifica_pc, "_host_raggiungibile", return_value=False):
+            verifica_pc.prova_rete(rep)
+        esito = rep.esiti[0]
+        self.assertEqual(esito.stato, AVV)
+        self.assertNotEqual(esito.stato, KO)
+        self.assertTrue(esito.rimedio, "un AVV senza rimedio non aiuta nessuno")
+
+    def test_sonda_non_solleva_mai(self) -> None:
+        """Qualsiasi errore di rete (DNS, timeout, proxy) = False, non eccezione."""
+        import urllib.request
+
+        with mock.patch.object(urllib.request, "urlopen", side_effect=OSError("rete giu'")):
+            self.assertFalse(verifica_pc._host_raggiungibile("https://pypi.org/simple/"))
+        # E la prova, con sonda che fallisce, risponde AVV senza esplodere.
+        rep = Relazione()
+        with mock.patch.object(verifica_pc, "_host_raggiungibile", return_value=False):
+            verifica_pc.prova_rete(rep)
+        self.assertEqual(rep.esiti[0].stato, AVV)
 
 
 if __name__ == "__main__":

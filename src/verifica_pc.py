@@ -323,6 +323,49 @@ def prova_spazio(r: Relazione, radice: Path) -> None:
             r.aggiungi(Esito("Spazio disco", OK, f"{_gb(libero)} liberi, ne servono ~{_gb(richiesto)}"))
 
 
+# Host da cui dipende il primo avvio: pip (pacchetti) e HuggingFace (modelli).
+# Timeout corto per host: su PC offline il DNS fallisce in fretta, ma dietro
+# certi proxy la connessione puo' pendere fino al timeout — 6+6 secondi al
+# peggio, solo in questo controllo.
+_RETE_HOST = ("https://pypi.org/simple/", "https://huggingface.co/")
+_RETE_TIMEOUT = 6
+
+
+def _host_raggiungibile(url: str, timeout: int = _RETE_TIMEOUT) -> bool:
+    """True se l'host risponde 2xx/3xx. Qualsiasi errore = irraggiungibile."""
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(url, timeout=timeout) as risposta:
+            return bool(200 <= risposta.status < 400)
+    except Exception:  # noqa: BLE001 - DNS, timeout, proxy, TLS: tutto e' "non raggiungibile"
+        return False
+
+
+def prova_rete(r: Relazione) -> None:
+    """Rete verso gli host dei download: solo AVV, mai KO.
+
+    Un KO bloccherebbe il referto (exit 1) su un PC che magari deve solo
+    produrre un video con modelli gia' in cache, dove la rete non serve piu'.
+    La rete serve solo a SCARICARE: se manca, il primo avvio fallisce in pip
+    o nei modelli, e questa riga dice dove guardare.
+    """
+    non_raggiunti = [url for url in _RETE_HOST if not _host_raggiungibile(url)]
+    if not non_raggiunti:
+        r.aggiungi(Esito("Rete", OK, "pypi.org e huggingface.co raggiungibili"))
+    else:
+        nomi = ", ".join(url.split("/")[2] for url in non_raggiunti)
+        r.aggiungi(
+            Esito(
+                "Rete",
+                AVV,
+                f"non raggiungibile: {nomi}",
+                "Senza rete i download (pacchetti pip, modelli) falliscono: "
+                "se il programma si ferma li', il problema e' questo, non il programma.",
+            )
+        )
+
+
 def prova_modelli(r: Relazione) -> None:
     from config import DEFAULT_EMBEDDING_CACHE_DIR
 
@@ -554,6 +597,7 @@ def main() -> int:
         (prova_ffmpeg, ()),
         (prova_hardware, ()),
         (prova_spazio, (radice,)),
+        (prova_rete, ()),
         (prova_modelli, ()),
         (prova_motore, ()),
         (prova_converter, ()),

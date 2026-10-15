@@ -130,6 +130,14 @@ if "%CHECK_UPDATES%"=="0" (
 ) else (
     !PY_CMD! src\main.py --no-confirm !LLM_ARG! !MAIN_ARGS!
 )
+set "EXIT_CODE=%ERRORLEVEL%"
+if "%EXIT_CODE%"=="0" goto uscita_ok
+echo.
+echo [USCITA ANOMALA] Il programma e' terminato con codice %EXIT_CODE%.
+echo   1 = errore gestito: il messaggio qui sopra dice quale.
+echo   Altro numero, specie se molto negativo = chiusura forzata dal sistema:
+echo   crash nativo o memoria esaurita, tipicamente durante la trascrizione.
+:uscita_ok
 
 echo.
 echo ========================================
