@@ -504,5 +504,56 @@ class TestTettoPillow(unittest.TestCase):
         self.assertLess(maggiore, 11, f"pillow {installata} e' oltre il tetto dichiarato ({spec})")
 
 
+class TestPipTail(unittest.TestCase):
+    """L'errore pip mostra la causa: prima restava solo un ❌ muto."""
+
+    def _esegui(self, effetto: object) -> tuple[bool, str]:
+        import io
+        from contextlib import redirect_stdout
+
+        if isinstance(effetto, BaseException):
+            rattoppo: object = {"side_effect": effetto}
+        else:
+            rattoppo = {"return_value": mock.Mock(returncode=0)}
+        with (
+            mock.patch("subprocess.run", **rattoppo),  # type: ignore[arg-type]
+            io.StringIO() as buf,
+            redirect_stdout(buf),
+        ):
+            esito = config._try_pip_install("pacchetto-finto")
+            uscita = buf.getvalue()
+        return esito, uscita
+
+    def test_successo_non_stampa_coda(self) -> None:
+        esito, uscita = self._esegui(None)
+        self.assertTrue(esito)
+        self.assertNotIn("|", uscita)
+
+    def test_fallimento_mostra_le_ultime_righe(self) -> None:
+        import subprocess
+
+        corpo = "\n".join(f"riga {i} di log" for i in range(30)).encode()
+        errore = subprocess.CalledProcessError(1, ["pip"], output=corpo)
+        esito, uscita = self._esegui(errore)
+        self.assertFalse(esito)
+        self.assertIn("riga 29 di log", uscita)
+        self.assertNotIn("riga 0 di log", uscita, "solo la coda, non tutto il log")
+
+    def test_fallimento_senza_output_resta_sobrio(self) -> None:
+        import subprocess
+
+        esito, uscita = self._esegui(subprocess.CalledProcessError(1, ["pip"], output=None))
+        self.assertFalse(esito)
+        self.assertNotIn("|", uscita)
+
+    def test_timeout_mostra_il_parziale(self) -> None:
+        import subprocess
+
+        parziale = subprocess.TimeoutExpired(["pip"], 300, output=b"Download in corso...\nfermo qui")
+        esito, uscita = self._esegui(parziale)
+        self.assertFalse(esito)
+        self.assertIn("fermo qui", uscita)
+
+
 if __name__ == "__main__":
     unittest.main()

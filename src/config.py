@@ -974,28 +974,52 @@ def _try_system_install(name: str, winget_id: str, apt_pkg: str, brew_pkg: str) 
     return False
 
 
+# Righe di output pip mostrate quando l'installazione fallisce: abbastanza per
+# capire la causa (rete? compilazione? permessi?), non tutto il log che
+# seppellirebbe il messaggio successivo (quali pacchetti installare a mano).
+_PIP_TAIL_LINES = 15
+
+
 def _try_pip_install(package: str, upgrade: bool = False) -> bool:
-    """Tenta di installare (o aggiornare, con upgrade=True) un pacchetto via pip."""
+    """Tenta di installare (o aggiornare, con upgrade=True) un pacchetto via pip.
+
+    In caso di fallimento stampa la coda dell'output di pip: prima l'output
+    finiva in DEVNULL e restava solo un ❌ muto (il caso del PC con quattro
+    pacchetti falliti senza diagnosi).
+    """
     try:
         print(f"   ⏳ pip install {'-U ' if upgrade else ''}{package} ...", end=" ", flush=True)
         cmd = [sys.executable, "-m", "pip", "install"]
         if upgrade:
             cmd.append("-U")
         cmd.append(package)
-        subprocess.check_call(
+        subprocess.run(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             timeout=300,
+            check=True,
         )
         print("✅")
         return True
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
         print("❌")
+        _print_pip_tail(e.stdout)
         return False
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
         print("⏰ timeout")
+        _print_pip_tail(e.stdout)
         return False
+
+
+def _print_pip_tail(output: bytes | str | None) -> None:
+    """Stampa le ultime righe dell'output di pip (niente se non ce n'e')."""
+    if not output:
+        return
+    testo = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else output
+    righe = [riga.strip() for riga in testo.splitlines() if riga.strip()]
+    for riga in righe[-_PIP_TAIL_LINES:]:
+        print(f"      | {riga[:200]}")
 
 
 def _req_name(req: str) -> str:
