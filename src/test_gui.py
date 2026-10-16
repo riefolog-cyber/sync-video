@@ -83,5 +83,141 @@ class TestFasi(unittest.TestCase):
         self.assertIsNone(_fase_da_riga("INFO | tutto bene, niente da dire"))
 
 
+class TestRiepilogoMateriali(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = TemporaryDirectory()
+        self.radice = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_mancanze_dette_chiaro(self) -> None:
+        from gui import riepilogo_materiali
+
+        scheda = riepilogo_materiali("manca.pdf", "manca.m4a", self.radice)
+        self.assertFalse(scheda["pronto"])
+        self.assertIn("presentazione", str(scheda["riga"]))
+        self.assertIn("audio", str(scheda["riga"]))
+
+    def test_pagine_contate_se_possibile(self) -> None:
+        try:
+            import fitz
+        except ImportError:
+            self.skipTest("pymupdf assente: pagine non verificabili")
+            return
+        from gui import riepilogo_materiali
+
+        pdf = self.radice / "slide.pdf"
+        doc = fitz.open()
+        for _ in range(3):
+            doc.new_page()
+        doc.save(pdf)
+        doc.close()
+        (self.radice / "voce.mp3").write_bytes(b"finto-audio")
+        scheda = riepilogo_materiali("slide.pdf", "voce.mp3", self.radice)
+        self.assertTrue(scheda["pronto"])
+        self.assertEqual(scheda["pagine"], 3)
+        self.assertIsNone(scheda["durata_audio"])
+        self.assertIn("3 slide", str(scheda["riga"]))
+
+
+class TestStatoRun(unittest.TestCase):
+    def test_vuota_none(self) -> None:
+        from gui import stato_ultima_run
+
+        with TemporaryDirectory() as tmp:
+            self.assertIsNone(stato_ultima_run(Path(tmp)))
+
+    def test_numeri_letti(self) -> None:
+        import json
+
+        from gui import stato_ultima_run
+
+        with TemporaryDirectory() as tmp:
+            radice = Path(tmp)
+            (radice / ".cache").mkdir()
+            (radice / ".cache" / "sync_report.json").write_text(
+                json.dumps(
+                    {
+                        "audio_duration": 120.0,
+                        "segments": [{"slide": 1}, {"slide": 2}],
+                        "anchors": {"anchored": 1, "transitions": 1},
+                        "frame_check": {"checked": 2, "coherent": 2, "mismatches": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (radice / "video_finale.mp4").write_bytes(b"x" * 100)
+            info = stato_ultima_run(radice)
+            self.assertIsNotNone(info)
+            assert info is not None
+            self.assertEqual(info["slide"], 2)
+            self.assertTrue(info["verificato"])
+            self.assertEqual(info["video_byte"], 100)
+
+    def test_storico_ultime_cinque(self) -> None:
+        import json
+
+        from gui import storico_run
+
+        with TemporaryDirectory() as tmp:
+            radice = Path(tmp)
+            (radice / ".cache").mkdir()
+            with (radice / ".cache" / "timing_history.jsonl").open("w", encoding="utf-8") as f:
+                f.write("riga-rotta\n")
+                for i in range(7):
+                    f.write(json.dumps({"ts": f"t{i}", "total": float(i)}) + "\n")
+            voci = storico_run(radice)
+            self.assertEqual(len(voci), 5)
+            self.assertEqual(voci[0]["quando"], "t6")
+
+
+class TestImpostazioni(unittest.TestCase):
+    def test_roundtrip_isolato(self) -> None:
+        import os
+        from unittest import mock
+
+        from gui import impostazioni_carica, impostazioni_salva
+
+        with (
+            TemporaryDirectory() as tmp,
+            mock.patch.dict(os.environ, {"APPDATA": tmp}),
+        ):
+            self.assertEqual(impostazioni_carica(), {})
+            impostazioni_salva({"audio": "voce.mp3", "bozza": True})
+            self.assertEqual(
+                impostazioni_carica(), {"audio": "voce.mp3", "bozza": True}
+            )
+
+    def test_file_rotto_non_esplode(self) -> None:
+        import os
+        from unittest import mock
+
+        from gui import impostazioni_carica
+
+        with TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"APPDATA": tmp}):
+            casa = Path(tmp)
+            (casa / "sync-video").mkdir()
+            (casa / "sync-video" / "impostazioni.json").write_text("rotto{", encoding="utf-8")
+            self.assertEqual(impostazioni_carica(), {})
+
+
+class TestRigheVerifica(unittest.TestCase):
+    def test_righe_come_testo(self) -> None:
+        from unittest import mock
+
+        import verifica_pc
+        from gui import righe_verifica
+
+        with (
+            TemporaryDirectory() as tmp,
+            mock.patch.object(
+                verifica_pc, "_esegui_prove", side_effect=lambda rep, prove: rep.aggiungi(
+                    verifica_pc.Esito("Prova", verifica_pc.OK, "tutto bene")
+                ),
+            ),
+        ):
+            righe = righe_verifica(Path(tmp))
+        self.assertEqual(righe, [("OK", "Prova", "tutto bene", "")])
+
+
 if __name__ == "__main__":
     unittest.main()
