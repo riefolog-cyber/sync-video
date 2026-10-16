@@ -14,6 +14,7 @@ import os
 import re
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 import config
@@ -714,4 +715,74 @@ class TestInsiemiFormati(unittest.TestCase):
         self.assertTrue(
             set(ocr.PRESENTATION_SUFFIXES) < set(config.PRESENTATION_ACCEPTED_SUFFIXES),
             "i formati da convertire devono restare dentro quelli accettati",
+        )
+
+
+class TestParitaPacchetti(unittest.TestCase):
+    """Le tre liste pacchetti non devono divergere in silenzio.
+
+    requirements.txt, bootstrap (_REQUIRED_PACKAGES) e aggiornamenti
+    (_PACKAGES) descrivono gli STESSI pacchetti da tre punti di vista
+    (pip -r, primo avvio, update-check): il caso av (dichiarato solo da
+    faster-whisper, mai aggiornato da nessuno) nasce proprio qui.
+    """
+
+    # Voci di requirements.txt che NON stanno nel bootstrap, con motivo.
+    # Chi aggiunge una voce qui deve scrivere il perche', non solo il nome.
+    NON_BOOTSTRAP: ClassVar[dict[str, str]] = {
+        "mypy": "dev, mai a runtime",
+        "ruff": "dev, mai a runtime",
+        "openvino": "provisioning di machine_setup, non bootstrap",
+        "openvino-genai": "provisioning di machine_setup, non bootstrap",
+        "requests": "opzionale protetto da guardia (llm_sync funziona senza)",
+    }
+
+    @staticmethod
+    def _requirements() -> set[str]:
+        from packaging.requirements import Requirement
+
+        radice = Path(config.__file__).resolve().parent.parent
+        nomi: set[str] = set()
+        for riga in (radice / "requirements.txt").read_text(encoding="utf-8").splitlines():
+            riga = riga.split("#", 1)[0].strip()
+            if riga:
+                nomi.add(Requirement(riga).name.lower())
+        return nomi
+
+    @staticmethod
+    def _bootstrap() -> set[str]:
+        nomi: set[str] = set()
+        for req in config._REQUIRED_PACKAGES.values():
+            nomi.add(re.split(r"[<>=!~\s]+", req, maxsplit=1)[0].lower())
+        return nomi
+
+    def test_bootstrap_copre_requirements(self) -> None:
+        import sys
+
+        ammessi = set(self.NON_BOOTSTRAP)
+        if sys.version_info < (3, 13):
+            # audioop-lts entra nel bootstrap solo dal 3.13 (sotto e' nella
+            # libreria standard e pip lo rifiuterebbe): qui non deve risultare.
+            ammessi.add("audioop-lts")
+        mancanti = self._requirements() - self._bootstrap() - ammessi
+        self.assertEqual(
+            mancanti,
+            set(),
+            f"pacchetti usati ma mai installati al primo avvio: {sorted(mancanti)}",
+        )
+
+    def test_bootstrap_solo_da_requirements(self) -> None:
+        """Chi aggiunge al bootstrap lo dichiara anche in requirements.txt
+        (altrimenti crea_venv con pip -r non lo installa)."""
+        fuori = self._bootstrap() - self._requirements()
+        self.assertEqual(fuori, set(), f"bootstrap senza riga in requirements.txt: {sorted(fuori)}")
+
+    def test_updates_copre_requirements(self) -> None:
+        import updates
+
+        # audioop-lts resta fuori di proposito: e' condizionale al 3.13+ e lo
+        # gestisce solo il bootstrap (a chi aggiorna non serve cercarlo).
+        self.assertEqual(
+            set(updates._PACKAGES),
+            self._requirements() - {"audioop-lts"},
         )
