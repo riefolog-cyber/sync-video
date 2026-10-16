@@ -1405,7 +1405,7 @@ def bootstrap(*, ignora_spazio: bool = False) -> None:
             "   Oppure installalo con: winget install --id UB-Mannheim.TesseractOCR -e\n"
             "   La lingua italiana (ita.traineddata) viene scaricata da sola in tessdata/\n"
             "   al prossimo avvio riuscito.\n"
-            "   Poi rilancia genera_video.bat.\n",
+            "   Poi rilancia genera_video.bat (dettagli: docs/troubleshooting.md).\n",
             _TESSERACT_DOWNLOAD_URL,
         )
         sys.exit(1)
@@ -1485,7 +1485,7 @@ def bootstrap(*, ignora_spazio: bool = False) -> None:
                     "   Auto-install fallita. Scaricalo da: %s\n"
                     "   Oppure installalo con: winget install Gyan.FFmpeg.Shared\n"
                     "   (apt: `apt-get install ffmpeg` / brew: `brew install ffmpeg`)\n"
-                    "   Poi rilancia genera_video.bat.\n",
+                    "   Poi rilancia genera_video.bat (dettagli: docs/troubleshooting.md).\n",
                     _FFMPEG_DOWNLOAD_URL,
                 )
                 sys.exit(1)
