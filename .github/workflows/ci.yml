@@ -122,3 +122,35 @@ jobs:
         # nulla. E' il perche' del -s esplicito, non una formalta'.
         run: python -m unittest discover -s src -p "test_*.py"
 
+  pacchetto:
+    # ZIP datato per i colleghi: niente piu' "quale copia hai?". Gira solo sui
+    # push su main (mai sulle PR: niente release dai rami) e solo se i test
+    # veloci sono verdi (needs). La release resta pubblica e scaricabile senza
+    # login; una per push, con data+sha nel nome (niente tag mobili).
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: lint-typecheck-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Impacchetta lo ZIP
+        run: |
+          TAG="build-$(date +%Y%m%d)-${GITHUB_SHA::7}-r${GITHUB_RUN_NUMBER}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          rm -rf /tmp/pkg && mkdir -p /tmp/pkg
+          git archive HEAD | tar -x -C /tmp/pkg
+          echo "$TAG" > /tmp/pkg/VERSIONE.txt
+          test -f /tmp/pkg/genera_video.bat
+          test -f /tmp/pkg/src/main.py
+          cd /tmp/pkg && zip -qr "$GITHUB_WORKSPACE/sync-video-$TAG.zip" .
+
+      - name: Pubblica release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          gh release create "$TAG" "sync-video-$TAG.zip"
+          --title "Sync Video $TAG (automatica)"
+          --notes "Pacchetto pronto: scarica, estrai, lancia verifica_pc.bat e poi genera_video.bat. Versione dentro VERSIONE.txt e in --version."
+

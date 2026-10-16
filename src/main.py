@@ -39,6 +39,7 @@ from config import (
     installa_dipendenze_se_mancano,
     log,
     parse_args,
+    versione_programma,
 )
 
 # =====================================================================
@@ -1716,6 +1717,7 @@ def _build_sync_report(
     verdicts: dict[int, str] | None = None,
     notes: dict[str, object] | None = None,
     review_diffs: Sequence[dict[str, object]] | None = None,
+    versione: str | None = None,
 ) -> dict[str, object]:
     """Tabella verificabile dei segmenti effettivamente mostrati nel video.
 
@@ -1749,6 +1751,8 @@ def _build_sync_report(
         "audio_duration": round(float(total_duration), 3),
         "segments": segments,
     }
+    if versione is not None:
+        report["versione"] = versione
     if notes:
         report.update(notes)
     if review_diffs:
@@ -2675,6 +2679,12 @@ def _primo_avvio_senza_materiali(
 
 def main(argv: list | None = None) -> None:
     args = parse_args(argv)
+
+    # Versione subito e senza effetti: deve funzionare anche su un PC rotto.
+    if args.version:
+        print(versione_programma())
+        return
+    log.info("Sync Video %s", versione_programma())
 
     # --- Misura / pulizia cache e uscita (P1: policy sicura) ---
     # PRIMA di bootstrap/setup/update-check: sono comandi di ispezione che non
@@ -4312,6 +4322,7 @@ llm_enabled=llm_disponibile,
             verdicts,
             notes=sync_notes,
             review_diffs=review_diffs,
+            versione=versione_programma(),
         )
         _save_sync_report(sync_report)
         if anomalous:

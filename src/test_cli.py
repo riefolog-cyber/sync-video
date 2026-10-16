@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import io
 import unittest
+from unittest import mock
 
 import config
 
@@ -72,6 +73,33 @@ class TestFlagReview(unittest.TestCase):
 
     def test_compare_nell_help(self) -> None:
         self.assertIn("--review", config.build_parser().format_help())
+
+
+class TestFlagVersione(unittest.TestCase):
+    def test_default_spento(self) -> None:
+        self.assertFalse(config.parse_args([]).version)
+
+    def test_si_accende(self) -> None:
+        self.assertTrue(config.parse_args(["--version"]).version)
+
+    def test_compare_nell_help(self) -> None:
+        self.assertIn("--version", config.build_parser().format_help())
+
+    def test_stampa_ed_esce_senza_bootstrap(self) -> None:
+        """--version deve funzionare anche su un PC rotto: niente installazioni."""
+        import main as m
+
+        with (
+            mock.patch.object(m, "bootstrap") as boot,
+            mock.patch.object(m, "machine_setup") as setup,
+            io.StringIO() as buf,
+            contextlib.redirect_stdout(buf),
+        ):
+            m.main(["--version"])
+            uscita = buf.getvalue()
+        boot.assert_not_called()
+        setup.assert_not_called()
+        self.assertTrue(uscita.strip())
 
 
 if __name__ == "__main__":

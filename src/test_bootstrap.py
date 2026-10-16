@@ -585,6 +585,48 @@ class TestPipTail(unittest.TestCase):
         self.assertIn("fermo qui", uscita)
 
 
+class TestVersioneProgramma(unittest.TestCase):
+    """Ordine: VERSIONE.txt (ZIP) > git describe (clone) > sconosciuta."""
+
+    def test_file_zip_vince_su_tutto(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "VERSIONE.txt").write_text("build-20261015-abc1234\n", encoding="utf-8")
+            with (
+                mock.patch.object(config, "BASE_DIR", Path(tmp)),
+                mock.patch("config.subprocess.run", side_effect=AssertionError("non deve servire")),
+            ):
+                self.assertEqual(config.versione_programma(), "build-20261015-abc1234")
+
+    def test_clone_usa_git(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / ".git").mkdir()
+            finto = mock.Mock(stdout="abc1234-dirty\n")
+            with (
+                mock.patch.object(config, "BASE_DIR", Path(tmp)),
+                mock.patch("config.subprocess.run", return_value=finto) as run,
+            ):
+                self.assertEqual(config.versione_programma(), "abc1234-dirty")
+            run.assert_called_once()
+
+    def test_senza_fonti_sconosciuta(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                mock.patch.object(config, "BASE_DIR", Path(tmp)),
+                mock.patch("config.subprocess.run") as run,
+            ):
+                self.assertEqual(config.versione_programma(), "sconosciuta")
+            run.assert_not_called()
+
+
 class TestSystemInstallTail(unittest.TestCase):
     """Anche l'auto-install di sistema mostra la causa, non solo un ❌."""
 

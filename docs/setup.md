@@ -3,8 +3,10 @@
 ## 🖥️ Setup su un altro PC
 
 **Su Windows, se hai scaricato lo ZIP: non devi installare niente a mano.**
-Metti `presentazione.pdf` e `podcast.m4a` nella cartella e fai doppio clic su
-`genera_video.bat`: il programma installa Python 3.11 (via winget), Tesseract,
+Prendi lo ZIP dalla pagina Releases (ogni pacchetto ha data e versione:
+niente piu' "quale copia hai?"). Metti `presentazione.pdf` e `podcast.m4a`
+nella cartella e fai doppio clic su `genera_video.bat`: il programma installa
+Python 3.11 (via winget), Tesseract,
 ffmpeg e i modelli, e poi genera il video. Vedi
 [Primo avvio automatico](#primo-avvio-automatico).
 

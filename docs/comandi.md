@@ -138,6 +138,7 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--skip-slides` | — | Esclude un elenco di slide (indici 1-based, es. `1,4,9`) dal flusso |
 | `--no-free-ordered-fallback` | — | Nel flusso libero, non ripiegare sull'allineamento ordinato quando la selezione semantica fallisce: interrompi |
 | `--no-confirm` | — | Non chiedere conferma interattiva (per batch/CI) |
+| `--version` | — | Stampa la versione del programma (da VERSIONE.txt nello ZIP, altrimenti dal git locale) ed esce senza fare nulla |
 | `--no-update` | — | Al controllo aggiornamenti: notifica senza installare |
 | `--no-update-check` | — | Non controllare gli aggiornamenti su PyPI (default di `genera_video.bat`) |
 | `--frozen-report` | — | Diagnostica i pacchetti **fermi**: per ognuno elenca chi lo vincola (tutti i vincoli dei pacchetti installati), il tetto raggiungibile in questo ambiente e a quali versioni si arriverebbe sciogliendo i vincoli **uno alla volta**. Legge PyPI, non installa nulla e non chiede conferme: stampa il referto ed esce. Stesso interruttore in `aggiornamenti.bat` |

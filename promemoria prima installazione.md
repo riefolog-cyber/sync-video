@@ -30,8 +30,10 @@ README): serve Windows 10/11.
 
 ## 2. Procurati i file
 
-- **Prova veloce (consigliata):** scarica lo ZIP del progetto da GitHub,
-  estrailo dove vuoi. Per aggiornarlo in futuro dovrai riscaricarlo.
+- **Prova veloce (consigliata):** scarica lo ZIP dalla pagina Releases del
+  progetto (ogni pacchetto ha data e versione nel nome e dentro
+  `VERSIONE.txt`, e `genera_video.bat --version` la ristampa), estrailo dove
+  vuoi. Per aggiornarlo in futuro riscarica il pacchetto piu' recente.
 - **Uso continuativo:** `git clone https://github.com/riefolog-cyber/sync-video.git`
   (serve Git installato). Poi gli aggiornamenti arrivano con `git pull`.
 

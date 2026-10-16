@@ -348,6 +348,40 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
 BASE_DIR = project_root()
 CACHE_DIR = BASE_DIR / ".cache"
 
+# Nome del file con la versione quando il programma gira da ZIP (niente .git):
+# lo scrive la CI impacchettando (data + sha del commit).
+VERSIONE_FILE = "VERSIONE.txt"
+
+
+def versione_programma() -> str:
+    """Versione del programma, da mostrare in log/report/--version.
+
+    Ordine: VERSIONE.txt nella cartella (ZIP impacchettato dalla CI) prima di
+    tutto, poi `git describe` (clone di sviluppo), poi "sconosciuta". Senza
+    quest'ordine, dagli screenshot non si capisce mai quale copia gira.
+    """
+    try:
+        testo = (BASE_DIR / VERSIONE_FILE).read_text(encoding="utf-8").strip()
+        if testo:
+            return testo
+    except OSError:
+        pass
+    if (BASE_DIR / ".git").exists():
+        try:
+            out = subprocess.run(
+                ["git", "describe", "--tags", "--always", "--dirty"],
+                cwd=BASE_DIR,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            ).stdout.strip()
+            if out:
+                return out
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return "sconosciuta"
+
 # Prefisso dei file cache della revisione LLM (``llm_review_<hash>.json``).
 # Vive qui (non in ``llm_sync``) perché ``pipeline_cache`` deve distinguere le
 # cache "review" da conservare dalle cache "timeline" da ripulire, e così
@@ -2062,6 +2096,12 @@ Esempi:
         action="store_true",
         help="Non chiedere conferma prima della sincronizzazione stimata "
         "(procede automaticamente anche con slide non annunciate)",
+    )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Stampa la versione del programma (da VERSIONE.txt nello ZIP, "
+        "altrimenti dal git locale) ed esce senza fare nulla",
     )
     parser.add_argument(
         "--require-full-anchors",

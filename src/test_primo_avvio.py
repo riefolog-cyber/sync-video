@@ -345,5 +345,21 @@ class TestMessaggioDiagnostico(unittest.TestCase):
         prefetch.assert_not_called()
 
 
+class TestReportVersione(unittest.TestCase):
+    """Il report salvato dice quale build l'ha prodotto (ZIP datati)."""
+
+    def test_versione_presente_quando_passata(self) -> None:
+        import main
+
+        report = main._build_sync_report([60.0], [1], 60.0, versione="build-test")
+        self.assertEqual(report["versione"], "build-test")
+
+    def test_versione_assente_di_default(self) -> None:
+        import main
+
+        report = main._build_sync_report([60.0], [1], 60.0)
+        self.assertNotIn("versione", report)
+
+
 if __name__ == "__main__":
     unittest.main()
