@@ -11,10 +11,9 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Sequence
 from concurrent.futures import thread as _futures_thread
 from contextlib import suppress
-from itertools import pairwise
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn, cast
 
@@ -70,7 +69,6 @@ from llm_sync import (
     llm_cache_keys_for,
     llm_ordered_timeline,
     llm_seconds,
-    llm_timeline_segments,
     llm_verify_anchor_mapping,
     reset_dead_endpoints,
     reset_llm_seconds,
@@ -120,13 +118,10 @@ from semantic_sync import (
     SemanticOptions,
     alignment_quality_from_words,
     embed_seconds,
-    free_order_segments_from_words,
     last_quality,
     make_anchor_remap_filter,
-    merge_short_segments,
     model_load_seconds,
     refine_diagnostics,
-    refine_llm_segments_from_words,
     refine_llm_timeline_from_words,
     repair_segments_from_frames_from_words,
     reset_weak_signal_flag,
@@ -1021,11 +1016,6 @@ def _find_anomalous_durations(
 # da medie di similarità, quindi "esattamente 8s" significa "8s ± rumore".
 _FLOOR_TOLERANCE_SECONDS = 0.05
 
-# Quanta parte dell'audio può restare fuori dai segmenti prima di rifiutare la
-# timeline (flusso libero). 1% copre il chunk parziale a inizio/fine audio; il
-# caso reale che ha motivato la soglia perdeva il 86%.
-_COPERTURA_MINIMA = 0.01
-
 # Sotto questa durata una slide è "al minimo" per costruzione, non per misura:
 # il pavimento anti-flicker non può scendere sotto `min_slide_seconds` (8s) se
 # non è incastrata fra due ancore. Le durate che nascono dal pavimento sono
@@ -1104,69 +1094,6 @@ def _floor_report(
         "guaranteed": guaranteed,
         "shortened": shortened,
         "unguaranteed": unguaranteed,
-    }
-
-
-def _frazione_non_coperta(
-    segments: Sequence[dict[str, object]], total_duration: float
-) -> float:
-    """Quanta parte dell'audio NON è coperta dai segmenti, in frazione.
-
-    Una timeline che si ferma prima della fine non è imprecisa: è troncata, e il
-    video che ne esce è corto senza che nulla lo dichiari. Misura la somma delle
-    lacune fra un segmento e il successivo, normalizzata sulla durata totale.
-
-    Tolleranza di 1%: un chunk parziale all'inizio o alla fine è normale (l'audio
-    non inizia né finisce esattamente su una frontiera di 30s), ma 21 minuti
-    persi su 24 non lo sono.
-    """
-    if total_duration <= 0 or not segments:
-        return 1.0
-    ordinati = sorted(
-        (float(cast(float, s["start"])), float(cast(float, s["end"]))) for s in segments
-    )
-    lacuna = max(0.0, ordinati[0][0])
-    for (_, fine), (inizio, _) in pairwise(ordinati):
-        lacuna += max(0.0, inizio - fine)
-    lacuna += max(0.0, total_duration - ordinati[-1][1])
-    return min(1.0, lacuna / total_duration)
-
-
-def _absorbed_report(
-    durate_assorbite: Sequence[float],
-    segments: Sequence[dict[str, object]],
-    min_seconds: float,
-) -> dict[str, object]:
-    """Stessa forma di ``_floor_report``, per il merge del flusso libero.
-
-    Il flusso libero non usa ``enforce_min_durations`` (non ha ancore da
-    preservare): la sua anti-flicker è ``merge_short_segments``, che FUSO un
-    segmento corto nel vicino. Il risultato è la stessa cosa — una durata
-    concessa per leggibilità, non misurata sul parlato — ma senza questa
-    funzione quel dato finiva solo nel log e il riepilogo chiedeva all'utente di
-    controllare a mano durate che erano per costruzione.
-
-    ``merge_short_segments`` restituisce le durate naturali dei segmenti
-    scomparsi, ma non dice CHI le aveva: nel flusso libero una stessa slide può
-    comparire più volte (``free flow`` = riordino), quindi l'attribuzione è per
-    posizione e non per numero di slide.
-
-    Returns:
-        ``{"min_seconds", "guaranteed", "shortened", "unguaranteed", "absorbed"}``
-    """
-    sure = sorted(d for d in durate_assorbite if d < min_seconds - _FLOOR_TOLERANCE_SECONDS)
-    return {
-        "min_seconds": round(min_seconds, 1),
-        "guaranteed": [{"segment": i, "before": round(d, 1)} for i, d in enumerate(sure)],
-        "shortened": [],
-        "unguaranteed": [],
-        # Le durate finali, per posizione: servono a un operatore che voglia
-        # ricostruire a mano la segmentazione (nel flusso libero una slide può
-        # comparire più volte, quindi la posizione è l'unico riferimento).
-        "durations": [
-            round(float(cast(float, m["end"])) - float(cast(float, m["start"])), 1)
-            for m in (cast("Mapping[str, object]", s) for s in segments)
-        ],
     }
 
 
@@ -2844,52 +2771,14 @@ def main(argv: list | None = None) -> None:
             flow_rilevato = flow
             log.info("   Flusso auto-rilevato: %s (usa --flow per sovrascrivere)", flow)
             if flow == "free":
-                # I due avvisi seguenti descrivevano lo stesso momento e si
-                # contraddicevano: il primo annunciava il flusso libero come
-                # comportamento atteso del podcast -> slide, il secondo (tre
-                # righe dopo) annunciava che il programma lo stava abbandonando.
-                # Ora il primo dice cosa sta davvero per succedere, e il secondo
-                # spiega come ripristinare il flusso libero se lo si vuole.
-                log.warning(
-                    "\n   [Avviso] Nessun riferimento 'slide N' né 'blocco successivo' "
-                    "rilevato nella trascrizione.\n"
-                    "   - Flusso podcast -> slide (podcast generato per primo, prompt "
-                    "'senza riferimenti alle slide'): COMPORTAMENTO ATTESO. Le ancore "
-                    "'slide N' sono escluse dal prompt e non vanno aggiunte.\n"
-                    "   - Flusso slide -> podcast: se il podcast doveva annunciare le "
-                    "slide (es. 'passiamo alla slide 2'), le ancore mancano: "
-                    "rigenera l'audio.\n"
-                    "   In entrambi i casi l'allineamento successivo e' quello "
-                    "ordinato per contenuto, come descritto sotto."
+                _abort(
+                    "Flusso libero non supportato: nella trascrizione non ci sono "
+                    "riferimenti riconoscibili ('slide N' per slide-audio, "
+                    "'blocco successivo' per audio-slide). Rigenera l'audio "
+                    "annunciando le slide ('Passiamo alla slide N', vedi "
+                    "PROMPT_PRESENTAZIONE (PREDEFINITO).md) oppure forza "
+                    "--flow slide-audio se sai cosa fai."
                 )
-                if not args.no_free_ordered_fallback:
-                    # Fallback automatico: su podcast senza ancore la selezione
-                    # libera via LLM è lenta (~16 min) e quella con soli
-                    # embeddings spezzetta le slide (micro-segmenti, ordine
-                    # caotico). L'allineamento ordinato con soli embeddings
-                    # produce durate bilanciate in ~1 min senza LLM. Disattivabile
-                    # con --no-free-ordered-fallback.
-                    log.warning(
-                        "\n   [Fallback] Flusso libero senza ancore: passo automaticamente "
-                        "all'allineamento ordinato slide-audio con soli embeddings "
-                        "(verificato: durate bilanciate, ~1 min).\n"
-                        "   Disattiva con --no-free-ordered-fallback o forza "
-                        "--flow free --llm auto per la selezione libera via LLM."
-                    )
-                    flow = "slide-audio"
-                    # La scelta dell'utente non viene persa, viene registrata:
-                    # `args.llm` effettivo resta "off" per questa run (il
-                    # fallback è una decisione presa adesso, non un annullamento
-                    # di quello che l'utente aveva chiesto), ma `llm_rilevato`
-                    # conserva la richiesta originale. È la stessa distinzione
-                    # già usata per `flow` / `flow_rilevato`: senza questa,
-                    # `--llm auto` finiva dimenticato e l'escalation al LLM —
-                    # l'unico meccanismo che riposiziona le slide non ancorate —
-                    # restava impossibile proprio nei run a segnale debole, cioè
-                    # quando serviva.
-                    args.llm = "off"
-                    sync_notes["engine"] = "ordered_embeddings_fallback"
-                    sync_notes["llm_rilevato"] = llm_rilevato
 
         # --- Ancore deterministiche disponibili ---
         # Calcolate una volta: servono al recupero delle zone cieche, alla scelta
@@ -3223,191 +3112,18 @@ def main(argv: list | None = None) -> None:
         if not words_raw:
             _abort("Trascrizione non disponibile: impossibile sincronizzare.")
 
-        # --- Flusso libero (riordino): le slide seguono il contenuto del
+        # --- Flusso libero RIMOSSO: le slide seguono il contenuto del
         # podcast e possono apparire in qualsiasi ordine o ripetersi ---
         slide_ids: list[int]
         if flow == "free":
-            log.info("3. Selezione libera: le slide seguono il contenuto del podcast, senza vincolo di ordine.")
-
-            # Soglia unica dell'anti-flicker per TUTTO il flusso libero. Prima
-            # il ramo MiniLM usava questa e il ramo LLM ne usava un'altra (il
-            # default di merge_short_segments, 15s): due soglie diverse nella
-            # stessa selezione, e nel caso limite (un segmento da 10s) il LLM lo
-            # assorbiva e il MiniLM no.
-            min_segment_seconds = anti_flicker_floor(args.semantic_min_duration)
-
-            # Motore LLM (opzionale): supera il tetto di precisione del MiniLM
-            # su presentazioni tematicamente omogenee. Unico provider: 9Router
-            # online (cascata interna di 3 modelli), poi fallback automatico
-            # al MiniLM locale.
-            segments = None
-            llm_used = False
-            if args.llm != "off":
-                endpoints = endpoints_for(args.llm)
-                if args.llm_model:
-                    for ep in endpoints:
-                        ep["model"] = args.llm_model
-                log.info("   Selezione slide con LLM (--llm %s)...", args.llm)
-                try:
-                    segments = llm_timeline_segments(
-                        slide_texts,
-                        words_raw,
-                        total_slides,
-                        total_duration,
-                        chunk_seconds=args.llm_chunk,
-                        endpoints=endpoints,
-                        review=args.llm_review,
-                        wait_timeout=args.llm_wait_timeout,
-                        strict=True,
-                    )
-                except RuntimeError as e:
-                    # Flusso libero: il MiniLM da solo non basta (tetto ~50%)
-                    # ed è lento su audio lunghi. Senza terminale interattivo
-                    # per scegliere, è meglio fermarsi con un errore chiaro.
-                    _abort(str(e))
-                if segments is not None:
-                    log.info("   Timeline generata dall'LLM.")
-                    # I segmenti provengono dall'LLM: su di essi va applicata la
-                    # post-elaborazione (confini a parola + anti-flicker).
-                    llm_used = True
-
-            if not segments:
-                log.info("   Sincronizzazione semantica locale (MiniLM)...")
-                local_segments = free_order_segments_from_words(
-                    slide_texts,
-                    words_raw,
-                    total_slides,
-                    total_duration,
-                    options=SemanticOptions(
-                        model_name=args.semantic_model,
-                        cache_dir=args.semantic_cache_dir,
-                        window_seconds=args.semantic_window,
-                        min_segment_seconds=min_segment_seconds,
-                        min_avg_z=args.semantic_min_z,
-                    ),
-                )
-                # I segmenti MiniLM sono "Segment" (TypedDict): convertiti in
-                # dict generici per restare omogenei ai segmenti LLM.
-                if local_segments is not None:
-                    segments = [dict(s) for s in local_segments]
-            if not segments:
-                _abort("Selezione libera fallita: nessun segmento affidabile generabile da slide + trascrizione.")
-
-            # La timeline deve COPRIRE l'audio. Una selezione che si ferma a
-            # metà non è "una selezione imperfetta": è una selezione che
-            # buttaway via metà dell'audio, e il video che ne esce è corto senza
-            # che nulla lo dichiari. Successe su un podcast di 24m34s: 7 segmenti
-            # che coprivano i primi 210s, con una slide mai mostrata e un'altra
-            # mostrata due volte — riepilogo finale "nessuno, la sincronizzazione
-            # è risultata solida".
-            #
-            # Non è un controllo estetico: il fallback MiniLM qui sotto è
-            # esattamente la rete di sicurezza che serve, e senza questo guard
-            # la selezione libera può produrre un video troncato.
-            non_coperto = _frazione_non_coperta(segments, total_duration)
-            if non_coperto > _COPERTURA_MINIMA:
-                log.error(
-                    "   La selezione libera copre solo %.0f%% dell'audio "
-                    "(%.0fs su %.0fs): %s",
-                    (1 - non_coperto) * 100,
-                    total_duration * (1 - non_coperto),
-                    total_duration,
-                    "non accetto una timeline che perde l'audio, passo al motore locale.",
-                )
-                segments = None
-                log.info("   Sincronizzazione semantica locale (MiniLM)...")
-                local_segments = free_order_segments_from_words(
-                    slide_texts,
-                    words_raw,
-                    total_slides,
-                    total_duration,
-                    options=SemanticOptions(
-                        model_name=args.semantic_model,
-                        cache_dir=args.semantic_cache_dir,
-                        window_seconds=args.semantic_window,
-                        min_segment_seconds=min_segment_seconds,
-                        min_avg_z=args.semantic_min_z,
-                    ),
-                )
-                if local_segments is not None:
-                    segments = [dict(s) for s in local_segments]
-                if not segments:
-                    _abort(
-                        "Selezione libera non copre l'audio e il motore locale non "
-                        "ha prodotto una segmentazione: uso il flusso ordinato "
-                        "(--flow slide-audio)."
-                    )
-                llm_used = False
-                log.warning(
-                    "   [Fallback]uso il motore locale: la selezione libera "
-                    "posizionava le slide solo su una parte dell'audio."
-                )
-
-            # Post-elaborazione dei SOLI segmenti LLM (flusso libero):
-            #   1) confini a livello di parola (l'LLM lavora su chunk da 30s e
-            #      non può esprimere confini più fini: i cambi slide cadono a
-            #      metà discorso);
-            #   2) merge anti-flicker dei segmenti residui corti (es. ultimo
-            #      chunk parziale da pochi secondi).
-            # Il MiniLM del flusso libero ha già il suo anti-flicker e il flusso
-            # ordinato ha ancore esatte da non toccare.
-            if llm_used:
-                # Nota: la cache llm_*.json conserva la timeline GREZZA dell'LLM
-                # (a chunk); il raffinamento qui sotto è deterministico e viene
-                # riapplicato a ogni run sopra il risultato cachato.
-                log.info("   Post-elaborazione timeline LLM: raffinamento confini a livello di parola...")
-                segments = refine_llm_segments_from_words(
-                    segments,
-                    words_raw,
-                    slide_texts,
-                    options=SemanticOptions(
-                        model_name=args.semantic_model,
-                        cache_dir=args.semantic_cache_dir,
-                    ),
-                    window_seconds=min(args.llm_chunk, 30.0),
-                )
-                n_segments_before = len(segments)
-                durate_assorbite: list[float] = []
-                segments = merge_short_segments(
-                    segments,
-                    min_seconds=min_segment_seconds,
-                    assorbiti=durate_assorbite,
-                )
-                if len(segments) != n_segments_before:
-                    log.info(
-                        "   Anti-flicker LLM: %d segmento/i corto/i assorbito/i.",
-                        n_segments_before - len(segments),
-                    )
-                if durate_assorbite:
-                    floor_note = _absorbed_report(
-                        durate_assorbite, segments, min_segment_seconds
-                    )
-                    floor_guaranteed, floor_unguaranteed, floor_min = _floor_split(floor_note)
-                    sync_notes["anti_flicker"] = floor_note
-
-            t_sync = time.time() - t_phase_start
-
-            slide_ids = [int(seg["slide"]) for seg in segments]
-            # La stessa slide può comparire più volte: costruisci la sequenza
-            # reale di file e durate per l'assemblaggio video.
-            slide_files = [slide_files[s - 1] for s in slide_ids]
-            durations = [float(seg["end"]) - float(seg["start"]) for seg in segments]
-            for i, seg in enumerate(segments):
-                log.info(
-                    "   -> Slide %2d: da %.1fs a %.1fs (durata: %.1fs)",
-                    slide_ids[i],
-                    float(seg["start"]),
-                    float(seg["end"]),
-                    durations[i],
-                )
-
-            missing = [s for s in range(1, total_slides + 1) if s not in set(slide_ids)]
-            if missing:
-                log.warning(
-                    "   [Avviso] Slide mai mostrate dal riordino (%s): il loro "
-                    "contenuto non è presente nella narrazione audio.",
-                    ", ".join(f"slide {s}" for s in missing),
-                )
+            _abort(
+                "Flusso libero non supportato: nella trascrizione non ci sono "
+                "riferimenti riconoscibili ('slide N' per slide-audio, "
+                "'blocco successivo' per audio-slide). Rigenera l'audio "
+                "annunciando le slide ('Passiamo alla slide N', vedi "
+                "PROMPT_PRESENTAZIONE (PREDEFINITO).md) oppure forza "
+                "--flow slide-audio se sai cosa fai."
+            )
         else:
             # Ancore deterministiche "slide N" dalla trascrizione: riferimenti
             # espliciti ad alta precisione che vincolano l'allineamento semantico.

@@ -1604,13 +1604,6 @@ DEFAULT_SEMANTIC_MIN_Z = _env_float("SEMANTIC_MIN_Z", 0.45)
 # con similarità uniforme catturi metà dell'audio).
 # 0.15 = bilanciamento ottimale trovato con test A/B su podcast reale.
 DEFAULT_SEMANTIC_TEMPERATURE = _env_float("SEMANTIC_TEMPERATURE", 0.15)
-# Fallback automatico al flusso ordinato quando il flusso auto-rilevato è
-# 'free' (nessuna ancora 'slide N' né 'blocco successivo' pronunciata).
-# Su podcast reali la selezione libera via LLM produce durate bilanciate ma
-# richiede ~16 min (9Router); l'allineamento ordinato con soli embeddings
-# produce durate altrettanto bilanciate (es. 47.8-136.0s) in ~1 min senza
-# dipendenza dall'LLM. Disattivabile con --no-free-ordered-fallback.
-DEFAULT_FREE_ORDERED_FALLBACK = os.environ.get("FREE_ORDERED_FALLBACK", "1") == "1"
 # Copertura minima delle ancore 'slide N' nel flusso slide -> podcast, come
 # frazione delle transizioni (slide 2..N). Sotto soglia la timeline sarebbe
 # stimata per contenuto, con durate inaffidabili e possibili micro-segmenti
@@ -2222,29 +2215,12 @@ Esempi:
     parser.add_argument(
         "--flow",
         default=None,
-        choices=["slide-audio", "audio-slide", "free"],
+        choices=["slide-audio", "audio-slide"],
         help="Flusso di sincronizzazione: 'slide-audio' (speaker dicono "
-        "'passiamo alla slide X'), 'audio-slide' (speaker dicono "
-        "'passiamo al blocco successivo') oppure 'free' (riordino "
-        "libero: le slide possono apparire in qualsiasi ordine e "
-        "ripetersi, seguendo il contenuto del podcast). Default: "
-        "auto-detect: slide-audio/audio-slide se il podcast segue "
-        "i vincoli del prompt NotebookLM ('slide N' / 'blocco "
-        "successivo'), altrimenti 'free'.",
-    )
-    parser.add_argument(
-        "--no-free-ordered-fallback",
-        action="store_true",
-        # Default preso dalla variabile d'ambiente: senza questo default=True
-        # della costante era irrilevante e FREE_ORDERED_FALLBACK=0 non faceva
-        # nulla (costante mai letta).
-        default=not DEFAULT_FREE_ORDERED_FALLBACK,
-        help="Disattiva il fallback automatico al flusso ordinato "
-        "quando il flusso auto-rilevato è 'free' (nessuna ancora "
-        "'slide N'). Default: attivo (vedi config.py), così un "
-        "podcast senza ancore usa l'allineamento ordinato con soli "
-        "embeddings (~1 min, durate bilanciate) invece della "
-        "selezione libera via LLM (~16 min con 9Router).",
+        "'passiamo alla slide X') o 'audio-slide' (speaker dicono "
+        "'passiamo al blocco successivo'). Default: auto-detect. "
+        "Un podcast senza riferimenti riconoscibili viene rifiutato "
+        "con errore chiaro (flusso libero non supportato).",
     )
     parser.add_argument(
         "--skip-slides",
@@ -2254,8 +2230,7 @@ Esempi:
         "escluse: i loro segmenti mostrano la slide precedente valida, "
         "così l'audio resta sincronizzato e il video mostra solo le "
         "slide effettivamente coperte. Il PDF resta intatto (le ancore "
-        "'slide N' del parlato non si spostano). Solo flusso ordinato "
-        "(slide-audio/audio-slide); nel flusso libero è ignorato.",
+        "'slide N' del parlato non si spostano).",
     )
     parser.add_argument(
         "--strict-sync",
