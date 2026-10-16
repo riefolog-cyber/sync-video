@@ -696,5 +696,22 @@ class TestSystemInstallTail(unittest.TestCase):
         self.assertIn("linea apt di log", uscita)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestInsiemiFormati(unittest.TestCase):
+    """Un solo posto per gli insiemi di estensioni (config.py)."""
+
+    def test_ricerca_libera_usa_config(self) -> None:
+        import pipeline_inputs
+
+        sorgente = Path(pipeline_inputs.__file__).read_text(encoding="utf-8")
+        self.assertIn("AUDIO_SEARCH_SUFFIXES", sorgente)
+        self.assertIn("PRESENTATION_ACCEPTED_SUFFIXES", sorgente)
+        self.assertNotIn('".m4a"', sorgente)
+        self.assertNotIn('".pptx"', sorgente)
+
+    def test_conversione_sottoinsieme_ricerca(self) -> None:
+        import ocr
+
+        self.assertTrue(
+            set(ocr.PRESENTATION_SUFFIXES) < set(config.PRESENTATION_ACCEPTED_SUFFIXES),
+            "i formati da convertire devono restare dentro quelli accettati",
+        )

@@ -541,17 +541,18 @@ def prova_materiali(r: Relazione, radice: Path) -> None:
     # main.py trascina moviepy e gli altri pesi, e questo modulo deve girare
     # anche a pacchetti mancanti): prima i nomi esatti, poi qualsiasi altra
     # presentazione, la piu' recente. Altrimenti il referto direbbe "manca"
-    # dove il programma invece procederebbe.
+    # dove il programma invece procederebbe. Gli insiemi stanno in UN solo
+    # posto (config): import locale come per ocr qui sotto.
+    from config import AUDIO_SEARCH_SUFFIXES, PRESENTATION_ACCEPTED_SUFFIXES
+
     nomi_presentazione = ("presentazione.pdf", "presentazione.pptx", "presentazione.ppt")
     file = [p for p in radice.iterdir() if p.is_file()]
     presentazione = next((p for n in nomi_presentazione for p in file if p.name.lower() == n), None)
     if presentazione is None:
-        candidati = [p for p in file if p.suffix.lower() in {".pdf", ".pptx", ".ppt"}]
+        candidati = [p for p in file if p.suffix.lower() in PRESENTATION_ACCEPTED_SUFFIXES]
         if candidati:
             presentazione = max(candidati, key=lambda p: p.stat().st_mtime)
-    audio_candidati = [
-        p for p in file if p.suffix.lower() in {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac"}
-    ]
+    audio_candidati = [p for p in file if p.suffix.lower() in AUDIO_SEARCH_SUFFIXES]
     audio = max(audio_candidati, key=lambda p: p.stat().st_mtime) if audio_candidati else None
     if presentazione and audio:
         r.aggiungi(Esito("Materiali", OK, f"{presentazione.name} + {audio.name}"))

@@ -14,20 +14,13 @@ import re
 from pathlib import Path
 
 from chunks import Word
-
-# Estensioni accettate dalla ricerca libera di presentazioni: il PDF e' nativo,
-# .ppt/.pptx passano per convert_presentation_to_pdf. Stesso insieme della
-# validazione (nome esatto) e di verifica_pc.prova_materiali: tre copie della
-# stessa regola sarebbero tre modi di divergere, quindi chi cambia questo
-# insieme aggiorna anche gli altri due punti.
-PRESENTATION_SEARCH_SUFFIXES = frozenset({".pdf", ".pptx", ".ppt"})
+from config import AUDIO_SEARCH_SUFFIXES, PRESENTATION_ACCEPTED_SUFFIXES
 
 
 def find_audio_file(directory: Path) -> Path | None:
     """Cerca qualsiasi file audio nella directory (glob pattern).
     Se più file audio presenti, sceglie il più recente per data di modifica."""
-    extensions = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac"}
-    candidates = [f for f in directory.iterdir() if f.suffix.lower() in extensions]
+    candidates = [f for f in directory.iterdir() if f.suffix.lower() in AUDIO_SEARCH_SUFFIXES]
     if not candidates:
         return None
     # Ordina per data di modifica (più recente prima)
@@ -47,7 +40,7 @@ def find_presentation_file(directory: Path) -> Path | None:
         files = [
             f
             for f in directory.iterdir()
-            if f.is_file() and f.suffix.lower() in PRESENTATION_SEARCH_SUFFIXES
+            if f.is_file() and f.suffix.lower() in PRESENTATION_ACCEPTED_SUFFIXES
         ]
     except OSError:
         return None
@@ -111,7 +104,7 @@ def _materiali_nei_sottocartelle(directory: Path, limite: int = 4) -> list[str]:
         sottocartelle = sorted(p for p in directory.iterdir() if p.is_dir() and not p.name.startswith("."))
     except OSError:
         return []
-    audio_est = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac"}
+    audio_est = AUDIO_SEARCH_SUFFIXES
     trovati: list[str] = []
     for sub in sottocartelle:
         if sub.name == "temp_slides":
@@ -121,7 +114,7 @@ def _materiali_nei_sottocartelle(directory: Path, limite: int = 4) -> list[str]:
         except OSError:
             continue
         for p in dentro:
-            if p.suffix.lower() in PRESENTATION_SEARCH_SUFFIXES or p.suffix.lower() in audio_est:
+            if p.suffix.lower() in PRESENTATION_ACCEPTED_SUFFIXES or p.suffix.lower() in audio_est:
                 trovati.append(f"{sub.name}/{p.name}")
                 if len(trovati) >= limite:
                     return trovati

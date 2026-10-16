@@ -1514,6 +1514,14 @@ DEFAULT_PDF = "presentazione.pdf"  # supporta anche .ppt/.pptx (convertiti autom
 DEFAULT_OUTPUT_VIDEO = "video_finale.mp4"
 DEFAULT_SLIDES_DIR = "temp_slides"
 
+# Formati accettati come presentazione e come audio, in UN solo posto.
+# Prima vivevano in tre copie (validazione, ricerca libera, referto verifica):
+# tre modi di divergere in silenzio. Chi supporta un nuovo formato aggiorna
+# qui; ocr.PRESENTATION_SUFFIXES resta separato di proposito (sono i formati
+# da CONVERTIRE, senza .pdf che e' gia' pronto).
+PRESENTATION_ACCEPTED_SUFFIXES = frozenset({".pdf", ".pptx", ".ppt"})
+AUDIO_SEARCH_SUFFIXES = frozenset({".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac"})
+
 # --- Sincronizzazione semantica (sentence embeddings, offline) ---
 # Modelli multilingue ONNX (fastembed). Supportano l'italiano senza prefissi.
 #
