@@ -122,6 +122,36 @@ jobs:
         # nulla. E' il perche' del -s esplicito, non una formalta'.
         run: python -m unittest discover -s src -p "test_*.py"
 
+  windows-rapido:
+    # La prima installazione vive su Windows (.bat, Program Files, registry,
+    # lettere disco): i test giravano solo su ubuntu. Una sola versione
+    # Python per tenere corto il job (le versioni le copre la matrice sopra);
+    # gli strumenti di sistema servono al test del PC sano.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-${{ runner.os }}-3.12-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-3.12-
+
+      - name: Strumenti di sistema (ffmpeg, Tesseract)
+        run: choco install ffmpeg tesseract -y --no-progress
+
+      - name: Installa dipendenze
+        run: pip install -r requirements.txt
+
+      - name: Test veloci su Windows
+        run: python -m unittest discover -s src -p "test_*.py"
+
   pacchetto:
     # ZIP datato per i colleghi: niente piu' "quale copia hai?". Gira solo sui
     # push su main (mai sulle PR: niente release dai rami) e solo se i test
