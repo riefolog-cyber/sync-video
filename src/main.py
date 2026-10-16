@@ -96,10 +96,26 @@ from pipeline_cache import load_sync_report as _load_sync_report_impl
 from pipeline_cache import save_cache as _save_cache_impl
 from pipeline_cache import save_final_timeline as _save_final_timeline_impl
 from pipeline_cache import save_sync_report as _save_sync_report_impl
+from pipeline_inputs import (
+    _clean_directory,
+    _materiali_nei_sottocartelle,
+    _nomi_file_visti,
+    _parse_transcript_raw,
+    find_audio_file,
+    find_presentation_file,
+)
 from pipeline_report import append_timing_history as _append_timing_history
 from pipeline_report import format_time as _format_time
 from pipeline_report import print_timing as _print_timing_impl
 from pipeline_report import slide_list_text as _slide_list_text
+from pipeline_review import (
+    _boundary_doubt_text,
+    _boundary_preview_moments,  # noqa: F401 - re-export per i test (il corpo sta in pipeline_review)
+    _write_boundary_previews,
+)
+from pipeline_review import (
+    _review_boundary_doubts as _review_boundary_doubts_impl,
+)
 from semantic_sync import (
     SemanticOptions,
     alignment_quality_from_words,
@@ -141,7 +157,11 @@ from transcription import (
     transcribe_audio,
 )
 from updates import run_frozen_report, run_update_check
-from video import boundary_review_sheet, build_video, frame_consistency_check
+from video import (
+    boundary_review_sheet,  # noqa: F401 - resta qui per mock.patch("main.boundary_review_sheet") dei test
+    build_video,
+    frame_consistency_check,
+)
 
 
 # =====================================================================
@@ -195,83 +215,21 @@ def _save_cache(key: str, data: dict) -> None:
 
 
 # =====================================================================
-# UTILITY: Ricerca file audio
+# SHIM INPUTS (P1): ricerca materiali in pipeline_inputs.py, re-esportata qui
+# per retro-compatibilita' con i test (stesso schema di pipeline_cache).
 # =====================================================================
-def find_audio_file(directory: Path) -> Path | None:
-    """Cerca qualsiasi file audio nella directory (glob pattern).
-    Se più file audio presenti, sceglie il più recente per data di modifica."""
-    extensions = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac"}
-    candidates = [f for f in directory.iterdir() if f.suffix.lower() in extensions]
-    if not candidates:
-        return None
-    # Ordina per data di modifica (più recente prima)
-    return max(candidates, key=lambda f: f.stat().st_mtime)
-
-
-# Estensioni accettate dalla ricerca libera di presentazioni: il PDF e' nativo,
-# .ppt/.pptx passano per convert_presentation_to_pdf. Stesso insieme della
-# validazione (nome esatto) e di verifica_pc.prova_materiali: tre copie della
-# stessa regola sarebbero tre modi di divergere, quindi chi cambia questo
-# insieme aggiorna anche gli altri due punti.
-PRESENTATION_SEARCH_SUFFIXES = frozenset({".pdf", ".pptx", ".ppt"})
-
-
-def find_presentation_file(directory: Path) -> Path | None:
-    """Cerca una presentazione nella directory, anche con nome non standard.
-
-    Il nome esatto ha la precedenza (presentazione.pdf, poi .pptx, poi .ppt,
-    come la validazione); solo se nessuno esiste si ripiega su qualsiasi altro
-    .pdf/.pptx/.ppt, il piu' recente. Serve al caso "presentazione (1).pptx"
-    da doppio download o al nome personalizzato: senza, il primo avvio dice
-    "manca il materiale" con il file li' accanto, e l'utente legge un falso.
-    """
-    try:
-        files = [
-            f
-            for f in directory.iterdir()
-            if f.is_file() and f.suffix.lower() in PRESENTATION_SEARCH_SUFFIXES
-        ]
-    except OSError:
-        return None
-    if not files:
-        return None
-    for nome in ("presentazione.pdf", "presentazione.pptx", "presentazione.ppt"):
-        for f in files:
-            if f.name.lower() == nome:
-                return f
-    return max(files, key=lambda f: f.stat().st_mtime)
 
 
 # =====================================================================
 # UTILITY: Parse transcript_raw.txt come fallback per words_raw
+# (corpo in pipeline_inputs._parse_transcript_raw, re-esportato sopra)
 # =====================================================================
-def _parse_transcript_raw(raw_path: Path) -> list[Word] | None:
-    """Legge transcript_raw.txt e ricostruisce la lista di parole Whisper.
-    Formato atteso: 'parola [X.Xs]' per riga."""
-    if not raw_path.exists():
-        return None
-    words: list[Word] = []
-    pattern = re.compile(r"^(\S+)\s+\[([\d.]+)s\]")
-    for line in raw_path.read_text(encoding="utf-8").splitlines():
-        m = pattern.match(line.strip())
-        if m:
-            words.append({"word": m.group(1), "start": float(m.group(2))})
-    return words if words else None
 
 
 # =====================================================================
 # PULIZIA FILE STALE
+# (corpo in pipeline_inputs._clean_directory, re-esportato sopra)
 # =====================================================================
-def _clean_directory(directory: Path, pattern: str = "*.png") -> int:
-    """Rimuove tutti i file che corrispondono al pattern nella directory.
-    Restituisce il numero di file rimossi."""
-    if not directory.exists():
-        return 0
-    removed = 0
-    for f in directory.glob(pattern):
-        f.unlink()
-        removed += 1
-    return removed
 
 
 # =====================================================================
@@ -946,167 +904,12 @@ def _frame_check_video(
     return frame_check
 
 
-def _boundary_preview_moments(item: dict[str, object]) -> list[tuple[str, float]]:
-    """I due istanti di un confine dubbio: l'annuncio e il confine dichiarato.
-
-    Sono le due cose che il dubbio mette in contraddizione. Il primo dice cosa
-    c'era a schermo mentre il parlato annunciava la slide (è la domanda a cui
-    rispondere: a schermo c'era già?), il secondo dove la timeline la fa
-    comparire.
-    """
-    slide = int(cast("int", item.get("slide") or 0))
-    mention = float(cast("float", item.get("mention") or 0.0))
-    declared = float(cast("float", item.get("declared") or 0.0))
-    return [
-        (f"parlato: annuncio 'slide {slide}' a {_format_time(mention)}", mention),
-        (f"video: la slide {slide} compare qui ({_format_time(declared)})", declared),
-    ]
-
-
-def _write_boundary_previews(
-    video_path: str | Path,
-    items: Sequence[dict[str, object]],
-    review_dir: Path,
-) -> None:
-    """Scrive il foglio di controllo di ogni confine dubbio e lo lega al dubbio.
-
-    I nomi sono deterministici (``confine_slideNN_II.png``): due run di seguito
-    si sovrascrivono invece di accumulare, che è il difetto costato 191 file /
-    297 MB alla cartella dei frame prima che venisse ripulita a ogni verifica.
-    Solo i dubbi con un'anteprima davvero scritta ricevono la chiave ``preview``:
-    nel dry-run il video non esiste e il riepilogo non deve citare un file che
-    non c'è.
-    """
-    for i, item in enumerate(items):
-        slide = int(cast("int", item.get("slide") or 0))
-        sheet = boundary_review_sheet(
-            video_path,
-            _boundary_preview_moments(item),
-            review_dir / f"confine_slide{slide:02d}_{i:02d}.png",
-        )
-        if sheet is not None:
-            item["preview"] = str(sheet)
-
-
-def _boundary_doubt_text(item: dict[str, object]) -> str:
-    """Testo (in parole semplici) di un dubbio "annuncio contro confine".
-
-    Estratto perché lo stampa sia il riepilogo finale sia il comando di sola
-    revisione (`--review`): due copie della stessa frase prima o poi divergono,
-    e la revisione deve ripetere esattamente quello che ha detto la run.
-    """
-    slide = int(cast("int", item.get("slide") or 0))
-    mention = float(cast("float", item.get("mention") or 0.0))
-    declared = float(cast("float", item.get("declared") or 0.0))
-    preview = f" (anteprima: {item.get('preview')})" if item.get("preview") else ""
-    return (
-        f"nel parlato la slide {slide} viene annunciata a {_format_time(mention)} "
-        f"ma il video la mostra da {_format_time(declared)}: "
-        + (
-            "il confine che la fa partire è più tardi dell'annuncio"
-            if mention < declared
-            else "il confine che la fa partire è più presto dell'annuncio"
-        )
-        + " — l'annuncio è un fatto, la stima no: guarda quel punto"
-        + preview
-    )
+# (Corpi in pipeline_review, re-esportati sopra con gli import.)
 
 
 def _review_boundary_doubts(video_path: Path) -> None:
-    """Rivede i confini dubbi di una run GIÀ fatta, senza rifare la pipeline.
-
-    Il report e la trascrizione della run sono già in `.cache/`: la revisione
-    legge quelli e rigenera solo le anteprime dal video che esiste. Funziona
-    anche sui report scritti PRIMA del controllo incrociato (lì `mentions_off`
-    non c'è e viene ricalcolato dalle parole in cache), che è il caso della run
-    del 14/10: rifarla per guardare un confine sarebbe costato 8 minuti.
-    """
-    report_path = CACHE_DIR / "sync_report.json"
-    report = _load_sync_report()
-    if not report:
-        log.error(
-            "\n   [Revisione] Nessun report da rivedere in %s: lancia la pipeline "
-            "una volta, poi ripeti con --review.",
-            report_path,
-        )
-        return
-    segments = cast("list[dict[str, object]]", report.get("segments") or [])
-    starts: dict[int, float] = {}
-    for seg in segments:
-        starts[int(cast("int", seg.get("slide") or 0))] = float(
-            cast("float", seg.get("start") or 0.0)
-        )
-    if not starts:
-        log.error("   [Revisione] Il report non contiene segmenti: niente da rivedere.")
-        return
-
-    anchors = cast("dict[str, object]", report.get("anchors") or {})
-    items = [
-        dict(item)
-        for item in cast("list[dict[str, object]]", anchors.get("mentions_off") or [])
-    ]
-    ricalcolati = False
-    if not items:
-        words = _latest_transcript_words()
-        if words:
-            items = [
-                {"slide": s, "mention": m, "declared": d}
-                for s, m, d in announcements_off_timeline(words, starts, max(starts))
-            ]
-            ricalcolati = True
-
-    quando = ""
-    with suppress(OSError):
-        quando = time.strftime(" (%d/%m %H:%M)", time.localtime(report_path.stat().st_mtime))
-    log.info("\n" + "=" * 70)
-    log.info(" REVISIONE DEI CONFINI — nessuna pipeline rifatta")
-    log.info("=" * 70)
-    log.info("   Report: %s%s", report_path, quando)
-    log.info(
-        "   %d slide, %s di parlato.",
-        len(segments),
-        _format_time(
-            max((float(cast("float", seg.get("end") or 0.0)) for seg in segments), default=0.0)
-        ),
-    )
-    transitions = int(cast("int", anchors.get("transitions") or 0))
-    if transitions:
-        log.info(
-            "   Confini ancorati nell'ultima run: %s su %s.",
-            int(cast("int", anchors.get("anchored") or 0)),
-            transitions,
-        )
-    # Un confine senza annuncio è una stima, non una misura: nei dubbi sui
-    # confini va detto anche quando non c'è nessuna contraddizione, altrimenti
-    # "niente da rivedere" suonerebbe come "tutto misurato".
-    senza_ancora = sorted(
-        int(s) for s in cast("Sequence[int]", anchors.get("unanchored_slides") or [])
-    )
-    if senza_ancora:
-        log.info(
-            "   Confini stimati dal contenuto (nessun annuncio 'slide N'): %s.",
-            _slide_list_text(senza_ancora),
-        )
-    if not items:
-        log.info(
-            "   Nessuna contraddizione fra gli annunci 'slide N' e i confini "
-            "dichiarati: niente da rivedere.%s",
-            " (controllo ricalcolato dalle parole in cache)" if ricalcolati else "",
-        )
-        log.info("=" * 70)
-        return
-    if video_path.exists():
-        _write_boundary_previews(video_path, items, CACHE_DIR / "review")
-    else:
-        log.info("   Video assente (%s): i dubbi restano, senza anteprima.", video_path)
-    if ricalcolati:
-        log.info(
-            "   (il report non li aveva salvati: ricalcolati dalle parole in cache)"
-        )
-    log.info("   Da controllare a mano:")
-    for item in items:
-        log.info("     - %s", _boundary_doubt_text(item))
-    log.info("=" * 70)
+    """Wrapper shim: vedi pipeline_review._review_boundary_doubts (inietta CACHE_DIR)."""
+    _review_boundary_doubts_impl(video_path, cache_dir=CACHE_DIR)
 
 
 def _repair_durations_from_frames(
@@ -2555,46 +2358,7 @@ def _prefetch_models(args: Any) -> None:
         log.info("\n✅ Tutti i modelli sono pronti. La prima run non scarichera' nulla.")
 
 
-# Quanti nomi di file mostra il messaggio di primo avvio: abbastanza per
-# riconoscere la cartella, non tutti i .bat/.md del progetto.
-_MATERIALI_VISTI_LIMITE = 12
-
-
-def _nomi_file_visti(directory: Path, limite: int = _MATERIALI_VISTI_LIMITE) -> tuple[list[str], int]:
-    """Nomi dei file nella directory (ordinati) + quanti restano fuori dal limite."""
-    try:
-        nomi = sorted(p.name for p in directory.iterdir() if p.is_file())
-    except OSError:
-        return [], 0
-    return nomi[:limite], max(0, len(nomi) - len(nomi[:limite]))
-
-
-def _materiali_nei_sottocartelle(limite: int = 4) -> list[str]:
-    """File presentazione/audio nei sottocartelle immediati, come "sub/nome".
-
-    Il caso reale e' lo ZIP con doppia cartella (sync-video-main dentro
-    sync-video-main): il materiale finisce un livello sopra o sotto quello
-    giusto. Solo un livello: scendere ricorsivi elencherebbe anche .cache/.
-    """
-    try:
-        sottocartelle = sorted(p for p in BASE_DIR.iterdir() if p.is_dir() and not p.name.startswith("."))
-    except OSError:
-        return []
-    audio_est = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac"}
-    trovati: list[str] = []
-    for sub in sottocartelle:
-        if sub.name == "temp_slides":
-            continue
-        try:
-            dentro = sorted(p for p in sub.iterdir() if p.is_file())
-        except OSError:
-            continue
-        for p in dentro:
-            if p.suffix.lower() in PRESENTATION_SEARCH_SUFFIXES or p.suffix.lower() in audio_est:
-                trovati.append(f"{sub.name}/{p.name}")
-                if len(trovati) >= limite:
-                    return trovati
-    return trovati
+# (Helper nomi-file in pipeline_inputs, re-esportati sopra con gli import.)
 
 
 def _primo_avvio_senza_materiali(
@@ -2662,7 +2426,7 @@ def _primo_avvio_senza_materiali(
         righe.append("   La cartella non contiene alcun file.")
     # Materiale finito un livello sopra o sotto (il classico ZIP con doppia
     # cartella): si segnala invece di far cercare a mano.
-    vicini = _materiali_nei_sottocartelle()
+    vicini = _materiali_nei_sottocartelle(BASE_DIR)
     if vicini:
         righe.append("   Ma in queste sottocartelle c'e' del materiale:")
         righe.extend(f'     - "{nome}"' for nome in vicini)

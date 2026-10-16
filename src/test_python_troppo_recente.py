@@ -62,7 +62,14 @@ class TestFinestraVersioni(unittest.TestCase):
             dati = yaml.safe_load(testo)
         except ImportError:
             self.skipTest("PyYAML non presente: non riesco a leggere la matrice")
-        matrici = [j["strategy"]["matrix"]["python-version"] for j in dati["jobs"].values()]
+        matrici = [
+            j["strategy"]["matrix"]["python-version"]
+            for j in dati["jobs"].values()
+            if isinstance(j.get("strategy"), dict)
+            and isinstance(j["strategy"].get("matrix"), dict)
+            and "python-version" in j["strategy"]["matrix"]
+        ]
+        self.assertTrue(matrici, "nessun job CI con matrice Python: il controllo e' cieco")
         for m in matrici:
             with self.subTest(matrice=m):
                 maggiore = hardware.PYTHON_MAX[1]
