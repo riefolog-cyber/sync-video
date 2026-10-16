@@ -572,25 +572,29 @@ def prova_materiali(r: Relazione, radice: Path) -> None:
 
 
 # =====================================================================
-def _stampa(rep: Relazione) -> None:
+def _righe(rep: Relazione) -> list[str]:
+    """Le righe del referto come testo (stampa e bundle diagnostico)."""
+    righe: list[str] = []
     for e in rep.esiti:
         simbolo = {OK: "[ ok ]", KO: "[ KO ]", AVV: "[avv]"}[e.stato]
-        print(f"  {simbolo} {e.nome:<18} {e.dettaglio}")
+        righe.append(f"  {simbolo} {e.nome:<18} {e.dettaglio}")
         if e.stato != OK and e.rimedio:
-            print(f"          -> {e.rimedio}")
+            righe.append(f"          -> {e.rimedio}")
+    return righe
 
 
-def main() -> int:
-    radice = project_root()
-    print()
-    print("=" * 74)
-    print("   SYNC VIDEO - verifica del computer")
-    print("=" * 74)
-    print(f"   Cartella: {radice}")
-    print()
+def _stampa(rep: Relazione) -> None:
+    for riga in _righe(rep):
+        print(riga)
 
-    rep = Relazione()
-    prove: list[tuple[Callable[..., None], tuple[object, ...]]] = [
+
+def _prove(radice: Path) -> list[tuple[Callable[..., None], tuple[object, ...]]]:
+    """L'elenco dei controlli con i loro argomenti, in ordine di stampa.
+
+    Sta qui (e non dentro main) perché anche diagnostica.py li esegue per il
+    bundle da inviare: due elenchi separati drifterebbero.
+    """
+    return [
         (prova_python, ()),
         (prova_pacchetti, ()),
         (prova_tesseract, ()),
@@ -603,12 +607,29 @@ def main() -> int:
         (prova_converter, ()),
         (prova_materiali, (radice,)),
     ]
+
+
+def _esegui_prove(rep: Relazione, prove: list[tuple[Callable[..., None], tuple[object, ...]]]) -> None:
+    """Esegue i controlli senza mai cadere: uno che esplode non abbassa gli altri."""
     for prova, argomenti in prove:
         try:
             prova(rep, *argomenti)
         except Exception as e:  # noqa: BLE001 - una prova non deve far cadere le altre
             nome = getattr(prova, "__name__", "verifica").replace("prova_", "")
             rep.aggiungi(Esito(nome, KO, f"controllo fallito: {type(e).__name__}: {e}"))
+
+
+def main() -> int:
+    radice = project_root()
+    print()
+    print("=" * 74)
+    print("   SYNC VIDEO - verifica del computer")
+    print("=" * 74)
+    print(f"   Cartella: {radice}")
+    print()
+
+    rep = Relazione()
+    _esegui_prove(rep, _prove(radice))
 
     _stampa(rep)
 
