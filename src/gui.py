@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
@@ -25,16 +26,24 @@ import verifica_pc
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 MAIN_PY = Path(__file__).resolve().parent / "main.py"
+AGGIORNAMENTI_PY = Path(__file__).resolve().parent / "aggiornamenti.py"
 
 PRESENTAZIONE_PREDEFINITA = "presentazione.pdf"
 AUDIO_PREDEFINITO = "podcast.m4a"
+
+# Motori della casella Opzioni (stessi di --transcriber).
+MOTORI = (
+    ("Automatico", "auto"),
+    ("Solo CPU (se la GPU si blocca)", "whisper"),
+    ("Solo GPU Intel (OpenVINO)", "openvino"),
+)
 
 
 def costruisci_comando(
     presentazione: str,
     audio: str,
     *,
-    solo_cpu: bool = False,
+    motore: str = "auto",
     riverifica: bool = True,
     bozza: bool = False,
 ) -> list[str]:
@@ -42,7 +51,8 @@ def costruisci_comando(
 
     Stessi default di genera_video.bat (niente controlli aggiornamenti,
     niente conferme, niente LLM, motore ffmpeg). Solleva ValueError se i
-    file non esistono: meglio un riquadro subito che un traceback dopo.
+    file non esistono o il motore non e' valido: meglio un riquadro subito
+    che un traceback dopo.
     """
     pdf = Path(presentazione)
     if not pdf.is_absolute():
@@ -54,6 +64,8 @@ def costruisci_comando(
         aud = BASE_DIR / aud
     if not aud.is_file():
         raise ValueError(f"audio non trovato: {audio}")
+    if motore not in ("auto", "whisper", "openvino"):
+        raise ValueError(f"motore non valido: {motore}")
     comando = [
         sys.executable,
         str(MAIN_PY),
@@ -68,13 +80,117 @@ def costruisci_comando(
         "--audio",
         str(aud),
     ]
-    if solo_cpu:
-        comando += ["--transcriber", "whisper"]
+    if motore != "auto":
+        comando += ["--transcriber", motore]
     if riverifica:
         comando += ["--verify-video"]
     if bozza:
         comando += ["--whisper-model", "tiny"]
     return comando
+
+
+def _base_main() -> list[str]:
+    """Interprete giusto + main.py (stesso usato dalla finestra)."""
+    return [sys.executable, str(MAIN_PY)]
+
+
+def comando_prova(presentazione: str, audio: str) -> list[str]:
+    """Come prova.bat ma sui file scelti: timeline senza generare il video."""
+    pdf = _risolvi(presentazione, BASE_DIR)
+    aud = _risolvi(audio, BASE_DIR)
+    if not pdf.is_file():
+        raise ValueError(f"presentazione non trovata: {presentazione}")
+    if not aud.is_file():
+        raise ValueError(f"audio non trovato: {audio}")
+    return [
+        *_base_main(),
+        "--no-update-check",
+        "--no-confirm",
+        "--llm",
+        "off",
+        "--engine",
+        "ffmpeg",
+        "--pdf",
+        str(pdf),
+        "--audio",
+        str(aud),
+        "--dry-run",
+        "--debug",
+    ]
+
+
+def comando_aggiornamenti() -> list[str]:
+    """Solo notifica (mai installazioni): la S/N resta nel .bat apposta."""
+    return [sys.executable, str(AGGIORNAMENTI_PY), "--no-update"]
+
+
+def comando_cache_peso() -> list[str]:
+    """Quanto pesa la cache (sola lettura)."""
+    return [*_base_main(), "--cache-du"]
+
+
+def comando_cache_pulisci() -> list[str]:
+    """Pulizia sicura: senza --include-models non tocca i modelli pesanti."""
+    return [*_base_main(), "--clean-cache", "--yes"]
+
+
+class Fermato(Exception):
+    """Il runner e' stato fermato dall'utente (non e' un errore)."""
+
+
+def esegui_streaming(
+    comando: list[str],
+    on_riga: Callable[[str], None],
+    deve_fermarsi: Callable[[], bool],
+) -> int:
+    """Esegue comando mostrando ogni riga man mano (lavori lunghi di Manutenzione).
+
+    on_riga(riga) riceve l'output dal vivo; il controllo di stop gira ogni
+    decimo di secondo anche se il processo tace (un thread pompa le righe in
+    coda). Se deve_fermarsi() e' vero, il processo viene terminato e sale
+    Fermato (non e' un errore). Ritorna il codice di uscita.
+    Bloccante: va chiamato in un thread, mai nella finestra.
+    """
+    processo = subprocess.Popen(
+        comando,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=str(BASE_DIR),
+    )
+    assert processo.stdout is not None
+    coda: queue.Queue[str | None] = queue.Queue()
+
+    def pompa() -> None:
+        try:
+            for riga in processo.stdout:  # type: ignore[union-attr]
+                coda.put(riga)
+        finally:
+            coda.put(None)
+
+    threading.Thread(target=pompa, daemon=True).start()
+    while True:
+        if deve_fermarsi():
+            processo.terminate()
+            raise Fermato()
+        try:
+            riga = coda.get(timeout=0.1)
+        except queue.Empty:
+            if processo.poll() is not None:
+                # Finito senza altre righe in arrivo: svuota e chiudi.
+                while True:
+                    ultima = coda.get()
+                    if ultima is None:
+                        break
+                    on_riga(ultima)
+                break
+            continue
+        if riga is None:
+            break
+        on_riga(riga)
+    return processo.wait()
 
 
 def _fase_da_riga(riga: str) -> str | None:
@@ -307,12 +423,15 @@ class Finestra:
         scheda_crea = ttk.Frame(taccuino, padding=12)
         scheda_pc = ttk.Frame(taccuino, padding=12)
         scheda_video = ttk.Frame(taccuino, padding=12)
+        scheda_manut = ttk.Frame(taccuino, padding=12)
         taccuino.add(scheda_crea, text="Crea video")
         taccuino.add(scheda_pc, text="Stato PC")
         taccuino.add(scheda_video, text="Ultimo video")
+        taccuino.add(scheda_manut, text="Manutenzione")
         self._scheda_crea(scheda_crea, versione)
         self._scheda_pc(scheda_pc)
         self._scheda_video(scheda_video)
+        self._scheda_manutenzione(scheda_manut)
 
         self.radice.protocol("WM_DELETE_WINDOW", self.chiudi)
 
@@ -334,12 +453,15 @@ class Finestra:
             campo.bind("<FocusOut>", lambda _e: self._aggiorna_scheda())
 
         ttk.Label(cornice, text="2. Opzioni", font=("TkDefaultFont", 10, "bold")).pack(anchor=tk.W, pady=(8, 0))
-        self.solo_cpu = tk.BooleanVar(value=bool(scelte.get("solo_cpu", False)))
+        motore_iniziale = str(scelte.get("motore", "whisper" if scelte.get("solo_cpu") else "auto"))
+        if motore_iniziale not in ("auto", "whisper", "openvino"):
+            motore_iniziale = "auto"
+        self.motore = tk.StringVar(value=motore_iniziale)
         self.riverifica = tk.BooleanVar(value=bool(scelte.get("riverifica", True)))
         self.bozza = tk.BooleanVar(value=bool(scelte.get("bozza", False)))
-        ttk.Checkbutton(
-            cornice, text="Solo CPU (se la trascrizione si blocca)", variable=self.solo_cpu
-        ).pack(anchor=tk.W)
+        ttk.Label(cornice, text="Motore trascrizione:").pack(anchor=tk.W)
+        for testo, valore in MOTORI:
+            ttk.Radiobutton(cornice, text=testo, value=valore, variable=self.motore).pack(anchor=tk.W)
         ttk.Checkbutton(cornice, text="Ricontrolla il video finito", variable=self.riverifica).pack(anchor=tk.W)
         ttk.Checkbutton(cornice, text="Bozza veloce (meno precisa)", variable=self.bozza).pack(anchor=tk.W)
 
@@ -508,6 +630,105 @@ class Finestra:
 
         self._lancia_lavoro(lavoro, fatto)
 
+    def _scheda_manutenzione(self, cornice) -> None:  # type: ignore[no-untyped-def]
+        import tkinter as tk
+        from tkinter import scrolledtext, ttk
+
+        ttk.Label(
+            cornice,
+            text="Operazioni sicure: solo notifica, prova senza video, pulizia leggera. "
+            "Niente installazioni automatiche, niente modelli cancellati.",
+            wraplength=560,
+        ).pack(anchor=tk.W)
+        bottoni = ttk.Frame(cornice)
+        bottoni.pack(fill=tk.X, pady=(6, 0))
+        ttk.Button(bottoni, text="Controlla aggiornamenti", command=self.manut_aggiornamenti).pack(side=tk.LEFT)
+        ttk.Button(bottoni, text="Prova veloce", command=self.manut_prova).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(bottoni, text="Peso cache", command=self.manut_peso).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(bottoni, text="Pulisci cache", command=self.manut_pulisci).pack(side=tk.LEFT, padx=(6, 0))
+        self.pulsante_manut_stop = ttk.Button(bottoni, text="Ferma", command=self.manut_ferma, state=tk.DISABLED)
+        self.pulsante_manut_stop.pack(side=tk.LEFT, padx=(6, 0))
+        self.diario_manut = scrolledtext.ScrolledText(cornice, height=16, state=tk.DISABLED)
+        self.diario_manut.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        self.coda_manut: queue.Queue[str | None] = queue.Queue()
+        self.manut_in_corso = False
+        self.manut_stop = False
+
+    def _manut_scrivi(self, testo: str) -> None:
+        self.diario_manut.configure(state="normal")
+        self.diario_manut.insert("end", testo)
+        self.diario_manut.see("end")
+        self.diario_manut.configure(state="disabled")
+
+    def _manut_avvia(self, comando: list[str]) -> None:
+        """Avvia un lavoro di manutenzione in thread con diario dal vivo."""
+        if self.manut_in_corso:
+            return
+        self.manut_in_corso = True
+        self.manut_stop = False
+        self.pulsante_manut_stop.configure(state="normal")
+        self._manut_scrivi(f"\n$ {' '.join(comando)}\n")
+
+        def lavoro() -> None:
+            try:
+                codice = esegui_streaming(
+                    comando, self._manut_accoda, lambda: self.manut_stop
+                )
+                self._manut_accoda(f"\n[finito con codice {codice}]\n")
+            except Fermato:
+                self._manut_accoda("\n[fermato da te]\n")
+            except OSError as e:
+                self._manut_accoda(f"\n[avvio fallito: {e}]\n")
+            finally:
+                self._manut_accoda(None)
+
+        threading.Thread(target=lavoro, daemon=True).start()
+        self.radice.after(150, self._manut_svuota)
+
+    def _manut_accoda(self, riga: str | None) -> None:
+        self.coda_manut.put(riga)
+
+    def _manut_svuota(self) -> None:
+        while True:
+            try:
+                riga = self.coda_manut.get_nowait()
+            except queue.Empty:
+                break
+            if riga is None:
+                self.manut_in_corso = False
+                self.pulsante_manut_stop.configure(state="disabled")
+                return
+            self._manut_scrivi(riga)
+        if self.manut_in_corso:
+            self.radice.after(150, self._manut_svuota)
+
+    def manut_ferma(self) -> None:
+        self.manut_stop = True
+
+    def manut_aggiornamenti(self) -> None:
+        self._manut_avvia(comando_aggiornamenti())
+
+    def manut_prova(self) -> None:
+        try:
+            comando = comando_prova(
+                self.presentazione.get().strip(), self.audio.get().strip()
+            )
+        except ValueError as e:
+            self.messagebox.showerror("Manca qualcosa", str(e))
+            return
+        self._manut_avvia(comando)
+
+    def manut_peso(self) -> None:
+        self._manut_avvia(comando_cache_peso())
+
+    def manut_pulisci(self) -> None:
+        if not self.messagebox.askyesno(
+            "Pulisci cache",
+            "Rimuovo i file temporanei (mai i modelli scaricati). Continuo?",
+        ):
+            return
+        self._manut_avvia(comando_cache_pulisci())
+
     def _riga_file(self, genitore, etichetta: str, predefinito: str):  # type: ignore[no-untyped-def]
         from tkinter import filedialog as _fd
         from tkinter import ttk
@@ -541,7 +762,7 @@ class Finestra:
             {
                 "presentazione": self.presentazione.get().strip(),
                 "audio": self.audio.get().strip(),
-                "solo_cpu": self.solo_cpu.get(),
+                "motore": self.motore.get(),
                 "riverifica": self.riverifica.get(),
                 "bozza": self.bozza.get(),
             }
@@ -551,7 +772,7 @@ class Finestra:
             comando = costruisci_comando(
                 self.presentazione.get().strip(),
                 self.audio.get().strip(),
-                solo_cpu=self.solo_cpu.get(),
+                motore=self.motore.get(),
                 riverifica=self.riverifica.get(),
                 bozza=self.bozza.get(),
             )
@@ -636,6 +857,7 @@ class Finestra:
                 self.processo.terminate()
         except OSError:
             pass
+        self.manut_stop = True
         self.radice.destroy()
 
 

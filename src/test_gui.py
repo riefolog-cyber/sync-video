@@ -35,17 +35,19 @@ class TestCostruisciComando(unittest.TestCase):
         self.assertNotIn("--transcriber", comando)
         self.assertNotIn("tiny", comando)
 
-    def test_solo_cpu_e_riverifica_e_bozza(self) -> None:
-        comando = costruisci_comando(
+    def test_motori_e_opzioni(self) -> None:
+        base = (
             str(self.radice / "presentazione.pdf"),
             str(self.radice / "podcast.m4a"),
-            solo_cpu=True,
-            riverifica=True,
-            bozza=True,
         )
+        comando = costruisci_comando(*base, motore="whisper", riverifica=True, bozza=True)
         self.assertIn("whisper", comando)
         self.assertIn("--verify-video", comando)
         self.assertIn("tiny", comando)
+        comando = costruisci_comando(*base, motore="openvino")
+        self.assertIn("openvino", comando)
+        with self.assertRaisesRegex(ValueError, "motore non valido"):
+            costruisci_comando(*base, motore="warp")
 
     def test_file_mancante_spiega_prima(self) -> None:
         with self.assertRaisesRegex(ValueError, "presentazione non trovata"):
@@ -217,6 +219,72 @@ class TestRigheVerifica(unittest.TestCase):
         ):
             righe = righe_verifica(Path(tmp))
         self.assertEqual(righe, [("OK", "Prova", "tutto bene", "")])
+
+
+class TestManutenzione(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = TemporaryDirectory()
+        self.radice = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        (self.radice / "presentazione.pdf").write_bytes(b"finta")
+        (self.radice / "podcast.m4a").write_bytes(b"finto")
+
+    def test_prova_usa_i_file_scelti_e_non_genera(self) -> None:
+        from gui import comando_prova
+
+        comando = comando_prova(
+            str(self.radice / "presentazione.pdf"), str(self.radice / "podcast.m4a")
+        )
+        self.assertIn("--dry-run", comando)
+        self.assertNotIn("--verify-video", comando)
+        with self.assertRaisesRegex(ValueError, "presentazione non trovata"):
+            comando_prova(str(self.radice / "manca.pdf"), str(self.radice / "podcast.m4a"))
+
+    def test_aggiornamenti_mai_installa_da_solo(self) -> None:
+        """Solo notifica: la S/N resta nel .bat apposta, qui non si preme."""
+        from gui import comando_aggiornamenti
+
+        comando = comando_aggiornamenti()
+        self.assertIn("--no-update", comando)
+
+    def test_cache_sicura_mai_modelli(self) -> None:
+        from gui import comando_cache_peso, comando_cache_pulisci
+
+        self.assertIn("--cache-du", comando_cache_peso())
+        pulisci = comando_cache_pulisci()
+        self.assertIn("--clean-cache", pulisci)
+        self.assertNotIn("--include-models", pulisci)
+
+    def test_runner_restituisce_uscita_e_righe(self) -> None:
+        import sys
+
+        from gui import esegui_streaming
+
+        viste: list[str] = []
+        codice = esegui_streaming(
+            [sys.executable, "-c", "print('riga1'); print('riga2')"],
+            viste.append,
+            lambda: False,
+        )
+        self.assertEqual(codice, 0)
+        self.assertEqual("".join(viste).split(), ["riga1", "riga2"])
+
+    def test_runner_stop_sollega_fermato(self) -> None:
+        import sys
+
+        from gui import Fermato, esegui_streaming
+
+        chiamate = {"n": 0}
+
+        def on_riga(riga: str) -> None:
+            chiamate["n"] += 1
+
+        with self.assertRaises(Fermato):
+            esegui_streaming(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                on_riga,
+                lambda: True,
+            )
 
 
 if __name__ == "__main__":
