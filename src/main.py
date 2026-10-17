@@ -278,6 +278,33 @@ def _transizioni_senza_ancora(anchors: dict[str, object] | None) -> list[int]:
         return []
 
 
+def _all_transitions_anchored(anchors: dict[str, object] | None) -> bool:
+    """True se OGNI cambio di slide è un'ancora "slide N" pronunciata.
+
+    In quel caso la timeline non è stimata dal contenuto: è la sequenza degli
+    annunci dello speaker. Cambia il significato di tutto quello che il motore
+    dice — ``avg_z`` non sta misurando i confini, li sta solo confermando — e
+    cambia cosa si può chiedere di controllare a mano (niente: non c'è nessuna
+    durata stimata).
+
+    Richiede il dato esplicito del report: senza ``anchors`` non si presume,
+    perché presumere "tutto ancorato" toglierebbe un dubbio reale su confini
+    che nessuno ha pronunciato.
+    """
+    if not isinstance(anchors, dict):
+        return False
+    try:
+        anchored = int(cast("int", anchors.get("anchored") or 0))
+        transitions = int(cast("int", anchors.get("transitions") or 0))
+    except (TypeError, ValueError):
+        return False
+    return (
+        transitions > 0
+        and anchored >= transitions
+        and not _transizioni_senza_ancora(anchors)
+    )
+
+
 # Sotto questa frazione della durata mediana una slide è "corta" rispetto alle
 # altre. Per le slide ANCORATE non significa niente: la loro durata è il tempo
 # fra due annunci pronunciati, un fatto. Per quelle STIMATE è il sintomo tipico
@@ -293,15 +320,13 @@ _WEAK_ESTIMATE_DURATION_RATIO = 0.6
 # "tenuto: margine dentro il rumore", l'utente deve capire cosa vuol dire).
 _DECISION_PHRASES = {
     "tenuto: margine dentro il rumore": (
-        "il candidato migliore non batte quello attuale più di quanto il punteggio "
-        "si muova da solo"
+        "la scelta non è abbastanza netta per fidarsi"
     ),
     "tenuto: vince solo a finestra stretta": (
-        "il candidato migliore vince solo guardando poca parlata attorno al confine"
+        "la scelta cambia se si guarda un po' più di parlato attorno"
     ),
     "tenuto: violerebbe un'ancora": (
-        "il candidato migliore sposterebbe il confine contro un annuncio 'slide N', "
-        "che resta il punto fermo"
+        "spostarla contrasterebbe un annuncio a voce, che è un punto fermo"
     ),
 }
 
@@ -395,22 +420,25 @@ def _weak_estimate_text(f: dict[str, object]) -> str:
     sigma = float(cast(float, sigma_raw)) if isinstance(sigma_raw, (int, float)) else None
     pezzi: list[str] = []
     if decisione.startswith("non valutabile"):
-        pezzi.append("il confine non si è potuto misurare (" + decisione.split(": ", 1)[-1] + ")")
+        pezzi.append("non si è potuto misurare (" + decisione.split(": ", 1)[-1] + ")")
     elif sigma is not None and sigma < 1.0:
-        pezzi.append(
-            f"il contenuto lo sostiene solo per {sigma:.1f} volte il rumore locale, "
-            "quindi è una stima e non una misura"
-        )
+        pezzi.append("il contenuto non la conferma abbastanza")
     elif decisione in _DECISION_PHRASES:
         pezzi.append(_DECISION_PHRASES[decisione])
     if float(cast(float, f.get("ratio") or 1.0)) < 1.0:
         pezzi.append(
-            f"la slide dura {_format_time(durata)} contro una mediana di {_format_time(mediana)}"
+            f"la slide dura {_format_time(durata)} contro una media di "
+            f"{_format_time(mediana)} delle altre"
         )
+    testa = (
+        f"L'inizio della slide {slide} non è annunciato a voce: l'ha deciso il "
+        "programma"
+    )
+    if pezzi:
+        testa += " — " + "; ".join(pezzi)
     return (
-        f"la slide {slide}: l'inizio non è un annuncio 'slide N' e "
-        + ", ".join(pezzi)
-        + " — se nel video compare tardi o presto, il confine da guardare è qui"
+        testa
+        + ". Se nel video la slide compare prima o dopo, il punto da guardare è lì."
     )
 
 
@@ -443,6 +471,8 @@ def _artifact_verified(frame_check: dict[str, object] | None, total_segments: in
 def _warn_sync_uncertainty(
     frame_check: dict[str, object] | None = None,
     total_segments: int = 0,
+    *,
+    all_anchored: bool = False,
 ) -> None:
     """Avviso nel riepilogo finale se l'ultima sync semantica aveva segnale debole.
 
@@ -450,29 +480,50 @@ def _warn_sync_uncertainty(
     non parte: non è che il motore si sia convinto, è che abbiamo guardato il
     video e le slide sono quelle giuste. La regola vale anche viceversa (frame
     check fallito -> l'avviso del motore basta, aggiunge niente).
+
+    Con ``all_anchored`` (ogni cambio di slide pronunciato dallo speaker) non
+    c'è nessuna durata stimata: il segnale debole diventa un limite della
+    verifica automatica, non un dubbio sui tempi, e dirlo "le durate sono
+    STIMATE" sarebbe falso proprio nel caso in cui le ancore sono complete.
     """
     if not weak_signal_seen():
         return
+    if all_anchored:
+        log.info(
+            "\n   [Il programma non è sicuro, ma i tempi sono certi] Il programma "
+            "ha trovato le slide simili tra loro e non è riuscito a confermare "
+            "da solo di averle messe nell'ordine giusto. Però ogni cambio di "
+            "slide è annunciato a voce dal relatore: nessuna durata è stata "
+            "stimata dal contenuto.\n"
+            "   %s\n",
+            (
+                "Il controllo sul video finito ha guardato tutti i pezzi e le "
+                "slide mostrate sono quelle attese."
+                if _artifact_verified(frame_check, total_segments)
+                else "Il video finito non è stato controllato in questa run: "
+                "sappiamo dove dovrebbe cambiare ogni slide, non che il file "
+                "lo faccia davvero."
+            ),
+        )
+        return
     if _artifact_verified(frame_check, total_segments):
         log.info(
-            "\n   [Attenzione, ma con rete di sicurezza] Il motore embedding era "
-            "scettico sulla qualità dell'allineamento, però la verifica dei "
-            "frame sul video finito ha controllato tutti i segmenti e le slide "
-            "mostrate sono quelle attese.\n"
-            "   Le durate restano STIMATE (non sono ancore dichiarate dallo "
-            "speaker): se in un punto il cambio di slide arriva tardi o presto, "
-            "solo guardandolo si può notare.\n"
+            "\n   [Attenzione, ma il video è stato controllato] Il programma non "
+            "era sicuro di dove cambiare slide (le slide si somigliano), però "
+            "il video finito è stato controllato: in ogni pezzo compare la "
+            "slide attesa.\n"
+            "   Alcuni inizi di slide restano però stimati (non sono "
+            "annunciati): se un cambio arriva tardi o presto, solo guardandolo "
+            "si nota.\n"
         )
         return
     log.warning(
-        "\n   [Attenzione] Sincronizzazione a bassa fiducia: il segnale "
-        "semantico era debole (slide simili / parlato che non segue "
-        "l'ordine), quindi le durate delle slide sono STIMATE e non "
-        "garantite 1:1. Se il podcast segue davvero l'ordine della "
-        "presentazione il video è corretto; per un allineamento certo "
-        "rigenera la presentazione dal podcast o fai pronunciare le "
-        "ancore 'slide N' alle transizioni.\n"
-        "   Se queste condizioni sono IMPOSTE (batch/CI), aggiungi "
+        "\n   [Attenzione] Il programma ha stimato le durate delle slide: il "
+        "parlato non segue chiaramente l'ordine della presentazione (o le "
+        "slide si somigliano troppo). Se il podcast segue davvero l'ordine "
+        "delle slide, il video è giusto; per essere sicuri, fai annunciare le "
+        "slide a voce (\"slide 1\", \"slide 2\"...).\n"
+        "   Se questo controllo gira in automatico (batch/CI), aggiungi "
         "--require-full-anchors: la run si ferma invece di produrre un video "
         "con durate stimate."
     )
@@ -501,6 +552,13 @@ def _log_plain_summary(
     frame, fiducia del motore embedding, copertura delle ancore,
     evidenza del raffinamento sui confini stimati) invece che da uno solo.
 
+    L'uscita è divisa in tre blocchi, nell'ordine in cui servono a chi non è
+    tecnico: "COSA È CERTO" (verificato sul file o annunciato a voce),
+    "COSA NON È CERTO" (stime e punti da guardare) e "COSA HA DECISO IL
+    PROGRAMMA" (durate minime, correzioni). Le frasi evitano il gergo del
+    codice (ancora, embedding, sigma): la stessa informazione, senza doverla
+    tradurre.
+
     ``refine`` è la diagnostica del raffinamento confini (``refine_diagnostics()``):
     serve a dire, dei confini STIMATI, se il contenuto li sostiene, invece di
     presentarli tutti come misurati.
@@ -527,50 +585,69 @@ def _log_plain_summary(
         )
         start += float(d)
 
-    # --- Verifica del video finito (l'unico controllo sull'artefatto) ---
-    log.info("")
+    # Quello che l'utente deve capire subito: cosa è stato VERIFICATO (certo),
+    # cosa è una STIMA del programma (non certo) e cosa il programma ha deciso da
+    # solo. Le tre liste si riempiono qui e si stampano in fondo: la distinzione
+    # si vede a colpo d'occhio invece di dipendere dall'ordine dei log.
+    certi: list[str] = []
+    incerti: list[str] = []
+    scelte: list[str] = []
+
+    # --- Il video finito: l'unico controllo che guarda l'artefatto ---
     if frame_check is None:
-        log.info(
-            "   Controllo del video finito: non eseguito (si attiva con "
-            "--verify-video, o da solo con --strict-sync)."
+        incerti.append(
+            "Il video finito non è stato controllato: non sappiamo se ogni pezzo "
+            "mostra la slide prevista (si controlla con --verify-video)."
         )
     else:
         checked = int(cast("int", frame_check.get("checked") or 0))
         coherent = int(cast("int", frame_check.get("coherent") or 0))
         total = len(durations)
-        if checked < total:
-            # Un frame non estratto viene scartato con un log di DEBUG, quindi
-            # senza questo avviso "OK, tutte le 8 slide" si leggerebbe come se
-            # il video fosse stato tutto verificato: qui si dice cosa manca.
-            log.warning(
-                "   Controllo del video finito: PARZIALE, %d segmenti su %d "
-                "controllati (frame non estratti: vedi .cache/verify_frames/).",
-                checked,
-                total,
+        mismatch_slides = [
+            str(m.get("slide"))
+            for m in cast("Sequence[dict[str, object]]", frame_check.get("mismatches") or [])
+        ]
+        if not checked:
+            incerti.append(
+                "Del video finito non si è potuto controllare nemmeno un pezzo: "
+                "non sappiamo se le slide compaiono quando previsto."
             )
-        if checked and coherent == checked:
-            log.info(
-                "   Controllo del video finito: OK, %d segmenti su %d mostrano "
-                "la slide prevista.",
-                checked,
-                total,
+        elif coherent < checked:
+            sbagliati = checked - coherent
+            pezzo = "pezzo" if sbagliati == 1 else "pezzi"
+            verbo = "mostra" if sbagliati == 1 else "mostrano"
+            incerti.append(
+                f"Nel video finito {sbagliati} {pezzo} su {checked} {verbo} la "
+                "slide sbagliata"
+                + (
+                    f" (slide {', '.join(mismatch_slides)})"
+                    if mismatch_slides
+                    else ""
+                )
+                + ": guarda i fotogrammi salvati in .cache/verify_frames/."
             )
         else:
-            log.warning(
-                "   Controllo del video finito: PROBLEMA, %d slide su %d non "
-                "compaiono quando previsto.",
-                checked - coherent,
-                checked,
+            certi.append(
+                f"Il video finito è stato controllato: nei {checked} pezzi "
+                f"guardati ({checked} su {total}) compare la slide prevista."
+            )
+        if checked and checked < total:
+            # Un frame non estratto viene scartato con un log di DEBUG: senza
+            # questa riga "nei 2 pezzi guardati compare la slide prevista" si
+            # leggerebbe come se il video fosse stato controllato tutto.
+            incerti.append(
+                f"Il controllo del video finito è solo parziale: {checked} pezzi "
+                f"su {total}. Degli altri non sappiamo se mostrano la slide "
+                "prevista."
             )
 
     # --- Correzioni automatiche (riparazione dei confini) ---
     for r in repairs:
-        log.info(
-            "   Correzione automatica: la slide %s entrava a %s, ora entra a %s "
-            "(il video la mostrava nel momento sbagliato).",
-            r.get("slide"),
-            _format_time(float(cast("float", r.get("old_start")) or 0.0)),
-            _format_time(float(cast("float", r.get("new_start")) or 0.0)),
+        scelte.append(
+            f"Ha spostato l'inizio della slide {r.get('slide')} da "
+            f"{_format_time(float(cast('float', r.get('old_start')) or 0.0))} a "
+            f"{_format_time(float(cast('float', r.get('new_start')) or 0.0))}: "
+            "il video la mostrava nel momento sbagliato."
         )
 
     # --- Durate garantite dal pavimento anti-flicker ---
@@ -580,11 +657,11 @@ def _log_plain_summary(
     # sia riuscito a salvarle.
     floor_guaranteed, floor_unguaranteed, floor_min = _floor_split(floor_report)
     if floor_guaranteed:
-        log.info(
-            "\n   Durata garantita dall'anti-flicker: per %s ha deciso il minimo "
-            "di %.0fs di leggibilità, non una misura del parlato.",
-            _slide_list_text(sorted(floor_guaranteed)),
-            floor_min,
+        scelte.append(
+            "Per garantire il minimo di "
+            f"{floor_min:.0f}s leggibile, il programma è intervenuto sulla durata "
+            f"{_slide_list_text(sorted(floor_guaranteed), di=True)}: quella durata "
+            "l'ha decisa lui, non viene dal parlato."
         )
     # Le VITTIME del pavimento hanno perso tempo per farne respirare una vicina:
     # anche la loro durata è un effetto dell'anti-flicker, non una misura, quindi
@@ -592,11 +669,10 @@ def _log_plain_summary(
     # né "garantite" né anomale né "thin", cioè erano state alterate in silenzio.
     floor_shortened = _floor_shortened(floor_report)
     if floor_shortened:
-        log.info(
-            "   L'anti-flicker ha accorciato %s per dare il minimo di lettibilità "
-            "alle vicine: la loro durata è influenzata dal pavimento, non è una "
-            "misura del parlato.",
-            _slide_list_text(sorted(floor_shortened)),
+        scelte.append(
+            "Per dare alle vicine il minimo di lettura, il programma ha accorciato "
+            f"la durata {_slide_list_text(sorted(floor_shortened), di=True)}: anche "
+            "lì è una scelta, non una misura del parlato."
         )
 
     # --- Slide "saziate": il sintomo del deck con piu' pagine delle sezioni ---
@@ -608,17 +684,12 @@ def _log_plain_summary(
     # "toccare i parametri" ma "rigenerare il deck".
     starved = _starved_slides(floor_report, floor_min)
     if starved:
-        log.warning(
-            "\n   [Avviso] %s non ha tempo proprio nel podcast: la durata minima "
-            "e' stata assegnata, non misurata (da %.1fs a %.1fs).\\n"
-            "   In pratica il podcast non sviluppa una sezione per queste pagine, "
-            "perche' le ha solo elencate o nominate di sfuggita: nel video "
-            "scorrono veloci.\\n"
-            "   Rimedio: rigenera l'AUDIO chiedendo una sezione sviluppata per "
-            "ciascuna pagina (vedi PROMPT_PRESENTAZIONE (PREDEFINITO).md).",
-            _slide_list_text(starved),
-            floor_min,
-            floor_min,
+        incerti.append(
+            "Il podcast non parla "
+            f"{_slide_list_text(starved, di=True)}: il programma ha messo il "
+            f"minimo di {floor_min:.0f}s e nel video scorrono veloci. Per "
+            "rimediare, rigenera l'audio chiedendo una sezione per ciascuna "
+            "pagina (vedi PROMPT_PRESENTAZIONE (PREDEFINITO).md)."
         )
 
     # --- Copertura delle ancore: dice COSA la fiducia del motore sta misurando ---
@@ -638,50 +709,82 @@ def _log_plain_summary(
         int(cast("int", u.get("slide") or 0))
         for u in cast("Sequence[dict[str, object]]", anchor_info.get("unconfirmed") or [])
     )
+    # Slide il cui inizio NON è fissato da un'ancora pronunciata: è su queste
+    # (e solo su queste) che la bassa fiducia del motore diventa un dubbio
+    # operativo, perché sono le uniche durate stimate dal contenuto.
+    senza_ancora = _transizioni_senza_ancora(anchors)
+    all_anchored = _all_transitions_anchored(anchors)
+    # I confini stimati che il contenuto non sostiene si calcolano PRIMA di
+    # scrivere la copertura delle ancore: così lo stesso dubbio non compare due
+    # volte (una in generale, una per slide).
+    fatti_stimati = _estimated_boundary_facts(
+        durations,
+        slide_ids,
+        set(senza_ancora),
+        refine,
+        floor_report=floor_report,
+    )
+    gia_dichiarati = {
+        int(cast(int, f.get("slide") or 0)) for f in fatti_stimati
+    }
     if transitions:
-        missing_anchor = sorted(
-            int(s) for s in cast("Sequence[int]", anchor_info.get("unanchored_slides") or [])
-        )
-        unstitched = transitions - anchored
-        log.info(
-            "   Confini ancorati: %d su %d (%s).",
-            anchored,
-            transitions,
-            (
-                f"le altre {unstitched} transizioni sono posizionate dal contenuto"
-                if unstitched > 1
-                else "l'altra transizione è posizionata dal contenuto"
+        stimate = transitions - anchored
+        if stimate <= 0 and not senza_ancora:
+            certi.append(
+                "I cambi di slide sono quelli annunciati a voce dal relatore "
+                f"({anchored} su {transitions}): non li ha stimati il programma."
             )
-            if unstitched
-            else "tutti i cambi di slide sono quelli dichiarati nel podcast",
-        )
-        if missing_anchor:
-            log.info(
-                "   Senza ancora esplicita: %s (posizionata/e per contenuto).",
-                _slide_list_text(missing_anchor),
-            )
+        else:
+            if anchored > 0 and stimate > 0:
+                # Anche in una run mista la parte annunciata è un fatto: si dice
+                # in "certo", invece di far sembrare tutto stimato.
+                if anchored == 1:
+                    certi.append(
+                        f"Un cambio di slide su {transitions} è annunciato a voce "
+                        "dal relatore: quello è certo."
+                    )
+                else:
+                    certi.append(
+                        f"{anchored} cambi di slide su {transitions} sono "
+                        "annunciati a voce dal relatore: quelli sono certi."
+                    )
+            quante = max(stimate, len(senza_ancora))
+            elenco = f" ({_slide_list_text(senza_ancora)})" if senza_ancora else ""
+            if not (senza_ancora and set(senza_ancora) <= gia_dichiarati):
+                if quante == 1:
+                    incerti.append(
+                        f"Un cambio di slide su {transitions} l'ha posizionato il "
+                        "programma in base al contenuto, non un annuncio: è una "
+                        f"stima{elenco}."
+                    )
+                else:
+                    incerti.append(
+                        f"{quante} cambi di slide su {transitions} li ha "
+                        "posizionati il programma in base al contenuto, non un "
+                        f"annuncio: sono stime{elenco}."
+                    )
 
-    # --- Dubbi da verificare a mano ---
-    doubts: list[str] = []
+    # --- Cosa NON è certo: i dubbi da verificare a mano ---
     misaligned = sorted(s for s, v in verdicts.items() if v == "disallineata")
     uncertain = sorted(
         s for s, v in verdicts.items() if v == "incerto" and s not in floor_guaranteed
     )
     if floor_unguaranteed:
-        doubts.append(
-            "durata sotto il minimo leggibile e non allungabile (nessun confine "
-            f"non ancorato da spostare): {_slide_list_text(sorted(floor_unguaranteed))} "
-            "— serve un'ancora 'slide N' o più parlato in quel punto"
+        incerti.append(
+            "Durata sotto il minimo leggibile per "
+            f"{_slide_list_text(sorted(floor_unguaranteed))}: il programma non è "
+            "riuscito ad allungarla (servirebbe un annuncio 'slide N' in quel "
+            "punto o più parlato)."
         )
     if misaligned:
-        doubts.append(
-            f"il parlato {_slide_list_text(misaligned, di=True)} somiglia di più "
-            "a un'altra slide: guarda dove iniziano nel video"
+        incerti.append(
+            f"Il parlato {_slide_list_text(misaligned, di=True)} somiglia di più "
+            "a un'altra slide: guarda quando compare nel video."
         )
     if uncertain:
-        doubts.append(
-            f"per {_slide_list_text(uncertain)} la durata è anomala e il "
-            "contenuto non conferma: controlla a mano"
+        incerti.append(
+            f"La durata {_slide_list_text(uncertain, di=True)} è anomala e il "
+            "contenuto non la conferma: guardala nel video."
         )
     # --- Confini STIMATI che il contenuto non sostiene ---
     # Un confine senza ancora "slide N" non è una misura: è la posizione che
@@ -691,14 +794,8 @@ def _log_plain_summary(
     # raffinamento dice quali confini battono il rumore locale e quali no
     # (``refine_diagnostics``), e la durata dice quanto la slide sta fuori dal
     # gruppo delle altre quando il confine è stimato.
-    for fatto in _estimated_boundary_facts(
-        durations,
-        slide_ids,
-        set(_transizioni_senza_ancora(anchors)),
-        refine,
-        floor_report=floor_report,
-    ):
-        doubts.append(_weak_estimate_text(fatto))
+    for fatto in fatti_stimati:
+        incerti.append(_weak_estimate_text(fatto))
     # --- Contraddizione fra le parole e la timeline dichiarata ---
     # Il parlato annuncia una slide in un momento e il video la mostra in un
     # altro. L'annuncio è il dato più affidabile della catena (le ancore sono
@@ -708,15 +805,7 @@ def _log_plain_summary(
     for item in cast(
         "Sequence[dict[str, object]]", anchor_info.get("mentions_off") or []
     ):
-        doubts.append(_boundary_doubt_text(item))
-    if frame_check is not None:
-        mismatches = cast("Sequence[dict[str, object]]", frame_check.get("mismatches") or [])
-        if mismatches:
-            doubted = ", ".join(str(m.get("slide")) for m in mismatches)
-            doubts.append(
-                f"il video finito mostra la slide sbagliata nei segmenti "
-                f"{doubted} (frame in .cache/verify_frames/)"
-            )
+        incerti.append(_boundary_doubt_text(item))
     if weak_signal_seen():
         # La fiducia del motore misura la TIMELINE, il frame check misura
         # l'ARTEFATTO: sono due domande diverse e nessuna risponde all'altra.
@@ -729,27 +818,33 @@ def _log_plain_summary(
         # risultata solida" tre righe sopra "fiducia del motore: bassa", e il
         # caso reale (7 slide con confusability 100%, confine 1->2 sbagliato di
         # due minuti, 0 ancore) passava dichiarandosi solido.
-        if _artifact_verified(frame_check, len(durations)):
-            log.info(
-                "   Il video finito è stato verificato: ogni segmento mostra la "
-                "slide che la timeline prevede."
-            )
+        # L'artefatto verificato è già dichiarato in "COSA È CERTO" (riga del
+        # controllo sul video finito): qui non si ripete.
         # Il dubbio riguarda i confini che NON sono ancorati, e solo quelli:
         # un'ancora "slide N" pronunciata è un fatto, e dichiarare i fatti
         # dubitabili è l'esatto difetto che questo progetto combatte.
-        senza_ancora = _transizioni_senza_ancora(anchors)
-        if senza_ancora:
-            doubts.append(
-                f"la somiglianza tra parlato e slide è risultata debole: i "
-                f"confini che fanno partire {_slide_list_text(senza_ancora)} "
-                f"sono stime, non misure, e su un deck confondibile possono cadere "
-                f"minuti fuori posto (1:1 solo con le ancore 'slide N')"
+        #
+        # E se non ci sono confini non ancorati — perché li hanno pronunciati
+        # tutti — non c'è nessuna durata stimata da controllare: il segnale
+        # debole resta un fatto sulla run (il motore non ha potuto confermare
+        # la numerazione da solo) e viene detto nella frase sulla fiducia e
+        # nell'avviso "rete di sicurezza", invece di essere travestito da
+        # dubbio sui tempi, che qui sarebbe inventato.
+        # Se il confine stimato è già stato dichiarato riga per riga
+        # (`_estimated_boundary_facts`), non si ripete la stessa cosa in
+        # generale: due frasi sullo stesso dubbio sembrano due problemi.
+        if senza_ancora and not set(senza_ancora) <= gia_dichiarati:
+            incerti.append(
+                "Il confronto fra parlato e slide è debole: l'inizio "
+                f"{_slide_list_text(senza_ancora, di=True)} non viene da un "
+                "annuncio e su una presentazione con pagine simili può cadere "
+                "anche a minuti dal punto giusto."
             )
-        else:
-            doubts.append(
-                "la somiglianza tra parlato e slide è risultata debole: le slide "
-                "si somigliano troppo fra loro, quindi guarda a mano dove il "
-                "parlato cambia tema (le ancore 'slide N' restano esatte)"
+        elif not all_anchored:
+            incerti.append(
+                "Il confronto fra parlato e slide è debole: le slide si "
+                "somigliano troppo fra loro. Guarda a mano dove il parlato "
+                "cambia argomento (i cambi annunciati a voce restano esatti)."
             )
     if unconfirmed:
         # Il segnale più insidioso: con quasi tutte le transizioni ancorate, il
@@ -759,22 +854,19 @@ def _log_plain_summary(
             # Non e' un difetto della numerazione: e' il motore che non
             # distingue le slide. Dirlo cosi' evita di mandare a riguardare un
             # video che i frame hanno gia' verificato.
-            doubts.append(
-                f"per {_slide_list_text(unconfirmed)} il confronto col contenuto "
-                "non ha confermato la pagina annunciata, ma in modo non uniforme "
-                "(alcune confermano, altre no): è il motore che fatica su questo "
-                "deck, non la numerazione. Le ancore pronunciate sono state "
-                "tenute e i tempi restano quelli dichiarati nel podcast"
-                + (" (segnale debole)" if weak_signal_seen() else "")
-                + " — vale la pena un'occhiata, ma non è un allarme"
-                + " (dettagli in .cache/sync_report.json, anchors.unconfirmed)"
+            incerti.append(
+                f"Per {_slide_list_text(unconfirmed)} il parlato che segue "
+                "l'annuncio somiglia di più a un'altra pagina, ma solo a tratti: "
+                "è il programma che fa fatica con questa presentazione, non un "
+                "numero sbagliato. I tempi restano quelli annunciati a voce: "
+                "non è un allarme (dettagli in .cache/sync_report.json)."
             )
         else:
-            doubts.append(
-                f"per {_slide_list_text(unconfirmed)} il parlato che segue l'annuncio "
-                "somiglia di più a un'altra slide: il numero detto ad alta voce e la "
-                "slide mostrata potrebbero non coincidere (dettagli in "
-                ".cache/sync_report.json, anchors.unconfirmed)"
+            incerti.append(
+                f"Dopo l'annuncio {_slide_list_text(unconfirmed, di=True)} il "
+                "parlato somiglia di più a un'altra pagina: il numero detto a "
+                "voce e la slide mostrata potrebbero non coincidere (dettagli "
+                "in .cache/sync_report.json)."
             )
     if mapping_suspicious:
         if _disaccordo == "mista":
@@ -782,54 +874,99 @@ def _log_plain_summary(
             # questo è falso (run del 05/10: 13 ancore su 14 esatte al
             # millisecondo) e spingeva a riguardare i cambi di slide, che erano
             # tutti corretti. Ora dice cosa è vero: il confronto non conclude.
-            doubts.append(
-                "il confronto fra il parlato e le slide non ha potuto verificare la "
-                "numerazione (motore incerto su questo deck): la correzione non è "
-                " stata applicata e i tempi sono quelli delle ancore pronunciate. "
-                "Se i frame del video hanno confermato tutto, puoi ignorare questa "
-                "riga"
+            incerti.append(
+                "Il programma non è riuscito a controllare da solo che i numeri "
+                "detti a voce corrispondano alle pagine: non ha cambiato niente, "
+                "i tempi sono quelli annunciati. Se il video finito ha le slide "
+                "giuste, puoi ignorare questo punto."
             )
         else:
-            doubts.append(
-                "la numerazione delle slide dette ad alta voce non è uniforme rispetto "
-                "alla presentazione, e non è stato possibile correggerla da solo: "
-                "ricontrolla i cambi di slide nel video"
+            incerti.append(
+                "I numeri delle slide detti a voce non tornano con la "
+                "presentazione e il programma non è riuscito a correggerli da "
+                "solo: controlla dove cambiano le slide nel video."
             )
 
+    # --- Le tre risposte, nell'ordine in cui servono: cosa so, cosa non so,
+    # cosa ho deciso io. Un utente non tecnico deve poter rispondere alla
+    # domanda "mi fido di questo video?" senza leggere i log tecnici. ---
     log.info("")
-    if not doubts:
+    log.info("   COSA È CERTO")
+    if certi:
+        for voce in certi:
+            log.info("     - %s", voce)
+    else:
         log.info(
-            "   Dubbi da controllare a mano: nessuno, la sincronizzazione è "
-            "risultata solida."
+            "     - Niente: nessun controllo ha potuto confermare qualcosa in "
+            "questa run."
+        )
+    log.info("")
+    log.info("   COSA NON È CERTO")
+    if incerti:
+        for voce in incerti:
+            log.info("     - %s", voce)
+    elif weak_signal_seen() and all_anchored:
+        # "niente da controllare" tre righe sopra "il programma non era sicuro"
+        # è la contraddizione che questo progetto combatte. Ma nemmeno qui si
+        # inventa un dubbio: i tempi sono gli annunci pronunciati, quindi si
+        # dice *perché* non c'è niente da controllare a mano.
+        log.info(
+            "     - Niente da controllare a mano. Il programma non era sicuro "
+            "del suo lavoro (le slide si somigliano), ma ogni cambio di slide "
+            "è annunciato a voce: nessuna durata è stata stimata."
         )
     else:
-        log.info("   Da controllare a mano:")
-        for doubt in doubts:
-            log.info("     - %s", doubt)
+        log.info("     - Niente da controllare a mano.")
+    if scelte:
+        log.info("")
+        log.info("   COSA HA DECISO IL PROGRAMMA")
+        for voce in scelte:
+            log.info("     - %s", voce)
+    log.info("")
     log.info(
-        "   Fiducia del motore: %s.",
-        _quality_phrase(quality, weak_signal_seen()),
+        "   Quanto è sicuro il programma: %s.",
+        _quality_phrase(quality, weak_signal_seen(), all_anchored=all_anchored),
     )
     log.info("=" * 70)
 
 
-def _quality_phrase(quality: dict[str, float] | None, weak: bool) -> str:
-    """Traduce la misura di qualità del motore in una frase breve."""
+def _quality_phrase(
+    quality: dict[str, float] | None, weak: bool, *, all_anchored: bool = False
+) -> str:
+    """Traduce la misura di qualità del motore in una frase breve.
+
+    ``all_anchored`` cambia la frase, non il numero: con tutti i cambi di
+    slide pronunciati dallo speaker la timeline non è stimata dal contenuto,
+    quindi dire "la scaletta è stimata dal contenuto" sarebbe falso proprio
+    nel caso in cui le ancore ci sono tutte.
+    """
     if not quality:
-        return "non misurata"
+        return "non lo sappiamo (misura non disponibile)"
     avg_z = float(quality.get("avg_z") or 0.0)
     min_z = float(quality.get("min_avg_z") or 0.0)
     avg_sim = float(quality.get("avg_sim") or 0.0)
     if weak:
-        # Il verdetto "bassa" NON nasce dal picco (che può essere alto, es. 0.75
+        # Il verdetto "basso" NON nasce dal picco (che può essere alto, es. 0.75
         # su soglia 0.45) ma dal fatto che le slide sono confondibili tra loro:
         # citare solo il picco faceva sembrare la frase in contraddizione con il
-        # numero accanto. Si nomina il motivo reale.
-        return (
-            f"bassa (slide confondibili per il motore, picco medio {avg_z:.2f}): "
-            "la scaletta è stimata dal contenuto"
+        # numero accanto. Si nomina il motivo reale, in parole semplici.
+        motivo = (
+            "le slide si somigliano troppo perché il programma possa "
+            "riconoscerle da solo"
         )
-    return f"alta (picco medio {avg_z:.2f} su soglia {min_z:.2f}, cosine {avg_sim:.2f})"
+        if all_anchored:
+            return (
+                f"BASSO — {motivo}, ma i cambi di slide sono quelli annunciati "
+                "a voce"
+            )
+        return f"BASSO — {motivo}, quindi le durate sono state stimate dal contenuto"
+    # Tre decimali: la soglia si sfiora (0.445 contro 0.450) e con due decimali
+    # il numero sembra identico alla soglia proprio nel caso limite.
+    return (
+        f"ALTO — il parlato somiglia chiaramente alla sua slide (punteggio "
+        f"{avg_z:.3f} contro una soglia di {min_z:.3f}; somiglianza media "
+        f"{avg_sim:.3f})"
+    )
 
 
 def _frame_check_video(
@@ -3069,6 +3206,15 @@ def main(argv: list | None = None) -> None:
                 if _mapping_corrected
                 else list(_anchor_report.get("unconfirmed") or [])
             ),
+            # Near-miss: pagine che battono quella annunciata di meno del rumore
+            # della stessa finestra. Non sono dubbi e non generano avvisi; come
+            # `unconfirmed`, si azzerano quando il mapping è stato corretto:
+            # i numeri sono quelli parlati, non quelli finali dell'artefatto.
+            "weak_margin": (
+                []
+                if _mapping_corrected
+                else list(_anchor_report.get("weak_margin") or [])
+            ),
             # "uniforme" | "mista" | "": serve al messaggio finale, che
             # altrimenti non distingue "numerazione sfalsata" da "motore
             # incerto" e descrive come difetto una sincronizzazione regolare.
@@ -3469,7 +3615,11 @@ def main(argv: list | None = None) -> None:
                 t_total,
                 video_encoder=getattr(args, "video_encoder", None),
             )
-            _warn_sync_uncertainty()
+            _warn_sync_uncertainty(
+                all_anchored=_all_transitions_anchored(
+                    cast("dict[str, object] | None", sync_notes.get("anchors"))
+                )
+            )
             _log_plain_summary(
                 durations,
                 slide_ids,
@@ -3628,6 +3778,9 @@ def main(argv: list | None = None) -> None:
         _warn_sync_uncertainty(
             cast("dict[str, object] | None", sync_report.get("frame_check")),
             len(durations),
+            all_anchored=_all_transitions_anchored(
+                cast("dict[str, object] | None", sync_notes.get("anchors"))
+            ),
         )
 
         # Anteprima dei confini dubbi: il dubbio nomina DUE istanti e senza il

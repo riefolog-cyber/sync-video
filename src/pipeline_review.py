@@ -85,11 +85,12 @@ def _boundary_doubt_text(item: dict[str, object]) -> str:
         f"nel parlato la slide {slide} viene annunciata a {_format_time(mention)} "
         f"ma il video la mostra da {_format_time(declared)}: "
         + (
-            "il confine che la fa partire è più tardi dell'annuncio"
+            "il video è in ritardo sull'annuncio"
             if mention < declared
-            else "il confine che la fa partire è più presto dell'annuncio"
+            else "il video è in anticipo sull'annuncio"
         )
-        + " — l'annuncio è un fatto, la stima no: guarda quel punto"
+        + " — il momento dell'annuncio è certo, quello del video è una stima: "
+        "guarda lì"
         + preview
     )
 

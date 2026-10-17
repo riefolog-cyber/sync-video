@@ -40,7 +40,18 @@ leggere per prima quando un confine sembra sbagliato:
   l'annuncio il testo somiglia di più a un'altra slide). Non è un errore: il
   bridge verso la slide successiva è normale. Diventa un dubbio nel riepilogo
   solo se il mapping non è stato corretto (`mapping_corrected`), altrimenti è
-  solo un dato di ispezione.
+  solo un dato di ispezione. Un'ancora finisce qui **solo se il margine è
+  concreto**: la pagina migliore deve battere quella annunciata di più della
+  dispersione delle similarità della stessa finestra (MAD × 1.4826, minimo
+  0.01), altrimenti la scelta è dentro il rumore del motore.
+- `weak_margin` — i near-miss: ancore in cui la pagina migliore batte quella
+  annunciata di pochi millesimi, meno del rumore misurato sulla stessa
+  finestra. Non sono dubbi e non guidano nessuna correzione (un offset nato
+  dal rumore sposterebbe la numerazione di tutte le ancore); restano qui per
+  l'ispezione. Sul run del 17/10 la slide 2 era a 0.8836 contro 0.8879 della
+  slide 4, con le 12 pagine fra 0.840 e 0.888: margine 0.004, cioè 0.4 volte il
+  rumore — un video verificato 12/12 non deve chiedere un controllo a mano per
+  questo.
 - `mapping_suspicious` / `mapping_corrected` — la numerazione detta ad alta voce
   era disallineata rispetto al PDF: o è stata corretta in automatico, o è
   rimasta sospetta e va controllata a mano.
@@ -261,9 +272,10 @@ quindi non può togliere un rimedio senza metterne un altro.
 Da quella run nasce anche il controllo incrociato `announcements_off_timeline`
 (`timeline.py`): ogni menzione "slide N" con un verbo di transizione davanti
 viene confrontata col confine che la timeline **finale** dichiara per quella
-slide, e uno scarto oltre i 5s finisce fra i "Da controllare a mano" del
-riepilogo ("nel parlato la slide 10 viene annunciata a 16m57s ma il video la
-mostra da 17m38s"). I richiami come "come dicevo nella slide 4" non hanno il
+slide, e uno scarto oltre i 5s finisce in "COSA NON È CERTO" nel riepilogo
+("nel parlato la slide 10 viene annunciata a 16m57s ma il video la mostra da
+17m38s: il video è in ritardo sull'annuncio — il momento dell'annuncio è
+certo, quello del video è una stima"). I richiami come "come dicevo nella slide 4" non hanno il
 verbo davanti e restano fuori: la soglia serve a dire un fatto, non a fabbricare
 allarmi. Sul materiale del 14/10 il controllo tace con la trascrizione greedy
 (l'annuncio lì non c'è più, quindi non c'è niente da confrontare) e scatta sul

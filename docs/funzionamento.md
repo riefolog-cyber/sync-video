@@ -8,6 +8,7 @@
 4. **Ancore "slide N"** — Riferimenti espliciti → ancore deterministiche ad alta precisione. Riconosce numeri in cifre (*"slide 3"*), cardinali (*"slide tre"*, *"numero due"*), **ordinali** (*"la terza diapositiva"*, *"la quinta slide"*) in entrambi i generi, con articolo o "numero" in mezzo, e varianti fonetiche di trascrizione (*"nonna slide"* → slide 9, *"sla e due"* → slide 2, *"asl cinque"* → slide 5, *"sallay 2"* / *"slaib6"* → slide 2/6 con numero incorporato).
 5. **Verifica mapping ancore** — Se la numerazione parlata è sfasata rispetto al PDF (es. copertina esclusa: lo speaker dice "slide 1" mostrando la slide 2), corregge il numero di slide delle ancore mantenendone i tempi esatti. Lo fa con l'**euristica deterministica** (embeddings locali, offline): rileva un offset sistematico coerente su tutte le ancore e lo applica. Tempi sempre rispettati, mai spostati.
    **Guardia sulle derive** (anche sulle cache): si applicano solo le derive *coerenti* della numerazione, cioè run contigue di **almeno 2 ancore sfasate dello stesso delta** (copertina esclusa, slide del PDF saltata a metà narrazione). I **rimappi isolati** vengono rifiutati: subito dopo un annuncio il parlato è già quello della slide *successiva*, quindi ogni test di contenuto la preferisce alla slide annunciata (tipico delle copertine/diapositive di transizione, il cui OCR non può confermarle). La **"slide 1" parlata non è mai rimappabile**: la slide 1 reale è sempre a 0.0s e il suo riferimento non è un confine di transizione.
+   **Soglia sul rumore**: un'ancora è dichiarata *non confermata* solo se la pagina migliore batte quella annunciata di più della dispersione delle similarità della stessa finestra (MAD × 1.4826, minimo 0.01 di coseno). Su un deck monotematico le pagine stanno tutte in una banda stretta (run del 17/10: 12 slide fra 0.840 e 0.888) e l'argmax sceglie di millesimi: senza soglia un margine di 0.004 diventava un dubbio da verificare a mano su un video già confermato 12/12. I near-miss restano nel report (`anchors.weak_margin`) e non guidano nessuna correzione, così un offset nato dal rumore non sposta la numerazione di tutte le ancore.
 6. **Sincronizzazione semantica** — Embedding (e5-large via fastembed, offline ONNX) + programmazione dinamica monotona. Assegna ogni blocco audio alla slide semanticamente più vicina, con competizione softmax (temperatura 0.15).
 7. **Anti-flicker** — Garanzia di durata minima (default `max(8s, 2×--semantic-min-duration)`) su ogni slide della timeline ordinata: le slide troppo corte (tipiche di quelle senza ancora, posizionate a ridosso dell'ancora successiva) vengono allungate spostando **solo i confini non ancorati**. Le ancore "slide N" pronunciate restano esatte al decimo di secondo; se nessun confine è spostabile la slide resta corta e viene segnalata, senza inventare posizioni.
 8. **Riconciliazione** — Validazione: tempi crescenti, durate positive, ultima slide entro fine audio. Se invalida → interruzione.
@@ -55,20 +56,31 @@ Esempio: se nella trascrizione a 3 minuti si parla di "riciclaggio della
 plastica" e una slide parla di "riciclo dei rifiuti", il modello riconosce che
 sono simili e mostra quella slide in quel momento.
 
-> **Nota sulla fiducia**: il riepilogo finale chiude sempre con la fiducia
-> misurata del motore, es. `Fiducia del motore: alta (picco medio 0.73 su
-> soglia 0.45, cosine 0.83)`. Se il parlato non segue chiaramente l'ordine
-> delle slide (es. le slide si somigliano molto tra loro) il valore scende
-> sotto la soglia e il riepilogo avvisa che la sincronizzazione è **stimata,
-> non garantita**, elencando cosa controllare a mano. Per un allineamento
-> certo, fai pronunciare le ancore esplicite "slide N" (vedi i workflow qui
-> sotto).
+> **Nota sulla fiducia**: il riepilogo finale è diviso in tre parti, in
+> quest'ordine: **COSA È CERTO** (verificato sul video o annunciato a voce dal
+> relatore), **COSA NON È CERTO** (stime e punti da guardare) e **COSA HA
+> DECISO IL PROGRAMMA** (durate minime, correzioni automatiche). Chiude con la
+> fiducia misurata del motore, es. `Quanto è sicuro il programma: ALTO — il
+> parlato somiglia chiaramente alla sua slide (punteggio 0.742 contro una
+> soglia di 0.450; somiglianza media 0.836)`. Se il parlato non segue
+> chiaramente l'ordine delle slide (es. le slide si somigliano molto tra loro)
+> il verdetto diventa `BASSO — le slide si somigliano troppo...` e la
+> sincronizzazione è dichiarata **stimata dal contenuto** — ma solo dei confini
+> che lo sono davvero: con i confini pronunciati come ancore "slide N" il
+> valore basso resta un fatto della run (il motore non ha potuto confermare la
+> numerazione da solo) e **non** diventa un dubbio sui tempi, perché non c'è
+> nessuna durata stimata da controllare. Per un allineamento certo, fai
+> pronunciare le ancore esplicite "slide N" (vedi i workflow qui sotto).
 >
 > **Il frame check ha la precedenza sulla fiducia del motore.** Se
 > `--verify-video` ha controllato *tutti* i segmenti e non ha trovato
-> mismatch, l'artefatto è verificato e l'avviso "da controllare a mano" non
-> viene aggiunto: sarebbe chiedere di controllare un video già guardato. Il
-> riepilogo lo dichiara comunque, perché le durate restano stimate.
+> mismatch, l'artefatto è verificato e finisce in **COSA È CERTO**, non fra i
+> punti da guardare: sarebbe chiedere di controllare un video già guardato.
+> Le due misure rispondono a domande diverse — il frame check guarda
+> l'artefatto (ogni segmento mostra la slide dichiarata), la fiducia guarda la
+> timeline (i confini sono quelli giusti) — e per questo l'avviso sulla fiducia
+> resta anche quando i frame tornano, a meno che i confini non siano tutti
+> pronunciati (lì non c'è nessuna stima da mettere in dubbio).
 >
 > Attenzione: `avg_z` è un proxy, e diventa pessimista quando le slide sono
 > **poche e lunghe** (misurato: 8 slide su 30 minuti, ~226 s per slide →

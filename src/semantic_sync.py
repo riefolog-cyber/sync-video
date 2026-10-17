@@ -1038,9 +1038,13 @@ def semantic_timeline_from_texts(
         # raffinamento possono ancora correggere; il valore alimenta invece
         # il gate --strict-sync e il riepilogo finale.
         _set_weak_signal()
+        # Tre decimali, non due: la soglia e i valori che la sfiorano (0.445
+        # contro 0.450, caso reale) stampati a due decimali diventano
+        # "0.45 < 0.45", un avviso che si contraddice da solo. Il numero deve
+        # essere leggibile proprio nel caso limite, che è quello che scatta.
         log.warning(
             "   [Semantico] AVVISO: allineamento a bassa fiducia (picco medio "
-            "normalizzato %.2f < %.2f). Il parlato di alcuni segmenti somiglia "
+            "normalizzato %.3f < %.3f). Il parlato di alcuni segmenti somiglia "
             "poco alla propria slide: la timeline viene usata comunque, ma va "
             "verificata (i confini senza ancora sono stime).",
             avg_z,
@@ -1263,6 +1267,36 @@ def _lis_positions(values: Sequence[int]) -> list[int]:
     return order
 
 
+# ---------------------------------------------------------------------
+# Un'ancora è "non confermata" solo se il margine supera il rumore
+# ---------------------------------------------------------------------
+# Il confronto fra il parlato dopo "slide N" e le pagine è un argmax su
+# similarità che, su un deck monotematico, stanno tutte nella stessa banda. Sul
+# run del 17/10 le 12 slide stavano fra 0.840 e 0.888 e la pagina sbagliata
+# batteva quella annunciata di 0.004: trattare quel margine come una
+# contraddizione manda a rivedere un video che il frame check ha verificato
+# 12/12, con le ancore pronunciate come unico vincolo (nessun tempo stimato).
+#
+# La soglia si misura sulla dispersione delle similarità della STESSA ancora
+# (MAD x 1.4826, la stessa unità di REFINE_STABILITY_SIGMA), con un pavimento
+# assoluto: senza pavimento un deck di pagine quasi identiche avrebbe
+# dispersione ~0 e qualsiasi rumore passerebbe per segnale.
+ANCHOR_CONFIRM_SIGMA = 1.5
+ANCHOR_CONFIRM_MIN_MARGIN = 0.01
+
+
+def _anchor_margin_threshold(sims: np.ndarray) -> float:
+    """Quanto deve battere la pagina migliore per essere una contraddizione vera.
+
+    ``sims`` sono le similarità della stessa finestra di parlato con TUTTE le
+    slide: la loro dispersione è il rumore di quella decisione, non una
+    costante presa altrove (stessa scelta di ``REFINE_STABILITY_SIGMA``).
+    """
+    median = float(np.median(sims))
+    scatter = 1.4826 * float(np.median(np.abs(sims - median)))
+    return max(ANCHOR_CONFIRM_MIN_MARGIN, ANCHOR_CONFIRM_SIGMA * scatter)
+
+
 def verify_anchor_mapping_embedding(
     slide_texts: Sequence[str],
     words_raw: Sequence[Word],
@@ -1288,7 +1322,14 @@ def verify_anchor_mapping_embedding(
       un'altra slide del PDF. Non è un errore (il bridge verso la slide
       successiva è normale) ma è l'unico indizio per distinguere un numero
       parlato sbagliato da un semplice ponte: restava nei log, ora resta
-      sull'artefatto e nel riepilogo.
+      sull'artefatto e nel riepilogo. Un margine dentro il rumore NON finisce
+      qui: è un near-miss, non una contraddizione (vedi ``weak_margin``).
+    - ``{"weak_margin": [{"slide", "time", "points_to", "margin"}]}`` — ancore
+      in cui la pagina "migliore" batte quella annunciata di meno della
+      dispersione delle similarità della stessa finestra: la scelta è dentro il
+      rumore del motore, quindi non è un dubbio e non entra nelle derive (un
+      offset nato dal rumore non deve correggere la numerazione). Restano qui
+      per l'ispezione.
 
     Se lo speaker numera le slide escludendo la copertina (dice "slide 1"
     mostrando la slide 2 del PDF), TUTTI i riferimenti sono sfasati dello
@@ -1330,10 +1371,14 @@ def verify_anchor_mapping_embedding(
         if report is not None:
             report["suspicious"] = suspicious
             report["unconfirmed"] = list(unconfirmed)
+            report["weak_margin"] = list(weak_margin)
             report["disaccordo"] = disaccordo
         return value
 
     unconfirmed: list[dict[str, Any]] = []
+    # Near-miss: il margine c'era, ma dentro il rumore del motore. Non sono
+    # dubbi e non sono derive: restano sull'artefatto per l'ispezione.
+    weak_margin: list[dict[str, Any]] = []
     # Come il contenuto contraddice le ancore: "uniforme" (tutte dalla stessa
     # parte: la numerazione e' davvero sfalsata) oppure "mista" (alcune sì,
     # altre no: e' il motore che non distingue, non la numerazione che
@@ -1374,7 +1419,40 @@ def verify_anchor_mapping_embedding(
             continue
         sims = slide_emb @ excerpt_emb
         best = int(np.argmax(sims)) + 1  # 1-based: slide del PDF più simile
-        pairs.append((s, t, best - s))
+        off = best - s
+        # Con similarità tutte nulle (vettore degenere: testo fuori dal lessico
+        # delle slide, embedding vuoto) non c'è un rumore da misurare: l'argmax
+        # è un caso, non un parere, e il comportamento resta quello di prima.
+        if off != 0 and 1 <= s <= total_slides and float(np.max(sims)) > 0.0:
+            # Il margine è la distanza fra la pagina annunciata e la migliore:
+            # va confrontato col rumore della STESSA finestra, perché su un deck
+            # monotematico tutte le similarità stanno nella stessa banda (run del
+            # 17/10: 0.8879 contro 0.8836, dispersione 0.0105 -> 0.4sigma).
+            margin = float(sims[best - 1] - sims[s - 1])
+            soglia = _anchor_margin_threshold(sims)
+            if margin < soglia:
+                weak_margin.append(
+                    {
+                        "slide": s,
+                        "time": round(t, 1),
+                        "points_to": best,
+                        "margin": round(margin, 4),
+                    }
+                )
+                # Dentro il rumore non c'è una contraddizione da dichiarare, e
+                # nemmeno un offset da usare per correggere: un derive nato dal
+                # rumore sposterebbe la numerazione di TUTTE le ancore.
+                off = 0
+        pairs.append((s, t, off))
+
+    if weak_margin:
+        log.info(
+            "   [Ancore] Margine dentro il rumore per %s: la pagina migliore "
+            "batte quella annunciata di meno di quanto il motore si muova da "
+            "solo, quindi non è una contraddizione (resta in "
+            ".cache/sync_report.json, anchors.weak_margin).",
+            ", ".join(f"slide {u['slide']}" for u in weak_margin),
+        )
 
     offsets = [off for _, _, off in pairs]
     # Ancore che il parlato NON conferma: subito dopo "passiamo alla slide N" il

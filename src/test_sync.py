@@ -7,6 +7,7 @@ interruzione con avviso se la sincronizzazione è impossibile.
 """
 
 import pathlib
+import re
 import tempfile
 import time
 import unittest
@@ -2849,8 +2850,8 @@ class TestFixtureConfondibile(unittest.TestCase):
             )
         testo = "\n".join(r.getMessage() for r in cm.records)
 
-        self.assertIn("somiglianza tra parlato e slide", testo)
-        self.assertNotIn("risultata solida", testo)
+        self.assertIn("Il confronto fra parlato e slide è debole", testo)
+        self.assertNotIn("Niente da controllare a mano", testo)
 
 
 class TestMinGapNonDistruggeLaTimeline(unittest.TestCase):
@@ -3111,6 +3112,31 @@ class TestNormalizedQualityGuard(unittest.TestCase):
         self.assertLess(quality["avg_z"], quality["min_avg_z"])
         # La vecchia guardia sulla scala grezza tace: è il motivo del cambio.
         self.assertGreater(quality["avg_sim"], 0.10)
+
+    def test_avviso_mostra_tre_decimali(self):
+        # La soglia si sfiora (caso reale: avg_z 0.445 contro 0.450). Stampati
+        # a due decimali i due numeri diventano "0.45 < 0.45", cioè un avviso
+        # che si contraddice da solo: bisogna poter distinguere il valore dalla
+        # soglia proprio nel caso limite.
+        themes = ["alfa", "beta", "gamma", "delta"]
+        blocks = [{"time": i * 5.0, "text": "alfa beta gamma delta"} for i in range(8)]
+
+        with self.assertLogs("slide2video", level="WARNING") as logs:
+            semantic_timeline_from_texts(
+                [f"{t} slide" for t in themes],
+                blocks,
+                total_slides=4,
+                total_duration=40.0,
+                embed_fn=TestSemanticSync._fake_embed(themes),
+                options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
+            )
+        avviso = next(m for m in logs.output if "bassa fiducia" in m)
+        numeri = re.search(
+            r"picco medio normalizzato (\d\.\d{3}) < (\d\.\d{3})", avviso
+        )
+        self.assertIsNotNone(numeri, avviso)
+        assert numeri is not None
+        self.assertNotEqual(numeri.group(1), numeri.group(2), avviso)
 
     def test_coherent_deck_reports_high_quality(self):
         themes = ["alfa", "beta", "gamma", "delta"]
@@ -3594,6 +3620,102 @@ class TestReviewOnly(unittest.TestCase):
         self.assertIn("Nessun report da rivedere", "\n".join(logs.output))
 
 
+class TestAllTransitionsAnchored(unittest.TestCase):
+    """Riconoscere la timeline fatta di soli annunci (``anchored == transitions``).
+
+    È il confine fra due situazioni che sembrano identiche nel riepilogo (fiducia
+    bassa, 14 ancore) ma chiedono cose opposte all'utente: con dei confini stimati
+    c'è da guardare dove cambia la slide, con tutti i confini pronunciati non c'è
+    nessuna stima da controllare. Il riconoscimento deve essere prudente: senza il
+    dato esplicito non si presume "tutto ancorato", perché quella presunzione
+    toglierebbe un dubbio vero.
+    """
+
+    def test_tutte_le_transizioni_ancorate(self):
+        from main import _all_transitions_anchored
+
+        self.assertTrue(
+            _all_transitions_anchored(
+                {"anchored": 14, "transitions": 14, "unanchored_slides": []}
+            )
+        )
+
+    def test_una_transizione_senza_ancora_basta_a_negarlo(self):
+        from main import _all_transitions_anchored
+
+        self.assertFalse(
+            _all_transitions_anchored(
+                {"anchored": 13, "transitions": 14, "unanchored_slides": [7]}
+            )
+        )
+
+    def test_dato_incoerente_non_vale_come_tutto_ancorato(self):
+        from main import _all_transitions_anchored
+
+        # anchored == transitions ma una slide elencata come senza ancora: non
+        # si decide, si resta prudenti.
+        self.assertFalse(
+            _all_transitions_anchored(
+                {"anchored": 2, "transitions": 2, "unanchored_slides": [2]}
+            )
+        )
+        # Meno ancore delle transizioni: copertura incompleta, punto.
+        self.assertFalse(
+            _all_transitions_anchored(
+                {"anchored": 1, "transitions": 3, "unanchored_slides": []}
+            )
+        )
+
+    def test_senza_report_non_si_presume(self):
+        from main import _all_transitions_anchored
+
+        # Nessuna slide da cambiare (1 sola slide) o report assente: non è
+        # "tutto ancorato", è "non lo so".
+        self.assertFalse(_all_transitions_anchored(None))
+        self.assertFalse(_all_transitions_anchored({}))
+        self.assertFalse(
+            _all_transitions_anchored({"transitions": 0, "unanchored_slides": []})
+        )
+
+
+class TestWarnSyncUncertainty(unittest.TestCase):
+    """L'avviso pre-riepilogo distingue "stime fragili" da "motore che non conferma"."""
+
+    def setUp(self):
+        from semantic_sync import _set_weak_signal, reset_weak_signal_flag
+
+        reset_weak_signal_flag()
+        _set_weak_signal()
+
+    def tearDown(self):
+        from semantic_sync import reset_weak_signal_flag
+
+        reset_weak_signal_flag()
+
+    def test_con_tutte_le_ancore_non_dice_che_le_durate_sono_stimate(self):
+        import main
+
+        with self.assertLogs("slide2video", level="INFO") as logs:
+            main._warn_sync_uncertainty(
+                {"checked": 3, "coherent": 3, "mismatches": []}, 3, all_anchored=True
+            )
+        out = "\n".join(logs.output)
+        self.assertIn("ma i tempi sono certi", out)
+        self.assertIn("ogni cambio di slide è annunciato a voce", out)
+        self.assertNotIn("durate stimate", out)
+        # L'artefatto verificato viene comunque dichiarato.
+        self.assertIn("ha guardato tutti i pezzi", out)
+
+    def test_con_confini_stimati_avvisa_come_prima(self):
+        import main
+
+        with self.assertLogs("slide2video", level="INFO") as logs:
+            main._warn_sync_uncertainty(None, 3)
+        out = "\n".join(logs.output)
+        self.assertIn("ha stimato le durate delle slide", out)
+        self.assertNotIn("ma i tempi sono certi", out)
+
+
 class TestWeakSignalSurvivesFrameCheck(unittest.TestCase):
     """Il dubbio del motore resta anche con l'artefatto verificato.
 
@@ -3629,9 +3751,12 @@ class TestWeakSignalSurvivesFrameCheck(unittest.TestCase):
         return "\n".join(logs.output)
 
     def test_weak_signal_is_a_doubt_when_artifact_not_verified(self):
+        # Copertura ancore ignota (nessun report): non si presume "tutto
+        # ancorato", quindi il dubbio resta e non accusa confini nominati.
         out = self._render(quality={"avg_sim": 0.86, "avg_z": 0.38, "min_avg_z": 0.45})
-        self.assertIn("somiglianza tra parlato e slide", out)
-        self.assertIn("Da controllare a mano", out)
+        self.assertIn("Il confronto fra parlato e slide è debole", out)
+        self.assertIn("Guarda a mano dove il parlato cambia argomento", out)
+        self.assertIn("COSA NON È CERTO", out)
 
     def test_artifact_verified_is_declared_as_a_fact(self):
         out = self._render(
@@ -3639,8 +3764,8 @@ class TestWeakSignalSurvivesFrameCheck(unittest.TestCase):
             quality={"avg_sim": 0.86, "avg_z": 0.38, "min_avg_z": 0.45},
         )
         # L'artefatto è davvero verificato, e va detto: è un fatto utile.
-        self.assertIn("video finito è stato verificato", out)
-        self.assertIn("ogni segmento mostra la slide", out)
+        self.assertIn("Il video finito è stato controllato", out)
+        self.assertIn("compare la slide prevista", out)
 
     def test_weak_signal_stays_a_doubt_when_artifact_verified(self):
         out = self._render(
@@ -3648,25 +3773,44 @@ class TestWeakSignalSurvivesFrameCheck(unittest.TestCase):
             anchors={"anchored": 0, "transitions": 2, "unanchored_slides": [2, 3]},
             quality={"avg_sim": 0.86, "avg_z": 0.38, "min_avg_z": 0.45},
         )
-        self.assertIn("somiglianza tra parlato e slide", out)
+        self.assertIn("Il confronto fra parlato e slide è debole", out)
+        # I confini veri di cui si dubita sono nominati, e detti per quello che
+        # sono: stime, non misure.
+        self.assertIn("le slide 2 e 3", out)
+        self.assertIn("non viene da un annuncio", out)
         # E non si può scrivere che è tutto a posto: sarebbe falso.
-        self.assertNotIn("risultata solida", out)
+        self.assertNotIn("Niente da controllare a mano", out)
 
     def test_il_dubbio_riguarda_solo_i_confini_non_ancorati(self):
         # Tutte le transizioni ancorate: la bassa fiducia viene dal deck
-        # confondibile, non dai confini, che sono fatti pronunciati. Il dubbio
-        # deve allora dire quello che c'è da fare (guardare i cambi di slide),
-        # non accusare stime che non ci sono.
+        # confondibile, non dai confini, che sono fatti pronunciati. Non c'è
+        # nessuna stima da mandare a controllare, quindi nessun dubbio sui
+        # tempi e niente "solida" accanto a "fiducia bassa": si dice il perché.
         out = self._render(
             frame_check={"checked": 3, "coherent": 3, "mismatches": []},
             anchors={"anchored": 2, "transitions": 2, "unanchored_slides": []},
             quality={"avg_sim": 0.86, "avg_z": 0.38, "min_avg_z": 0.45},
         )
-        self.assertIn("somiglianza tra parlato e slide", out)
-        self.assertIn("guarda a mano dove il parlato cambia tema", out)
-        self.assertIn("ancore 'slide N' restano esatte", out)
-        # Nessun riferimento a stime che in questo caso non esistono.
-        self.assertNotIn("sono stime, non misure", out)
+        # Nessun dubbio inventato su durate che non sono stimate.
+        self.assertNotIn("Il confronto fra parlato e slide è debole", out)
+        self.assertNotIn("l'ha deciso il programma", out)
+        self.assertNotIn("Guarda a mano dove il parlato cambia argomento", out)
+        # La bassa fiducia resta dichiarata, con il motivo vero.
+        self.assertIn("Niente da controllare a mano", out)
+        self.assertIn("ogni cambio di slide è annunciato a voce", out)
+        self.assertIn("Il programma non era sicuro del suo lavoro", out)
+        self.assertIn("i cambi di slide sono quelli annunciati a voce", out)
+
+    def test_anchors_present_but_incomplete_keeps_the_doubt(self):
+        # `anchored == transitions` ma con una slide senza ancora: il dato è
+        # incoerente e non si presume niente. Meglio un dubbio in più che una
+        # stima dichiarata "fatta".
+        out = self._render(
+            anchors={"anchored": 2, "transitions": 2, "unanchored_slides": [2]},
+            quality={"avg_sim": 0.86, "avg_z": 0.38, "min_avg_z": 0.45},
+        )
+        self.assertIn("Il confronto fra parlato e slide è debole", out)
+        self.assertIn("l'inizio della slide 2 non viene da un annuncio", out)
 
 
 class TestPlainSummary(unittest.TestCase):
@@ -3699,9 +3843,10 @@ class TestPlainSummary(unittest.TestCase):
         self.assertIn("3 slide", out)
         self.assertIn("slide  1", out)
         self.assertIn("1m00s", out)
-        self.assertIn("OK, 3 segmenti su 3 mostrano", out)
-        self.assertIn("nessuno, la sincronizzazione è", out)
-        self.assertIn("alta (picco medio 0.69", out)
+        self.assertIn("nei 3 pezzi guardati (3 su 3) compare la slide prevista", out)
+        self.assertIn("Niente da controllare a mano", out)
+        self.assertIn("ALTO — il parlato somiglia chiaramente", out)
+        self.assertIn("0.690 contro una soglia di 0.450", out)
 
     def test_frame_mismatch_is_reported_as_problem_and_doubt(self):
         out = self._render(
@@ -3711,14 +3856,15 @@ class TestPlainSummary(unittest.TestCase):
                 "mismatches": [{"slide": 2, "shown": 3, "similarity": 1.0, "time": 90.0}],
             }
         )
-        self.assertIn("PROBLEMA", out)
-        self.assertIn("slide sbagliata nei segmenti 2", out)
+        self.assertIn("1 pezzo su 3 mostra la slide sbagliata", out)
+        self.assertIn("(slide 2)", out)
+        self.assertIn(".cache/verify_frames/", out)
 
     def test_content_verdicts_become_doubts(self):
         out = self._render(verdicts={2: "disallineata", 3: "incerto"})
-        self.assertIn("slide 2 somiglia di più", out)
-        self.assertIn("slide 3 la durata è anomala", out)
-        self.assertIn("Da controllare a mano", out)
+        self.assertIn("Il parlato della slide 2 somiglia di più", out)
+        self.assertIn("La durata della slide 3 è anomala", out)
+        self.assertIn("COSA NON È CERTO", out)
 
     def test_weak_signal_is_a_doubt(self):
         from semantic_sync import _set_weak_signal
@@ -3727,8 +3873,8 @@ class TestPlainSummary(unittest.TestCase):
         out = self._render(
             quality={"avg_sim": 0.83, "avg_z": 0.20, "min_avg_z": 0.45},
         )
-        self.assertIn("somiglianza tra parlato e slide è risultata debole", out)
-        self.assertIn("bassa (slide confondibili per il motore, picco medio 0.20", out)
+        self.assertIn("Il confronto fra parlato e slide è debole", out)
+        self.assertIn("BASSO — le slide si somigliano troppo", out)
 
     def test_low_confidence_names_the_reason_not_only_the_peak(self):
         # Caso reale (13/09): il motore segnala slide confondibili mentre il
@@ -3738,12 +3884,12 @@ class TestPlainSummary(unittest.TestCase):
 
         _set_weak_signal()
         out = self._render(quality={"avg_sim": 0.83, "avg_z": 0.75, "min_avg_z": 0.45})
-        self.assertIn("bassa (slide confondibili per il motore, picco medio 0.75", out)
-        self.assertNotIn("picco medio 0.75, soglia", out)
+        self.assertIn("BASSO — le slide si somigliano troppo", out)
+        self.assertNotIn("punteggio 0.750", out)
 
     def test_missing_check_is_stated(self):
         out = self._render()
-        self.assertIn("Controllo del video finito: non eseguito", out)
+        self.assertIn("Il video finito non è stato controllato", out)
 
     def test_frame_check_states_how_many_were_verified(self):
         # "tutte le 8 slide" si legge come se il video fosse tutto verificato,
@@ -3755,7 +3901,7 @@ class TestPlainSummary(unittest.TestCase):
             durations=[120.0, 120.0, 120.0, 120.0, 120.0],
             frame_check={"checked": 5, "coherent": 5, "mismatches": []},
         )
-        self.assertIn("OK, 5 segmenti su 5 mostrano la slide prevista", out)
+        self.assertIn("nei 5 pezzi guardati (5 su 5) compare la slide prevista", out)
         self.assertNotIn("tutte le", out)
 
     def test_partial_frame_check_is_flagged(self):
@@ -3765,7 +3911,7 @@ class TestPlainSummary(unittest.TestCase):
             durations=[120.0, 120.0, 120.0, 120.0, 120.0],
             frame_check={"checked": 2, "coherent": 2, "mismatches": []},
         )
-        self.assertIn("PARZIALE, 2 segmenti su 5 controllati", out)
+        self.assertIn("solo parziale: 2 pezzi su 5", out)
 
     def test_anchor_coverage_is_stated(self):
         # La misura del motore dice quanto è stato MISURATO: con le transizioni
@@ -3784,8 +3930,11 @@ class TestPlainSummary(unittest.TestCase):
                 "mapping_suspicious": False,
             },
         )
-        self.assertIn("Confini ancorati: 4 su 4", out)
-        self.assertIn("tutti i cambi di slide sono quelli dichiarati nel podcast", out)
+        # `anchored == transitions` ma `unanchored_slides` elenca la slide 3: il
+        # dato è incoerente e il riepilogo non lo promuove a "certo" (stessa
+        # prudenza di `_all_transitions_anchored`).
+        self.assertIn("Un cambio di slide su 4", out)
+        self.assertIn("(la slide 3)", out)
 
     def test_partial_anchor_coverage_names_the_missing_slide(self):
         out = self._render(
@@ -3800,9 +3949,9 @@ class TestPlainSummary(unittest.TestCase):
                 "mapping_suspicious": False,
             },
         )
-        self.assertIn("Confini ancorati: 3 su 4", out)
-        self.assertIn("l'altra transizione è posizionata dal contenuto", out)
-        self.assertIn("Senza ancora esplicita: la slide 3", out)
+        self.assertIn("Un cambio di slide su 4", out)
+        self.assertIn("l'ha posizionato il programma in base al contenuto", out)
+        self.assertIn("(la slide 3)", out)
 
     def test_unconfirmed_anchor_becomes_a_doubt(self):
         # Il video può essere perfino rispetto a una numerazione parlata
@@ -3816,8 +3965,8 @@ class TestPlainSummary(unittest.TestCase):
                 "mapping_suspicious": False,
             },
         )
-        self.assertIn("per la slide 3 il parlato che segue l'annuncio", out)
-        self.assertIn("anchors.unconfirmed", out)
+        self.assertIn("Dopo l'annuncio della slide 3 il parlato somiglia", out)
+        self.assertIn(".cache/sync_report.json", out)
 
     def test_suspicious_mapping_becomes_a_doubt(self):
         out = self._render(
@@ -3829,7 +3978,7 @@ class TestPlainSummary(unittest.TestCase):
                 "mapping_suspicious": True,
             },
         )
-        self.assertIn("non è uniforme rispetto alla presentazione", out)
+        self.assertIn("I numeri delle slide detti a voce non tornano", out)
 
     def test_automatic_repairs_are_shown(self):
         # Una correzione automatica deve essere visibile in chiaro: l'utente ha
@@ -3838,10 +3987,7 @@ class TestPlainSummary(unittest.TestCase):
             frame_check={"checked": 3, "coherent": 3, "mismatches": []},
             repairs=[{"slide": 2, "old_start": 120.0, "new_start": 90.0}],
         )
-        self.assertIn(
-            "Correzione automatica: la slide 2 entrava a 2m00s, ora entra a 1m30s",
-            out,
-        )
+        self.assertIn("Ha spostato l'inizio della slide 2 da 2m00s a 1m30s", out)
 
     def test_floor_guaranteed_duration_is_declared_and_not_a_doubt(self):
         # La durata di 8s viene dal pavimento anti-flicker, non dal parlato: va
@@ -3856,10 +4002,12 @@ class TestPlainSummary(unittest.TestCase):
                 "unguaranteed": [],
             },
         )
-        self.assertIn("Durata garantita dall'anti-flicker", out)
-        self.assertIn("slide 1", out)
+        self.assertIn("Per garantire il minimo di 8s leggibile", out)
+        self.assertIn("della slide 1", out)
         self.assertNotIn("controlla a mano", out)
-        self.assertIn("nessuno, la sincronizzazione è", out)
+        # La durata garantita è una decisione dichiarata, non un dubbio.
+        self.assertIn("COSA HA DECISO IL PROGRAMMA", out)
+        self.assertNotIn("sotto il minimo leggibile", out)
 
     def test_slide_too_short_even_for_the_floor_is_still_a_doubt(self):
         # Incastrata fra due ancore: il pavimento non può allungarla. Qui sì che
@@ -3874,7 +4022,7 @@ class TestPlainSummary(unittest.TestCase):
         )
         self.assertIn("sotto il minimo leggibile", out)
         self.assertIn("la slide 1", out)
-        self.assertIn("Da controllare a mano", out)
+        self.assertIn("COSA NON È CERTO", out)
 
     def test_slide_numbers_are_listed_in_italian(self):
         # Il riepilogo è testo per l'utente: "per le slide 13" è sbagliato, non
@@ -3902,20 +4050,20 @@ class TestPlainSummary(unittest.TestCase):
                 "unguaranteed": [],
             },
         )
-        self.assertIn("L'anti-flicker ha accorciato", out)
+        self.assertIn("il programma ha accorciato la durata della slide 2", out)
         self.assertIn("la slide 2", out)
 
     def test_single_anomalous_slide_is_worded_in_the_singular(self):
         out = self._render(verdicts={2: "disallineata", 13: "incerto"})
-        self.assertIn("il parlato della slide 2 somiglia", out)
-        self.assertIn("per la slide 13 la durata è anomala", out)
+        self.assertIn("Il parlato della slide 2 somiglia", out)
+        self.assertIn("La durata della slide 13 è anomala", out)
         self.assertNotIn("per le slide 13", out)
 
     def test_no_floor_report_keeps_the_old_summary(self):
         # Nessun pavimento applicato (senza ancore): nessuna riga in più.
         out = self._render(verdicts={3: "incerto"})
-        self.assertNotIn("Durata garantita dall'anti-flicker", out)
-        self.assertIn("slide 3 la durata è anomala", out)
+        self.assertNotIn("Per garantire il minimo di", out)
+        self.assertIn("La durata della slide 3 è anomala", out)
 
 
     def test_annuncio_lontano_dal_confine_diventa_un_dubbio(self):
@@ -3936,10 +4084,10 @@ class TestPlainSummary(unittest.TestCase):
                 anchors=anchors,
             )
         out = "\n".join(logs.output)
-        self.assertIn("Da controllare a mano", out)
+        self.assertIn("COSA NON È CERTO", out)
         self.assertIn("slide 3", out)
-        self.assertIn("l'annuncio è un fatto", out)
-        self.assertNotIn("risultata solida", out)
+        self.assertIn("il momento dell'annuncio è certo", out)
+        self.assertNotIn("Niente da controllare a mano", out)
 
     def test_annunci_al_confine_niente_dubbio(self):
         # Nessuna contraddizione fra annunci e confini: nessun dubbio inventato.
@@ -3959,8 +4107,12 @@ class TestPlainSummary(unittest.TestCase):
                 anchors=anchors,
             )
         out = "\n".join(logs.output)
-        self.assertIn("nessuno, la sincronizzazione è", out)
-        self.assertNotIn("l'annuncio è un fatto", out)
+        # Nessun dubbio inventato sui contenuti: gli annunci non contraddicono i
+        # confini. Il controllo del video finito manca, e viene detto per quello
+        # che è (non verificato), non come se fosse un sospetto.
+        self.assertNotIn("Il confronto fra parlato e slide è debole", out)
+        self.assertNotIn("somiglia di più a un'altra slide", out)
+        self.assertIn("Il video finito non è stato controllato", out)
 
     def test_dubbio_sui_confini_allega_l_anteprima(self):
         import main
@@ -4428,6 +4580,111 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
             return np.array(out)
 
         return _embed
+
+    @staticmethod
+    def _cosine_embed(num_slides, cosines):
+        """Embedder finto con similarità decise.
+
+        Le slide sono la base canonica, il parlato (testo ``probe``) è il
+        vettore con le componenti date: dopo la normalizzazione le similarità
+        sono proporzionali a ``cosines``, quindi il test controlla il MARGINE
+        fra la pagina annunciata e la migliore, non solo chi vince.
+        """
+
+        def _embed(texts):
+            out = []
+            for t in texts:
+                v = np.zeros(num_slides)
+                m = re.search(r"pagina(\d+)", t)
+                if m:
+                    v[int(m.group(1)) - 1] = 1.0
+                elif "probe" in t:
+                    v[:] = cosines
+                norm = np.linalg.norm(v)
+                out.append(v / norm if norm else v)
+            return np.array(out)
+
+        return _embed
+
+    def test_offset_di_poche_millesime_non_e_un_dubbio(self):
+        """Il caso del 17/10: la pagina sbagliata vince di 4 millesimi.
+
+        Sulle similarità reali della finestra dopo "slide 2" (0.8836 la 2,
+        0.8879 la 4, tutte le 12 pagine fra 0.840 e 0.888) il margine è 0.004,
+        cioè 0.4 volte la dispersione della stessa finestra: è rumore del
+        motore su un deck monotematico. Trattarlo come contraddizione
+        produceva due avvisi su un video verificato 12/12.
+
+        Le due ancore di questo test puntano entrambe alla 4 con margine
+        minuscolo: senza la soglia avrebbero formato un offset +2 "uniforme" e
+        il codice avrebbe corretto la numerazione di TUTTE le ancore. Il test
+        fissa entrambe le cose: niente dubbio e niente deriva da rumore.
+        """
+        n = 12
+        cosines = [
+            0.8619, 0.8836, 0.8876, 0.8879, 0.8580, 0.8612,
+            0.8611, 0.8745, 0.8640, 0.8397, 0.8799, 0.8666,
+        ]
+        slides = [f"pagina{i} slide" for i in range(1, n + 1)]
+        words = [
+            {"word": "probe", "start": 100.0},
+            {"word": "probe", "start": 200.0},
+        ]
+        anchors = {2: 100.0, 3: 200.0}
+        report: dict = {}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=n,
+            window_seconds=40.0,
+            embed_fn=self._cosine_embed(n, cosines),
+            report=report,
+        )
+
+        self.assertIsNone(out, "una deriva nata dal rumore non va applicata")
+        self.assertFalse(report["suspicious"])
+        self.assertEqual(report["unconfirmed"], [])
+        self.assertEqual(
+            [u["slide"] for u in report["weak_margin"]], [2, 3]
+        )
+
+    def test_margine_sopra_il_rumore_resta_un_dubbio(self):
+        """La soglia non deve zittire le contraddizioni vere.
+
+        Banda larga come sopra, ma qui la pagina 4 batte la 2 di 0.05: è fuori
+        dal rumore della finestra, quindi l'ancora resta non confermata — e il
+        mapping resta sospetto, perché non c'è una deriva correggibile.
+        """
+        n = 12
+        cosines = [0.86] * n
+        cosines[1] = 0.83  # slide 2, annunciata
+        cosines[3] = 0.93  # slide 4, migliore per il parlato
+        slides = [f"pagina{i} slide" for i in range(1, n + 1)]
+        words = [
+            {"word": "probe", "start": 100.0},
+            {"word": "probe", "start": 200.0},
+        ]
+        anchors = {2: 100.0, 4: 200.0}
+        report: dict = {}
+
+        out = verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=n,
+            window_seconds=40.0,
+            embed_fn=self._cosine_embed(n, cosines),
+            report=report,
+        )
+
+        self.assertIsNone(out)
+        self.assertTrue(report["suspicious"])
+        self.assertEqual(
+            report["unconfirmed"], [{"slide": 2, "time": 100.0, "points_to": 4}]
+        )
+        self.assertEqual(report["weak_margin"], [])
 
     def test_offsets_sparsi_non_distruggono_le_ancore(self):
         """Il caso reale del 04/10, con la combinazione che manca nei test.
@@ -5643,7 +5900,7 @@ class TestConfiniStimatiNonSostenuti(unittest.TestCase):
         testo = _weak_estimate_text(fatti[0])
         self.assertIn("non si è potuto misurare", testo)
         self.assertIn("finestre di parlato vuote", testo)
-        self.assertIn("non è un annuncio 'slide N'", testo)
+        self.assertIn("non è annunciato a voce", testo)
 
     def test_durata_garantita_dal_pavimento_esclusa(self):
         from main import _estimated_boundary_facts
@@ -5684,9 +5941,9 @@ class TestConfiniStimatiNonSostenuti(unittest.TestCase):
                 refine=refine,
             )
         out = "\n".join(logs.output)
-        self.assertIn("la slide 3", out)
-        self.assertIn("0.6 volte il rumore locale", out)
-        self.assertIn("contro una mediana di", out)
+        self.assertIn("L'inizio della slide 3", out)
+        self.assertIn("il contenuto non la conferma abbastanza", out)
+        self.assertIn("contro una media di", out)
 
     def test_senza_diagnostica_il_riepilogo_non_inventa_dubbi(self):
         import main
@@ -5695,5 +5952,7 @@ class TestConfiniStimatiNonSostenuti(unittest.TestCase):
         with self.assertLogs("slide2video", level="INFO") as logs:
             main._log_plain_summary([100.0, 100.0, 100.0], [1, 2, 3], 300.0, anchors=anchors)
         out = "\n".join(logs.output)
-        self.assertNotIn("volte il rumore locale", out)
-        self.assertIn("nessuno, la sincronizzazione è risultata solida", out)
+        self.assertNotIn("il contenuto non la conferma abbastanza", out)
+        # Nessuna diagnostica del raffinamento: il confine stimato non viene
+        # dichiarato incerto per sentito dire.
+        self.assertNotIn("L'inizio della slide", out)
