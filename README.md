@@ -109,27 +109,22 @@ La venv **riusa i modelli già scaricati** (cartella `.cache` e cache di Hugging
 
 Override manuale: `python src/main.py --flow audio-slide` (oppure `--flow slide-audio`)
 
-> **Auto-detection automatica**: il sistema sceglie da solo fra i due flussi
-> ordinati. Se il podcast segue i vincoli del prompt NotebookLM (`slide N` o
+> **Auto-detection automatica**: il sistema sceglie da solo fra i due flussi.
+> Se il podcast segue i vincoli del prompt NotebookLM (`slide N` o
 > `blocco successivo`) usa il flusso corrispondente e rispetta le ancore.
 >
-> ⛔ **Il flusso libero (`free`) non è supportato.** Un audio senza riferimenti
-> riconoscibili ("slide N" / "blocco successivo") non è più sincronizzabile: la
-> pipeline si **interrompe** con un errore chiaro che chiede di rigenerare il
-> podcast annunciando le slide.
+> ⛔ **Un audio senza riferimenti riconoscibili non è supportato.** Se la
+> trascrizione non contiene né "slide N" né "blocco successivo" non è
+> sincronizzabile: la pipeline si **interrompe** con un errore chiaro che chiede
+> di rigenerare il podcast annunciando le slide.
 
 ### 📝 Prompt NotebookLM (come generare presentazione e podcast)
 
-Un solo processo di input, quello supportato:
+Un solo processo di input:
 
 | Prompt | Flusso | Quando usarlo |
 |---|---|---|
-| [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>) | **A**: deck → podcast con ancore `slide N` | **Consigliato.** Confini **misurati** (è lo speaker a dichiarare il tempo). Podcast più strutturato. Fragile a un errore operativo: se il deck cambia dopo il podcast, le ancore puntano a pagine che non esistono più |
-
-> ⛔ **Il flusso B (`PROMPT_PODCAST.md`, podcast libero → deck derivato) non è
-> più supportato.** Derivava le slide dal parlato senza ancore, un percorso che
-> la pipeline non gestisce più: un audio senza riferimenti "slide N" fa
-> **interrompere** la run. Il file resta solo come riferimento storico.
+| [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>) | deck → podcast con ancore `slide N` | Confini **misurati** (è lo speaker a dichiarare il tempo). Podcast più strutturato. Fragile a un errore operativo: se il deck cambia dopo il podcast, le ancore puntano a pagine che non esistono più |
 
 Il prompt richiede che ogni pagina abbia una sezione di parlato **sviluppata**:
 una sezione che si limita a elencare produce una pagina che nel video scorre
@@ -144,12 +139,8 @@ se una frase sparisce dal file, i test falliscono; se la si toglie di proposito,
 va registrata in `REGOLE_RIMOSSE` con il motivo, e da lì il test verifica che non
 rientri.
 
-| Prompt | Flusso | Perché questo |
-|---|---|---|
-| [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>) | A: presentazione → podcast | I confini sono **misurati**: il conduttore dichiara il numero della pagina. Costa un ciclo in più e un podcast più dichiarato, in cambio di confini esatti |
 
-
-### ✅ Ricetta validata (flusso A, 5 run verdi consecutive)
+### ✅ Ricetta validata (5 run verdi consecutive)
 
 Procedura congelata: deck da 12–15 slide generato dal prompt, **presentazione come UNICA fonte** per il podcast, annunci `slide N` su tutte le transizioni, sezioni da 45s in su. Gate `--min-anchor-coverage` (default 50%) attivo in `genera_video.bat`.
 
@@ -164,7 +155,7 @@ Procedura congelata: deck da 12–15 slide generato dal prompt, **presentazione 
 Se i materiali seguono le regole (fonte unica, tutte le pagine annunciate, sezioni sviluppate), il risultato si ripete: non modificare prompt né soglie senza rieseguire `python -m unittest test_prompts test_sync`.
 
 
-> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto, ma per stima. Prompt NotebookLM: [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>) — vedi "Come scegliere".
+> **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto, ma per stima. Prompt NotebookLM: [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>).
 >
 > ⚠️ **Il nemico non è dimenticare la slide: è richiamarla.** Se il conduttore
 > torna su una pagina già trattata e ne ripete il numero (*"guarda sempre slide 3,

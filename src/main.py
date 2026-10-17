@@ -614,9 +614,8 @@ def _log_plain_summary(
             "   In pratica il podcast non sviluppa una sezione per queste pagine, "
             "perche' le ha solo elencate o nominate di sfuggita: nel video "
             "scorrono veloci.\\n"
-            "   Rimedi: nel flusso podcast -> slide rigenera la PRESENTAZIONE "
-            "chiedendo una sezione sviluppata per ciascuna pagina (l'audio si "
-            "riusa, costa poco); nel flusso slide -> podcast rigenera l'AUDIO.",
+            "   Rimedio: rigenera l'AUDIO chiedendo una sezione sviluppata per "
+            "ciascuna pagina (vedi PROMPT_PRESENTAZIONE (PREDEFINITO).md).",
             _slide_list_text(starved),
             floor_min,
             floor_min,
@@ -950,7 +949,7 @@ def _find_anomalous_durations(
     Returns: lista di triple ``(posizione, slide, durata)``.
 
     La POSIZIONE è parte del risultato perché la stessa slide può comparire più
-    volte nella sequenza mostrata (flusso free-order): restituire solo il numero
+    volte nella sequenza mostrata (es. con --skip-slides): restituire solo il numero
     di slide renderebbe indistinguibili due sue occorrenze, e chi consuma il
     risultato non potrebbe più sapere quale finestra temporale guardare. Il
     chiamante storico riceveva coppie ``(slide, durata)``: per compatibilità i
@@ -1102,10 +1101,9 @@ def _starved_slides(floor_report: dict[str, object] | None, min_seconds: float) 
 
     È il sintomo osservabile della differenza fra le pagine del deck e le
     sezioni realmente sviluppate nel podcast: queste slide non hanno tempo
-    proprio, quello serve a leggerle è stato preso alle vicine. Nel flusso
-    podcast -> slide è l'unico controllo possibile, perché le sezioni del
-    podcast non hanno un marcatore (lì è proprio vietato nominare le slide, e
-    senza ancore non c'è nulla da contare).
+    proprio, quello serve a leggerle è stato preso alle vicine. Quando l'audio
+    non annuncia le slide ('slide N') non c'è nulla da contare, quindi questo
+    resta l'unico controllo sulle sezioni.
 
     Soglia: sotto metà del minimo. Una slide trattata per 7.8s su un minimo di
     8s sta sopra e non viene segnalata — il pavimento ha corretto un
@@ -1307,7 +1305,7 @@ def _validate_anomalous_segments(
 
     ``anomalous_positions`` sono triple ``(posizione, slide, durata)``: la
     posizione è necessaria perché la stessa slide può comparire più volte nella
-    sequenza mostrata (flusso free-order) e gli offset temporali sono posizionali.
+    sequenza mostrata (es. con --skip-slides) e gli offset temporali sono posizionali.
     Vedi il commento nel corpo: con il solo numero di slide si leggeva la
     finestra sbagliata.
     """
@@ -1316,8 +1314,8 @@ def _validate_anomalous_segments(
     offsets = [0.0]
     for d in durations:
         offsets.append(offsets[-1] + d)
-    # La stessa slide può comparire più volte nella sequenza mostrata (flusso
-    # free-order: la slide viene richiamata più avanti nella narrazione). Gli
+    # La stessa slide può comparire più volte nella sequenza mostrata (es.
+    # --skip-slides, o una slide richiamata più avanti nella narrazione). Gli
     # offset sono POSIZIONALI, quindi `slide_ids.index(s)` non basta: restituisce
     # la PRIMA occorrenza e il segmento con durata anomala potrebbe essere una
     # delle successive. Misurato: con slide_ids [1,2,1,3] e la seconda occorrenza
@@ -1496,7 +1494,7 @@ def _needs_accurate_beam(pinned_slides: int, total_slides: int) -> bool:
 
     Con la timeline fissata dalle ancore 'slide N' il testo serve solo a
     rifinire confini già decisi, quindi la decodifica greedy è sufficiente.
-    Quando le slide vincolate sono poche (o nessuna: flusso libero), i confini
+    Quando le slide vincolate sono poche (o nessuna: senza ancore), i confini
     sono stimati dal testo: lì vale la decodifica di massima accuratezza.
 
     Args:
@@ -1784,7 +1782,7 @@ def _transcribe_with_accurate_beam(
 # =====================================================================
 # AUTO-DETECTION FLUSSO
 # =====================================================================
-def _detect_flow(transcript: str, words: list[Word] | None = None) -> str:
+def _detect_flow(transcript: str, words: list[Word] | None = None) -> str | None:
     """
     Auto-rileva il flusso di sincronizzazione dal contenuto della trascrizione.
 
@@ -1795,9 +1793,8 @@ def _detect_flow(transcript: str, words: list[Word] | None = None) -> str:
     Restituisce:
         "slide-audio" se trova numeri di slide espliciti ("slide 2", "slide tre"...)
         "audio-slide" se trova "blocco successivo" senza numeri di slide
-        "free" (riordino libero) come fallback: senza segnali espliciti il
-            podcast non segue i vincoli del prompt NotebookLM, quindi le slide
-            seguono il contenuto in qualsiasi ordine (e possono ripetersi)
+        None se non c'è nessun segnale: l'audio non annuncia le slide, quindi
+            non è sincronizzabile e chi chiama interrompe la run
     """
     if words:
         flow = detect_flow_from_words(words)
@@ -1811,21 +1808,7 @@ def _detect_flow(transcript: str, words: list[Word] | None = None) -> str:
     elif has_blocco:
         return "audio-slide"
     else:
-        return "free"
-
-
-def _anchor_gate_applies(flow_rilevato: str) -> bool:
-    """True se ``--require-full-anchors`` può legittimamente fermare la run.
-
-    Riguarda il flusso slide -> podcast, dove ogni pagina DEVE essere annunciata.
-    Nel flusso podcast -> slide le ancore sono escluse dal prompt per scelta:
-    l'assenza non è un difetto dell'audio, quindi il gate deve stare zitto.
-
-    Il parametro è il flusso RILEVATO, non quello effettivo: il fallback su
-    podcast senza ancore riscrive il flusso effettivo da "free" a "slide-audio",
-    e usare quello faceva scattare il gate in un flusso che le ancore le vieta.
-    """
-    return flow_rilevato != "free"
+        return None
 
 
 def _anchor_coverage_ok(n_anchored: int, total_slides: int, minimum: float) -> bool:
@@ -1840,20 +1823,15 @@ def _anchor_coverage_ok(n_anchored: int, total_slides: int, minimum: float) -> b
     return n_anchored / transitions >= minimum
 
 
-def _thin_slide_advice(flow_rilevato: str) -> str:
+def _thin_slide_advice() -> str:
     """Rimedio per una slide con durata troppo breve.
 
-    Anche qui il flusso da usare è quello rilevato: nel podcast -> slide non ha
-    senso consigliare un'ancora "slide N", che quel prompt vieta esplicitamente.
+    L'unico flusso supportato è slide -> podcast, dove ogni pagina è annunciata:
+    il rimedio è ampliare l'audio oppure pronunciare un'ancora esplicita.
     """
-    if _anchor_gate_applies(flow_rilevato):
-        return (
-            "amplia l'audio su quei temi oppure fai pronunciare "
-            "un'ancora esplicita 'slide N' al momento della transizione"
-        )
     return (
-        "amplia l'audio su quei temi (nel flusso podcast -> slide "
-        "le ancore 'slide N' sono escluse dal prompt)"
+        "amplia l'audio su quei temi oppure fai pronunciare "
+        "un'ancora esplicita 'slide N' al momento della transizione"
     )
 
 
@@ -2524,7 +2502,7 @@ def main(argv: list | None = None) -> None:
         log.error("[ERRORE] Nessuna slide trovata nel PDF.")
         sys.exit(1)
     # Copia della lista COMPLETA 1..N: più avanti `slide_files` viene riallineata
-    # alla sequenza reale dei segmenti (flusso libero, --skip-slides). La verifica
+    # alla sequenza reale dei segmenti (--skip-slides). La verifica
     # frame vs slide deve confrontare col file della slide per NUMERO, quindi
     # deve usare questa lista intatta.
     all_slide_files = list(slide_files)
@@ -2608,44 +2586,41 @@ def main(argv: list | None = None) -> None:
 
         # Scelte fatte dalla run che finiscono in sync_report.json (es.
         # escalation per segnale debole, beam automatico): prima esistevano solo
-        # nei log. Va inizializzata prima della biforcazione flusso
-        # libero/ordinato, perché il report è costruito più avanti per entrambi i
-        # flussi, e prima della scelta del beam, che la annota qui dentro.
+        # nei log. Va inizializzata prima della scelta del beam, che la annota
+        # qui dentro, e prima della costruzione del report, più avanti.
         sync_notes: dict[str, object] = {}
-        # Provenienza delle durate garantite dal pavimento anti-flicker (solo il
-        # flusso ordinato): restano vuoti quando quel pavimento non è stato
-        # applicato, così nessun ramo deve indovinare se il dato esiste.
+        # Provenienza delle durate garantite dal pavimento anti-flicker:
+        # restano vuoti quando quel pavimento non è stato applicato, così
+        # nessun ramo deve indovinare se il dato esiste.
         floor_note: dict[str, object] | None = None
         floor_guaranteed: dict[int, float] = {}
         floor_unguaranteed: dict[int, float] = {}
-        # `floor_min` è letto DOPO la biforcazione dei flussi (dalle anomalie
-        # di durata), quindi va inizializzato qui: nei rami che non applicano
+        # `floor_min` è letto DOPO la sincronizzazione (dalle anomalie di
+        # durata), quindi va inizializzato qui: nei rami che non applicano
         # nessun pavimento non deve esistere, e lasciarlo non assegnato faceva
-        # esplodere la run con UnboundLocalError. Il flusso libero con MiniLM è
-        # esattamente quel ramo: il suo anti-flicker è interno al motore e non
-        # lascia nessuna nota.
+        # esplodere la run con UnboundLocalError. Il caso senza ancore con
+        # MiniLM è esattamente quel ramo: il suo anti-flicker è interno al
+        # motore e non lascia nessuna nota.
         floor_min: float = 0.0
 
         # --- Auto-detection flusso (dopo trascrizione, prima della sincronizzazione) ---
         flow: str
-        flow_rilevato: str
         if args.flow is not None:
             flow = args.flow
-            flow_rilevato = args.flow
             log.info("   Flusso specificato manualmente: %s", flow)
         else:
-            flow = _detect_flow(transcript, words_raw)
-            flow_rilevato = flow
-            log.info("   Flusso auto-rilevato: %s (usa --flow per sovrascrivere)", flow)
-            if flow == "free":
+            detected = _detect_flow(transcript, words_raw)
+            if detected is None:
                 _abort(
-                    "Flusso libero non supportato: nella trascrizione non ci sono "
+                    "Nessun flusso rilevato: nella trascrizione non ci sono "
                     "riferimenti riconoscibili ('slide N' per slide-audio, "
                     "'blocco successivo' per audio-slide). Rigenera l'audio "
                     "annunciando le slide ('Passiamo alla slide N', vedi "
                     "PROMPT_PRESENTAZIONE (PREDEFINITO).md) oppure forza "
                     "--flow slide-audio se sai cosa fai."
                 )
+            flow = detected
+            log.info("   Flusso auto-rilevato: %s (usa --flow per sovrascrivere)", flow)
 
         # --- Ancore deterministiche disponibili ---
         # Calcolate una volta: servono al recupero delle zone cieche, alla scelta
@@ -2720,7 +2695,7 @@ def main(argv: list | None = None) -> None:
         # decoder, pagava la decodifica intera per scoprire che le due ancore
         # mancanti erano a 6 secondi da quelle vicine.
         #
-        # Il flusso libero resta com'era: lì le ancore non si cercano (restano
+        # Il caso senza ancore resta com'era: lì le ancore non si cercano (restano
         # vuote), la copertura è zero e il testo è l'unico segnale, quindi la
         # decodifica accurata si fa sempre. Il costo si paga una volta per audio:
         # la cache è per chiave, quindi la run successiva ritrova entrambe.
@@ -2882,15 +2857,8 @@ def main(argv: list | None = None) -> None:
             # non annuncia (tutte) le slide NON genera un video degradato (slide
             # stimate + micro-segmenti). Meglio fermarsi e rigenerare l'audio: il
             # prompt NotebookLM richiede l'annuncio di ogni slide.
-            #
-            # Il gate riguarda il VERO flusso slide -> podcast. Nel podcast ->
-            # slide le ancore sono escluse dal prompt per scelta: l'assenza non
-            # e' un difetto dell'audio e chiedere di aggiungerle sarebbe
-            # contraddittorio (il fallback qui sopra ha gia' riscritto `flow` in
-            # "slide-audio", quindi il test va fatto su `flow_rilevato`).
             if (
                 args.require_full_anchors
-                and _anchor_gate_applies(flow_rilevato)
                 and (not early_anchors or early_missing)
             ):
                 _abort(
@@ -2925,7 +2893,6 @@ def main(argv: list | None = None) -> None:
             min_cov = float(getattr(args, "min_anchor_coverage", 0.5) or 0)
             if (
                 min_cov > 0
-                and _anchor_gate_applies(flow_rilevato)
                 and not _anchor_coverage_ok(len(early_anchors), total_slides, min_cov)
             ):
                 _abort(
@@ -3269,13 +3236,7 @@ def main(argv: list | None = None) -> None:
         # --- Avviso: slide quasi non coperte dalla narrazione ---
         thin = [slide_ids[i] for i, d in enumerate(durations) if d < 2 * args.semantic_min_duration]
         if thin:
-            # Il consiglio dell'ancora esplicita vale SOLO nel flusso
-            # slide -> podcast: nel flusso podcast -> slide le ancore 'slide N'
-            # sono escluse dal prompt, quindi l'unico rimedio è ampliare l'audio.
-            # Il test va su `flow_rilevato` perché il fallback riscrive `flow` in
-            # "slide-audio": con `flow != "free"` questo ramo prometteva a un
-            # podcast -> slide di aggiungere l'ancora che il suo prompt vieta.
-            advice = _thin_slide_advice(flow_rilevato)
+            advice = _thin_slide_advice()
             log.warning(
                 "\n   [Avviso] Slide con durata minima (%s): il loro contenuto "
                 "sembra poco presente nella narrazione audio.\n"
@@ -3391,13 +3352,11 @@ def main(argv: list | None = None) -> None:
 
         # --- La PRIMA sezione non ha ancora: va verificata per conto suo ---
         # La slide 1 parte a 0.0s, quindi non è una transizione e nessuna
-        # ancora la vincola; nessun altro controllo la guarda. Con il flusso
-        # slide -> podcast ogni pagina ha una sezione (una sezione per pagina,
-        # con l'annuncio solo dalla seconda in poi), quindi l'attesa è definita:
-        # i primi secondi di audio devono parlare di cosa c'è sulla pagina 1.
-        # Nel flusso podcast -> slide non vale: il deck è derivato dall'audio e
-        # la prima pagina può essere qualsiasi cosa.
-        if durations and flow_rilevato != "free":
+        # ancora la vincola; nessun altro controllo la guarda. Con ogni pagina
+        # che ha una sezione (una sezione per pagina, con l'annuncio solo dalla
+        # seconda in poi), l'attesa è definita: i primi secondi di audio devono
+        # parlare di cosa c'è sulla pagina 1.
+        if durations:
             _primo = _validate_anomalous_segments(
                 [(0, slide_ids[0], durations[0])], slide_texts, words_raw, durations
             ).get(slide_ids[0])
@@ -3453,8 +3412,8 @@ def main(argv: list | None = None) -> None:
                     slide_ids[i] = prev
                     replaced[s] = prev
                 if replaced:
-                    # Riallinea i file immagine alla nuova sequenza (nel flusso
-                    # ordinato slide_files è ancora la lista completa 1..N).
+                    # Riallinea i file immagine alla nuova sequenza (slide_files
+                    # è ancora la lista completa 1..N).
                     slide_files = [slide_files[s - 1] for s in slide_ids]
                     log.info(
                         "   [Skip] Slide non mostrate: %s (segmenti mostrano la slide precedente valida).",
@@ -3621,7 +3580,7 @@ def main(argv: list | None = None) -> None:
                     # di scrivere): qui non serve un secondo punto di pulizia.
                     # L'artefatto di verifica (letto da analysis_sync.py) deve
                     # descrivere il video NUOVO, non la timeline pre-riparazione.
-                    # Con slide ripetute (flusso libero) la mappa slide->start
+                    # Con slide ripetute la mappa slide->start
                     # non è rappresentabile: lì resta la timeline originale.
                     if len(set(slide_ids)) == len(slide_ids):
                         repaired_timeline: dict[int, float] = {}

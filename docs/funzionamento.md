@@ -21,9 +21,12 @@ pipeline prende una strada diversa a seconda del segnale presente nell'audio.
 
 | Scenario | Segnale | Cosa fa |
 |---|---|---|
-| **A. `slide-audio`** | "Passiamo alla slide 3" | Estratte ancore deterministiche "slide N" (cifre, cardinali o **ordinali**: "la terza diapositiva") → vincoli ad alta precisione. Verifica mapping ancore: se la numerazione parlata è sfasata rispetto al PDF, l'**euristica deterministica** (embeddings locali, offline) corregge gli offset sistematici. Sincronizzazione semantica (embedding e5-large offline): ogni blocco audio → slide più vicina, DP monotona. Le slide SENZA ancora vengono posizionate per contenuto dal motore embedding (nessun LLM); le ancore restano esatte. Riconciliazione (tempi crescenti, durate positive); se impossibile → **interruzione**. Slide in ordine 1→N. Un log diagnostico distingue riferimenti trovati/usati/scartati e segnala le slide senza ancora esplicita. |
-| **B. `audio-slide`** | "Passiamo al blocco successivo" | Stesse ancore (numeriche o ordinali), stessa pipeline ordinata; la slide cambia sulle transizioni di blocco non numerate. |
-| **~~C. `free`~~** | nessuno | **Rimosso.** Un audio senza riferimenti riconoscibili non è più sincronizzabile: la pipeline si **interrompe** con un errore chiaro che chiede di rigenerare il podcast annunciando le slide. |
+| **`slide-audio`** | "Passiamo alla slide 3" | Estratte ancore deterministiche "slide N" (cifre, cardinali o **ordinali**: "la terza diapositiva") → vincoli ad alta precisione. Verifica mapping ancore: se la numerazione parlata è sfasata rispetto al PDF, l'**euristica deterministica** (embeddings locali, offline) corregge gli offset sistematici. Sincronizzazione semantica (embedding e5-large offline): ogni blocco audio → slide più vicina, DP monotona. Le slide SENZA ancora vengono posizionate per contenuto dal motore embedding (nessun LLM); le ancore restano esatte. Riconciliazione (tempi crescenti, durate positive); se impossibile → **interruzione**. Slide in ordine 1→N. Un log diagnostico distingue riferimenti trovati/usati/scartati e segnala le slide senza ancora esplicita. |
+| **`audio-slide`** | "Passiamo al blocco successivo" | Stesse ancore (numeriche o ordinali), stessa pipeline ordinata; la slide cambia sulle transizioni di blocco non numerate. |
+
+Un audio **senza** questi riferimenti riconoscibili non è sincronizzabile: la
+pipeline si **interrompe** con un errore chiaro che chiede di rigenerare il
+podcast annunciando le slide.
 
 Il raggruppamento in finestre temporali e la costruzione dei blocchi per la
 sincronizzazione vivono in `chunks.py` (`build_windows`).
@@ -111,11 +114,11 @@ recupero salti.
 4. `python src/main.py` → auto-detection `slide-audio`, ancore deterministiche, allineamento embedding locale.
 
 **Se il podcast non pronuncia le ancore** (dibattito libero): il pipeline si
-**interrompe** con "Flusso libero non supportato". Rigenera il podcast
+**interrompe** con "Nessun flusso rilevato". Rigenera il podcast
 annunciando le slide (`PROMPT_PRESENTAZIONE (PREDEFINITO).md`), oppure forza
 `--flow slide-audio` se sai cosa fai.
 
-Risultato su test reali (NotebookLM, flusso A con presentazione come UNICA fonte): 11/11, 13/14 e 12/13 ancore, durate 37s–2m05s senza pavimenti anti-flicker, fiducia del motore alta (picco 0.53–0.74 su soglia 0.45) e frame-check pieno. Sincronizzazione misurata, non stimata.
+Risultato su test reali (NotebookLM, presentazione come UNICA fonte): 11/11, 13/14 e 12/13 ancore, durate 37s–2m05s senza pavimenti anti-flicker, fiducia del motore alta (picco 0.53–0.74 su soglia 0.45) e frame-check pieno. Sincronizzazione misurata, non stimata.
 
 ---
 

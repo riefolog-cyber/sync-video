@@ -25,7 +25,7 @@ soglia usata) e il verdetto `weak_signal` e — con `--verify-video` — l'esito
 del confronto frame vs slide. Così la
 sincronizzazione resta verificabile a posteriori senza rigenerare il video.
 
-Nel flusso ordinato il report contiene anche **`anchors`**, che è la parte da
+Nel flusso con le ancore il report contiene anche **`anchors`**, che è la parte da
 leggere per prima quando un confine sembra sbagliato:
 
 - `anchored` / `transitions` — quanti cambi di slide vengono dai "slide N"
@@ -48,9 +48,8 @@ leggere per prima quando un confine sembra sbagliato:
   pavimento anti-flicker le ha portate al minimo partendo da quasi nulla, quindi
   la loro durata è *costruita* per leggibilità, non misurata dal parlato. In
   video scorrono veloce. È il sintomo del deck con più pagine delle sezioni
-  realmente sviluppate, e il rimedio dipende dal flusso: in podcast → slide si
-  rigenera la **presentazione** (l'audio si riusa), in slide → podcast si
-  rigenera l'audio. Non viene segnalata una slide che il podcast ha trattato per
+  realmente sviluppate: il rimedio è rigenerare l'audio chiedendo una sezione
+  sviluppata per ciascuna pagina. Non viene segnalata una slide che il podcast ha trattato per
   pochi secondi ma che il pavimento ha solo arrotondato: la soglia è metà del
   minimo, così l'avviso resta raro e quindi leggibile.
 

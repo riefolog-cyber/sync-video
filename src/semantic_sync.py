@@ -731,8 +731,8 @@ def build_candidates(
         hi = num_blocks - 1 - (total_slides - s) * min_gap
         if hi < lo:
             return None
-        free = list(range(lo, hi + 1))
-        chosen = free
+        unconstrained = list(range(lo, hi + 1))
+        chosen = unconstrained
         if blocks and anchors and s in anchors:
             if times is None:
                 times = np.array([float(b["time"]) for b in blocks], dtype=np.float64)
@@ -742,7 +742,7 @@ def build_candidates(
             # Se nessuno dei tre blocchi è fattibile (l'ancora cade fuori dalla
             # finestra [lo, hi] imposta da `min_gap`) si usa il blocco fattibile
             # PIÙ VICINO all'ancora. Prima si rinunciava al vincolo
-            # (`chosen = free`) e la DP poteva piazzare la slide ovunque, salvo
+            # (`chosen = unconstrained`) e la DP poteva piazzare la slide ovunque, salvo
             # poi essere scavalcata dalla riga `timeline[s] = anchors[s]`:
             # ancora "rispettata" nel tempo ma segmento non monotono, cioè
             # violazione silenziosa.
@@ -1726,7 +1726,7 @@ def refine_segment_boundaries(
     restano esattamente dove sono. Serve al flusso ordinato, dove le ancore
     ``"slide N"`` sono vincoli esatti e inviolabili e solo le slide senza
     ancora esplicita possono muoversi. Di default (None) tutti i confini sono
-    candidati (flusso libero).
+    candidati (nessuna ancora).
 
     Vincoli rispettati: monotonicità, durata minima ``min_segment_seconds``
     per i segmenti adiacenti e confini mai fuori dai limiti del segmento.

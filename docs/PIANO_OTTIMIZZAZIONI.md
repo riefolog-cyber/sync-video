@@ -38,10 +38,21 @@ consigliata, primo avvio automatico di Python su Windows).
 **P2 #11 — `llm_sync.py`: rimosso del tutto.**
 La selezione via LLM (9Router online, modello `comboact`, revisione `--llm-review`)
 non era mai usata nel percorso reale: `--llm` aveva già `default="off"` e il
-flusso libero che la richiedeva è stato a sua volta rimosso. Tenere il modulo
+percorso senza ancore che la richiedeva è stato a sua volta rimosso. Tenere il modulo
 significava trascinare `requests`, una cascata di endpoint e ~2000 righe di test
 per un percorso spento. Rimosso insieme a `9router-maintenance/`,
 `aggiornamenti_9router.bat` e `docs/9router.md`.
+
+**Selezione libera `free` e secondo prompt (`PROMPT_PODCAST.md`): rimossi.**
+Il flusso libero allineava le slide per contenuto senza ancore, con
+l'anti-flicker interno al motore, e il prompt "podcast → presentazione" lo
+alimentava. Non era più usato e non era verificabile (nessuna ancora da
+contare): un audio senza "slide N"/"blocco successivo" ora fa **interrompere**
+la run con un errore chiaro. Rimossi il ramo `free`, gli argomenti
+`--flow free`/`--no-free-ordered-fallback`, `PROMPT_PODCAST.md` e i relativi
+riferimenti. Le due funzioni di gate che distinguevano il flusso rilevato da
+quello effettivo (`_anchor_gate_applies`, il ramo libero di `_thin_slide_advice`)
+se ne sono andate con il fallback che le rendeva necessarie.
 
 **Split fisico di `main.py` / `semantic_sync.py`: non eseguito.**
 `test_sync.py` importa molte funzioni private da `main`. Spezzare romperebbe

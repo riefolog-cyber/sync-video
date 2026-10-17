@@ -1510,45 +1510,13 @@ class TestDetectFlow(unittest.TestCase):
         self.assertIsNone(detect_flow_from_words([]))
 
 
-class TestFlowRilevatoVsEffettivo(unittest.TestCase):
-    """Il flusso RILEVATO va distinto da quello EFFETTIVO.
+class TestThinSlideAdvice(unittest.TestCase):
+    """Il rimedio per una slide troppo breve suggerisce l'ancora esplicita."""
 
-    Sul podcast senza ancore il fallback riscrive il flusso effettivo da "free"
-    a "slide-audio". Usare quello efficace per decidere se ancore e rimedi sono
-    sensati prometteva a un podcast -> slide (che le ancore le vieta per scelta)
-    un'ancora da pronunciare, e faceva scattare --require-full-anchors sempre,
-    con un messaggio che chiedeva l'esatta cosa che il prompt vieta.
-    """
-
-    def test_gate_applies_to_slide_audio(self):
-        from main import _anchor_gate_applies
-
-        self.assertTrue(_anchor_gate_applies("slide-audio"))
-
-    def test_gate_applies_to_audio_slide(self):
-        from main import _anchor_gate_applies
-
-        self.assertTrue(_anchor_gate_applies("audio-slide"))
-
-    def test_gate_does_not_apply_to_podcast_first(self):
-        # Flusso podcast -> slide: le ancore sono escluse dal prompt.
-        from main import _anchor_gate_applies
-
-        self.assertFalse(_anchor_gate_applies("free"))
-
-    def test_advice_podcast_first_never_suggests_an_anchor(self):
-        # Il caso concreto del difetto: il podcast -> slide non deve mai
-        # ricevere il consiglio "fai pronunciare un'ancora 'slide N'".
+    def test_advice_suggests_the_anchor(self):
         from main import _thin_slide_advice
 
-        advice = _thin_slide_advice("free")
-        self.assertIn("escluse dal prompt", advice)
-        self.assertNotIn("ancora esplicita", advice)
-
-    def test_advice_slide_audio_suggests_the_anchor(self):
-        from main import _thin_slide_advice
-
-        advice = _thin_slide_advice("slide-audio")
+        advice = _thin_slide_advice()
         self.assertIn("ancora esplicita", advice)
 
 
@@ -3944,7 +3912,7 @@ class TestPlainSummary(unittest.TestCase):
         self.assertNotIn("per le slide 13", out)
 
     def test_no_floor_report_keeps_the_old_summary(self):
-        # Nessun pavimento applicato (flusso libero): nessuna riga in più.
+        # Nessun pavimento applicato (senza ancore): nessuna riga in più.
         out = self._render(verdicts={3: "incerto"})
         self.assertNotIn("Durata garantita dall'anti-flicker", out)
         self.assertIn("slide 3 la durata è anomala", out)
@@ -4050,7 +4018,7 @@ class TestAnomalousDurations(unittest.TestCase):
     def test_position_travels_with_the_result(self):
         # La posizione è ciò che permette a chi consuma il risultato di sapere
         # QUALE occorrenza della slide è anomala (la stessa slide può comparire
-        # più volte nel flusso free-order).
+        # più volte nella sequenza mostrata).
         from main import _find_anomalous_durations
 
         out = _find_anomalous_durations([100.0, 100.0, 100.0, 400.0], [1, 2, 3, 4])
@@ -4155,7 +4123,7 @@ class TestAnomalousContentValidation(unittest.TestCase):
         self.assertEqual(verdicts[3], "disallineata")
 
     def test_repeated_slide_uses_the_right_occurrence(self):
-        # Nel flusso free-order la stessa slide può comparire più volte nella
+        # La stessa slide può comparire più volte nella
         # sequenza mostrata. Gli offset sono posizionali, quindi il verdetto va
         # calcolato sulla POSIZIONE del segmento anomalo: prima si cercava la
         # slide con `.index()`, che restituisce la prima occorrenza e faceva

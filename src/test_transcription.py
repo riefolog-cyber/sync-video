@@ -659,7 +659,7 @@ class TestAutoBeamPolicy(unittest.TestCase):
         self.assertFalse(m._needs_accurate_beam(5, 11))  # 5/10 = 0.5 (soglia)
         self.assertTrue(m._needs_accurate_beam(4, 11))  # 4/10 = 0.4
         self.assertTrue(m._needs_accurate_beam(0, 11))  # nessuna ancora
-        self.assertTrue(m._needs_accurate_beam(0, 15))  # flusso libero
+        self.assertTrue(m._needs_accurate_beam(0, 15))  # nessuna ancora, deck grande
 
     def test_single_slide_deck_never_escalates(self):
         import main as m

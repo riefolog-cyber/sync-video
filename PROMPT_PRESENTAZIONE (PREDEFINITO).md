@@ -1,11 +1,8 @@
-# Prompt NotebookLM — presentazione → podcast (PREDEFINITO)
+# Prompt NotebookLM — presentazione → podcast
 
-> **Flusso A, consigliato.** La presentazione viene prima e il podcast la
-> segue dichiarando il numero di ogni pagina: i cambi di slide sono **misurati**,
-> non dedotti. Costa un ciclo in più e un podcast più dichiarato.
-> Se invece ti serve l'audio prima e il deck derivato dal parlato, c'è
-> [`PROMPT_PODCAST.md`](<PROMPT_PODCAST.md>) — ma i confini li
-> stima e possono cadere minuti fuori posto.
+> La presentazione viene prima e il podcast la segue dichiarando il numero di
+> ogni pagina: i cambi di slide sono **misurati**, non dedotti. Costa un ciclo
+> in più e un podcast più dichiarato, in cambio di confini esatti.
 
 ## Fase 1 — La presentazione (incolla in "Studio → Slide Deck")
 

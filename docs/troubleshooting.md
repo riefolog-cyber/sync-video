@@ -19,6 +19,7 @@
 | Il programma smette di partire senza aver toccato il codice | L'ambiente condiviso è cambiato: `python -m pip check`. Per non rivederlo più: `crea_venv.bat` (ambiente dedicato, immune alle installazioni altrui) |
 | Sincronizzazione fallita | Similarità troppo bassa. Verifica che l'audio parli dei contenuti delle slide |
 | Timeline sbagliata | Prova `--flow audio-slide` o aggiungi ancore "slide N" nell'audio |
+| `Nessun flusso rilevato` | L'audio non annuncia le slide: rigeneralo con `PROMPT_PRESENTAZIONE (PREDEFINITO).md` ("passiamo alla slide N") |
 | Audio troncato | Già protetto da fps=5 + buffer 3.0s |
 | Video senza audio | `winget install ffmpeg` |
 | Slide vecchie nel video | Usa `--no-cache` |

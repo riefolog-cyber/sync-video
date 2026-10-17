@@ -29,8 +29,7 @@ crea_venv.bat            ← Crea .venv (Windows)
 requirements.txt         ← Dipendenze pip
 ruff.toml                ← Configurazione lint (guardrail di stile)
 mypy.ini                 ← Configurazione type-check
-PROMPT_PRESENTAZIONE (PREDEFINITO).md ← Prompt NotebookLM: presentazione → podcast (flusso A, consigliato)
-PROMPT_PODCAST.md            ← Prompt NotebookLM: podcast → presentazione (**flusso B non più supportato**, riferimento storico)
+PROMPT_PRESENTAZIONE (PREDEFINITO).md ← Prompt NotebookLM: presentazione → podcast
 tessdata/                ← Modelli lingua Tesseract portatili
 docs/                    ← Documentazione (queste pagine) + diagramma architettura
 sync-video-architecture (in docs/) ← Diagramma architettura (generato con archify)
@@ -50,7 +49,7 @@ Comandi verificati per chi modifica il codice:
 # Verifica completa in un colpo: CI + mypy 3 piattaforme + debug hardware
 python src/controlli.py
 
-# Test (suite completa, unittest — 1001 test)
+# Test (suite completa, unittest — 996 test)
 python -m unittest discover -s src -p "test_*.py"
 
 # Type-check (mypy: codice di produzione e test, tranne la deny-list in mypy.ini)

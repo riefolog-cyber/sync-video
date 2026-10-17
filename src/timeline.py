@@ -1671,7 +1671,7 @@ def detect_flow_from_words(
             # tre" (cfr. il commento di quel punto). Con 4 la detection non
             # riconosceva la stessa frase, il flusso restava "auto" e la
             # regex sulla trascrizione compatta — che conosce solo le cifre —
-            # non trovava "numero tre": si finiva nel flusso libero e le ancore
+            # non trovava "numero tre": si restava senza ancore, e le ancore
             # deterministiche, che erano li', non venivano mai usate.
             for j in range(i + 1, min(i + 8, len(words))):
                 if _number_from_word(_normalize(words[j]["word"])) is not None:

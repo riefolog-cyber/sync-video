@@ -1,26 +1,23 @@
-<!-- Estratto da README.md (righe 541-614). Torna al [README](../README.md). -->
+<!-- Estratto dal README. Torna al [README](../README.md). -->
 
-## 🔀 Due flussi di lavoro (e i loro avvisi)
+## 🔀 Flussi di lavoro (e i loro avvisi)
 
-Il progetto supporta due modi di lavorare, riconosciuti automaticamente dalla
-trascrizione (override con `--flow`):
+Il programma riconosce automaticamente il flusso dalla trascrizione (override
+con `--flow`):
 
-### 1. Podcast → Slide (`PROMPT_PODCAST.md`)
+| Flusso | Segnale nell'audio |
+|---|---|
+| `slide-audio` | *"passiamo alla slide N"* |
+| `audio-slide` | *"passiamo al blocco successivo"* |
 
-Il podcast viene generato per primo, in modo libero, e la presentazione nasce
-DA esso (una slide per sezione). Questo flusso **non è più supportato**: la
-pipeline si basa sulle ancore "slide N" pronunciate.
+Un audio **senza** questi riferimenti non è sincronizzabile: il programma si
+ferma **prima** di generare il video con l'errore "Nessun flusso rilevato".
+Rimedio: rigenera l'audio annunciando le slide ("Passiamo alla slide N", vedi
+`PROMPT_PRESENTAZIONE (PREDEFINITO).md`).
 
-- Messaggio "Flusso libero non supportato" → **non è un difetto**: la
-  trascrizione non contiene riferimenti riconoscibili ("slide N" per
-  `slide-audio`, "blocco successivo" per `audio-slide`). Il programma si
-  ferma **prima** di generare un video.
-- Rimedio: rigenera l'audio annunciando le slide ("Passiamo alla slide N", vedi
-  `PROMPT_PRESENTAZIONE (PREDEFINITO).md`) oppure forza `--flow slide-audio`
-  se sai cosa fai.
-
-> **`--require-full-anchors` e `--min-anchor-coverage`**: servono al flusso con
-> ancore, dove ogni pagina deve essere annunciata.
+> **`--require-full-anchors` e `--min-anchor-coverage`**: ogni pagina deve
+> essere annunciata. La soglia `--min-anchor-coverage` (default 50%) interrompe
+> prima della sincronizzazione; `--require-full-anchors` pretende il 100%.
 
 > **Modello embedding**: il default è `intfloat/multilingual-e5-large`
 > (più preciso, ~2.2 GB, validato con test A/B). Su macchine meno potenti puoi
@@ -31,18 +28,18 @@ pipeline si basa sulle ancore "slide N" pronunciate.
 > motore resti **alta** (picco medio normalizzato sopra la soglia) e non
 > compaia l'avviso "segnale debole".
 
-### 2. Slide → Podcast (`PROMPT_PRESENTAZIONE (PREDEFINITO).md`)
+### Slide → Podcast (`PROMPT_PRESENTAZIONE (PREDEFINITO).md`)
 
 La presentazione esiste prima e il podcast deve **annunciare ogni slide**
 ("passiamo alla slide N"): queste ancore vincolano la sincronizzazione.
 
-- Avviso "Solo N slide su M annunciate esplicitamente" → nel flusso
-  slide → podcast il podcast doveva annunciarle tutte: se le manca, conviene
-  rigenerare l'audio PRIMA di procedere. In batch/CI (`--no-confirm`, es.
-  `genera_video.bat`) la soglia `--min-anchor-coverage` (default 50%)
-  interrompe da sola sotto copertura; aggiungi `--require-full-anchors` per
-  **interrompere** anche sopra soglia (qualsiasi ancora mancante) invece di
-  generare un video con durate stimate e micro-segmenti.
+- Avviso "Solo N slide su M annunciate esplicitamente" → il podcast doveva
+  annunciarle tutte: se le manca, conviene rigenerare l'audio PRIMA di
+  procedere. In batch/CI (`--no-confirm`, es. `genera_video.bat`) la soglia
+  `--min-anchor-coverage` (default 50%) interrompe da sola sotto copertura;
+  aggiungi `--require-full-anchors` per **interrompere** anche sopra soglia
+  (qualsiasi ancora mancante) invece di generare un video con durate stimate e
+  micro-segmenti.
 - Avviso "Durate slide molto squilibrate" → ora viene **validato sul
   contenuto**: se il parlato del segmento è coerente con la slide mostrata
   (F1 lessicale), la durata lunga/corta è reale e l'avviso si riduce a una
@@ -103,4 +100,3 @@ La presentazione esiste prima e il podcast deve **annunciare ogni slide**
   tempo e nient'altro.
 
 ---
-

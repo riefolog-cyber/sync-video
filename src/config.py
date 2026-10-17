@@ -1596,13 +1596,12 @@ DEFAULT_SEMANTIC_MIN_Z = _env_float("SEMANTIC_MIN_Z", 0.45)
 # con similarità uniforme catturi metà dell'audio).
 # 0.15 = bilanciamento ottimale trovato con test A/B su podcast reale.
 DEFAULT_SEMANTIC_TEMPERATURE = _env_float("SEMANTIC_TEMPERATURE", 0.15)
-# Copertura minima delle ancore 'slide N' nel flusso slide -> podcast, come
-# frazione delle transizioni (slide 2..N). Sotto soglia la timeline sarebbe
-# stimata per contenuto, con durate inaffidabili e possibili micro-segmenti
-# (run del 06/10: 4 ancore su 13 transizioni, slide da 0.5s): meglio fermarsi
-# e rigenerare l'audio. Riguarda solo il flusso slide -> podcast, dove ogni
-# pagina DEVE essere annunciata; nel podcast -> slide le ancore sono escluse
-# dal prompt per scelta e il gate resta zitto (vedi _anchor_gate_applies).
+# Copertura minima delle ancore 'slide N' come frazione delle transizioni
+# (slide 2..N). Sotto soglia la timeline sarebbe stimata per contenuto, con
+# durate inaffidabili e possibili micro-segmenti (run del 06/10: 4 ancore su 13
+# transizioni, slide da 0.5s): meglio fermarsi e rigenerare l'audio. Ogni
+# pagina DEVE essere annunciata, quindi il gate vale sempre quando l'audio
+# dichiara un flusso (vedi main._anchor_coverage_ok).
 # 0.5 = almeno meta' transizioni ancorate; 0 disattiva (procede sempre).
 DEFAULT_MIN_ANCHOR_COVERAGE = _env_float("MIN_ANCHOR_COVERAGE", 0.5)
 
@@ -1725,7 +1724,7 @@ DEFAULT_WHISPER_BATCH = _env_int(
 )
 # Beam size della decodifica ACCURATA: usato quando la timeline NON è vincolata
 # dalle ancore 'slide N', cioè quando il testo è l'unico segnale di
-# sincronizzazione (flusso libero, o quasi nessuna slide annunciata).
+# sincronizzazione (nessuna ancora, o quasi nessuna slide annunciata).
 # Override con WHISPER_BEAM_ACCURATE.
 DEFAULT_WHISPER_BEAM_ACCURATE = _env_int("WHISPER_BEAM_ACCURATE", 5)
 # Scelta automatica del beam (vedi main._needs_accurate_beam). La decisione non
@@ -2212,7 +2211,7 @@ Esempi:
         "'passiamo alla slide X') o 'audio-slide' (speaker dicono "
         "'passiamo al blocco successivo'). Default: auto-detect. "
         "Un podcast senza riferimenti riconoscibili viene rifiutato "
-        "con errore chiaro (flusso libero non supportato).",
+        "con errore chiaro (nessun flusso rilevato).",
     )
     parser.add_argument(
         "--skip-slides",

@@ -294,7 +294,7 @@ installazione: **non** fallisce con un errore incomprensibile.
 >
 > - **timeline vincolata dalle ancore** (≥ metà delle slide annunciate): il testo
 >   rifinisce confini già decisi, quindi la decodifica veloce resta. Nessun costo.
-> - **timeline decisa dal contenuto** (flusso libero, o meno della metà delle
+> - **timeline decisa dal contenuto** (nessuna ancora, o meno della metà delle
 >   slide annunciate): il testo è l'unico segnale di sincronizzazione, quindi la
 >   trascrizione viene rifatta a beam `5`.
 >
