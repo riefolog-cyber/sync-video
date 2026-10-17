@@ -35,7 +35,6 @@ _PACCHETTI = (
     "pytesseract",
     "pymupdf",
     "packaging",
-    "requests",
     "av",
 )
 

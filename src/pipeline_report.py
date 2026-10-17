@@ -34,7 +34,6 @@ def format_time(seconds: float) -> str:
 
 def append_timing_history(
     t_ocr: float, t_transcribe: float, t_sync: float, t_embed: float, t_video: float, t_total: float,
-    t_llm: float = 0.0,
 ) -> None:
     """Persiste lo storico tempi in .cache/timing_history.jsonl (mai bloccante)."""
     import json
@@ -47,7 +46,6 @@ def append_timing_history(
             "transcribe": round(t_transcribe, 1),
             "sync": round(t_sync, 1),
             "embed": round(t_embed, 1),
-            "llm": round(t_llm, 1),
             "video": round(t_video, 1),
             "total": round(t_total, 1),
         }
@@ -70,7 +68,7 @@ def slide_list_text(slides: Sequence[int], *, di: bool = False) -> str:
 
 def print_timing(
     t_ocr: float, t_transcribe: float, t_sync: float, t_embed: float, t_model: float,
-    t_video: float, t_total: float, t_llm: float = 0.0,
+    t_video: float, t_total: float,
     *,
     history_fn: Callable[..., None] | None = None,
     video_encoder: str | None = None,
@@ -95,8 +93,6 @@ def print_timing(
         log.info("     └ Embedding │ %s", format_time(t_embed))
     if t_model > 0:
         log.info("     └ Modello   │ %s", format_time(t_model))
-    if t_llm > 0:
-        log.info("     └ LLM       │ %s", format_time(t_llm))
     if t_video > 0:
         log.info("   Encoding Video│ %s", format_time(t_video))
     log.info("   ─────────────────────────")
@@ -134,4 +130,4 @@ def print_timing(
             f"video {video_encoder} (GPU)" if video_encoder and video_encoder != "libx264" else "video libx264 (CPU)"
         )
         log.info("   🖥️  Hardware: %s", ", ".join(righe_hw))
-    (history_fn or append_timing_history)(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total, t_llm)
+    (history_fn or append_timing_history)(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total)

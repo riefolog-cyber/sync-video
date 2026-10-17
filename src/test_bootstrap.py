@@ -734,7 +734,6 @@ class TestParitaPacchetti(unittest.TestCase):
         "ruff": "dev, mai a runtime",
         "openvino": "provisioning di machine_setup, non bootstrap",
         "openvino-genai": "provisioning di machine_setup, non bootstrap",
-        "requests": "opzionale protetto da guardia (llm_sync funziona senza)",
     }
 
     @staticmethod

@@ -5,10 +5,6 @@ rem
 rem  Fa solo quello che il nome promette: controlla le versioni su PyPI e
 rem  chiede S/N per installare quelle non pinnate.
 rem
-rem  La manutenzione di 9Router NON e' qui dentro: e' una cosa separata
-rem  (aggiornamenti_9router.bat) perche' modifica quali modelli il servizio
-rem  espone, e non c'entra con l'aggiornamento delle dipendenze.
-rem
 rem  Uso:
 rem    aggiornamenti.bat                        chiede S/N prima di installare
 rem    aggiornamenti.bat --no-update            notifica e basta
@@ -72,6 +68,5 @@ set "EXIT=%ERRORLEVEL%"
 :fine
 echo.
 echo Codice di uscita: %EXIT%
-echo Per la manutenzione di 9Router esiste "aggiornamenti_9router.bat".
 if "%PAUSE_IT%"=="1" pause
 exit /b %EXIT%

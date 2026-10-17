@@ -21,7 +21,6 @@ from pipeline_cache import (
     KEEP_CACHE_STEMS,
     cache_path,
     clean_orphan_cache,
-    clean_stale_llm_cache,
     file_hash,
     load_cache,
     save_cache,
@@ -46,7 +45,7 @@ class TestSaveFinalTimeline(_CacheTemp):
         timeline = {3: 20.0, 1: 0.0, 2: 10.0}
         save_final_timeline(timeline, total_duration=30.0, cache_dir=self.base)
 
-        entries = json.loads((self.base / "llm_timeline_finale.json").read_text(encoding="utf-8"))
+        entries = json.loads((self.base / "timeline_finale.json").read_text(encoding="utf-8"))
         self.assertEqual([e["slide"] for e in entries], [1, 2, 3])
         self.assertEqual(entries[0], {"slide": 1, "start": 0.0, "end": 10.0})
         self.assertEqual(entries[1], {"slide": 2, "start": 10.0, "end": 20.0})
@@ -56,18 +55,18 @@ class TestSaveFinalTimeline(_CacheTemp):
         # non lasciare `end` mancante o infinity.
         save_final_timeline({1: 5.0, 2: 9.0}, total_duration=42.5, cache_dir=self.base)
 
-        entries = json.loads((self.base / "llm_timeline_finale.json").read_text(encoding="utf-8"))
+        entries = json.loads((self.base / "timeline_finale.json").read_text(encoding="utf-8"))
         self.assertEqual(entries[-1]["end"], 42.5)
 
     def test_timeline_vuota_non_rompe(self) -> None:
         save_final_timeline({}, total_duration=10.0, cache_dir=self.base)
-        self.assertEqual(json.loads((self.base / "llm_timeline_finale.json").read_text(encoding="utf-8")), [])
+        self.assertEqual(json.loads((self.base / "timeline_finale.json").read_text(encoding="utf-8")), [])
 
     def test_arrotonda_a_3_cifre(self) -> None:
         # analysis_sync.py legge questo file: la precisione deve essere
         # sufficiente e non mostrare float residui.
         save_final_timeline({1: 0.123456}, total_duration=1.0, cache_dir=self.base)
-        entries = json.loads((self.base / "llm_timeline_finale.json").read_text(encoding="utf-8"))
+        entries = json.loads((self.base / "timeline_finale.json").read_text(encoding="utf-8"))
         self.assertEqual(entries[0]["start"], 0.123)
 
 
@@ -110,6 +109,7 @@ class TestKeepCacheStems(_CacheTemp):
                     "updates_check",
                     "fastembed_ab",
                     "sync_report",
+                    "timeline_finale",
                     "hardware",
                     "openvino_attempt",
                 }
@@ -158,43 +158,15 @@ class TestCleanOrphanCache(_CacheTemp):
         self.assertTrue((self.base / "slide1.json").exists())
         self.assertFalse((self.base / "orfano.json").exists())
 
-    def test_mai_tocca_gli_llm(self) -> None:
-        # Gli llm_*.json sono cache di contenuto del LLM: la loro pulizia
-        # è un compito separato (clean_stale_llm_cache).
+    def test_rimuove_gli_llm_residui(self) -> None:
+        # Non c'è più la selezione via LLM: eventuali llm_*.json di run
+        # precedenti sono orfani e vanno rimossi come qualsiasi altra chiave.
         (self.base / "llm_abc123.json").write_text("{}", encoding="utf-8")
-        self.assertEqual(clean_orphan_cache(set(), cache_dir=self.base), 0)
-        self.assertTrue((self.base / "llm_abc123.json").exists())
+        self.assertEqual(clean_orphan_cache(set(), cache_dir=self.base), 1)
+        self.assertFalse((self.base / "llm_abc123.json").exists())
 
     def test_cartella_mancante_ritorna_zero(self) -> None:
         self.assertEqual(clean_orphan_cache(set(), cache_dir=self.base / "non-esiste"), 0)
-
-
-class TestCleanStaleLlmCache(_CacheTemp):
-    def test_rimuove_llm_non_usati(self) -> None:
-        for nome in ("llm_usato", "llm_vecchio"):
-            (self.base / f"{nome}.json").write_text("{}", encoding="utf-8")
-
-        rimossi = clean_stale_llm_cache({"llm_usato"}, cache_dir=self.base)
-
-        self.assertEqual(rimossi, 1)
-        self.assertTrue((self.base / "llm_usato.json").exists())
-        self.assertFalse((self.base / "llm_vecchio.json").exists())
-
-    def test_non_tocca_gli_llm_review(self) -> None:
-        # llm_review_* è la cache della revisione: sopravvive alla pulizia
-        # come le chiavi housekeeping sopravvivono a clean_orphan_cache.
-        from llm_sync import LLM_REVIEW_CACHE_PREFIX
-
-        recensione = f"{LLM_REVIEW_CACHE_PREFIX}xyz"
-        (self.base / f"{recensione}.json").write_text("{}", encoding="utf-8")
-
-        self.assertEqual(clean_stale_llm_cache(set(), cache_dir=self.base), 0)
-        self.assertTrue((self.base / f"{recensione}.json").exists())
-
-    def test_ignora_i_non_llm(self) -> None:
-        (self.base / "slide1.json").write_text("{}", encoding="utf-8")
-        self.assertEqual(clean_stale_llm_cache(set(), cache_dir=self.base), 0)
-        self.assertTrue((self.base / "slide1.json").exists())
 
 
 class TestCachePath(_CacheTemp):
@@ -259,7 +231,6 @@ class TestShimMainCompatibile(_CacheTemp):
             "_save_cache",
             "_cache_path",
             "_clean_orphan_cache",
-            "_clean_stale_llm_cache",
             "_save_final_timeline",
             "_save_sync_report",
             "_format_time",

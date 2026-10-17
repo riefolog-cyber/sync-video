@@ -6,12 +6,11 @@
 src/                      ← Tutto il codice Python (moduli e test insieme)
 main.py                  ← Orchestratore (auto-detection, cache, timing)
 config.py                ← Bootstrap auto-dipendenze + costanti + CLI
-chunks.py                ← Finestre temporali condivise (semantic_sync + llm_sync)
+chunks.py                ← Finestre temporali condivise (semantic_sync)
 ocr.py                   ← Fase 1: PDF → immagini → OCR
 transcription.py         ← Fase 2: Audio → Whisper → trascrizione
 timeline.py              ← Ancore "slide N" + riconciliazione timeline
 semantic_sync.py         ← Sincronizzazione semantica (embeddings, DP, raffinamento confini)
-llm_sync.py              ← Selezione slide con LLM (9Router) + cache
 embedder.py              ← Interfaccia embedding (Protocol `Embedder`, backend fastembed)
 video.py                 ← Fase 4: Assemblaggio MP4 (1080p)
 pipeline_cache.py        ← Hash/caricamento/salvataggio cache (estratto da main)
@@ -19,7 +18,6 @@ pipeline_report.py       ← Formattazione tempi + report (estratto da main)
 cache_maintenance.py     ← `--cache-du` / `--clean-cache` (peso e pulizia sicura)
 controlli.py             ← Verifica completa in un comando (CI + mypy 3 piattaforme + debug)
 test_sync.py             ← Suite di test unitari
-test_llm_sync.py         ← Test modulo LLM
 test_chunks.py           ← Test finestre temporali condivise
 test_prompts.py          ← Test dei prompt e dei link del README
 test_integration.py      ← Test di integrazione
@@ -32,9 +30,8 @@ requirements.txt         ← Dipendenze pip
 ruff.toml                ← Configurazione lint (guardrail di stile)
 mypy.ini                 ← Configurazione type-check
 PROMPT_PRESENTAZIONE (PREDEFINITO).md ← Prompt NotebookLM: presentazione → podcast (flusso A, consigliato)
-PROMPT_PODCAST.md            ← Prompt NotebookLM: podcast → presentazione (flusso B)
+PROMPT_PODCAST.md            ← Prompt NotebookLM: podcast → presentazione (**flusso B non più supportato**, riferimento storico)
 tessdata/                ← Modelli lingua Tesseract portatili
-9router-maintenance/     ← Script manutenzione combo `comboact` di 9Router (vedi sotto)
 docs/                    ← Documentazione (queste pagine) + diagramma architettura
 sync-video-architecture (in docs/) ← Diagramma architettura (generato con archify)
 ```
@@ -53,7 +50,7 @@ Comandi verificati per chi modifica il codice:
 # Verifica completa in un colpo: CI + mypy 3 piattaforme + debug hardware
 python src/controlli.py
 
-# Test (suite completa, unittest — 1139 test)
+# Test (suite completa, unittest — 1001 test)
 python -m unittest discover -s src -p "test_*.py"
 
 # Type-check (mypy: codice di produzione e test, tranne la deny-list in mypy.ini)
@@ -68,7 +65,7 @@ python -m ruff check . --fix
 
 Il `ruff.toml` esclude le metriche di complessità (PLR09xx, PLC0415) perché
 rappresentano il backlog di refactoring, non guardrail di stile: il check
-default resta verde. I `try/except Exception` difensivi (fallback robusti: LLM
+default resta verde. I `try/except Exception` difensivi (fallback robusti: rete
 irraggiungibile, cache corrotta, embedding fallito) non vanno "stretti" senza
 motivo: `ruff.toml` li esclude da BLE001 file per file (probe hardware e rete,
 fallback OCR, bootstrap).

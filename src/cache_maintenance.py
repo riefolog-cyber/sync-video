@@ -24,7 +24,15 @@ MODEL_DIRS = ("embedding_model", "whisper_openvino_small", "whisper_openvino_bas
 # Chiavi che non sono cache di contenuto: vanno conservate (stesso elenco di
 # pipeline_cache.KEEP_CACHE_STEMS: il test di equivalenza li tiene allineati).
 KEEP_STEMS = frozenset(
-    {"machine_setup", "updates_check", "fastembed_ab", "sync_report", "hardware", "openvino_attempt"}
+    {
+        "machine_setup",
+        "updates_check",
+        "fastembed_ab",
+        "sync_report",
+        "timeline_finale",
+        "hardware",
+        "openvino_attempt",
+    }
 )
 
 
@@ -74,8 +82,8 @@ def clean_cache(
     """Pulizia sicura. Ritorna conteggi {'orphan_json': n, 'embed_npz': n,
     'verify_frames': n, 'model_bytes': b}.
 
-    Non tocca mai: chiavi KEEP_STEMS, llm_*.json (hash di contenuto),
-    modelli pesanti (salvo include_models=True).
+    Non tocca mai: chiavi KEEP_STEMS, modelli pesanti (salvo
+    include_models=True).
     """
     import main as _main
     from semantic_sync import _prune_embed_cache  # import locale: evita cicli
@@ -84,7 +92,7 @@ def clean_cache(
     if not cache_dir.exists():
         return esito
     # 1. JSON orfani (slide/trascrizioni di run precedenti): senza chiavi
-    # attive, rimuove solo ciò che non è housekeeping né llm_*.
+    # attive, rimuove solo ciò che non è housekeeping.
     esito["orphan_json"] = _main._clean_orphan_cache(set())
     # 2. embedding content-addressed oltre il tetto LRU (40 voci).
     emb_dir = cache_dir / "embedding_cache"

@@ -368,37 +368,6 @@ installazione: **non** fallisce con un errore incomprensibile.
 > comparivano da nessuna parte — per questo lo spreco non era mai emerso. Ora
 > `└ Embedding` è il calcolo dei vettori e `└ Modello` il caricamento, separati.
 >
-> Anche il tempo dell'LLM ha una riga sua (`└ LLM`), per lo stesso motivo: senza,
-> una cascata LLM da ~328s finiva dentro `Sincronizzaz.` senza attribuzione e il
-> costo restava invisibile finché non si leggevano i log riga per riga. Il tempo
-> è contato anche per le chiamate **fallite**, che sono proprio quelle da vedere.
->
-> **Il motore locale gira SEMPRE per primo, l'LLM è un escalation.** Il motore
-> embedding costa pochi secondi (embedding in cache) e produce già una timeline
-> utilizzabile, quindi viene sempre provato per primo e l'LLM serve solo a
-> migliorarla. Prima l'ordine era inverso: oltre `--llm-local-threshold` slide
-> senza ancora si saltava dritto all'LLM e, se falliva, si ricalcolava da capo il
-> motore locale — nel run del 25/09 (12 slide senza ancora) questo costava ~328s
-> di cascata per arrivare esattamente al fallback locale che si aveva a portata di
-> mano in 2s. Ora la timeline locale viene **riusata** se l'LLM non dà niente.
->
-> **Tre guardie sul costo dell'LLM**, nate dallo stesso run:
->
-> 1. **Timeout 45s, non 120s.** Tarato sui dati reali di `comboact-state.json`
->    (p50 3.2s, max 10.9s su 37 modelli): 120s erano ~35x il p50, quindi non
->    scattavano mai per davvero e, quando scattavano, costavano 180s col retry
->    per scoprire che il backup rispondeva in 14s. Alzalo con
->    `LLM_9ROUTER_TIMEOUT` per i modelli "reasoning".
-> 2. **Gli endpoint morti restano morti nella run.** Un timeout esaurito marca
->    l'endpoint come irraggiungibile: il retry non ripaga più gli stessi
->    timeout e va dritto al primo backup ancora vivo.
-> 3. **I fallimenti vengono ricordati (cache negativa, TTL 30 min).** Prima la
->    cache LLM ricordava solo i successi, quindi un rerun ripagava l'intera
->    cascata per arrivare allo stesso fallback. Ora il rerun entro la finestra va
->    diretto al motore locale. La chiave è un hash del contenuto, quindi un
->    input diverso viene comunque ritentato. TTL con `LLM_FAILURE_TTL_SECONDS`
->    (`0` = disattiva).
->
 > **OpenVINO GenAI (solo iGPU Intel).** Su PC Intel con iGPU Iris Xe e senza
 > GPU NVIDIA è un'alternativa più veloce di faster-whisper su CPU (~5 min per 28
 > min di audio), con word timestamps identici. Non serve su macchine ARM/AMD,
@@ -503,34 +472,6 @@ installazione: **non** fallisce con un errore incomprensibile.
 > `--no-update` (notifica senza installare), `--no-update-check` (non
 > controllare PyPI), `--frozen-report` (referto dei pacchetti fermi),
 > `--no-pause` (non fermarsi, per l'uso in automazione).
->
-> **La manutenzione di 9Router è un altro script.** Sta in
-> `aggiornamenti_9router.bat` e non è dentro `aggiornamenti.bat` perché
-> modifica *quali modelli il servizio espone* (con `-AutoReplace` toglie dalla
-> combo quelli che falliscono, con `-AddFreeModels` aggiunge quelli gratuiti):
-> sono modifiche automatiche e non annullabili, che vanno chiese esplicitamente
-> e non nascoste dietro "aggiorna le dipendenze". Serve solo se usi
-> `--llm 9router`, perché il percorso di default è `--llm off`.
->
-> | `aggiornamenti_9router.bat` | effetto |
-> |---|---|
-> | (nessun argomento) | chiede conferma, poi applica |
-> | `--dry-run` | **mostra cosa cambierebbe e non applica nulla** |
-> | `--no-pause` | non si ferma a fine script (automazione) |
->
-> Un consiglio: la prima volta lancialo con `--dry-run`. `update-comboact.ps1`
-> in anteprima scrive `Would update combo ... No changes applied` con i modelli
-> che entrerebbero e quelli che uscirebbero.
->
-> **Il codice di uscita di questo script non dice se la combo è sana.**
-> `update-comboact.ps1` esce con `0` anche quando ha rimosso modelli falliti
-> (esce con `1` solo su eccezione grave): un `0` significa "lo script è andato
-> a buon fine". Per lo stato della combo guarda la riga
-> `SUCCESS: Kept=.. | Removed=.. | Replaced=..` o il report in
-> `9router-maintenance/logs/`.
->
-> Serve `pwsh` (PowerShell 7): con il solo PowerShell di Windows lo dice e si
-> ferma, invece di saltare il passo in silenzio.
 
 ---
 

@@ -1,6 +1,12 @@
 # Prompt NotebookLM — podcast → presentazione
 
-> **Flusso B.** La presentazione nasce dal podcast: una slide per sezione, e
+> ⛔ **Flusso B — NON PIÙ SUPPORTATO.** Documento mantenuto solo come riferimento
+> storico. La pipeline non gestisce più l'audio senza ancore: un podcast che non
+> pronuncia i riferimenti "slide N" fa **interrompere** la run ("Flusso libero
+> non supportato"). Per un video sincronizzato usa
+> [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md)>.
+>
+> **Flusso B (storico, non più attivo).** La presentazione nasce dal podcast: una slide per sezione, e
 > l'audio si riusa se un errore ti fa rifare il deck. In compenso i confini sono
 > **stimati** dal contenuto e possono cadere minuti fuori posto.
 >

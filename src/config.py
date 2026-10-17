@@ -382,14 +382,6 @@ def versione_programma() -> str:
             pass
     return "sconosciuta"
 
-# Prefisso dei file cache della revisione LLM (``llm_review_<hash>.json``).
-# Vive qui (non in ``llm_sync``) perché ``pipeline_cache`` deve distinguere le
-# cache "review" da conservare dalle cache "timeline" da ripulire, e così
-# importare solo questa stringa da ``config`` invece di caricare tutto
-# ``llm_sync`` (che trascina ``requests`` e company). ``llm_sync`` la
-# re-esporta per retro-compatibilità con i test.
-LLM_REVIEW_CACHE_PREFIX = "llm_review_"
-
 
 # =====================================================================
 # LOGGING (setup minimo prima del bootstrap)
@@ -1527,7 +1519,7 @@ AUDIO_SEARCH_SUFFIXES = frozenset({".mp3", ".m4a", ".wav", ".aac", ".ogg", ".fla
 #
 # ⚠️ REGOLA DI SCELTA MODELLO (documentata ad oggi):
 #   e5-large è il modello DA PREFERIRE. Testato A/B su podcast reale
-#   (10 slide, flusso ordinato senza LLM): similarità media 0.791 vs
+#   (10 slide, flusso ordinato): similarità media 0.791 vs
 #   0.380 (MiniLM) e 0.421 (mpnet-base), e durate tutte bilanciate
 #   (104-188s) senza anomalie, mentre MiniLM/mpnet producevano slide da
 #   8-20s e 332s. Confermato anche sul podcast da 8 slide (0.834 vs 0.612
@@ -1597,7 +1589,7 @@ DEFAULT_MIN_SEGMENT_SECONDS = _env_float("MIN_SEGMENT_SECONDS", 8.0)
 #   deck senza firma per slide 0.15  <- caso limite: non deve decidere il guard
 # 0.45 = nessuna variante sbagliata accettata, nessun deck con contenuto
 # per-slide rifiutato. Sotto questa soglia NON si scarta la timeline: si segnala
-# (escalation al LLM, --strict-sync, riepilogo finale).
+# (--strict-sync, riepilogo finale).
 DEFAULT_SEMANTIC_MIN_Z = _env_float("SEMANTIC_MIN_Z", 0.45)
 # Temperatura della "competizione softmax" tra slide per blocco: più è bassa,
 # più il posizionamento privilegia i picchi locali (evita che una slide-riepilogo
@@ -1962,7 +1954,7 @@ def build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         description="Sincronizza PDF + audio in un video con timeline generata "
-        "da embeddings semantici (offline, senza LLM).",
+        "da embeddings semantici (offline).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Esempi:
@@ -2238,8 +2230,7 @@ Esempi:
         help="Interrompe la pipeline se un controllo di sincronizzazione "
         "fallisce: prima di generare il video se un segmento di durata "
         "anomala risulta disallineato dal contenuto (il parlato somiglia a "
-        "un'altra slide) o se la revisione LLM (--llm-review) segnala "
-        "discrepanze; dopo la generazione se la verifica frame vs slide "
+        "un'altra slide); dopo la generazione se la verifica frame vs slide "
         "(--verify-video, attivata automaticamente da questo flag) trova "
         "segmenti che mostrano una slide diversa. Il report completo dei "
         "segmenti è sempre salvato in .cache/sync_report.json. "
@@ -2294,8 +2285,8 @@ Esempi:
         type=float,
         default=DEFAULT_SEMANTIC_MIN_Z,
         help=f"Soglia sul picco medio NORMALIZZATO (z-score per slide) sotto cui "
-        f"la sincronizzazione è a bassa fiducia: segnala, alimenta l'escalation "
-        f"al LLM e il gate --strict-sync (default: {DEFAULT_SEMANTIC_MIN_Z})",
+        f"la sincronizzazione è a bassa fiducia: segnala e alimenta "
+        f"il gate --strict-sync (default: {DEFAULT_SEMANTIC_MIN_Z})",
     )
     parser.add_argument(
         "--semantic-temperature",
@@ -2307,67 +2298,6 @@ Esempi:
         f"(default: {DEFAULT_SEMANTIC_TEMPERATURE})",
     )
 
-    # Selezione slide via LLM (opzionale, supera il tetto dell'embedding)
-    parser.add_argument(
-        "--llm",
-        default="off",
-        choices=["off", "auto", "9router"],
-        help="Selezione slide via LLM. 'off' = solo embedding "
-        "locale (nessuna rete). 'auto' e '9router' sono oggi "
-        "EQUIVALENTI: l'unico provider è 9Router, quindi entrambi "
-        "usano la stessa cascata di tre modelli (comboact → "
-        "Mistral 24B → Gemma 31B) e, se il router non risponde, "
-        "ripiegano sull'embedding locale (flusso libero: "
-        "interruzione esplicita). Nel flusso libero (senza segnali 'slide "
-        "N') sceglie la slide per ogni chunk; nei flussi "
-        "ordinati (slide-audio/audio-slide) posiziona SOLO "
-        "le slide senza ancora esplicita, rispettando le "
-        "ancore deterministiche. Se nessun servizio "
-        "risponde si ripiega sull'embedding senza interrompere.",
-    )
-    parser.add_argument(
-        "--llm-model",
-        default=None,
-        help="Override del modello LLM (es. comboact, "
-        "openrouter/google/gemma-4-26b-a4b-it:free, "
-        "cf/@cf/mistralai/mistral-small-3.1-24b-instruct). "
-        "Default: la combo 'comboact' configurata per "
-        "l'endpoint 9Router.",
-    )
-    parser.add_argument(
-        "--llm-chunk", type=float, default=30.0, help="Secondi per chunk trascrizione inviata all'LLM (default: 30.0)"
-    )
-    parser.add_argument(
-        "--llm-review",
-        action="store_true",
-        help="Dopo la timeline LLM nel flusso libero, esegue un "
-        "secondo passaggio LLM che ri-verifica la selezione "
-        "chunk->slide e avvisa (senza modificare la timeline) "
-        "sui chunk sospetti. Costo: una chiamata extra (free, "
-        "cachata). Default: disattivato.",
-    )
-    parser.add_argument(
-        "--llm-wait-timeout",
-        type=float,
-        default=0.0,
-        help="Secondi massimi di attesa che 9Router sia avviato "
-        "prima di ripiegare sull'embedding, quando serve l'LLM ma "
-        "il router non risponde. 0 (default) = attesa "
-        "illimitata: il processo si mette in pausa con un "
-        "avviso e riprende appena 9Router è online; si può "
-        "premere 'S' in ogni momento per saltare e usare "
-        "subito l'embedding locale.",
-    )
-    parser.add_argument(
-        "--llm-local-threshold",
-        type=int,
-        default=2,
-        help="Nel flusso ordinato (slide-audio/audio-slide), numero "
-        "massimo di slide senza ancora gestite dal raffinamento "
-        "locale (embeddings) al posto di 9Router. Oltre questa "
-        "soglia l'LLM cloud viene usato come prima (default: 2). "
-        "Imposta 0 per usare sempre 9Router nel flusso ibrido.",
-    )
     parser.add_argument("--log-file", default=None, help="Percorso file di log (salva i log anche su file)")
 
     return parser

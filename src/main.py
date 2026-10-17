@@ -63,17 +63,6 @@ installa_dipendenze_se_mancano()
 from moviepy import AudioFileClip, VideoFileClip
 
 from chunks import Word
-from llm_sync import (
-    endpoints_for,
-    is_interactive,
-    llm_cache_keys_for,
-    llm_ordered_timeline,
-    llm_seconds,
-    llm_verify_anchor_mapping,
-    reset_dead_endpoints,
-    reset_llm_seconds,
-    review_diffs_seen,
-)
 from machine_setup import machine_setup
 from ocr import PRESENTATION_SUFFIXES, convert_presentation_to_pdf, extract_slides_text_ocr
 
@@ -86,7 +75,6 @@ from ocr import PRESENTATION_SUFFIXES, convert_presentation_to_pdf, extract_slid
 # =====================================================================
 from pipeline_cache import cache_path as _cache_path_impl
 from pipeline_cache import clean_orphan_cache as _clean_orphan_cache_impl
-from pipeline_cache import clean_stale_llm_cache as _clean_stale_llm_cache_impl
 from pipeline_cache import file_hash as _file_hash
 from pipeline_cache import latest_transcript_words as _latest_transcript_words_impl
 from pipeline_cache import load_cache as _load_cache_impl
@@ -119,10 +107,9 @@ from semantic_sync import (
     alignment_quality_from_words,
     embed_seconds,
     last_quality,
-    make_anchor_remap_filter,
     model_load_seconds,
     refine_diagnostics,
-    refine_llm_timeline_from_words,
+    refine_timeline_from_words,
     repair_segments_from_frames_from_words,
     reset_weak_signal_flag,
     semantic_timeline_from_words,
@@ -167,11 +154,6 @@ from video import (
 def _clean_orphan_cache(active_keys: set[str]) -> int:
     """Wrapper shim: vedi pipeline_cache.clean_orphan_cache (inietta CACHE_DIR)."""
     return _clean_orphan_cache_impl(active_keys, cache_dir=CACHE_DIR)
-
-
-def _clean_stale_llm_cache(keep_stems: set[str]) -> int:
-    """Wrapper shim: vedi pipeline_cache.clean_stale_llm_cache (inietta CACHE_DIR)."""
-    return _clean_stale_llm_cache_impl(keep_stems, cache_dir=CACHE_DIR)
 
 
 def _save_final_timeline(timeline: dict[int, float], total_duration: float) -> None:
@@ -240,7 +222,7 @@ def _abort(message: str) -> NoReturn:
 
 
 # Corpi spostati in pipeline_cache.py / pipeline_report.py (re-export shim
-# sopra): _clean_orphan_cache, _clean_stale_llm_cache, _save_final_timeline,
+# sopra): _clean_orphan_cache, _save_final_timeline,
 # _save_sync_report, _file_hash, _cache_path, _load_cache, _save_cache,
 # _format_time, _print_timing, _append_timing_history, _slide_list_text.
 
@@ -253,7 +235,6 @@ def _print_timing(
     t_model: float,
     t_video: float,
     t_total: float,
-    t_llm: float = 0.0,
     *,
     video_encoder: str | None = None,
 ) -> None:
@@ -269,7 +250,7 @@ def _print_timing(
     anche per l'encoding (prima era sempre libx264 su CPU, senza dirlo).
     """
     _print_timing_impl(
-        t_ocr, t_transcribe, t_sync, t_embed, t_model, t_video, t_total, t_llm,
+        t_ocr, t_transcribe, t_sync, t_embed, t_model, t_video, t_total,
         history_fn=_append_timing_history,
         video_encoder=video_encoder,
     )
@@ -505,7 +486,6 @@ def _log_plain_summary(
     verdicts: dict[int, str] | None = None,
     frame_check: dict[str, object] | None = None,
     quality: dict[str, float] | None = None,
-    review_diffs: int = 0,
     repairs: Sequence[dict[str, object]] = (),
     floor_report: dict[str, object] | None = None,
     anchors: dict[str, object] | None = None,
@@ -518,7 +498,7 @@ def _log_plain_summary(
     slide e quanto durano, se il video finito mostra la slide giusta, cosa è
     stato corretto da solo, cosa conviene controllare a mano. I dubbi sono
     raccolti da TUTTI i segnali della run (verdetto di contenuto, verifica
-    frame, fiducia del motore embedding, revisione LLM, copertura delle ancore,
+    frame, fiducia del motore embedding, copertura delle ancore,
     evidenza del raffinamento sui confini stimati) invece che da uno solo.
 
     ``refine`` è la diagnostica del raffinamento confini (``refine_diagnostics()``):
@@ -772,11 +752,6 @@ def _log_plain_summary(
                 "si somigliano troppo fra loro, quindi guarda a mano dove il "
                 "parlato cambia tema (le ancore 'slide N' restano esatte)"
             )
-    if review_diffs:
-        doubts.append(
-            f"la revisione automatica contesta {review_diffs} scelte di slide: "
-            "dettagli in .cache/sync_report.json (review_diffs)"
-        )
     if unconfirmed:
         # Il segnale più insidioso: con quasi tutte le transizioni ancorate, il
         # video può essere perfino rispetto a una numerazione parlata sbagliata,
@@ -1359,94 +1334,12 @@ def _validate_anomalous_segments(
     return verdicts
 
 
-def _should_escalate_weak_signal(
-    weak_signal: bool, missing_count: int, llm_enabled: bool
-) -> bool:
-    """True se conviene abbandonare la timeline locale appena costruita.
-
-    ``weak_signal`` è il verdetto del motore embedding stesso: l'audio non
-    segue l'ordine delle slide, quindi l'allineamento appena calcolato è
-    inaffidabile. Prima questo veniva solo loggato e il video veniva generato
-    comunque; con l'LLM disponibile conviene passargli il posizionamento delle
-    slide senza ancora, perché legge il contenuto dei chunk. Se tutte le slide
-    hanno un'ancora (``missing_count == 0``) il segnale debole non cambia nulla:
-    i timestamp sono già dichiarati dal parlato.
-    """
-    return weak_signal and missing_count > 0 and llm_enabled
-
-
-def _escalate_senza_ancore(
-    weak_local: bool,
-    local_failed: bool,
-    llm_enabled: bool,
-) -> bool:
-    """Serve l'LLM nel flusso podcast -> slide (dove le ancore non esistono)?
-
-    È la domanda che `_needs_llm_escalation` non sa fare, e il motivo è
-    strutturale: lì ``missing_count`` misura un problema (troppe slide non
-    annunciate), qui sarebbe SEMPRE uguale a ``total_slides - 1`` perché il
-    prompt vieta le ancore. Applicare le stesse soglie farebbe spendere una
-    chiamata LLM (~16 min) a ogni run di questo flusso, anche quando il motore
-    embedding è convinto.
-
-    Quindi qui la soglia è una sola e non è un numero: l'LLM viene coinvolto
-    solo se il motore locale ha dichiarato di non distinguere le slide
-    (``weak_local``). È il caso in cui la timeline non è "un po' imprecisa" ma
-   costruita su un segnale piatto, e il posizionamento dell'LLM legge il
-    contenuto dei chunk invece di un argmax su una matrice piatta.
-
-    Se il motore locale non ha prodotto nulla l'LLM non viene coinvolto: non
-    è il caso da cui questo percorso nasce, e il flusso libero (dove l'LLM è il
-    motore principale) copre già quel fallback.
-    """
-    return weak_local and not local_failed and llm_enabled
-
-
-def _needs_llm_escalation(
-    local_failed: bool,
-    weak_local: bool,
-    missing_count: int,
-    llm_local_threshold: int,
-    llm_enabled: bool = True,
-) -> bool:
-    """Serve l'LLM dopo che il motore embedding locale ha girato per primo?
-
-    Il motore locale costa pochi secondi (embedding in cache) e produce sempre
-    una timeline utilizzabile, quindi viene SEMPRE provato per primo e l'LLM è
-    un ESCALATION, non un prerequisito. Prima l'ordine era inverso: oltre
-    ``llm_local_threshold`` slide senza ancora si saltava dritto all'LLM e, se
-    falliva, si ricalcolava da capo il motore locale. Nel run del 25/09 (12
-    slide senza ancora) questo costava ~328s di cascata LLM per arrivare
-    esattamente al fallback locale che si aveva a portata di mano in 2s.
-
-    L'LLM viene comunque coinvolto, quindi, quando:
-      * il motore locale non ha prodotto nulla;
-      * le slide senza ancora sono troppe perché il raffinamento locale basti;
-      * il motore stesso dichiara il segnale inaffidabile.
-
-    Args:
-        local_failed: il motore locale non ha restituito timeline.
-        weak_local: il motore ha dichiarato segnale debole.
-        missing_count: slide senza ancora esplicita.
-        llm_local_threshold: soglia oltre cui il solo raffinamento locale non basta.
-        llm_enabled: ``False`` se l'LLM è spento (``--llm off``).
-    """
-    if not llm_enabled:
-        return False
-    return (
-        local_failed
-        or missing_count > llm_local_threshold
-        or _should_escalate_weak_signal(weak_local, missing_count, True)
-    )
-
-
 def _build_sync_report(
     durations: Sequence[float],
     slide_ids: Sequence[int],
     total_duration: float,
     verdicts: dict[int, str] | None = None,
     notes: dict[str, object] | None = None,
-    review_diffs: Sequence[dict[str, object]] | None = None,
     versione: str | None = None,
 ) -> dict[str, object]:
     """Tabella verificabile dei segmenti effettivamente mostrati nel video.
@@ -1457,10 +1350,9 @@ def _build_sync_report(
     senza rieseguire il pipeline (usato da ``analysis_sync.py`` e dal debug
     manuale).
 
-    ``notes`` aggiunge le scelte fatte dalla run (es. escalation per segnale
-    debole, esito della verifica frame) e ``review_diffs`` le discrepanze del
-    secondo passaggio LLM: entrambi sono segnali che prima finivano solo nei
-    log e che invece devono restare sull'artefatto.
+    ``notes`` aggiunge le scelte fatte dalla run (es. esito della verifica
+    frame): segnali che prima finivano solo nei log e che invece devono
+    restare sull'artefatto.
     """
     verdicts = verdicts or {}
     start = 0.0
@@ -1485,8 +1377,6 @@ def _build_sync_report(
         report["versione"] = versione
     if notes:
         report.update(notes)
-    if review_diffs:
-        report["review_diffs"] = [dict(d) for d in review_diffs]
     return report
 
 
@@ -2573,8 +2463,7 @@ def main(argv: list | None = None) -> None:
     # --- Pulizia cache ALL'AVVIO ---
     # A ogni nuova run rimuove subito le cache di slide/trascrizione di
     # PDF/audio precedenti (le chiavi sono hash del contenuto: con input nuovi
-    # le vecchie cache non servono). Le cache LLM vengono ripulite più avanti,
-    # quando i contenuti correnti sono noti.
+    # le vecchie cache non servono).
     _startup_cleaned = _clean_orphan_cache(active_cache_keys)
     if _startup_cleaned:
         log.info("   🧹 Rimosse %d cache orfane di run precedenti (slide/trascrizione).", _startup_cleaned)
@@ -2586,11 +2475,6 @@ def main(argv: list | None = None) -> None:
     # è lavoro semantico, quindi viene attribuito alla sincronizzazione, così la
     # tabella dei tempi continua a sommare al totale.
     beam_ab_seconds = 0.0
-    # Cronometro LLM e memoria degli endpoint morti: sono per-run, quindi
-    # vanno azzerati qui. Senza, una seconda esecuzione in-process (test,
-    # chiamate ripetute) ripartirebbe con il tempo e i timeout gia' spesi.
-    reset_llm_seconds()
-    reset_dead_endpoints()
 
     # Strutture accumulate
     slide_files: list[str] | None = None
@@ -2718,7 +2602,7 @@ def main(argv: list | None = None) -> None:
 
         # --- Correzione nomi propri (Whisper li storpi sistematicamente: "sigmond
         # freud", "thomas mur", "mark chiuse"...). I nomi corretti sono indizi
-        # cruciali per il matching slide<->parlato di LLM e MiniLM. ---
+        # cruciali per il matching slide<->parlato del motore embedding. ---
         if words_raw:
             words_raw = correct_transcript_names(words_raw)
 
@@ -2741,23 +2625,6 @@ def main(argv: list | None = None) -> None:
         # esattamente quel ramo: il suo anti-flicker è interno al motore e non
         # lascia nessuna nota.
         floor_min: float = 0.0
-
-        # Scelta LLM richiesta esplicitamente: la decisione "cosa faremo in
-        # questa run" può discostarsene (il fallback sotto), ma la richiesta
-        # va conservata per il report.
-        llm_rilevato: str = args.llm
-
-        # L'LLM è "disponibile" se l'utente lo ha chiesto, e questa è la
-        # domanda che va posta al momento in cui serve davvero. Il fallback
-        # ORDERED azzera `args.llm` per non chiamare l'LLM subito — è una scelta
-        # di tempi (il percorso ordinato costa ~1 min, l'LLM ~16) — ma se più
-        # avanti il motore scopre che il segnale è debole, la disponibilità
-        # dell'LLM è esattamente la risposta all'informazione mancante, e
-        # l'utente l'aveva già autorizzata. Con `args.llm` come gate la
-        # disponibilità veniva revocata da una decisione di tempi presa prima
-        # di sapere se serviva, e l'escalation restava irraggiungibile nel
-        # flusso podcast -> slide, l'unico in cui non ci sono ancore.
-        llm_disponibile: bool = llm_rilevato != "off"
 
         # --- Auto-detection flusso (dopo trascrizione, prima della sincronizzazione) ---
         flow: str
@@ -2782,20 +2649,15 @@ def main(argv: list | None = None) -> None:
 
         # --- Ancore deterministiche disponibili ---
         # Calcolate una volta: servono al recupero delle zone cieche, alla scelta
-        # automatica del beam e ai gate sulle ancore. Nel flusso libero non
-        # vincolano l'allineamento (le slide seguono il contenuto), quindi non si
-        # cercano.
+        # automatica del beam e ai gate sulle ancore.
         flow_anchors: dict[int, float] = (
-            extract_slide_anchors(words_raw, total_slides, flow) if flow != "free" and words_raw else {}
+            extract_slide_anchors(words_raw, total_slides, flow) if words_raw else {}
         )
 
         # Stato del recupero delle zone cieche e della decodifica accurata:
         # li leggono sia le decisioni qui sotto sia i messaggi all'utente, e
-        # devono esistere in OGNI ramo, compreso il flusso libero — dove il
-        # recupero non si applica ma la scelta del beam sì (le ancore restano
-        # vuote, quindi i confini li decide il testo e la decodifica accurata si
-        # fa sempre). Per questo la soglia dichiarata si legge qui e non dentro
-        # il recupero.
+        # devono esistere in OGNI ramo. Per questo la soglia dichiarata si
+        # legge qui e non dentro il recupero.
         _min_cov = float(getattr(args, "min_anchor_coverage", 0.0) or 0.0)
         _gap_seconds = 0.0
         _gap_recovered: list[int] = []
@@ -2814,7 +2676,7 @@ def main(argv: list | None = None) -> None:
         # M annunciate" e la soglia di copertura accusavano il podcast di un
         # danno fatto dal decoder, e la run si fermava prima di aver provato a
         # riparare il testo. Ora l'audio viene giudicato per quello che DICE.
-        if flow != "free" and words_raw:
+        if words_raw:
             # Se la copertura è già insufficiente, la decodifica accurata
             # dell'audio intero arriva comunque (è la decisione immediatamente
             # successiva): ritrascrivere a pezzi quasi tutto l'audio sarebbe la
@@ -2901,7 +2763,7 @@ def main(argv: list | None = None) -> None:
             # accurata può riconoscere annunci che la decodifica veloce aveva
             # perso, e allora la timeline torna vincolata (gratis).
             rechecked = (
-                extract_slide_anchors(words_raw, total_slides, flow) if flow != "free" and words_raw else {}
+                extract_slide_anchors(words_raw, total_slides, flow) if words_raw else {}
             )
             if rechecked and not flow_anchors:
                 log.info(
@@ -3010,10 +2872,10 @@ def main(argv: list | None = None) -> None:
         # "solo 7 su 9 annunciate, conviene rigenerare l'audio" — cioè al
         # podcast veniva attribuito il danno del trascrittore, e con
         # --no-confirm (genera_video.bat) nessuno leggeva l'avviso. Con poche
-        # ancore la timeline sarà stimata (9Router o fallback MiniLM) e le slide
+        # ancore la timeline sarà stimata (motore embedding) e le slide
         # non annunciate avranno durate brevi o micro-segmenti: QUESTO resta
         # vero, e i due gate restano, ma scattano dopo i rimedi e lo dicono.
-        if flow != "free" and words_raw:
+        if words_raw:
             early_anchors = flow_anchors
             early_missing = [s for s in range(2, total_slides + 1) if s not in early_anchors]
             # Gate opzionale (batch/CI): con --require-full-anchors un podcast che
@@ -3097,7 +2959,7 @@ def main(argv: list | None = None) -> None:
                     ", ".join(str(s) for s in early_missing),
                     _recovery_attempts_note(_gap_recovered, _accurate_beam_tried),
                 )
-                if is_interactive() and not args.no_confirm:
+                if sys.stdin.isatty() and not args.no_confirm:
                     try:
                         input(
                             "   Premi Invio per continuare con la sincronizzazione stimata, "
@@ -3112,619 +2974,297 @@ def main(argv: list | None = None) -> None:
         if not words_raw:
             _abort("Trascrizione non disponibile: impossibile sincronizzare.")
 
-        # --- Flusso libero RIMOSSO: le slide seguono il contenuto del
-        # podcast e possono apparire in qualsiasi ordine o ripetersi ---
+        # --- Ancore deterministiche "slide N" dalla trascrizione ---
+        # Riferimenti espliciti ad alta precisione che vincolano l'allineamento
+        # semantico. Sono già state calcolate sopra (`flow_anchors`) e ricalcolate
+        # se la scelta automatica del beam ha rifatto la trascrizione: riusarle
+        # evita una seconda scansione identica (e il suo log duplicato).
         slide_ids: list[int]
-        if flow == "free":
-            _abort(
-                "Flusso libero non supportato: nella trascrizione non ci sono "
-                "riferimenti riconoscibili ('slide N' per slide-audio, "
-                "'blocco successivo' per audio-slide). Rigenera l'audio "
-                "annunciando le slide ('Passiamo alla slide N', vedi "
-                "PROMPT_PRESENTAZIONE (PREDEFINITO).md) oppure forza "
-                "--flow slide-audio se sai cosa fai."
+        semantic_anchors = flow_anchors
+        # Riferimento parlato alla "slide 1": la slide 1 reale è sempre 0.0,
+        # ma la numerazione dello speaker può essere sfasata (dice "slide 1"
+        # mostrando la slide 2 del PDF). Viene passato alla verifica del
+        # mapping (euristica deterministica), mai usato come ancora vincolante.
+        slide_one_refs = extract_slide_one_references(words_raw, total_slides)
+        if semantic_anchors:
+            log.info(
+                "3. [Ancore] %d ancore 'slide N' coerenti usate per vincolare l'allineamento semantico.",
+                len(semantic_anchors),
             )
         else:
-            # Ancore deterministiche "slide N" dalla trascrizione: riferimenti
-            # espliciti ad alta precisione che vincolano l'allineamento semantico.
-            # Sono già state calcolate sopra (`flow_anchors`) e ricalcolate se la
-            # scelta automatica del beam ha rifatto la trascrizione: riusarle
-            # evita una seconda scansione identica (e il suo log duplicato).
-            semantic_anchors = flow_anchors
-            # Riferimento parlato alla "slide 1": la slide 1 reale è sempre 0.0,
-            # ma la numerazione dello speaker può essere sfasata (dice "slide 1"
-            # mostrando la slide 2 del PDF). Viene passato SOLO alla verifica LLM
-            # del mapping, mai usato come ancora vincolante.
-            slide_one_refs = extract_slide_one_references(words_raw, total_slides)
-            if semantic_anchors:
-                log.info(
-                    "3. [Ancore] %d ancore 'slide N' coerenti usate per vincolare l'allineamento semantico.",
-                    len(semantic_anchors),
-                )
-            else:
-                log.info("3. Nessun riferimento 'slide N': sincronizzazione solo per contenuto.")
-            # Numerazione stampata sulle slide vs posizione della pagina. Non
-            # corregge nulla di proposito: la sincronizzazione e' gia' vincolata
-            # alle ancore pronunciate, e l'etichetta stampata e' un difetto dei
-            # materiali che l'utente deve sapere, non un errore da nascondere.
-            if slide_texts:
-                _avviso_numerazione = _check_numerazione_stampata(slide_texts)
-                if _avviso_numerazione:
-                    log.warning("   %s", _avviso_numerazione)
-            if slide_one_refs:
-                log.info(
-                    "   [Ancore] Riferimento parlato alla 'slide 1' a %.1fs: "
-                    "passato alla verifica del mapping (numerazione sfasata).",
-                    next(iter(slide_one_refs.values())),
-                )
-
-            # --- Verifica mapping ancore: numero parlato -> slide reale del PDF ---
-            # Il podcast potrebbe NON seguire le regole del prompt NotebookLM: la
-            # numerazione parlata può essere sfasata rispetto al PDF (es. lo speaker
-            # dice "quarta diapositiva" ma mostra la slide 5). L'euristica
-            # deterministica (embeddings locali) corregge subito gli offset
-            # sistematici; l'LLM legge invece il contenuto del parlato dopo ogni
-            # riferimento "slide N" e corregge il numero di slide, mantenendo i
-            # TEMPI esatti. Fallback: ancore originali.
-            # L'euristica DETERMINISTICA gira SEMPRE (offline, ~2s con cache): è
-            # l'unico controllo che nota uno sfasamento di numerazione anche quando
-            # tutte le slide sono annunciate, cioè proprio quando non manca nulla
-            # e l'LLM non avrebbe niente da aggiungere. La verifica LLM resta
-            # sotto la soglia delle slide senza ancora.
-            verify_anchors = {**semantic_anchors, **slide_one_refs}
-            # Esito della verifica del mapping: `suspicious` (offset non
-            # correggibile in modo affidabile) e `unconfirmed` (ancore che il
-            # parlato non conferma). Finiscono nel report anche se la verifica
-            # non viene eseguita, per non dover distinguere i due casi a valle.
-            _anchor_report: dict[str, Any] = {}
-            _mapping_corrected = False
-            _mapping_checked = False
-            # 1) Euristica DETERMINISTICA (embeddings locali, offline):
-            #    se la numerazione parlata è sistematicamente sfasata (es.
-            #    copertina esclusa: "slide 1" -> slide 2 del PDF) la corregge
-            #    senza chiamare 9Router. Funziona anche con --llm off.
-            if len(verify_anchors) >= 2:
-                _mapping_checked = True
-                verified = verify_anchor_mapping_embedding(
-                    slide_texts,
-                    words_raw,
-                    verify_anchors,
-                    total_slides,
-                    window_seconds=40.0,
-                    options=SemanticOptions(
-                        model_name=args.semantic_model,
-                        cache_dir=args.semantic_cache_dir,
-                    ),
-                    report=_anchor_report,
-                )
-                if verified is not None:
-                    # La slide 1 reale è sempre 0.0: un eventuale mapping a slide 1
-                    # (es. ripasso della prima slide a metà narrazione) non è un
-                    # confine di transizione e non deve vincolare la timeline.
-                    verified = {s: t for s, t in verified.items() if s != 1}
-                    log.info(
-                        "   Mapping ancore corretto dall'euristica deterministica: %d ancore.",
-                        len(verified),
-                    )
-                    semantic_anchors = verified
-                    _mapping_corrected = True
-                elif args.llm != "off":
-                    # Salto la verifica LLM SOLO quando il mapping è coerente: una
-                    # sola slide senza ancora (caso più comune: 13/14 annunciate) e
-                    # nessun offset sospetto dall'euristica deterministica. Se
-                    # l'euristica ha visto almeno un'ancora il cui contenuto NON
-                    # conferma il numero parlato ma non può correggere in modo
-                    # affidabile (una sola slide sfasata, drift a intermittenza),
-                    # la verifica LLM parte comunque: è proprio il caso in cui la
-                    # scorciatoia nasconderebbe un disallineamento (es. una slide
-                    # mai nominata a metà deck che sfasa tutte le successive).
-                    # La verifica resta inoltre per i casi già coperti: recap della
-                    # slide 1 o ≥2 slide senza ancora.
-                    anchor_mapping_suspicious = _anchor_report.get("suspicious", False)
-                    if (
-                        slide_one_refs
-                        or (total_slides - 1 - len(semantic_anchors) >= 2)
-                        or anchor_mapping_suspicious
-                    ):
-                        # 2) Fallback LLM: la numerazione non ha offset sistematico
-                        #    rilevabile, lascio decidere all'LLM (lettura del contenuto).
-                        endpoints = endpoints_for(args.llm)
-                        if args.llm_model:
-                            for ep in endpoints:
-                                ep["model"] = args.llm_model
-                        log.info("   Verifica mapping ancore con LLM (--llm %s)...", args.llm)
-                        # Validatore dei rimappi LLM: un rimappo che contraddice il
-                        # contenuto del parlato (embeddings locali) viene scartato,
-                        # perché le ancore esplicite sono vincoli ad alta precisione
-                        # e un rimappo errato rompe la timeline (es. slide 4/5).
-                        remap_filter = make_anchor_remap_filter(
-                            slide_texts,
-                            words_raw,
-                            total_slides,
-                            window_seconds=40.0,
-                            options=SemanticOptions(
-                                model_name=args.semantic_model,
-                                cache_dir=args.semantic_cache_dir,
-                            ),
-                        )
-                        try:
-                            verified = llm_verify_anchor_mapping(
-                                slide_texts,
-                                words_raw,
-                                verify_anchors,
-                                total_slides,
-                                endpoints=endpoints,
-                                wait_timeout=args.llm_wait_timeout,
-                                strict=True,
-                                remap_filter=remap_filter,
-                            )
-                        except RuntimeError as e:
-                            # 9Router necessario ma non avviabile/non online: niente
-                            # fallback silenzioso, il processo si arresta con l'avviso.
-                            _abort(str(e))
-                        if verified is not None:
-                            # La slide 1 reale è sempre 0.0: un eventuale mapping a slide 1
-                            # (es. ripasso della prima slide a metà narrazione) non è un
-                            # confine di transizione e non deve vincolare la timeline.
-                            verified = {s: t for s, t in verified.items() if s != 1}
-                            log.info(
-                                "   Mapping ancore corretto dall'LLM: %d ancore verificate.",
-                                len(verified),
-                            )
-                            semantic_anchors = verified
-                            _mapping_corrected = True
-                    else:
-                        log.info(
-                            "   [Ancore] Una sola slide senza ancora e mapping coerente "
-                            "(nessun offset sospetto): salto la verifica LLM del mapping "
-                            "(le ancore restano quelle deterministiche) e risparmio ~1 min."
-                        )
-
-            # Ultima transizione detta con un numero più grande del deck ("slide 15"
-            # su un PDF da 14): la menzione è fuori portata, quindi la verifica del
-            # mapping non la vede. Il TEMPO però è la misura dello speaker, e senza
-            # di esso l'ultima slide resta posizionata a tentativi.
-            _tail = out_of_range_tail_anchor(words_raw, total_slides, semantic_anchors)
-            if _tail:
-                for _s, _t in _tail.items():
-                    log.info(
-                        "   [Ancore] L'ultimo annuncio supera il numero di slide del "
-                        "PDF: la transizione finale è riammessa sulla slide %d a %.1fs.",
-                        _s,
-                        _t,
-                    )
-                semantic_anchors = {**semantic_anchors, **_tail}
-
-            # Log diagnostico condiviso (stato finale ancore, post-verifica):
-            # le slide senza ancora esplicita sono quelle che il flusso ibrido
-            # posizionerà con l'LLM (o che il MiniLM allinea per contenuto).
-            _missing_anchors = sorted(
-                s for s in range(2, total_slides + 1) if s not in semantic_anchors
+            log.info("3. Nessun riferimento 'slide N': sincronizzazione solo per contenuto.")
+        # Numerazione stampata sulle slide vs posizione della pagina. Non
+        # corregge nulla di proposito: la sincronizzazione e' gia' vincolata
+        # alle ancore pronunciate, e l'etichetta stampata e' un difetto dei
+        # materiali che l'utente deve sapere, non un errore da nascondere.
+        if slide_texts:
+            _avviso_numerazione = _check_numerazione_stampata(slide_texts)
+            if _avviso_numerazione:
+                log.warning("   %s", _avviso_numerazione)
+        if slide_one_refs:
+            log.info(
+                "   [Ancore] Riferimento parlato alla 'slide 1' a %.1fs: "
+                "passato alla verifica del mapping (numerazione sfasata).",
+                next(iter(slide_one_refs.values())),
             )
-            if _missing_anchors:
-                log.info(
-                    "   [Ancore] Slide senza ancora esplicita dopo la verifica (%d): %s.",
-                    len(_missing_anchors),
-                    ", ".join(str(s) for s in _missing_anchors),
-                )
 
-            # Diagnosi delle ancore sull'artefatto: con quasi tutte le transizioni
-            # inchiodate dai riferimenti parlati, la misura di qualità del motore
-            # non distingue più "allineamento misurato" da "ancora sbagliata".
-            # Copertura, ancore non confermate dal parlato e citazioni scartate
-            # sono i tre dati che rendono la timeline ispezionabile a posteriori.
-            sync_notes["anchors"] = {
-                "anchored": len(semantic_anchors),
-                "transitions": total_slides - 1,
-                "unanchored_slides": _missing_anchors,
-                "mapping_checked": _mapping_checked,
-                "mapping_suspicious": bool(_anchor_report.get("suspicious", False)),
-                "mapping_corrected": _mapping_corrected,
-                # Le ancore "non confermate" sono calcolate sul NUMERO PARLATO:
-                # se il mapping è stato corretto, il disaccordo è spiegato e
-                # rivolerlo come dubbio sarebbe un falso allarme su tutte le
-                # ancore rimappate (è il caso normale del deck con una pagina in
-                # meno). Restano sull'artefatto per l'ispezione, ma senza generare
-                # un dubbio che l'utente non può agire.
-                "unconfirmed": (
-                    []
-                    if _mapping_corrected
-                    else list(_anchor_report.get("unconfirmed") or [])
+        # --- Verifica mapping ancore: numero parlato -> slide reale del PDF ---
+        # Il podcast potrebbe NON seguire le regole del prompt NotebookLM: la
+        # numerazione parlata può essere sfasata rispetto al PDF (es. lo speaker
+        # dice "quarta diapositiva" ma mostra la slide 5). L'euristica
+        # deterministica (embeddings locali, offline) corregge subito gli offset
+        # sistematici mantenendo i TEMPI esatti. Fallback: ancore originali.
+        verify_anchors = {**semantic_anchors, **slide_one_refs}
+        # Esito della verifica del mapping: `suspicious` (offset non
+        # correggibile in modo affidabile) e `unconfirmed` (ancore che il
+        # parlato non conferma). Finiscono nel report per l'ispezione.
+        _anchor_report: dict[str, Any] = {}
+        _mapping_corrected = False
+        _mapping_checked = False
+        # Euristica DETERMINISTICA (embeddings locali, offline):
+        # se la numerazione parlata è sistematicamente sfasata (es.
+        # copertina esclusa: "slide 1" -> slide 2 del PDF) la corregge
+        # senza rete.
+        if len(verify_anchors) >= 2:
+            _mapping_checked = True
+            verified = verify_anchor_mapping_embedding(
+                slide_texts,
+                words_raw,
+                verify_anchors,
+                total_slides,
+                window_seconds=40.0,
+                options=SemanticOptions(
+                    model_name=args.semantic_model,
+                    cache_dir=args.semantic_cache_dir,
                 ),
-                # "uniforme" | "mista" | "": serve al messaggio finale, che
-                # altrimenti non distingue "numerazione sfalsata" da "motore
-                # incerto" e descrive come difetto una sincronizzazione regolare.
-                "disaccordo": (
-                    "" if _mapping_corrected else str(_anchor_report.get("disaccordo") or "")
-                ),
-                "discarded_citations": discarded_citations(words_raw, total_slides, semantic_anchors),
-            }
-
-            # --- Pulizia cache LLM orfane ---
-            # Con podcast/presentazione nuovi le chiavi contenuto-specifiche
-            # cambiano: le cache LLM di run precedenti non servono più. Si
-            # conservano SOLO quelle che questa run può riusare (stessi
-            # contenuti, calcolate con gli stessi endpoint) e la timeline finale.
-            if llm_disponibile:
-                _llm_endpoints = endpoints_for(llm_rilevato)
-                if args.llm_model:
-                    for ep in _llm_endpoints:
-                        ep["model"] = args.llm_model
-                _llm_keep = {"llm_timeline_finale"}
-                _llm_keep.update(
-                    llm_cache_keys_for(
-                        slide_texts,
-                        words_raw,
-                        total_slides,
-                        args.llm_chunk,
-                        _llm_endpoints,
-                        [verify_anchors, semantic_anchors],
-                    )
-                )
-                _llm_cleaned = _clean_stale_llm_cache(_llm_keep)
-                if _llm_cleaned:
-                    log.info("   🧹 Rimosse %d cache LLM orfane (contenuti cambiati).", _llm_cleaned)
-
-            # --- Flusso IBRIDO (ordinato + LLM, con fallback locale) ---
-            # Le ancore deterministiche sono vincoli ESATTI e inviolabili. Se
-            # restano slide senza ancora esplicita (mai nominate o narrate fuori
-            # posizione), serve posizionarle dove il loro contenuto è discusso.
-            #
-            # ORDINE DEI PERCORSI: il motore embedding locale gira PRIMA, sempre.
-            # Costa pochi secondi (embedding in cache) e produce una timeline
-            # valida, così l'LLM diventa un ESCALATION e non un prerequisito.
-            #
-            # Prima era il contrario: oltre `--llm-local-threshold` slide senza
-            # ancora si saltava dritto all'LLM e, se falliva, si ricalcolava da
-            # capo il motore locale. Nel run del 25/09 (12 slide senza ancora)
-            # questo costava ~328s di cascata LLM per arrivare esattamente al
-            # fallback locale che si sarebbe potuto avere in 2s. Ora la timeline
-            # locale esiste SEMPRE e viene RIUSATA se l'LLM non dà niente.
-            timeline: dict[int, float] | None = None
-            # Timeline già calcolata dal motore locale: se l'LLM fallisce la si
-            # riusa invece di ricalcolarla (stessa funzione, embedding in cache,
-            # ma work doppio inutile).
-            local_timeline: dict[int, float] | None = None
-            llm_hybrid_attempted = False
-            # `senza_ancore` è il flusso podcast -> slide: lì le ancore non
-            # esistono PER PROGETTO (il prompt le vieta), quindi il ramo ibrido
-            # non entrava mai e l'escalation — l'unico meccanismo che
-            # riposiziona le slide non ancorate — restava irraggiungibile
-            # proprio dove serviva. Il messaggio di `semantic_sync` ("con l'LLM
-            # attivo le slide non ancorate vengono riposizionate") era quindi
-            # una promessa falsa per costruzione.
-            senza_ancore = not semantic_anchors
-            if llm_disponibile and (
-                (semantic_anchors and len(semantic_anchors) < total_slides - 1)
-                or senza_ancore
-            ):
-                missing_count = (total_slides - 1) - len(semantic_anchors)
-                # Il flag di segnale debole è globale: azzerato qui per
-                # misurarlo SOLO su questa chiamata (altrimenti una
-                # rilevazione precedente della stessa run lo falserebbe).
-                reset_weak_signal_flag()
-                log.info(
-                    "   Flusso ibrido: %d slide senza ancora. Provo prima il motore "
-                    "embedding locale (semantic + refine, nessuna attesa di rete)...",
-                    missing_count,
-                )
-                local_timeline = semantic_timeline_from_words(
-                    slide_texts,
-                    words_raw,
-                    total_slides,
-                    total_duration,
-                    options=SemanticOptions(
-                        model_name=args.semantic_model,
-                        cache_dir=args.semantic_cache_dir,
-                        window_seconds=args.semantic_window,
-                        min_slide_duration=args.semantic_min_duration,
-                        min_avg_z=args.semantic_min_z,
-                        temperature=args.semantic_temperature,
-                    ),
-                    anchors=semantic_anchors,
-                )
-                weak_local = weak_signal_seen()
-                local_failed = local_timeline is None
-                # Serve l'LLM quando: il motore locale non ha prodotto nulla,
-                # OPPURE le slide senza ancora sono troppe per il raffinamento
-                # locale, OPPURE il motore stesso dichiara il segnale
-                # inaffidabile. La decisione è in `_needs_llm_escalation` (quindi
-                # è testabile da sola): il motore locale ha GIA' prodotto una
-                # timeline, l'LLM è solo un tentativo di migliorarla.
-                #
-                # Nel flusso SENZA ancore la regola è diversa e più stretta, per
-                # non spendere una chiamata LLM (~16 min) a ogni run: lì le
-                # ancore mancano per progetto, quindi "troppe slide senza ancora"
-                # è SEMPRE vero e farebbe scattare l'escalation sempre. L'unica
-                # ragione sufficiente è che il motore locale dichiari il segnale
-                # debole: non è un numero, è un fatto ("non distinguo queste
-                # slide"). Se il motore è convinto, la sua timeline va bene.
-                if senza_ancore:
-                    need_llm = _escalate_senza_ancore(
-                        weak_local=weak_local,
-                        local_failed=local_failed,
-llm_enabled=llm_disponibile,
-                    )
-                else:
-                    need_llm = _needs_llm_escalation(
-                        local_failed=local_failed,
-                        weak_local=weak_local,
-                        missing_count=missing_count,
-                        llm_local_threshold=args.llm_local_threshold,
-                        llm_enabled=llm_disponibile,
-                    )
-                if weak_local and not local_failed:
-                    log.warning(
-                        "\n   [Fallback] Motore embedding locale con segnale DEBOLE: "
-                        "l'audio potrebbe non seguire l'ordine delle slide, quindi passo "
-                        "all'LLM per posizionare le %d slide senza ancora.",
-                        missing_count,
-                    )
-                    sync_notes["engine"] = "llm_escalated_weak_signal"
-                if not need_llm and local_timeline is not None:
-                    # La timeline locale basta: raffinamento a livello di parola
-                    # SOLO delle slide senza ancora (stesso refine usato dopo
-                    # l'LLM: deterministico, zero chiamate di rete). Le ancore
-                    # esatte restano ai loro timestamp pronunciati.
-                    log.info(
-                        "   Post-elaborazione locale: raffinamento confini a "
-                        "livello di parola (solo slide senza ancora)..."
-                    )
-                    timeline = refine_llm_timeline_from_words(
-                        local_timeline,
-                        semantic_anchors,
-                        words_raw,
-                        slide_texts,
-                        total_duration,
-                        options=SemanticOptions(
-                            model_name=args.semantic_model,
-                            cache_dir=args.semantic_cache_dir,
-                        ),
-                        window_seconds=min(args.llm_chunk, 30.0),
-                    )
-                if need_llm:
-                    # Percorso B: molte slide senza ancora (oppure percorso A
-                    # abbandonato per segnale debole). Serve l'LLM per capire dove
-                    # viene discusso il contenuto: 9Router parte in automatico se
-                    # spento (wait_for_router in llm_ordered_timeline).
-                    llm_hybrid_attempted = True
-                    endpoints = endpoints_for(llm_rilevato)
-                    if args.llm_model:
-                        for ep in endpoints:
-                            ep["model"] = args.llm_model
-                    log.info(
-                        "   Flusso ibrido: ancore esatte + LLM per le %d slide senza ancora (--llm %s)...",
-                        missing_count,
-                        llm_rilevato,
-                    )
-                    try:
-                        timeline = llm_ordered_timeline(
-                            slide_texts,
-                            words_raw,
-                            total_slides,
-                            total_duration,
-                            anchors=semantic_anchors,
-                            chunk_seconds=args.llm_chunk,
-                            endpoints=endpoints,
-                            wait_timeout=args.llm_wait_timeout,
-                            strict=True,
-                        )
-                    except RuntimeError as e:
-                        # 9Router necessario ma non avviabile/non online: niente
-                        # fallback silenzioso, il processo si arresta con l'avviso.
-                        _abort(str(e))
-                    if timeline is not None:
-                        log.info("   Timeline ibrida generata dall'LLM (ancore esatte preservate).")
-                        # Post-elaborazione dei SOLI confini LLM del flusso ordinato:
-                        # l'LLM lavora su chunk da `llm_chunk` secondi, quindi i
-                        # confini delle slide SENZA ancora esplicita possono cadere a
-                        # metà parola o nel mezzo di un discorso ancora dedicato alla
-                        # slide precedente. Il refine sposta SOLO quei confini al
-                        # punto di parola in cui la similarità locale si inverte; le
-                        # ancore esatte restano intoccate (stesso modello embedding
-                        # in cache, zero chiamate LLM). Il MiniLM del fallback non ha
-                        # bisogno del refine: i suoi confini sono già allineati alle
-                        # parole (first_time dei blocchi da `semantic_window`s).
-                        # Nota: la cache llm_*.json conserva la timeline GREZZA
-                        # dell'LLM; il raffinamento è deterministico e viene
-                        # riapplicato a ogni run sopra il risultato cachato.
-                        log.info(
-                            "   Post-elaborazione timeline LLM: raffinamento confini a livello di parola "
-                            "(solo slide senza ancora)..."
-                        )
-                        timeline = refine_llm_timeline_from_words(
-                            timeline,
-                            semantic_anchors,
-                            words_raw,
-                            slide_texts,
-                            total_duration,
-                            options=SemanticOptions(
-                                model_name=args.semantic_model,
-                                cache_dir=args.semantic_cache_dir,
-                            ),
-                            window_seconds=min(args.llm_chunk, 30.0),
-                        )
-
-            if timeline is None:
-                if llm_hybrid_attempted:
-                    log.warning(
-                        "\n   [Avviso] L'LLM non ha prodotto una timeline coerente con le "
-                        "ancore (posizioni in conflitto o risposta non interpretabile).\n"
-                        "   Ripiego sul motore locale (embeddings): qualità inferiore, "
-                        "possibili micro-segmenti sulle slide senza ancora.\n"
-                        "   Il problema nasce dal podcast: poche ancore 'slide N' "
-                        "annunciate. Rigenera l'audio se possibile.\n"
-                    )
-                if local_timeline is not None:
-                    # Il motore locale ha GIA' prodotto questa timeline prima
-                    # dell'escalation all'LLM: si riusa il risultato invece di
-                    # ricalcolare da capo la stessa funzione con gli stessi
-                    # embedding. Il refine a granularità di parola viene
-                    # applicato anche qui: prima non lo era, con la scusa che
-                    # "la differenza sarebbe solo il refine", ma la differenza
-                    # è il confine delle slide SENZA ancora, che è
-                    # esattamente quello che l'escalation doveva migliorare.
-                    # Run del 04/10: l'LLM ha risposto per 12 chunk su 28 e la
-                    # guardia anti-troncamento l'ha respinto (correttamente),
-                    # il fallback ha riescluso la timeline locale GREZZA e la
-                    # slide 12, unica senza ancora, restava 35s prima del suo
-                    # confine vero. Con il refine va a 730.7s: non risolve, ma
-                    # è il massimo che le embedding possono fare su questo deck.
-                    log.info(
-                        "   Uso la timeline del motore embedding locale gia' calcolata "
-                        "prima dell'escalation all'LLM, con il raffinamento dei "
-                        "confini senza ancora."
-                    )
-                    timeline = refine_llm_timeline_from_words(
-                        local_timeline,
-                        semantic_anchors,
-                        words_raw,
-                        slide_texts,
-                        total_duration,
-                        options=SemanticOptions(
-                            model_name=args.semantic_model,
-                            cache_dir=args.semantic_cache_dir,
-                        ),
-                        window_seconds=min(args.llm_chunk, 30.0),
-                    )
-                else:
-                    log.info("   Sincronizzazione semantica (embeddings offline)...")
-                    timeline = semantic_timeline_from_words(
-                        slide_texts,
-                        words_raw,
-                        total_slides,
-                        total_duration,
-                        options=SemanticOptions(
-                            model_name=args.semantic_model,
-                            cache_dir=args.semantic_cache_dir,
-                            window_seconds=args.semantic_window,
-                            min_slide_duration=args.semantic_min_duration,
-                            min_avg_z=args.semantic_min_z,
-                            temperature=args.semantic_temperature,
-                        ),
-                        anchors=semantic_anchors,
-                    )
-
-            if timeline is None:
-                _abort("Sincronizzazione semantica fallita: nessuna timeline generabile da slide + trascrizione.")
-
-            # Raffinamento dei SOLI confini senza ancora, su QUALSIASI motore.
-            # Il confine di una slide non annunciata cade su una frontiera di
-            # blocco da `semantic_window` secondi, che puo' essere a meta' del
-            # discorso: qui viene spostato al punto di parola in cui la
-            # similarita' locale si inverte. Le ancore pronunciate restano ai
-            # loro timestamp.
-            #
-            # Va fatto anche senza LLM: prima questa post-elaborazione esisteva
-            # solo nei rami che passano dall'escalation, e con `--llm off` (che
-            # e' il default) non girava mai. Misurato sul run del 04/10: la
-            # slide 12, unica senza ancora, restava a 720s invece di 757.5s.
-            # Sotto LLM la stessa slide era a 757.5s: la differenza non era il
-            # modello, era che il refine non era passato.
-            if len(semantic_anchors) < total_slides - 1:
-                log.info(
-                    "   Raffinamento a livello di parola dei confini senza ancora..."
-                )
-                timeline = refine_llm_timeline_from_words(
-                    timeline,
-                    semantic_anchors,
-                    words_raw,
-                    slide_texts,
-                    total_duration,
-                    options=SemanticOptions(
-                        model_name=args.semantic_model,
-                        cache_dir=args.semantic_cache_dir,
-                    ),
-                    window_seconds=min(args.llm_chunk, 30.0),
-                )
-
-            # --- Anti-flicker: garanzia di durata minima per ogni slide ---
-            # Una slide a video 1-4s è un lampo illeggibile (tipico delle slide
-            # senza ancora posizionate a ridosso dell'ancora successiva). Qui le
-            # slide troppo corte vengono allungate spostando SOLO i confini NON
-            # ancorati: le ancore "slide N" pronunciate restano esatte al
-            # decimo di secondo (principio del progetto). Stessa soglia
-            # dell'anti-flicker del flusso libero: max(8s, 2x durata minima).
-            min_slide_seconds = anti_flicker_floor(args.semantic_min_duration)
-            timeline_before_floor = dict(timeline)
-            timeline, _moved = enforce_min_durations(
-                timeline,
-                total_duration,
-                min_slide_seconds,
-                anchors=semantic_anchors,
+                report=_anchor_report,
             )
-            floor_note = _floor_report(
-                timeline_before_floor, timeline, total_duration, min_slide_seconds
+            if verified is not None:
+                # La slide 1 reale è sempre 0.0: un eventuale mapping a slide 1
+                # (es. ripasso della prima slide a metà narrazione) non è un
+                # confine di transizione e non deve vincolare la timeline.
+                verified = {s: t for s, t in verified.items() if s != 1}
+                log.info(
+                    "   Mapping ancore corretto dall'euristica deterministica: %d ancore.",
+                    len(verified),
+                )
+                semantic_anchors = verified
+                _mapping_corrected = True
+
+        # Ultima transizione detta con un numero più grande del deck ("slide 15"
+        # su un PDF da 14): la menzione è fuori portata, quindi la verifica del
+        # mapping non la vede. Il TEMPO però è la misura dello speaker, e senza
+        # di esso l'ultima slide resta posizionata a tentativi.
+        _tail = out_of_range_tail_anchor(words_raw, total_slides, semantic_anchors)
+        if _tail:
+            for _s, _t in _tail.items():
+                log.info(
+                    "   [Ancore] L'ultimo annuncio supera il numero di slide del "
+                    "PDF: la transizione finale è riammessa sulla slide %d a %.1fs.",
+                    _s,
+                    _t,
+                )
+            semantic_anchors = {**semantic_anchors, **_tail}
+
+        # Log diagnostico condiviso (stato finale ancore, post-verifica):
+        # le slide senza ancora esplicita sono quelle che il motore
+        # embedding allinea per contenuto.
+        _missing_anchors = sorted(
+            s for s in range(2, total_slides + 1) if s not in semantic_anchors
+        )
+        if _missing_anchors:
+            log.info(
+                "   [Ancore] Slide senza ancora esplicita dopo la verifica (%d): %s.",
+                len(_missing_anchors),
+                ", ".join(str(s) for s in _missing_anchors),
             )
-            sync_notes["anti_flicker"] = floor_note
-            floor_guaranteed, floor_unguaranteed, floor_min = _floor_split(floor_note)
-            # Slide senza tempo proprio nel podcast: il sintomo ispezionabile del
-            # deck con piu' pagine delle sezioni realmente sviluppate. Va nel
-            # report perche' spiega da solo le durate che altrimenti appaiono
-            # come misurate dal parlato.
-            starved_slides = _starved_slides(floor_note, floor_min)
-            if starved_slides:
-                sync_notes["starved_slides"] = {
-                    "slides": starved_slides,
-                    "natural_seconds": {
-                        str(s): _floor_before(floor_note).get(s, 0.0)
-                        for s in starved_slides
-                    },
-                    "floor_seconds": floor_min,
-                }
-            if _moved:
-                log.info(
-                    "   Anti-flicker: %d confini non ancorati spostati per garantire "
-                    "almeno %.0fs per slide (%s).",
-                    len(_moved),
-                    min_slide_seconds,
-                    ", ".join(f"slide {s}: {old:.1f}->{new:.1f}s" for s, old, new in _moved),
-                )
-            if floor_guaranteed:
-                # La durata di queste slide è una GARANZIA di leggibilità, non una
-                # misura del parlato: dirlo, invece di far apparire "8s" come se
-                # fosse un confine trovato.
-                log.info(
-                    "   Anti-flicker: per %s il minimo di %.0fs ha DECISO la durata "
-                    "(garanzia di leggibilità, non misura del parlato: il tempo è "
-                    "stato preso alle slide vicine).",
-                    _slide_list_text(sorted(floor_guaranteed)),
-                    min_slide_seconds,
-                )
-            if floor_unguaranteed:
+
+        # Diagnosi delle ancore sull'artefatto: con quasi tutte le transizioni
+        # inchiodate dai riferimenti parlati, la misura di qualità del motore
+        # non distingue più "allineamento misurato" da "ancora sbagliata".
+        # Copertura, ancore non confermate dal parlato e citazioni scartate
+        # sono i tre dati che rendono la timeline ispezionabile a posteriori.
+        sync_notes["anchors"] = {
+            "anchored": len(semantic_anchors),
+            "transitions": total_slides - 1,
+            "unanchored_slides": _missing_anchors,
+            "mapping_checked": _mapping_checked,
+            "mapping_suspicious": bool(_anchor_report.get("suspicious", False)),
+            "mapping_corrected": _mapping_corrected,
+            # Le ancore "non confermate" sono calcolate sul NUMERO PARLATO:
+            # se il mapping è stato corretto, il disaccordo è spiegato e
+            # rivolerlo come dubbio sarebbe un falso allarme su tutte le
+            # ancore rimappate (è il caso normale del deck con una pagina in
+            # meno). Restano sull'artefatto per l'ispezione, ma senza generare
+            # un dubbio che l'utente non può agire.
+            "unconfirmed": (
+                []
+                if _mapping_corrected
+                else list(_anchor_report.get("unconfirmed") or [])
+            ),
+            # "uniforme" | "mista" | "": serve al messaggio finale, che
+            # altrimenti non distingue "numerazione sfalsata" da "motore
+            # incerto" e descrive come difetto una sincronizzazione regolare.
+            "disaccordo": (
+                "" if _mapping_corrected else str(_anchor_report.get("disaccordo") or "")
+            ),
+            "discarded_citations": discarded_citations(words_raw, total_slides, semantic_anchors),
+        }
+
+        # --- Sincronizzazione: solo motore embedding locale (offline) ---
+        # Le ancore deterministiche sono vincoli ESATTI e inviolabili. Le
+        # slide senza ancora esplicita vengono posizionate dove il loro
+        # contenuto è discusso, dal motore embedding + raffinamento a
+        # livello di parola (nessuna rete, nessun servizio esterno).
+        #
+        # Il flag di segnale debole è globale: azzerato qui per misurarlo
+        # SOLO su questa chiamata (altrimenti una rilevazione precedente
+        # della stessa run lo falserebbe).
+        reset_weak_signal_flag()
+        log.info("   Sincronizzazione semantica (embeddings offline)...")
+        timeline: dict[int, float] | None = semantic_timeline_from_words(
+            slide_texts,
+            words_raw,
+            total_slides,
+            total_duration,
+            options=SemanticOptions(
+                model_name=args.semantic_model,
+                cache_dir=args.semantic_cache_dir,
+                window_seconds=args.semantic_window,
+                min_slide_duration=args.semantic_min_duration,
+                min_avg_z=args.semantic_min_z,
+                temperature=args.semantic_temperature,
+            ),
+            anchors=semantic_anchors,
+        )
+
+        if timeline is None:
+            _abort("Sincronizzazione semantica fallita: nessuna timeline generabile da slide + trascrizione.")
+
+        # Segnale debole: l'audio potrebbe non seguire l'ordine delle
+        # slide, quindi i confini stimati sono fragili. Non c'è un secondo
+        # motore a cui passare: si avvisa e si resta sul locale (il
+        # riepilogo finale lo segnala tra i dubbi).
+        if weak_signal_seen():
+            _missing = (total_slides - 1) - len(semantic_anchors)
+            if _missing > 0:
                 log.warning(
-                    "\n   [Avviso] Slide sotto il minimo leggibile e non allungabili "
-                    "(nessun confine non ancorato da spostare): %s.\n"
-                    "   Il rimedio è un'ancora 'slide N' pronunciata alla transizione "
-                    "o più parlato su quella slide.",
-                    ", ".join(
-                        f"slide {s} = {d:.0f}s" for s, d in sorted(floor_unguaranteed.items())
-                    ),
+                    "\n   [Avviso] Motore embedding locale con segnale DEBOLE: "
+                    "l'audio potrebbe non seguire l'ordine delle slide, quindi i "
+                    "confini delle %d slide senza ancora sono stime fragili.",
+                    _missing,
                 )
+                sync_notes["engine"] = "embedding_weak_signal"
 
-            t_sync = time.time() - t_phase_start
+        # Raffinamento dei SOLI confini senza ancora.
+        # Il confine di una slide non annunciata cade su una frontiera di
+        # blocco da `semantic_window` secondi, che puo' essere a meta' del
+        # discorso: qui viene spostato al punto di parola in cui la
+        # similarita' locale si inverte. Le ancore pronunciate restano ai
+        # loro timestamp. Gira sempre (non solo in casi particolari):
+        # misurato sul run del 04/10, senza questo passaggio la slide 12,
+        # unica senza ancora, restava a 720s invece di 757.5s.
+        if len(semantic_anchors) < total_slides - 1:
+            log.info(
+                "   Raffinamento a livello di parola dei confini senza ancora..."
+            )
+            timeline = refine_timeline_from_words(
+                timeline,
+                semantic_anchors,
+                words_raw,
+                slide_texts,
+                total_duration,
+                options=SemanticOptions(
+                    model_name=args.semantic_model,
+                    cache_dir=args.semantic_cache_dir,
+                ),
+            )
 
-            # --- Riconciliazione (precisione assoluta: interrompe se non valida) ---
-            try:
-                durations = reconcile_timeline(
-                    timeline,
-                    total_slides,
-                    total_duration,
-                )
-            except ValueError as e:
-                _abort(f"{e} Sincronizzazione impossibile senza distribuzioni inventate.")
-            slide_ids = list(range(1, total_slides + 1))
+        # --- Anti-flicker: garanzia di durata minima per ogni slide ---
+        # Una slide a video 1-4s è un lampo illeggibile (tipico delle slide
+        # senza ancora posizionate a ridosso dell'ancora successiva). Qui le
+        # slide troppo corte vengono allungate spostando SOLO i confini NON
+        # ancorati: le ancore "slide N" pronunciate restano esatte al
+        # decimo di secondo (principio del progetto). Soglia: max(8s,
+        # 2x durata minima).
+        min_slide_seconds = anti_flicker_floor(args.semantic_min_duration)
+        timeline_before_floor = dict(timeline)
+        timeline, _moved = enforce_min_durations(
+            timeline,
+            total_duration,
+            min_slide_seconds,
+            anchors=semantic_anchors,
+        )
+        floor_note = _floor_report(
+            timeline_before_floor, timeline, total_duration, min_slide_seconds
+        )
+        sync_notes["anti_flicker"] = floor_note
+        floor_guaranteed, floor_unguaranteed, floor_min = _floor_split(floor_note)
+        # Slide senza tempo proprio nel podcast: il sintomo ispezionabile del
+        # deck con piu' pagine delle sezioni realmente sviluppate. Va nel
+        # report perche' spiega da solo le durate che altrimenti appaiono
+        # come misurate dal parlato.
+        starved_slides = _starved_slides(floor_note, floor_min)
+        if starved_slides:
+            sync_notes["starved_slides"] = {
+                "slides": starved_slides,
+                "natural_seconds": {
+                    str(s): _floor_before(floor_note).get(s, 0.0)
+                    for s in starved_slides
+                },
+                "floor_seconds": floor_min,
+            }
+        if _moved:
+            log.info(
+                "   Anti-flicker: %d confini non ancorati spostati per garantire "
+                "almeno %.0fs per slide (%s).",
+                len(_moved),
+                min_slide_seconds,
+                ", ".join(f"slide {s}: {old:.1f}->{new:.1f}s" for s, old, new in _moved),
+            )
+        if floor_guaranteed:
+            # La durata di queste slide è una GARANZIA di leggibilità, non una
+            # misura del parlato: dirlo, invece di far apparire "8s" come se
+            # fosse un confine trovato.
+            log.info(
+                "   Anti-flicker: per %s il minimo di %.0fs ha DECISO la durata "
+                "(garanzia di leggibilità, non misura del parlato: il tempo è "
+                "stato preso alle slide vicine).",
+                _slide_list_text(sorted(floor_guaranteed)),
+                min_slide_seconds,
+            )
+        if floor_unguaranteed:
+            log.warning(
+                "\n   [Avviso] Slide sotto il minimo leggibile e non allungabili "
+                "(nessun confine non ancorato da spostare): %s.\n"
+                "   Il rimedio è un'ancora 'slide N' pronunciata alla transizione "
+                "o più parlato su quella slide.",
+                ", ".join(
+                    f"slide {s} = {d:.0f}s" for s, d in sorted(floor_unguaranteed.items())
+                ),
+            )
 
-            # --- Persistenza timeline finale (per gli strumenti di verifica) ---
-            # Il flusso semantico (MiniLM) NON salva una cache llm_*.json: senza
-            # questo file, analysis_sync.py riciclerebbe una timeline LLM vecchia
-            # di una run precedente, generando falsi mismatch. Il file usa il
-            # prefisso llm_ per sopravvivere alla pulizia delle cache orfane e
-            # viene sovrascritto a ogni run con gli start/end validati.
-            try:
-                _save_final_timeline(timeline, total_duration)
-            except OSError:
-                log.debug("   Impossibile salvare la timeline finale in cache (ignorato).")
+        t_sync = time.time() - t_phase_start
+
+        # --- Riconciliazione (precisione assoluta: interrompe se non valida) ---
+        try:
+            durations = reconcile_timeline(
+                timeline,
+                total_slides,
+                total_duration,
+            )
+        except ValueError as e:
+            _abort(f"{e} Sincronizzazione impossibile senza distribuzioni inventate.")
+        slide_ids = list(range(1, total_slides + 1))
+
+        # --- Persistenza timeline finale (per gli strumenti di verifica) ---
+        # Senza questo file, analysis_sync.py riciclerebbe la timeline di una
+        # run precedente, generando falsi mismatch. Viene sovrascritto a ogni
+        # run con gli start/end validati.
+        try:
+            _save_final_timeline(timeline, total_duration)
+        except OSError:
+            log.debug("   Impossibile salvare la timeline finale in cache (ignorato).")
 
         # --- Avviso: slide quasi non coperte dalla narrazione ---
         thin = [slide_ids[i] for i, d in enumerate(durations) if d < 2 * args.semantic_min_duration]
@@ -3776,7 +3316,6 @@ llm_enabled=llm_disponibile,
             if anomalous
             else {}
         )
-        review_diffs = review_diffs_seen()
         # Misura di qualità del motore embedding (picco medio normalizzato +
         # cosine grezza) e verdetto di fiducia: nel report, così una run può
         # essere riesaminata a posteriori senza rifare l'embedding.
@@ -3793,15 +3332,13 @@ llm_enabled=llm_disponibile,
             sync_notes["refine"] = refine_note
         # Il report dei segmenti va salvato SEMPRE, anche senza anomalie: è
         # l'artefatto che rende verificabile a posteriori cosa è stato mostrato,
-        # con quale verdetto di contenuto, quale motore è stato scelto e cosa ha
-        # segnalato la revisione LLM.
+        # con quale verdetto di contenuto e quale motore è stato scelto.
         sync_report = _build_sync_report(
             durations,
             slide_ids,
             total_duration,
             verdicts,
             notes=sync_notes,
-            review_diffs=review_diffs,
             versione=versione_programma(),
         )
         _save_sync_report(sync_report)
@@ -3889,37 +3426,12 @@ llm_enabled=llm_disponibile,
                         f"{durations[0]:.0f} secondi, oppure rimuovi --strict-sync."
                     )
 
-        # --- Revisione LLM (--llm-review): le discrepanze non vanno perse ---
-        # Il secondo passaggio LLM è "advisory" (non modifica la timeline) ma è
-        # già pagato: prima finiva solo nei log. Ora sta nel report e, con
-        # --strict-sync, blocca la generazione di un video sospetto.
-        if review_diffs:
-            log.warning(
-                "\n   [Verifica] La revisione LLM (--llm-review) ha segnalato %d "
-                "chunk con una slide diversa da quella proposta (dettagli in "
-                ".cache/sync_report.json).",
-                len(review_diffs),
-            )
-            if args.strict_sync:
-                details = ", ".join(
-                    f"chunk {d.get('chunk')} -> slide {d.get('slide')}"
-                    for d in review_diffs[:5]
-                )
-                _abort(
-                    f"La revisione LLM contesta la mappa chunk->slide ({details}). "
-                    "Il video NON è stato generato (--strict-sync attivo): "
-                    "controlla .cache/sync_report.json e la timeline, oppure "
-                    "rimuovi --strict-sync (o --llm-review) per procedere."
-                )
-
         # --- Filtro slide da non mostrare (--skip-slides) ---
         # Le slide saltate dal podcast (mai annunciate né discusse) restano
         # nel PDF (le ancore 'slide N' del parlato non si spostano), ma nei
         # loro segmenti il video mostra la slide precedente valida: l'audio
         # resta sincronizzato e il video mostra solo le slide coperte.
-        # Nel flusso libero le slide non coperte non vengono mostrate
-        # comunque, quindi il filtro è solo per i flussi ordinati.
-        if flow != "free" and args.skip_slides:
+        if args.skip_slides:
             skip_set = {
                 int(x) for x in args.skip_slides.split(",") if x.strip().isdigit()
             }
@@ -3996,7 +3508,6 @@ llm_enabled=llm_disponibile,
                 model_load_seconds(),
                 0.0,
                 t_total,
-                llm_seconds(),
                 video_encoder=getattr(args, "video_encoder", None),
             )
             _warn_sync_uncertainty()
@@ -4006,7 +3517,6 @@ llm_enabled=llm_disponibile,
                 total_duration,
                 verdicts=verdicts,
                 quality=quality,
-                review_diffs=len(review_diffs),
                 floor_report=floor_note,
                 anchors=cast("dict[str, object] | None", sync_notes.get("anchors")),
                 refine=cast("Sequence[dict[str, object]]", sync_notes.get("refine") or ()),
@@ -4154,7 +3664,6 @@ llm_enabled=llm_disponibile,
             model_load_seconds(),
             t_video,
             t_total,
-            llm_seconds(),
             video_encoder=getattr(args, "video_encoder", None),
         )
         _warn_sync_uncertainty(
@@ -4193,7 +3702,6 @@ llm_enabled=llm_disponibile,
                 "dict[str, object] | None", sync_report.get("frame_check")
             ),
             quality=quality,
-            review_diffs=len(review_diffs),
             repairs=repairs,
             floor_report=floor_note,
             anchors=cast("dict[str, object] | None", sync_notes.get("anchors")),

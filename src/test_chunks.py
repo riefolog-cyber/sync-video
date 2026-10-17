@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Test unitari per il modulo condiviso `chunks` (finestre temporali).
-Verifica che i dati grezzi siano identici a quelli che producevano
-`build_semantic_blocks` e `build_llm_chunks` prima del refactor.
+Verifica che i dati grezzi siano identici a quelli che produceva
+`build_semantic_blocks` prima del refactor.
 
 Esegui con: python -m unittest test_chunks -v
 """

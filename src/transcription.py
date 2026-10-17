@@ -63,7 +63,7 @@ def _compress_words(
         # Le parole di transizione NON vengono mai filtrate
         is_transition = word_text in transition_words
 
-        # Non filtrare i numeri ("1", "2", "3"): sono cruciali per il LLM
+        # Non filtrare i numeri ("1", "2", "3"): sono cruciali per le ancore
         if not is_transition and (
             word_text in stopwords or (len(word_text) < min_word_len and not word_text.isdigit())
         ):
@@ -127,7 +127,7 @@ def correct_transcript_names(words: list[Word]) -> list[Word]:
     successive vengono scartate (l'intervallo temporale complessivo del gruppo
     viene conservato: inizio della prima, fine dell'ultima). I nomi corretti
     sono indizi cruciali per il matching slide<->parlato del flusso
-    LLM/semantico (es. "mark chiuse" -> "marcuse" permette di agganciare la
+    semantico (es. "mark chiuse" -> "marcuse" permette di agganciare la
     slide della critica alla prestazione).
 
     Returns:

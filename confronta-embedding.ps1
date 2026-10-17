@@ -1,5 +1,5 @@
 # Confronto A/B dei modelli embedding (fastembed) sulla pipeline reale.
-# Lancia un dry-run del flusso ordinato (--flow slide-audio --llm off) per ogni
+# Lancia un dry-run del flusso ordinato (--flow slide-audio) per ogni
 # modello e stampa una tabella comparativa: similarità media, durata min/max,
 # anomalie (slide troppo corte) e tempi. In coda suggerisce la scelta migliore.
 #
@@ -68,7 +68,7 @@ foreach ($short in $Models) {
 
     $env:EMBEDDING_MODEL = $modelName
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $raw = & python main.py --dry-run --debug --flow $Flow --llm off 2>&1 | Out-String
+    $raw = & python main.py --dry-run --debug --flow $Flow 2>&1 | Out-String
     $sw.Stop()
 
     if ($LASTEXITCODE -ne 0) {

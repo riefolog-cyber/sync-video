@@ -30,7 +30,7 @@ moviepy>=2.0.0
 numpy>=1.26.0
 tqdm>=4.66.0
 
-# Fallback semantico (sincronizzazione via embeddings, senza LLM)
+# Fallback semantico (sincronizzazione via embeddings locali)
 # Pinnata a 0.5.1: le versioni successive usano mean pooling invece di CLS
 # per e5-large, cambiando gli embedding rispetto alla baseline validata (A/B).
 # A/B re-test 2026-08 vs 0.8.0 su dati reali (check_fastembed_upgrade.py):
@@ -41,9 +41,6 @@ fastembed==0.5.1
 # Confronto versioni (updates.py) e soglie minime del bootstrap (config.py).
 # Arriva già con pytesseract, ma il progetto lo importa direttamente.
 packaging>=23.0
-
-# Selezione slide via LLM opzionale (9Router online, endpoint OpenAI-compatibile)
-requests>=2.31.0
 
 # Trascrizione audio (faster-whisper, fallback CPU)
 # Nativo solo dove CTranslate2 esiste: non pubblica wheel win_arm64, quindi su

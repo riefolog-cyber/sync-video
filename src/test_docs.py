@@ -10,8 +10,8 @@ doc e' rimasto indietro rispetto al codice.
   - docs/comandi.md: "i tre parametri di thread hanno lo stesso default,
     min(8, cpu_count())" quando il codice distingueva gia' whisper (senza
     tetto) da embed/video (min(12, core fisici)) e OCR (min(6, ...));
-  - la stessa tabella: --llm documentato con default "auto" mentre il
-    codice fa "off";
+  - la stessa tabella: un flag documentato con un default diverso da quello
+    del codice;
   - promemoria prima installazione.md: diceva che il programma "NON
     installa Python da solo",cioe' il contrario di quello che faceva.
 

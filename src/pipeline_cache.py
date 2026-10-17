@@ -12,21 +12,30 @@ import hashlib
 import json
 from pathlib import Path
 
-from config import CACHE_DIR, LLM_REVIEW_CACHE_PREFIX, atomic_write_text, log
+from config import CACHE_DIR, atomic_write_text, log
 
 # Chiavi "housekeeping" che NON sono cache di contenuto: vanno conservate
 # (updates_check = TTL PyPI, fastembed_ab = report A/B, sync_report =
-# report ultima run, machine_setup = fatti hardware, hardware = profilo
+# report ultima run, timeline_finale = timeline validata dell'ultima run
+# letta da analysis_sync.py, machine_setup = fatti hardware, hardware = profilo
 # hardware + encoder ffmpeg di questa macchina, openvino_attempt = tentativo
 # GPU incompiuto: cancellarlo alla pulizia di avvio disattiverebbe per sempre
 # il ripiego automatico su CPU dopo un crash nativo).
 KEEP_CACHE_STEMS = frozenset(
-    {"machine_setup", "updates_check", "fastembed_ab", "sync_report", "hardware", "openvino_attempt"}
+    {
+        "machine_setup",
+        "updates_check",
+        "fastembed_ab",
+        "sync_report",
+        "timeline_finale",
+        "hardware",
+        "openvino_attempt",
+    }
 )
 
 
 def clean_orphan_cache(active_keys: set[str], cache_dir: Path | None = None) -> int:
-    """Rimuove i .json che non matchano le chiavi attive. Mai llm_* né housekeeping.
+    """Rimuove i .json che non matchano le chiavi attive. Mai housekeeping.
 
     ``cache_dir``: cartella da pulire (default: la cache del progetto). I test
     la passano esplicita indirizzando il wrapper in main, che inietta la
@@ -38,7 +47,7 @@ def clean_orphan_cache(active_keys: set[str], cache_dir: Path | None = None) -> 
     removed = 0
     for cache_file in cd.glob("*.json"):
         key = cache_file.stem
-        if key.startswith("llm_") or key in KEEP_CACHE_STEMS:
+        if key in KEEP_CACHE_STEMS:
             continue
         if key not in active_keys:
             cache_file.unlink()
@@ -47,26 +56,10 @@ def clean_orphan_cache(active_keys: set[str], cache_dir: Path | None = None) -> 
     return removed
 
 
-def clean_stale_llm_cache(keep_stems: set[str], cache_dir: Path | None = None) -> int:
-    """Rimuove i llm_*.json non riusati, salvo keep_stems e llm_review_*."""
-    cd = cache_dir if cache_dir is not None else CACHE_DIR
-    if not cd.exists():
-        return 0
-    removed = 0
-    for cache_file in cd.glob("llm_*.json"):
-        stem = cache_file.stem
-        if stem in keep_stems or stem.startswith(LLM_REVIEW_CACHE_PREFIX):
-            continue
-        cache_file.unlink()
-        removed += 1
-        log.debug("   🧹 Cache LLM orfana rimossa: %s", cache_file.name)
-    return removed
-
-
 def save_final_timeline(
     timeline: dict[int, float], total_duration: float, cache_dir: Path | None = None
 ) -> None:
-    """Persiste la timeline finale come llm_timeline_finale.json (per analysis_sync.py)."""
+    """Persiste la timeline finale come timeline_finale.json (per analysis_sync.py)."""
     cd = cache_dir if cache_dir is not None else CACHE_DIR
     cd.mkdir(parents=True, exist_ok=True)
     entries: list[dict[str, float]] = []
@@ -74,8 +67,8 @@ def save_final_timeline(
     for i, s in enumerate(ordered):
         end = timeline[ordered[i + 1]] if i + 1 < len(ordered) else total_duration
         entries.append({"slide": s, "start": round(float(timeline[s]), 3), "end": round(float(end), 3)})
-    atomic_write_text(cd / "llm_timeline_finale.json", json.dumps(entries, ensure_ascii=False))
-    log.info("   Timeline finale salvata in cache per la verifica (llm_timeline_finale.json).")
+    atomic_write_text(cd / "timeline_finale.json", json.dumps(entries, ensure_ascii=False))
+    log.info("   Timeline finale salvata in cache per la verifica (timeline_finale.json).")
 
 
 def save_sync_report(report: dict[str, object], cache_dir: Path | None = None) -> None:

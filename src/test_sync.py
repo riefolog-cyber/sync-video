@@ -21,8 +21,7 @@ from config import DEFAULT_RECOVERY_MAX_ZONE_SHARE
 from semantic_sync import (
     SemanticOptions,
     build_candidates,
-    make_anchor_remap_filter,
-    refine_llm_segment_boundaries,
+    refine_segment_boundaries,
     semantic_timeline_from_texts,
     verify_anchor_mapping_embedding,
 )
@@ -249,7 +248,7 @@ class TestSlideAudioFlow(unittest.TestCase):
     def test_recap_only_mention_still_discarded(self):
         # La slide 3 è menzionata SOLO come citazione a posteriori (dopo le
         # slide 4 e 5): nessuna menzione in ordine da recuperare -> resta
-        # scartata (l'LLM/DP semantico la posizionerà per contenuto).
+        # scartata (il DP semantico la posizionerà per contenuto).
         from timeline import extract_slide_anchors
 
         words = _words(
@@ -1125,7 +1124,7 @@ class TestSlideAudioFlow(unittest.TestCase):
 
     def test_misheard_slide_variants_sla(self):
         # Whisper trascrive "slide due" come "sla e due": le varianti fonetiche
-        # vanno riconosciute come ancore deterministiche, non affidate all'LLM.
+        # vanno riconosciute come ancore deterministiche.
         from timeline import extract_slide_anchors
 
         words = _words(
@@ -1283,7 +1282,7 @@ class TestSlideAudioFlow(unittest.TestCase):
     def test_out_of_order_reference_returns_none(self):
         # Falso positivo: "slide 8" citata in anticipo (39.2s) prima della
         # slide 7 (634.3s) — il riferimento va scartato e, mancando slide,
-        # la timeline è None → il fallback LLM viene attivato dal chiamante.
+        # la timeline è None.
         words = _words(
             [
                 ("slide", 39.2),
@@ -2315,41 +2314,6 @@ class TestTimingTable(unittest.TestCase):
         self.assertIn("Embedding │ 28s", printed)
         self.assertIn("Modello   │ 3s", printed)
 
-    def test_llm_time_is_shown(self):
-        # Stessa ragione che ha fatto correggere la riga Embedding: senza la
-        # voce LLM, 328s di cascata finivano dentro "Sincronizzaz." senza
-        # attribuzione e lo spreco restava invisibile.
-        import main
-
-        with (
-            mock.patch.object(main, "_append_timing_history"),
-            self.assertLogs(main.log, level="INFO") as cm,
-        ):
-            main._print_timing(1.0, 2.0, 330.0, 2.0, 5.0, 49.0, 400.0, 328.0)
-        printed = "\n".join(r.getMessage() for r in cm.records)
-        self.assertIn("LLM       │ 5m28s", printed)
-
-    def test_llm_row_absent_when_no_llm_was_called(self):
-        # Una run senza LLM non deve mostrare una riga a zero.
-        import main
-
-        with (
-            mock.patch.object(main, "_append_timing_history"),
-            self.assertLogs(main.log, level="INFO") as cm,
-        ):
-            main._print_timing(1.0, 2.0, 30.0, 28.0, 3.0, 5.0, 40.0)
-        printed = "\n".join(r.getMessage() for r in cm.records)
-        self.assertNotIn("LLM  ", printed)
-
-    def test_llm_time_is_persisted_in_the_history(self):
-        # Lo storico serve a monitorare le regressioni: senza la voce LLM il
-        # costo non era confrontabile fra una run e l'altra.
-        import main
-
-        with mock.patch.object(main, "_append_timing_history") as history:
-            main._print_timing(1.0, 2.0, 330.0, 2.0, 5.0, 49.0, 400.0, 328.0)
-        self.assertEqual(history.call_args.args[-1], 328.0)
-
 
 class TestSemanticSync(unittest.TestCase):
     """Sincronizzazione semantica (embeddings): DP monotona senza LLM."""
@@ -3093,61 +3057,6 @@ class TestConfusabilityNelReport(unittest.TestCase):
         self.assertLessEqual(q["confusability"], 0.5)
 
 
-class TestEscalationSenzaAncore(unittest.TestCase):
-    """Il flusso podcast -> slide deve poter escalare all'LLM.
-
-    Lì le ancore non esistono per progetto (il prompt le vieta), quindi il ramo
-    ibrido non entrava mai e l'escalation — l'unico meccanismo del progetto che
-    riposiziona le slide non ancorate — restava irraggiungibile proprio dove
-    serviva. Il messaggio di `semantic_sync` ("con l'LLM attivo le slide non
-    ancorate vengono riposizionate") era una promessa falsa per costruzione.
-
-    La regola qui è volutamente stretta: `missing_count` vale sempre
-    `total_slides - 1` in questo flusso, quindi riusare le soglie di
-    `_needs_llm_escalation` farebbe spendere ~16 min di LLM a ogni run.
-    """
-
-    def test_segnale_debole_escala(self):
-        from main import _escalate_senza_ancore
-
-        self.assertTrue(_escalate_senza_ancore(True, False, True))
-
-    def test_segnale_buono_non_escala_e_non_costa_niente(self):
-        from main import _escalate_senza_ancore
-
-        self.assertFalse(_escalate_senza_ancore(False, False, True))
-
-    def test_llm_spento_non_escala(self):
-        from main import _escalate_senza_ancore
-
-        self.assertFalse(_escalate_senza_ancore(True, False, False))
-
-    def test_motore_locale_fallito_non_è_questo_percorso(self):
-        # Non è il caso da cui la modifica nasce, e nel flusso libero l'LLM è
-        # già il motore principale: qui lascia il fallback com'è.
-        from main import _escalate_senza_ancore
-
-        self.assertFalse(_escalate_senza_ancore(True, True, True))
-
-    def test_la_regola_standard_avrebbe_spendo_l_llm_invece(self):
-        # Documenta PERCHÉ serve una funzione a parte: applicando la regola
-        # esistente a un podcast senza ancore si scala sempre.
-        from main import _needs_llm_escalation
-
-        # 6 transizioni, 3 slide senza ancora tollerate: le altre 3 fanno
-        # scattare la soglia. Ma in questo flusso 6 è il NUMERO FISSO delle
-        # transizioni, non un sintomo.
-        self.assertTrue(
-            _needs_llm_escalation(
-                local_failed=False,
-                weak_local=False,
-                missing_count=6,
-                llm_local_threshold=3,
-                llm_enabled=True,
-            )
-        )
-
-
 class TestNormalizedQualityGuard(unittest.TestCase):
     """Guard-rail di qualità sulla scala normalizzata (z-score per slide).
 
@@ -3156,7 +3065,7 @@ class TestNormalizedQualityGuard(unittest.TestCase):
     giusto sia mescolate, quindi il valore assoluto non contiene informazione
     sull'allineamento. Questi test fissano la misura che discrimina davvero
     (picco medio normalizzato) e il fatto che un valore basso è un SEGNALE
-    (escalation al LLM, --strict-sync, report) e non un verdetto che scarta la
+    (--strict-sync, report) e non un verdetto che scarta la
     timeline già costruita.
     """
 
@@ -3210,7 +3119,7 @@ class TestNormalizedQualityGuard(unittest.TestCase):
         # Slide tutte diverse, parlato che nomina tutti i temi allo stesso modo:
         # nessuna colonna ha un picco (z = 0) mentre la cosine resta ~0.5, sopra
         # la vecchia soglia. La timeline NON va scartata (era il comportamento
-        # precedente): va segnalata, perché ancore ed LLM possono ancora
+        # precedente): va segnalata, perché le ancore possono ancora
         # correggerla.
         themes = ["alfa", "beta", "gamma", "delta"]
         blocks = [{"time": i * 5.0, "text": "alfa beta gamma delta"} for i in range(8)]
@@ -3417,7 +3326,7 @@ class TestFrameGuidedRepair(unittest.TestCase):
     def test_search_window_reaches_beyond_the_default_window(self):
         # La finestra simmetrica di default limita lo spostamento: con la
         # ricerca guidata dall'evidenza il confine raggiunge il punto reale.
-        from semantic_sync import refine_llm_segment_boundaries
+        from semantic_sync import refine_segment_boundaries
 
         segments = [
             {"slide": 1, "start": 0.0, "end": 60.0},
@@ -3427,11 +3336,11 @@ class TestFrameGuidedRepair(unittest.TestCase):
         slide_texts = [f"{t} slide" for t in self.THEMES]
         embed = TestSemanticSync._fake_embed(self.THEMES)
 
-        default = refine_llm_segment_boundaries(
+        default = refine_segment_boundaries(
             segments, words, slide_texts, embed,
             window_seconds=20.0, min_segment_seconds=5.0, refine_slides={2},
         )
-        guided = refine_llm_segment_boundaries(
+        guided = refine_segment_boundaries(
             segments, words, slide_texts, embed,
             window_seconds=20.0, min_segment_seconds=5.0, refine_slides={2},
             search_window={2: (0.0, 60.0)},
@@ -3843,16 +3752,14 @@ class TestPlainSummary(unittest.TestCase):
         self.assertIn("slide 3 la durata è anomala", out)
         self.assertIn("Da controllare a mano", out)
 
-    def test_weak_signal_and_review_diffs_are_doubts(self):
+    def test_weak_signal_is_a_doubt(self):
         from semantic_sync import _set_weak_signal
 
         _set_weak_signal()
         out = self._render(
             quality={"avg_sim": 0.83, "avg_z": 0.20, "min_avg_z": 0.45},
-            review_diffs=2,
         )
         self.assertIn("somiglianza tra parlato e slide è risultata debole", out)
-        self.assertIn("contesta 2 scelte di slide", out)
         self.assertIn("bassa (slide confondibili per il motore, picco medio 0.20", out)
 
     def test_low_confidence_names_the_reason_not_only_the_peak(self):
@@ -4330,10 +4237,9 @@ class TestAnomalousContentValidation(unittest.TestCase):
         # Senza note né revisione il report resta minimale.
         self.assertEqual(sorted(report), ["audio_duration", "segments"])
 
-    def test_sync_report_carries_notes_and_review_diffs(self):
-        # Le scelte della run (es. escalation per segnale debole) e le
-        # discrepanze del secondo passaggio LLM devono restare sull'artefatto:
-        # prima esistevano solo nei log e andavano perse.
+    def test_sync_report_carries_notes(self):
+        # Le scelte della run (es. motore usato, segnale debole) devono restare
+        # sull'artefatto: prima esistevano solo nei log e andavano perse.
         from main import _build_sync_report
 
         report = _build_sync_report(
@@ -4341,94 +4247,9 @@ class TestAnomalousContentValidation(unittest.TestCase):
             [1, 2],
             100.0,
             None,
-            notes={"engine": "llm_escalated_weak_signal"},
-            review_diffs=[{"chunk": 3, "slide": 7}],
+            notes={"engine": "embedding_weak_signal"},
         )
-        self.assertEqual(report["engine"], "llm_escalated_weak_signal")
-        self.assertEqual(report["review_diffs"], [{"chunk": 3, "slide": 7}])
-
-    def test_should_escalate_weak_signal(self):
-        # Segnale debole + slide da posizionare + LLM disponibile: si passa
-        # all'LLM invece di generare un video potenzialmente disallineato.
-        from main import _should_escalate_weak_signal
-
-        self.assertTrue(_should_escalate_weak_signal(True, 2, True))
-        # Tutte le slide hanno un'ancora: il segnale debole non cambia nulla.
-        self.assertFalse(_should_escalate_weak_signal(True, 0, True))
-        # --llm off: resta il motore locale.
-        self.assertFalse(_should_escalate_weak_signal(True, 2, False))
-        # Segnale buono: nessuna escalation.
-        self.assertFalse(_should_escalate_weak_signal(False, 2, True))
-
-    def test_local_engine_runs_first_and_llm_is_only_an_escalation(self):
-        # Il caso reale del 25/09: 12 slide senza ancora, oltre la soglia (2).
-        # Prima l'LLM era un PREREQUISITO (si saltava il motore locale) e se
-        # falliva si ricalcolava da capo: ~328s per arrivare al fallback locale.
-        # Ora il motore locale gira SEMPRE per primo e l'LLM è un tentativo di
-        # migliorare una timeline che esiste già.
-        from main import _needs_llm_escalation
-
-        # Motore locale riuscito con segnale buono, poche slide mancanti:
-        # nessuna ragione di pagare l'LLM.
-        self.assertFalse(
-            _needs_llm_escalation(
-                local_failed=False,
-                weak_local=False,
-                missing_count=2,
-                llm_local_threshold=2,
-            )
-        )
-
-    def test_escalates_when_the_local_engine_failed(self):
-        from main import _needs_llm_escalation
-
-        self.assertTrue(
-            _needs_llm_escalation(
-                local_failed=True,
-                weak_local=False,
-                missing_count=1,
-                llm_local_threshold=2,
-            )
-        )
-
-    def test_escalates_when_too_many_slides_are_unanchored(self):
-        from main import _needs_llm_escalation
-
-        self.assertTrue(
-            _needs_llm_escalation(
-                local_failed=False,
-                weak_local=False,
-                missing_count=12,
-                llm_local_threshold=2,
-            )
-        )
-
-    def test_escalates_on_a_weak_signal(self):
-        from main import _needs_llm_escalation
-
-        self.assertTrue(
-            _needs_llm_escalation(
-                local_failed=False,
-                weak_local=True,
-                missing_count=3,
-                llm_local_threshold=10,
-            )
-        )
-
-    def test_llm_off_never_escalates(self):
-        # --llm off: la timeline locale è quella definitiva, per quanto debole
-        # sia il segnale.
-        from main import _needs_llm_escalation
-
-        self.assertFalse(
-            _needs_llm_escalation(
-                local_failed=True,
-                weak_local=True,
-                missing_count=12,
-                llm_local_threshold=2,
-                llm_enabled=False,
-            )
-        )
+        self.assertEqual(report["engine"], "embedding_weak_signal")
 
 
 class TestEmbedModelFallback(unittest.TestCase):
@@ -4762,8 +4583,8 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
     def test_systematic_offset_detected_even_with_every_slide_anchored(self):
         # Il caso che il gating saltava: TUTTE le transizioni annunciate, quindi
         # nessuna slide senza ancora. È proprio lì che uno sfasamento di
-        # numerazione resta invisibile (niente da completare, l'LLM non avrebbe
-        # niente da fare), eppure sposta l'intero video di una slide.
+        # numerazione resta invisibile (niente da completare), eppure sposta
+        # l'intero video di una slide.
         slides = [f"tema{i} slide" for i in range(1, 6)]
         words = []
         for s in range(1, 6):
@@ -5011,7 +4832,7 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
 
     def test_report_suspicious_when_single_shifted_anchor(self):
         # Una sola ancora sfasata: niente correzione (run di 1), ma il mapping
-        # è SOSPETTO: il chiamante deve poter chiedere la verifica LLM.
+        # è SOSPETTO: il chiamante deve poter chiedere la verifica.
         slides = [f"tema{i} slide" for i in range(1, 5)]
         words = [
             {"word": "tema2", "start": 200.0},
@@ -5078,7 +4899,7 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
         self.assertFalse(report["suspicious"])
 
     def test_report_clean_when_corrected(self):
-        # Corretto deterministicamente: non serve l'LLM, nessun sospetto.
+        # Corretto deterministicamente: nessun sospetto.
         slides = [f"tema{i} slide" for i in range(1, 7)]
         words = []
         for s, tema in [(2, 2), (3, 3), (4, 5), (5, 6)]:
@@ -5100,7 +4921,7 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
         self.assertFalse(report["suspicious"])
 
     def test_report_not_suspicious_when_too_few_anchors(self):
-        # Segnale insufficiente: non sospetto (niente chiamate LLM spurie).
+        # Segnale insufficiente: non sospetto.
         slides = [f"tema{i} slide" for i in range(1, 5)]
         words = [{"word": "tema2", "start": 100.0}]
         anchors = {1: 100.0}
@@ -5123,7 +4944,7 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
         # ("slide 5" mostra la 6, più avanti "slide 9" mostra la 11). Gli offset
         # non costanti formano più run e le regole a offset uniforme/gradino
         # rinunciano: la correzione deve arrivare dal CONTENUTO (slide "best"),
-        # in modo deterministico e senza LLM.
+        # in modo deterministico.
         slides = [f"tema{i} slide" for i in range(1, 15)]
         plan = [
             (1, 0.0, 1),
@@ -5187,7 +5008,7 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
     def test_progressive_drift_with_plateau_not_corrected(self):
         # Offset a più run (drift) MA due ancore che il contenuto manda sulla
         # STESSA slide senza salti all'indietro: ambiguità reale, non drift ->
-        # nessuna correzione, il mapping resta sospetto per la verifica LLM.
+        # nessuna correzione, il mapping resta sospetto.
         slides = [f"tema{i} slide" for i in range(1, 15)]
         plan = [
             (5, 100.0, 6),
@@ -5214,81 +5035,6 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
         )
         self.assertIsNone(out)
         self.assertTrue(report["suspicious"])
-
-
-class TestAnchorRemapFilter(unittest.TestCase):
-    """Validatore dei rimappi ancore LLM: il contenuto deve confermare il
-    rimappo, altrimenti l'ancora esplicita (vincolo ad alta precisione) resta."""
-
-    @staticmethod
-    def _embed_fn(num_slides):
-        def _embed(texts):
-            out = []
-            for t in texts:
-                v = np.zeros(num_slides)
-                for k in range(num_slides):
-                    if f"tema{k + 1}" in t:
-                        v[k] = 1.0
-                norm = np.linalg.norm(v)
-                out.append(v / norm if norm else v)
-            return np.array(out)
-
-        return _embed
-
-    def test_remap_supported_when_content_matches_target(self):
-        # Speaker dice "slide 4" a 100s ma il parlato dopo parla di tema5:
-        # il rimappo 4 -> 5 è supportato dal contenuto.
-        slides = [f"tema{i} slide" for i in range(1, 6)]
-        words = [{"word": "tema5", "start": 105.0 + i} for i in range(5)]
-        filtro = make_anchor_remap_filter(
-            slides,
-            words,
-            total_slides=5,
-            window_seconds=40.0,
-            embed_fn=self._embed_fn(5),
-        )
-        self.assertIsNotNone(filtro)
-        self.assertTrue(filtro(4, 100.0, 5))
-
-    def test_remap_rejected_when_content_matches_spoken(self):
-        # Speaker dice "slide 4" a 100s e il parlato parla davvero di tema4:
-        # il rimappo 4 -> 5 contraddice il contenuto e va rifiutato.
-        slides = [f"tema{i} slide" for i in range(1, 6)]
-        words = [{"word": "tema4", "start": 105.0 + i} for i in range(5)]
-        filtro = make_anchor_remap_filter(
-            slides,
-            words,
-            total_slides=5,
-            window_seconds=40.0,
-            embed_fn=self._embed_fn(5),
-        )
-        self.assertIsNotNone(filtro)
-        self.assertFalse(filtro(4, 100.0, 5))
-
-    def test_empty_window_returns_none(self):
-        slides = [f"tema{i} slide" for i in range(1, 6)]
-        filtro = make_anchor_remap_filter(
-            slides,
-            [],
-            total_slides=5,
-            window_seconds=40.0,
-            embed_fn=self._embed_fn(5),
-        )
-        self.assertIsNotNone(filtro)
-        self.assertIsNone(filtro(4, 100.0, 5))
-
-    def test_embedder_unavailable_returns_none(self):
-        # Senza embedder il filtro è None: l'LLM fa fede (comportamento storico).
-        from unittest.mock import patch
-
-        with patch("semantic_sync._load_embed_model", return_value=None):
-            filtro = make_anchor_remap_filter(
-                ["tema1 slide", "tema2 slide"],
-                [{"word": "tema1", "start": 105.0}],
-                total_slides=2,
-                window_seconds=40.0,
-            )
-        self.assertIsNone(filtro)
 
 
 class TestFilterAnchorRemaps(unittest.TestCase):
@@ -5625,7 +5371,7 @@ class TestRefineRobustness(unittest.TestCase):
         from semantic_sync import refine_diagnostics
 
         words, segments = self._due_sezioni(56, 50)
-        out = refine_llm_segment_boundaries(
+        out = refine_segment_boundaries(
             segments,
             words,
             ["tema_a", "tema_b"],
@@ -5646,7 +5392,7 @@ class TestRefineRobustness(unittest.TestCase):
         from semantic_sync import refine_diagnostics
 
         words, segments = self._due_sezioni(40, 30)
-        out = refine_llm_segment_boundaries(
+        out = refine_segment_boundaries(
             segments,
             words,
             ["tema_a", "tema_b"],
@@ -5672,7 +5418,7 @@ class TestRefineRobustness(unittest.TestCase):
         with mock.patch(
             "semantic_sync._refine_wins_under_perturbation", return_value=False
         ):
-            out = refine_llm_segment_boundaries(
+            out = refine_segment_boundaries(
                 segments,
                 words,
                 ["tema_a", "tema_b"],
@@ -5734,7 +5480,7 @@ class TestRefineRobustness(unittest.TestCase):
                 min_segment_seconds=5.0,
                 context_seconds=10.0,
             )
-            libero = refine_llm_segment_boundaries(
+            libero = refine_segment_boundaries(
                 segments,
                 words,
                 ["tema_a", "tema_b"],
@@ -5756,7 +5502,7 @@ class TestRefineRobustness(unittest.TestCase):
         from semantic_sync import refine_diagnostics
 
         words, segments = self._due_sezioni(40, 30)
-        refine_llm_segment_boundaries(
+        refine_segment_boundaries(
             segments,
             words,
             ["tema_a", "tema_b"],
@@ -5830,7 +5576,7 @@ class TestRefineConEmbeddingInCache(unittest.TestCase):
             {"slide": 2, "start": 30.0, "end": 100.0},
         ]
         embed = self._counting_embed()
-        primo = refine_llm_segment_boundaries(
+        primo = refine_segment_boundaries(
             segments,
             words,
             ["tema_a", "tema_b"],
@@ -5841,7 +5587,7 @@ class TestRefineConEmbeddingInCache(unittest.TestCase):
         )
         diagnosi_prima = refine_diagnostics()
         self._ss.reset_embed_cache()  # nuova run nello stesso processo, disco pieno
-        secondo = refine_llm_segment_boundaries(
+        secondo = refine_segment_boundaries(
             segments,
             words,
             ["tema_a", "tema_b"],

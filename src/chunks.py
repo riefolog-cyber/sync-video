@@ -2,10 +2,9 @@
 """
 Raggruppamento parole in finestre temporali fisse.
 
-Helper condiviso tra `semantic_sync.build_semantic_blocks` (finestre corte,
-4s, che scarta i silenzi) e `llm_sync.build_llm_chunks` (finestre larghe,
-30s, che conserva i vuoti come "..."). Il loop di raggruppamento è identico:
-solo la politica di filtro/formato del chiamante cambia.
+Helper di `semantic_sync.build_semantic_blocks` (finestre corte, 4s, che
+scarta i silenzi). Il loop di raggruppamento è condiviso: cambia solo la
+politica di filtro/formato del chiamante.
 """
 
 from bisect import bisect_left

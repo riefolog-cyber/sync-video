@@ -22,7 +22,7 @@ consigliata, primo avvio automatico di Python su Windows).
 | P1 #8 | CI: cache pip/HF + nightly full | ✅ `630aa75` |
 | P2 #9 | Moduli foglia `pipeline_cache` / `pipeline_report` | ✅ `2e35405` + `test_pipeline_cache.py` |
 | P2 #10 | Protocol `Embedder` + `load_embedder()` | ✅ pronto per un backend alternativo |
-| P2 #11 | `llm_sync.py` fuori dal percorso di default | ❌ **non consigliata**, vedi sotto |
+| P2 #11 | `llm_sync.py` fuori dal percorso di default | ✅ **rimosso del tutto** (con 9Router, modello LLM e revisione LLM) |
 | P2 #12 | Typing graduale dei test (deny-list mypy) | ✅ |
 | P2 #13 | Riparato `_physical_cpus()` (era morto in silenzio) | ✅ whisper 20→14 thread |
 | P2 #14 | Adattamento a ogni PC: RAM, encoder GPU, batch | ✅ |
@@ -35,19 +35,19 @@ consigliata, primo avvio automatico di Python su Windows).
 
 ## Decisioni da non riaprire
 
-**P2 #11 — `llm_sync.py` come percorso sperimentale: non consigliata.**
-`--llm` ha già `default="off"`, quindi il comportamento di default è già
-quello locale. Per escludere il modulo dal percorso di default servirebbe
-renderlo lazy in `main.py` (lo importa per 11 nomi a livello di modulo) e
-escluderlo dai test: guadagno reale minimo, costo di manutenzione certo.
+**P2 #11 — `llm_sync.py`: rimosso del tutto.**
+La selezione via LLM (9Router online, modello `comboact`, revisione `--llm-review`)
+non era mai usata nel percorso reale: `--llm` aveva già `default="off"` e il
+flusso libero che la richiedeva è stato a sua volta rimosso. Tenere il modulo
+significava trascinare `requests`, una cascata di endpoint e ~2000 righe di test
+per un percorso spento. Rimosso insieme a `9router-maintenance/`,
+`aggiornamenti_9router.bat` e `docs/9router.md`.
 
-**Split fisico di `main.py` / `semantic_sync.py` / `llm_sync.py`: non
-eseguito.** `test_sync.py` importa **20** funzioni private da `main` (20
-nomi distinti, tutti privati; 21 su tutti i test — verificato con AST).
-Spezzare romperebbe centinaia di test per un beneficio non visibile
-all'utente. A 20 dipendenze un'estrazione a shim, come quella di P2 #9,
-sarebbe plausibile: resta rimandata per una ragione di merito (beneficio
-incerto), non per una barriera tecnica.
+**Split fisico di `main.py` / `semantic_sync.py`: non eseguito.**
+`test_sync.py` importa molte funzioni private da `main`. Spezzare romperebbe
+centinaia di test per un beneficio non visibile all'utente. A molte dipendenze
+un'estrazione a shim, come quella di P2 #9, sarebbe plausibile: resta rimandata
+per una ragione di merito (beneficio incerto), non per una barriera tecnica.
 
 **Downgrade automatico del modello su RAM bassa: non eseguito di proposito.**
 Il batching, i thread e l'encoder si adattano alla RAM; i *pesi* no. Su un

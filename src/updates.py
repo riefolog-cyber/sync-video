@@ -46,7 +46,6 @@ _PACKAGES: tuple[str, ...] = (
     "tqdm",
     "fastembed",
     "faster-whisper",
-    "requests",
     "openvino",
     "openvino-genai",
     "mypy",

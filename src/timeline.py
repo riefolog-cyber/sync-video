@@ -131,7 +131,7 @@ def extract_timeline_from_transcript(
 
     Returns:
         Timeline {slide_num: start_second} oppure None se i segnali sono
-        troppo pochi per una sincronizzazione affidabile (fallback LLM).
+        troppo pochi per una sincronizzazione affidabile.
         Se alcune slide mancano di riferimento esplicito, vengono interpolate
         tra le ancore reali trovate (slide citate fuori ordine escluse via LIS).
 
@@ -548,7 +548,7 @@ def _extract_slide_audio_flow(
     Se restano slide mancanti (tipico di riferimenti fuori ordine: anticipazioni
     o citazioni a posteriori), recupera usando la sotto-sequenza crescente più
     lunga (LIS) come ancore reali e interpola le slide senza riferimento.
-    Restituisce None solo se i segnali sono troppo pochi (fallback LLM).
+    Restituisce None solo se i segnali sono troppo pochi.
     """
     refs = _collect_slide_references(words, total_slides)
     if not refs:
@@ -848,7 +848,7 @@ def _collect_slide_mentions(
     """Tempi di tutte le menzioni 'slide N', senza la qualificazione conteggio.
 
     Comodo per i chiamanti che trattano ogni menzione allo stesso modo (la
-    verifica LLM del mapping, il report delle citazioni scartate, la ricerca
+    verifica del mapping, il report delle citazioni scartate, la ricerca
     delle "slide 1" parlate). Chi deve scegliere QUALE menzione è la transizione
     usa ``_collect_slide_mention_kinds``: perderebbe la distinzione fra un
     conteggio e un richiamo, che è l'unico caso in cui la scelta cambia.
@@ -989,7 +989,7 @@ def filter_anchor_remaps(
 
     I rimappi ISOLATI, invece, sono quasi sempre falsi positivi: il contenuto
     subito dopo l'annuncio è già quello della slide SUCCESSIVA, quindi ogni
-    test di contenuto (embeddings o LLM) la preferisce alla slide annunciata
+    test di contenuto (embeddings) la preferisce alla slide annunciata
     (caso tipico: copertina con OCR illeggibile, "passiamo alla slide 1" seguito
     dal tema della slide 3). Per questo un rimappo isolato viene accettato solo
     se le altre ancore NON confermano la numerazione parlata (nessuna evidenza
@@ -1037,7 +1037,7 @@ def filter_anchor_remaps(
             rejected.append((s, proposed[s]))
         else:
             # Nessuna evidenza di identità: l'unico segnale è il contenuto,
-            # l'LLM (già filtrato dal validatore semantico) fa fede.
+            # già filtrato dal validatore semantico.
             accepted[s] = proposed[s]
 
     # La slide 1 reale è sempre a 0.0s: il suo riferimento non è un confine.

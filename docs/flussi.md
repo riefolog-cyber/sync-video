@@ -7,27 +7,23 @@ trascrizione (override con `--flow`):
 
 ### 1. Podcast → Slide (`PROMPT_PODCAST.md`)
 
-Il podcast viene generato PER PRIMO, in modo libero, e la presentazione nasce
-DA esso (una slide per sezione). Il prompt **vieta esplicitamente** i
-riferimenti "slide N": l'assenza di ancore è il comportamento atteso.
+Il podcast viene generato per primo, in modo libero, e la presentazione nasce
+DA esso (una slide per sezione). Questo flusso **non è più supportato**: la
+pipeline si basa sulle ancore "slide N" pronunciate.
 
-- Avviso "Nessun riferimento 'slide N'… flusso libero" → **atteso, nessuna
-  azione necessaria** (il messaggio lo dice esplicitamente).
-- Il pipeline ripiega sull'allineamento ordinato con soli embeddings (veloce,
-  senza LLM) e posiziona le slide per contenuto.
+- Messaggio "Flusso libero non supportato" → **non è un difetto**: la
+  trascrizione non contiene riferimenti riconoscibili ("slide N" per
+  `slide-audio`, "blocco successivo" per `audio-slide`). Il programma si
+  ferma **prima** di generare un video.
+- Rimedio: rigenera l'audio annunciando le slide ("Passiamo alla slide N", vedi
+  `PROMPT_PRESENTAZIONE (PREDEFINITO).md`) oppure forza `--flow slide-audio`
+  se sai cosa fai.
 
-> **`--require-full-anchors` e `--min-anchor-coverage` in questo flusso sono ignorati**: servono al flusso B →
-> A (dove ogni pagina deve essere annunciata), qui le ancore sono escluse dal
-> prompt per scelta. L'opzione viene applicata solo se il flusso *rilevato* è
-> quello con ancore: il fallback interno riscrive il flusso effettivo da `free`
-  a `slide-audio`, ma la decisione guarda il flusso originale.
->
-> **Prima di generare, conta le pagine del PDF e confrontale con le sezioni
-  del podcast**: è l'unico controllo che il programma non può fare al posto
-  tuo, ed è la condizione dell'allineamento 1:1 che questo flusso promette.
+> **`--require-full-anchors` e `--min-anchor-coverage`**: servono al flusso con
+> ancore, dove ogni pagina deve essere annunciata.
 
 > **Modello embedding**: il default è `intfloat/multilingual-e5-large`
-> (più preciso, ~2.2 GB, validato con test A/B). Nel solo flusso libero puoi
+> (più preciso, ~2.2 GB, validato con test A/B). Su macchine meno potenti puoi
 > provare un modello più leggero e veloce con `--semantic-model
 > sentence-transformers/paraphrase-multilingual-mpnet-base-v2` (già usato
 > come fallback automatico): più rapido ma leggermente meno preciso —

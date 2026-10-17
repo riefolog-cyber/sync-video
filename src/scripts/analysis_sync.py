@@ -51,31 +51,42 @@ from config import (
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
     STOPWORDS_ITA,
 )
-from llm_sync import slide_di_altro_deck
 from semantic_sync import _clean_slide_text, _load_embed_model, _make_embed_fn, segment_verdict
 from timeline import extract_slide_anchors
 from video import _letterbox_references, _reference_matrix, _similarities
 
+
+def slide_di_altro_deck(elementi: list, n_slide: int) -> list[int]:
+    """Numeri di slide che non esistono nel deck di ``n_slide`` pagine.
+
+    La timeline finale e' una cache del CONTENUTO: sopravvive al cambio di
+    materiale. Senza questo controllo, il confronto ancore/segmento produce
+    numeri che sembrano misure e non lo sono: su un video verificato perfetto
+    (12/12 frame, 11/11 confini) la sezione 3 riportava "delta +221.65s" e
+    "slide 13 non mostrata", frammenti di un deck da 13 slide.
+    """
+    fuori: list[int] = []
+    for e in elementi:
+        if not isinstance(e, dict) or "slide" not in e:
+            continue
+        try:
+            n = int(e["slide"])  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= n <= n_slide:
+            fuori.append(n)
+    return fuori
+
+
 TIMELINE_FILE = None
 
 # Auto-rilevamento dei file piu recenti della run corrente.
-# Il file "timeline" ha voci con la chiave "end"; il file "ancore" ha voci
-# con solo "slide" e "start" (senza "end").
+# Il file "timeline" ha voci con la chiave "end".
 #
-# PREFERENZA timeline: se esiste "llm_timeline_finale.json" e' la timeline
-# FINALE validata da main.py (start/end usati davvero per il video), salvata
-# da ogni run anche nel flusso semantico MiniLM. Va preferita alle cache
-# llm_*.json GREZZE: quelle contengono la timeline LLM pre-raffinamento e, in
-# assenza del flusso LLM (semantico puro), sarebbero stale di una run
-# precedente -> falsi mismatch. Il file "ancore" resta auto-rilevato dai
-# llm_*.json senza chiave "end".
-#
-# NOTA: i file llm_*.json in cache contengono la timeline GREZZA prodotta
-# dall'LLM. main.py però ri-raffina a ogni run i confini delle slide senza
-# ancora esplicita (refine_llm_timeline_from_words), quindi il video finale è
-# stato costruito con la timeline RAFFINATA, che può differire da quella in
-# cache (es. confine spostato di qualche secondo). Le discrepanze segnalate
-# qui possono quindi essere attese e NON indicare un video desincronizzato.
+# La timeline viene dalla cache "timeline_finale.json": e' la timeline FINALE
+# validata da main.py (start/end usati davvero per il video), salvata a ogni
+# run. Va preferita perché riflette la timeline post-raffinamento, che il video
+# finale ha davvero usato; le cache grezze pre-raffinamento sarebbero stale.
 def _newest(pattern: str) -> Path:
     files = sorted(CACHE.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
@@ -84,27 +95,17 @@ def _newest(pattern: str) -> Path:
     return files[0]
 
 
-# 1) Timeline finale validata da main.py (se presente)
-FINAL_TIMELINE = CACHE / "llm_timeline_finale.json"
-if FINAL_TIMELINE.exists():
-    TIMELINE_FILE = FINAL_TIMELINE
-    print(f"[Verifica] Uso timeline finale validata: {FINAL_TIMELINE.name}")
+# Timeline finale validata da main.py (scritta a ogni run)
+FINAL_TIMELINE = CACHE / "timeline_finale.json"
+if not FINAL_TIMELINE.exists():
+    print(
+        f"ERRORE: nessuna timeline finale in {CACHE} "
+        "(timeline_finale.json). Lancia prima main.py."
+    )
+    sys.exit(1)
+TIMELINE_FILE = FINAL_TIMELINE
+print(f"[Verifica] Uso timeline finale validata: {FINAL_TIMELINE.name}")
 
-# 2) Timeline LLM: auto-rilevamento (solo se non gia' impostata). Le ancore NON
-#    vengono da qui: sono ricalcolate dalla trascrizione piu' in basso.
-for f in sorted(CACHE.glob("llm_*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-    if f == FINAL_TIMELINE:
-        continue
-    try:
-        data = json.loads(f.read_text(encoding="utf-8"))
-    except Exception:
-        continue
-    if not isinstance(data, list) or not data:
-        continue
-    if all(isinstance(e, dict) and "end" in e for e in data) and TIMELINE_FILE is None:
-        TIMELINE_FILE = f
-
-TIMELINE_FILE = TIMELINE_FILE or _newest("llm_*.json")
 SLIDES_FILE = _newest("slides_*.json")
 TRANSCRIPT_FILE = _newest("transcript_*.json")
 VIDEO = BASE / "video_finale.mp4"
@@ -139,7 +140,7 @@ total_slides = len(slide_texts)
 
 # Le ancore NON si leggono da una cache: si ricalcolano dalla trascrizione.
 #
-# Prima cercavo un file llm_<hash>.json e lo scartavo se conteneva numeri di
+# Prima cercavo un file di cache e lo scartavo se conteneva numeri di
 # slide fuori dal deck. Il controllo reggeva solo in un caso: deck NUOVO piu'
 # piccolo del vecchio. Con un deck di 15 slide, un file di ancore di un deck da
 # 12 (slide 4..13) entrava e la sezione 3 ha stampato "delta +200s" e "+496s"

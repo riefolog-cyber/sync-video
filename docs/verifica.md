@@ -18,11 +18,11 @@ segmento, confini che tagliano a metà parola, scostamento delle ancore
 Ogni run salva inoltre `.cache/sync_report.json`: la tabella dei segmenti
 effettivamente mostrati (slide, inizio, fine, durata) con il verdetto di
 contenuto dei segmenti anomali (`coerente` / `disallineata` / `incerto`),
-le scelte fatte dalla run (es. `engine: llm_escalated_weak_signal` quando il
-motore embedding dichiara segnale debole e si passa all'LLM), la **qualità
+le scelte fatte dalla run (es. `engine: embedding_weak_signal` quando il
+motore embedding dichiara segnale debole), la **qualità
 misurata** dal motore (`quality`: `avg_sim` grezza, `avg_z` normalizzata,
-soglia usata) e il verdetto `weak_signal`, le discrepanze della revisione LLM
-e — con `--verify-video` — l'esito del confronto frame vs slide. Così la
+soglia usata) e il verdetto `weak_signal` e — con `--verify-video` — l'esito
+del confronto frame vs slide. Così la
 sincronizzazione resta verificabile a posteriori senza rigenerare il video.
 
 Nel flusso ordinato il report contiene anche **`anchors`**, che è la parte da
@@ -311,7 +311,7 @@ resta intatta, gli spostamenti applicati finiscono in `sync_report.json`
 (`repairs`) e restano visibili nel riepilogo finale. Con `--no-auto-repair` la
 riparazione è disattivata e l'esito resta un semplice avviso.
 
-> Richiede il file `llm_timeline_finale.json` nella cache (salvato a ogni
+> Richiede il file `timeline_finale.json` nella cache (salvato a ogni
 > run) e il video generato. Il percorso base è auto-rilevato dalla cartella
 > dello script: funziona da qualsiasi copia del progetto, senza percorsi
 > hardcoded.

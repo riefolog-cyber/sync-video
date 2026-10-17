@@ -4,8 +4,8 @@ Sincronizzazione semantica offline (sentence embeddings, e5-large) — motore
 di allineamento del pipeline per il flusso ordinato.
 
 Offline e deterministico: allinea le slide (OCR) con la trascrizione usando
-la somiglianza semantica blocco-slide, senza chiamate di rete e senza modelli
-LLM locali:
+la somiglianza semantica blocco-slide, senza chiamate di rete e senza
+modelli esterni:
 
   1. raggruppa le parole Whisper/OpenVINO in blocchi temporali
   2. codifica slide (OCR) e blocchi con fastembed (ONNX, multilingue)
@@ -19,9 +19,9 @@ LLM locali:
 Stessa filosofia del progetto: se il segnale è insufficiente restituisce None
 invece di inventare distribuzioni uniformi (il chiamante interrompe con avviso).
 
-L'LLM (llm_sync.py) non sostituisce questo motore: nel flusso ordinato
-posiziona SOLO le slide senza ancora esplicita (vincolate da qui), mentre nel
-flusso libero guida la selezione chunk→slide.
+È l'unico motore di posizionamento: le slide senza ancora esplicita vengono
+posizionate qui e raffinate a livello di parola (nessuna rete, nessun
+servizio esterno).
 """
 
 from __future__ import annotations
@@ -463,7 +463,7 @@ def _embed_and_report(
 ) -> tuple[np.ndarray, dict[str, float]] | None:
     """Embedding slide+blocchi, cosine (B, N) e report di qualità del segnale.
 
-    Blocco condiviso tra il flusso monotono e la selezione libera: embeddare
+    Blocco condiviso dal flusso ordinato: embeddare
     i testi e calcolare il report è identico nei due casi, cambia solo il
     prefisso dei log. Restituisce ``(sim, report)`` oppure None in caso di
     errore (il chiamante ripiega).
@@ -1034,17 +1034,15 @@ def semantic_timeline_from_texts(
     if avg_z < min_avg_z:
         # Segnale, NON verdetto: un picco medio basso dice "allineamento
         # dubbio", non "allineamento assente". Fermarsi qui (come faceva la
-        # guardia sulla scala grezza) scarterebbe timeline che ancore e LLM
-        # possono ancora correggere; il valore alimenta invece l'escalation al
-        # LLM (main._should_escalate_weak_signal), il gate --strict-sync e il
-        # riepilogo finale.
+        # guardia sulla scala grezza) scarterebbe timeline che ancore e
+        # raffinamento possono ancora correggere; il valore alimenta invece
+        # il gate --strict-sync e il riepilogo finale.
         _set_weak_signal()
         log.warning(
             "   [Semantico] AVVISO: allineamento a bassa fiducia (picco medio "
             "normalizzato %.2f < %.2f). Il parlato di alcuni segmenti somiglia "
             "poco alla propria slide: la timeline viene usata comunque, ma va "
-            "verificata (con l'LLM attivo le slide non ancorate vengono "
-            "riposizionate).",
+            "verificata (i confini senza ancora sono stime).",
             avg_z,
             min_avg_z,
         )
@@ -1276,15 +1274,15 @@ def verify_anchor_mapping_embedding(
     report: dict[str, Any] | None = None,
 ) -> dict[int, float] | None:
     """Corregge la numerazione parlata sistematicamente sfasata usando gli
-    embeddings locali (nessuna chiamata LLM).
+    embeddings locali.
 
     ``report`` (opzionale): se fornito, riceve
 
     - ``{"suspicious": bool}`` — True quando l'euristica ha visto almeno un'ancora
       il cui contenuto NON conferma il numero parlato ma non può correggere in
       modo affidabile (offset misti senza run correggibile, offset uniforme fuori
-      range, ...). Il chiamante usa il segnale per decidere se vale la pena la
-      verifica LLM anche quando di solito la salterebbe.
+      range, ...). Il chiamante lo riporta nel report e nel riepilogo (ancore
+      sospette da controllare a mano).
     - ``{"unconfirmed": [{"slide", "time", "points_to"}]}`` — le ancore che il
       PARLATO non conferma: subito dopo l'annuncio il testo somiglia di più a
       un'altra slide del PDF. Non è un errore (il bridge verso la slide
@@ -1299,7 +1297,7 @@ def verify_anchor_mapping_embedding(
     se lo spostamento ``slide_dx - N`` è lo STESSO per tutte le ancore
     (offset coerente), lo si applica a tutte e si restituisce il mapping
     corretto. Se l'offset non è univoco o è zero, restituisce None (il
-    chiamante ripiega sulle ancore originali o sulla verifica LLM).
+    chiamante ripiega sulle ancore originali).
 
     Gestisce anche l'offset PARZIALE (a gradino): se la numerazione è
     allineata per le prime ancore e poi slitta di una costante per le
@@ -1315,7 +1313,7 @@ def verify_anchor_mapping_embedding(
     formano più run e le regole precedenti rinunciano. Se ALMENO 2 ancore sono
     contraddette dal parlato si adotta allora la slide del PDF più simile
     ("best") di ogni ancora, tenendo la sola sotto-sequenza monotona crescente
-    (LIS) per scartare gli outlier: correzione deterministica, senza LLM. Due
+    (LIS) per scartare gli outlier: correzione deterministica. Due
     ancore che il contenuto manda sulla STESSA slide senza salti all'indietro
     sono invece ambiguità reale, non drift: niente correzione.
 
@@ -1390,8 +1388,8 @@ def verify_anchor_mapping_embedding(
         if off != 0
     ]
     if len(offsets) < 2:
-        # Troppo poco segnale per un giudizio: non sospetto (evita chiamate
-        # LLM spurie quando la verifica non pu�� valutare nulla).
+        # Troppo poco segnale per un giudizio: non sospetto (evita falsi
+        # allarmi quando la verifica non può valutare nulla).
         return _done(None, False)
 
     if any(off != 0 for off in offsets):
@@ -1434,8 +1432,8 @@ def verify_anchor_mapping_embedding(
     #
     #    Offsets misti = almeno un'ancora NON confermata dal contenuto: se non
     #    c'è una run correggibile (una sola ancora sfasata, drift a
-    #    intermittenza) il mapping è AMBIGUO ma SOSPETTO: il chiamante può
-    #    chiedere all'LLM di decidere leggendo il contenuto.
+    #    intermittenza) il mapping è AMBIGUO ma SOSPETTO: resta il segnale per
+    #    il report e il riepilogo (da controllare a mano).
     runs: list[tuple[int, list[tuple[int, float]]]] = []  # (offset, ancore)
     for s, t, off in pairs:
         if off != 0 and runs and runs[-1][0] == off:
@@ -1448,15 +1446,15 @@ def verify_anchor_mapping_embedding(
         #    può allontanarsi via via dal PDF (es. il podcast ha meno slide del
         #    PDF: "slide 3" mostra la 4 e più avanti "slide 6" mostra la 9), per
         #    cui gli offset NON sono costanti e formano più run: le regole
-        #    precedenti (offset uniforme / singola run) rinunciano e delegano la
-        #    correzione all'LLM. Il contenuto però è spesso già univoco: se
+        #    precedenti (offset uniforme / singola run) rinunciano e si prova la
+        #    correzione per contenuto. Il contenuto però è spesso già univoco: se
         #    ALMENO 2 ancore sono contraddette dal parlato, si adotta la slide
         #    "best" di ogni ancora tenendo la sola sotto-sequenza monotona
         #    crescente (LIS), che scarta gli outlier (es. l'ancora di chiusura
         #    il cui parlato somiglia a più slide).
         #    Due ancore che il contenuto manda sulla STESSA slide senza alcun
         #    salto all'indietro sono invece ambiguità reale, non drift: niente
-        #    correzione (resta il sospetto per la verifica LLM).
+        #    correzione (resta il sospetto nel report).
         ordered = sorted(pairs, key=lambda p: p[1])
         if sum(1 for _, _, off in ordered if off != 0) >= 2:
             best_seq = [s + off for s, _, off in ordered]
@@ -1567,147 +1565,6 @@ def verify_anchor_mapping_embedding(
     return _done(corrected, False)
 
 
-def make_anchor_remap_filter(
-    slide_texts: Sequence[str],
-    words_raw: Sequence[Word],
-    total_slides: int,
-    window_seconds: float = 40.0,
-    options: SemanticOptions | None = None,
-    embed_fn: EmbedFn | None = None,
-) -> Callable[[int, float, int], bool | None] | None:
-    """Restituisce un validatore dei rimappi ancora proposti dall'LLM.
-
-    La verifica LLM del mapping (``llm_verify_anchor_mapping``) corregge la
-    numerazione parlata sfasata, ma un rimappo non supportato dal contenuto
-    del parlato rischia di rompere la timeline: le ancore esplicite "slide N"
-    sono vincoli ad alta precisione, e un rimappo ``s -> s'`` viene accettato
-    SOLO se il parlato subito dopo il riferimento è semanticamente più vicino
-    alla slide ``s'`` che alla slide parlata ``s`` (stesso modello embedding
-    della verifica deterministica). Così l'LLM non può spostare un'ancora
-    corretta (es. "slide 5" il cui contenuto è davvero la slide 5) e resta
-    utile solo dove il contenuto conferma davvero lo sfasamento.
-
-    La finestra di parlato per ogni ancora è cachata: ogni ancora viene
-    codificata una sola volta per run.
-
-    ``embed_fn`` è iniettabile (stessa convenzione di
-    ``verify_anchor_mapping_embedding``): nei test si passa un embedder finto,
-    in produzione viene caricato il modello fastembed locale.
-
-    Returns:
-        ``None`` se l'embedder non è disponibile (l'LLM fa fede, comportamento
-        storico). Altrimenti una funzione ``(slide_parlata, tempo, slide_mappata)
-        -> bool`` che restituisce ``True`` (rimappo supportato), ``False``
-        (contraddetto dal contenuto) o ``None`` (finestra di parlato vuota o
-        embedding fallito: nessuna opinione).
-    """
-    opts = options or SemanticOptions()
-    if embed_fn is None:
-        try:
-            model = _load_embed_model(
-                opts.model_name or DEFAULT_EMBEDDING_MODEL,
-                opts.cache_dir or DEFAULT_EMBEDDING_CACHE_DIR,
-                alternate_name=opts.alternate_model_name or DEFAULT_EMBEDDING_MODEL_ALTERNATE,
-            )
-            if model is None:
-                return None
-            embed_fn = _make_embed_fn(model)
-        except Exception as e:  # noqa: BLE001
-            log.warning("   [Ancore] Embedder non disponibile per la verifica dei rimappi: %s", e)
-            return None
-
-    slide_clean = [_clean_slide_text(t) for t in slide_texts[:total_slides]]
-    try:
-        slide_emb = _embed_list(embed_fn, slide_clean, "Ancore")
-    except Exception as e:  # noqa: BLE001
-        log.warning("   [Ancore] Embedding slide non riuscito: %s", e)
-        return None
-
-    _excerpt_emb: dict[float, np.ndarray] = {}
-
-    def _validate(spoken_slide: int, t: float, new_slide: int) -> bool | None:
-        exc = _excerpt_emb.get(round(t, 1))
-        if exc is None:
-            excerpt = words_text_in_window(words_raw, t, t + window_seconds)
-            if not excerpt:
-                return None
-            try:
-                exc = embed_fn([excerpt])[0]
-            except Exception as e:  # noqa: BLE001
-                log.warning("   [Ancore] Embedding del parlato a %.1fs non riuscito: %s", t, e)
-                return None
-            _excerpt_emb[round(t, 1)] = exc
-        sims = slide_emb @ exc
-        return bool(sims[new_slide - 1] > sims[spoken_slide - 1])
-
-    return _validate
-
-
-# =====================================================================
-# SELEZIONE LIBERA (riordino): le slide possono apparire in qualsiasi
-# ordine e ripetersi, seguendo il contenuto del podcast.
-# =====================================================================
-def _smooth_segments(
-    best: np.ndarray,
-    min_blocks: int,
-) -> list[tuple[int, int, int]]:
-    """
-    Converte la sequenza di argmax per blocco in segmenti (slide, inizio,
-    fine) con anti-flicker: i segmenti più corti di `min_blocks` blocchi
-    vengono fusi nel vicino più lungo.
-
-    Returns:
-        Lista di tuple (slide 0-based, blocco_inizio, blocco_fine).
-    """
-    if len(best) == 0:
-        return []
-    runs: list[list[int]] = []
-    for s in best.tolist():
-        if runs and runs[-1][0] == s:
-            runs[-1].append(s)
-        else:
-            runs.append([s])
-    # rappresenta come (slide, start_block, end_block escluso)
-    segs = []
-    start = 0
-    for r in runs:
-        end = start + len(r)
-        segs.append((r[0], start, end))
-        start = end
-
-    changed = True
-    while changed and len(segs) > 1:
-        changed = False
-        for i, (_s, a, b) in enumerate(segs):
-            if b - a >= min_blocks:
-                continue
-            # fondi nel vicino più lungo
-            if i == 0:
-                n = 1
-            elif i == len(segs) - 1:
-                n = i - 1
-            else:
-                n = i - 1 if segs[i - 1][2] - segs[i - 1][1] >= segs[i + 1][2] - segs[i + 1][1] else i + 1
-            lo, hi = min(i, n), max(i, n)
-            # Il segmento corto viene ASSORBITO dal vicino più lungo: la slide
-            # del risultato è quella del vicino (n), non quella corta (i).
-            merged = (segs[n][0], segs[lo][1], segs[hi][2])
-            segs = [*segs[:lo], merged, *segs[hi + 1 :]]
-            changed = True
-            break
-
-    # Fusione finale: segmenti adiacenti con la STESSA slide diventano uno
-    # solo (es. dopo una fusione corta possono restare due blocchi 8-8 o
-    # quattro 14-14-14-14 consecutivi che vanno uniti).
-    final: list[tuple[int, int, int]] = []
-    for s, a, b in segs:
-        if final and final[-1][0] == s:
-            final[-1] = (s, final[-1][1], b)
-        else:
-            final.append((s, a, b))
-    return [(s, a, b) for s, a, b in final if b - a >= min_blocks]
-
-
 # ---------------------------------------------------------------------
 # ROBUSTEZZA DEL RAFFINAMENTO: il margine va misurato in unità di rumore
 # ---------------------------------------------------------------------
@@ -1805,7 +1662,7 @@ def _refine_wins_under_perturbation(
     try:
         embs = np.asarray(embed_fn(texts), dtype=np.float32)
     except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
-        log.debug("   [LLM/Refine] Prova di stabilità non calcolabile (%s).", e)
+        log.debug("   [Refine] Prova di stabilità non calcolabile (%s).", e)
         return False
     if embs.ndim != 2 or embs.shape[0] != 4:
         return False
@@ -1815,7 +1672,7 @@ def _refine_wins_under_perturbation(
     return best_score > cur_score
 
 
-def refine_llm_segment_boundaries(
+def refine_segment_boundaries(
     segments: list[dict[str, Any]],
     words: list[Word],
     slide_texts: Sequence[str],
@@ -1830,7 +1687,7 @@ def refine_llm_segment_boundaries(
     max_candidates: int = 48,
     search_window: Mapping[int, tuple[float, float]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Rifinisce i confini dei segmenti LLM a granularità di parola.
+    """Rifinisce i confini dei segmenti a granularità di parola.
 
     Ogni confine (inizio di un segmento) viene spostato entro
     ``±window_seconds`` al timestamp di parola che massimizza la coerenza
@@ -1884,10 +1741,10 @@ def refine_llm_segment_boundaries(
         return segments
     try:
         slide_emb = _embed_list(
-            embed_fn, [_clean_slide_text(t) for t in slide_texts], "LLM/Refine"
+            embed_fn, [_clean_slide_text(t) for t in slide_texts], "Refine"
         )
     except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
-        log.warning("   [LLM/Refine] Embedding slide non disponibile: confini invariati (%s).", e)
+        log.warning("   [Refine] Embedding slide non disponibile: confini invariati (%s).", e)
         return segments
     if slide_emb.ndim != 2 or slide_emb.shape[0] < 1:
         return segments
@@ -2004,7 +1861,7 @@ def refine_llm_segment_boundaries(
                 continue
             embs = (embs / np.maximum(np.linalg.norm(embs, axis=1, keepdims=True), 1e-9)).astype(np.float32)
         except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
-            log.warning("   [LLM/Refine] Embedding finestre non disponibile: confini invariati (%s).", e)
+            log.warning("   [Refine] Embedding finestre non disponibile: confini invariati (%s).", e)
             _record_refine(
                 int(out[i]["slide"]),
                 from_slide=prev_slide + 1,
@@ -2046,7 +1903,7 @@ def refine_llm_segment_boundaries(
                 int(out[i]["slide"]), **record, decision="tenuto: margine dentro il rumore"
             )
             log.info(
-                "   [LLM/Refine] Confine TENUTO a %.1fs: il candidato migliore (%.1fs) "
+                "   [Refine] Confine TENUTO a %.1fs: il candidato migliore (%.1fs) "
                 "batte di %.3f, sotto %.3f = %.1fx il rumore locale %.4f (margine %.1fsigma).",
                 t_current,
                 indexed[best_idx][0],
@@ -2097,7 +1954,7 @@ def refine_llm_segment_boundaries(
                 int(out[i]["slide"]), **record, decision="tenuto: vince solo a finestra stretta"
             )
             log.info(
-                "   [LLM/Refine] Confine TENUTO a %.1fs: il candidato %.1fs vince con la "
+                "   [Refine] Confine TENUTO a %.1fs: il candidato %.1fs vince con la "
                 "finestra di %.0fs ma non con quella allargata a %.0fs (margine %.1fsigma).",
                 t_current,
                 best_t,
@@ -2115,7 +1972,7 @@ def refine_llm_segment_boundaries(
             decision="spostato (guidato dall'evidenza)" if guided else "spostato",
         )
         log.info(
-            "   [LLM/Refine] Confine spostato a %.1fs (era %.1fs): slide %d -> %d "
+            "   [Refine] Confine spostato a %.1fs (era %.1fs): slide %d -> %d "
             "(score %.3f vs %.3f, margine %.1fsigma sul rumore locale %.4f).",
             best_t,
             t_current,
@@ -2127,7 +1984,7 @@ def refine_llm_segment_boundaries(
             scatter,
         )
     if moved:
-        log.info("   [LLM/Refine] %d confine/i raffinato/i a livello di parola.", moved)
+        log.info("   [Refine] %d confine/i raffinato/i a livello di parola.", moved)
     return out
 
 
@@ -2138,49 +1995,16 @@ def _window_words(words: Sequence[Word], word_times: Sequence[float], start: flo
     return " ".join(words[k]["word"] for k in range(lo_i, hi_i))
 
 
-def refine_llm_segments_from_words(
-    segments: list[dict[str, Any]],
-    words_raw: list[Word],
-    slide_texts: list[str],
-    options: SemanticOptions | None = None,
-    window_seconds: float = 30.0,
-) -> list[dict[str, Any]]:
-    """Refinamento dei confini LLM con il modello embedding reale (fastembed).
-
-    Come ``semantic_timeline_from_words``: carica il modello (con fallback sul
-    modello alternativo), costruisce la ``EmbedFn`` e delega a
-    ``refine_llm_segment_boundaries``. Se il modello non è disponibile i
-    segmenti vengono restituiti invariati (nessuna interruzione).
-    """
-    opts = options or SemanticOptions()
-    model = _load_embed_model(
-        opts.model_name or DEFAULT_EMBEDDING_MODEL,
-        opts.cache_dir or DEFAULT_EMBEDDING_CACHE_DIR,
-        alternate_name=opts.alternate_model_name or DEFAULT_EMBEDDING_MODEL_ALTERNATE,
-    )
-    if model is None:
-        return segments
-    embed_fn = _make_embed_fn(model)
-    return refine_llm_segment_boundaries(
-        segments,
-        words_raw,
-        slide_texts,
-        embed_fn,
-        window_seconds=window_seconds,
-        min_segment_seconds=max(5.0, opts.min_slide_duration),
-    )
-
-
 # =====================================================================
-# POST-ELABORAZIONE TIMELINE LLM ORDINATA (flusso slide-audio/audio-slide)
+# POST-ELABORAZIONE TIMELINE ORDINATA (flusso slide-audio/audio-slide)
 # =====================================================================
-# Nel flusso ordinato l'LLM posiziona SOLO le slide senza ancora esplicita
-# (``llm_ordered_timeline``): i loro confini di inizio restano quantizzati al
-# chunk (es. 30s) e possono cadere a metà parola o nel mezzo di un discorso
+# Nel flusso ordinato le slide senza ancora esplicita vengono posizionate
+# dal motore embedding: i loro confini di inizio restano quantizzati al
+# blocco (es. 30s) e possono cadere a metà parola o nel mezzo di un discorso
 # ancora dedicato alla slide precedente. Queste due funzioni raffinano SOLO
 # quei confini a livello di parola; le ancore esatte (``"slide N"``) non
 # vengono MAI toccate.
-def refine_ordered_llm_timeline(
+def refine_ordered_timeline(
     timeline: dict[int, float],
     anchors: dict[int, float],
     words: list[Word],
@@ -2190,10 +2014,10 @@ def refine_ordered_llm_timeline(
     window_seconds: float = 30.0,
     min_segment_seconds: float = DEFAULT_MIN_SEGMENT_SECONDS,
 ) -> dict[int, float]:
-    """Rifinisce i confini della timeline LLM ordinata a granularità di parola.
+    """Rifinisce i confini della timeline ordinata a granularità di parola.
 
     Converte la timeline ``{slide: start}`` in segmenti e delega a
-    ``refine_llm_segment_boundaries`` limitando i candidati alle sole slide
+    ``refine_segment_boundaries`` limitando i candidati alle sole slide
     SENZA ancora (``refine_slides``): le ancore restano al timestamp esatto
     pronunciato nel parlato. La timeline in uscita rispetta la monotonicità
     (garantita dai vincoli del refine) ed è quindi riconciliabile.
@@ -2219,7 +2043,7 @@ def refine_ordered_llm_timeline(
                 "end": float(timeline[nxt]) if nxt is not None else float(total_duration),
             }
         )
-    refined = refine_llm_segment_boundaries(
+    refined = refine_segment_boundaries(
         segments,
         words,
         slide_texts,
@@ -2232,7 +2056,7 @@ def refine_ordered_llm_timeline(
     return {int(seg["slide"]): float(seg["start"]) for seg in refined}
 
 
-def refine_llm_timeline_from_words(
+def refine_timeline_from_words(
     timeline: dict[int, float],
     anchors: dict[int, float],
     words_raw: list[Word],
@@ -2241,9 +2065,9 @@ def refine_llm_timeline_from_words(
     options: SemanticOptions | None = None,
     window_seconds: float = 30.0,
 ) -> dict[int, float]:
-    """Refinamento della timeline LLM ordinata con il modello embedding reale.
+    """Refinamento della timeline ordinata con il modello embedding reale.
 
-    Come ``refine_ordered_llm_timeline`` ma carica il modello fastembed (con
+    Come ``refine_ordered_timeline`` ma carica il modello fastembed (con
     fallback sul modello alternativo) e delega a essa. Se il modello non è
     disponibile la timeline viene restituita invariata (nessuna interruzione).
     """
@@ -2261,7 +2085,7 @@ def refine_llm_timeline_from_words(
     if model is None:
         return timeline
     embed_fn = _make_embed_fn(model)
-    return refine_ordered_llm_timeline(
+    return refine_ordered_timeline(
         timeline,
         anchors,
         words_raw,
@@ -2388,7 +2212,7 @@ def repair_segments_from_frame_mismatches(
     if not ranges:
         return [dict(s) for s in segments], []
 
-    refined = refine_llm_segment_boundaries(
+    refined = refine_segment_boundaries(
         out,
         list(words),
         slide_texts,
@@ -2451,7 +2275,7 @@ def repair_segments_from_frames_from_words(
     """Come ``repair_segments_from_frame_mismatches`` col modello embedding reale.
 
     Carica fastembed (con fallback sul modello alternativo) esattamente come
-    ``refine_llm_timeline_from_words``. Se il modello non è disponibile i
+    ``refine_timeline_from_words``. Se il modello non è disponibile i
     segmenti tornano invariati: la riparazione è un'opportunità, non un
     requisito della pipeline (nessuna interruzione).
     """

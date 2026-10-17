@@ -29,8 +29,8 @@ python src/main.py --whisper-model large-v3
 python src/main.py --transcriber openvino
 python src/main.py --transcriber whisper
 
-# Esegui i test (503 test: pipeline, LLM, chunks, integrazione)
-python -m unittest test_sync test_integration test_llm_sync test_chunks
+# Esegui i test (pipeline, chunking, integrazione)
+python -m unittest test_sync test_integration test_chunks
 ```
 
 ### Opzioni principali
@@ -113,17 +113,11 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--semantic-window` | `4.0` | Secondi per blocco |
 | `--semantic-min-duration` | `3.0` | Durata minima slide (s) |
 | `--semantic-temperature` | `0.15` | Competizione softmax (più bassa = picchi più netti) |
-| `--semantic-min-z` | `0.45` | Soglia sul **picco medio normalizzato** (z-score per slide, la stessa matrice usata dal posizionamento): è la misura che distingue un allineamento giusto da slide mescolate. Sotto soglia la timeline **non** viene scartata: viene segnalata (escalation al LLM, gate `--strict-sync`, report e riepilogo finale). Tarata su dati reali: ordine giusto 0.61-0.75, slide mescolate 0.30-0.43, invertite 0.18, non correlate ≤0.09, quasi-duplicate 0.006 |
+| `--semantic-min-z` | `0.45` | Soglia sul **picco medio normalizzato** (z-score per slide, la stessa matrice usata dal posizionamento): è la misura che distingue un allineamento giusto da slide mescolate. Sotto soglia la timeline **non** viene scartata: viene segnalata (gate `--strict-sync`, report e riepilogo finale). Tarata su dati reali: ordine giusto 0.61-0.75, slide mescolate 0.30-0.43, invertite 0.18, non correlate ≤0.09, quasi-duplicate 0.006 |
 | ~~`--semantic-min-sim`~~ | — | **Rimosso.** Era una soglia sulla similarità media *grezza* e non poteva mai scattare: misurata sui dati reali, anche un testo senza senso dà 0.75 di coseno contro una slide e il parlato reale non scende mai sotto 0.75, quindi la soglia (0.10) era fuori scala di un fattore ~7. Un presidio che non presidia è peggio di non averlo. La decisione è su `--semantic-min-z`, che è libero da scala. Se hai lo `--semantic-min-sim` in uno script, toglilo: il flag non esiste più |
-| `--llm` | `off` | Selezione slide con LLM: `off` (solo embedding locale, **il default**), `auto` e `9router` (**oggi equivalenti**: l'unico provider è 9Router, quindi entrambi usano la stessa cascata e ripiegano sull'embedding locale). Libero: slide per chunk. Ordinato: solo le slide senza ancora esplicita |
-| `--llm-model` | — | Override modello LLM (es. `comboact`, `cf/@cf/mistralai/mistral-small-3.1-24b-instruct`) |
-| `--llm-chunk` | `30.0` | Secondi per chunk inviato all'LLM |
-| `--llm-wait-timeout` | `0.0` | Se 9Router è necessario ma spento: secondi massimi di attesa prima del fallback embedding. `0` = attesa illimitata (pausa + avviso, riprende appena 9Router risponde) |
-| `--llm-review` | — | Dopo la timeline LLM nel flusso libero, secondo passaggio LLM che ri-verifica la selezione chunk→slide e avvisa (senza modificare la timeline) sui chunk sospetti. Risultato cachato. |
-| `--llm-local-threshold` | `2` | Nel flusso ordinato, numero massimo di slide senza ancora che il **raffinamento locale** (embeddings, ~secondi, nessun 9Router) può gestire da solo. Il motore locale gira comunque **sempre per primo**; oltre questa soglia si chiede anche all'LLM (9Router, che si avvia da solo se spento) di migliorare la timeline, e se non riesce si usa quella locale già calcolata. `0` = chiedi sempre all'LLM |
 | `--require-full-anchors` | — | Nel flusso ordinato, **interrompi** se il podcast non annuncia TUTTE le slide (ancore `slide N` incomplete) invece di generare un video con durate stimate. Utile in batch/CI (`genera_video.bat`) |
 | `--min-anchor-coverage` | `0.5` | Nel flusso slide → podcast, **interrompi prima della sincronizzazione** se la frazione di transizioni con ancora `slide N` è sotto la soglia (default 50%: con `--no-confirm` la pausa interattiva viene saltata e senza gate un podcast condensato generava un video degradato in silenzio). La soglia è anche il metro della decodifica accurata: sotto di essa la trascrizione dell'audio intero col beam accurato viene tentata PRIMA di fermarsi, e il recupero delle zone cieche prima ancora, quindi gate e avviso arrivano solo dopo i rimedi e dicono cosa è stato provato. `0` disattiva. Più morbido di `--require-full-anchors`, che pretende il 100% |
-| `--strict-sync` | — | Modalità "non consegnare un video sospetto". Blocca PRIMA della generazione se un segmento di durata anomala risulta disallineato dal contenuto (il parlato somiglia a un'altra slide) o se la revisione LLM (`--llm-review`) contesta la mappa chunk→slide; blocca DOPO la generazione (il video resta su disco, ma l'esito è un errore) se la verifica frame vs slide trova segmenti con la slide sbagliata. Attiva automaticamente `--verify-video`. Default: avviso soltanto. Il report dei segmenti è salvato comunque in `.cache/sync_report.json` |
+| `--strict-sync` | — | Modalità "non consegnare un video sospetto". Blocca PRIMA della generazione se un segmento di durata anomala risulta disallineato dal contenuto (il parlato somiglia a un'altra slide); blocca DOPO la generazione (il video resta su disco, ma l'esito è un errore) se la verifica frame vs slide trova segmenti con la slide sbagliata. Attiva automaticamente `--verify-video`. Default: avviso soltanto. Il report dei segmenti è salvato comunque in `.cache/sync_report.json` |
 | `--verify-video` | — | Dopo la generazione estrae un frame a metà di ogni segmento e lo confronta con la slide attesa: è l'unico controllo sull'ARTEFATTO (la timeline può essere coerente e il video comunque sbagliato). I frame restano in `.cache/verify_frames/` e l'esito finisce in `sync_report.json`. `genera_video.bat` lo attiva di default (pochi secondi in più) |
 | `--no-auto-repair` | — | Disattiva la **riparazione automatica**. Quando la verifica del video trova un segmento con la slide sbagliata, la pipeline sposta da sola quel confine (motore embedding, solo nella direzione indicata dall'evidenza) e rigenera il video, poi lo ricontrolla. Con questo flag l'esito resta un avviso e il video non viene rifatto |
 | `--force-setup` | — | Rileva l'hardware da capo e riscrive i fatti in `.cache/machine_setup.json` (utile se hai cambiato GPU o spostato la cartella). La *decisione* sul motore viene comunque ricalcolata a ogni run |
@@ -136,7 +130,6 @@ python -m unittest test_sync test_integration test_llm_sync test_chunks
 | `--dpi` | `300` | Risoluzione di rendering delle slide per l'OCR |
 | `--slides-dir` | `temp_slides` | Cartella delle slide renderizzate |
 | `--skip-slides` | — | Esclude un elenco di slide (indici 1-based, es. `1,4,9`) dal flusso |
-| `--no-free-ordered-fallback` | — | Nel flusso libero, non ripiegare sull'allineamento ordinato quando la selezione semantica fallisce: interrompi |
 | `--no-confirm` | — | Non chiedere conferma interattiva (per batch/CI) |
 | `--version` | — | Stampa la versione del programma (da VERSIONE.txt nello ZIP, altrimenti dal git locale) ed esce senza fare nulla |
 | `--no-update` | — | Al controllo aggiornamenti: notifica senza installare |
