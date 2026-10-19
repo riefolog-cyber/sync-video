@@ -54,6 +54,26 @@ class TestControlliCopronoLaCi(unittest.TestCase):
         mancanti = moduli_ci - _moduli_controlli()
         self.assertEqual(mancanti, set(), f"la CI esegue {sorted(mancanti)} ma controlli.py non lo fa")
 
+    def test_il_job_windows_verifica_ffmpeg_e_ha_un_ripiego(self) -> None:
+        """Non basta l'exit code di Chocolatey per dire "ffmpeg c'e'".
+
+        Misurato il 19/10/2026: il feed ha risposto 504, `choco install
+        ffmpeg` e' uscito 0 senza installare niente, e il KO e' arrivato dal
+        test del PC sano ("ffmpeg non trovato nel PATH") come se il codice
+        fosse rotto. Il passo deve quindi controllare il binario e avere un
+        ripiego che non dipende dalla rete (imageio-ffmpeg, gia' installato
+        come dipendenza di moviepy).
+        """
+        import yaml
+
+        dati = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        passi = [str(p.get("run", "")) for p in dati["jobs"]["windows-rapido"]["steps"] if "run" in p]
+        testi = [t for t in passi if "ffmpeg" in t]
+        self.assertTrue(testi, "nessun passo del job Windows nomina ffmpeg")
+        passo = "\n".join(testi)
+        self.assertIn("Get-Command ffmpeg", passo, "l'installazione va verificata sul binario, non sull'exit code")
+        self.assertIn("imageio_ffmpeg", passo, "senza ripiego un 504 di Chocolatey fa fallire i test")
+
     def test_il_type_check_copre_le_tre_piattaforme(self) -> None:
         piattaforme: set[str] = set()
         for controllo in controlli._passi():

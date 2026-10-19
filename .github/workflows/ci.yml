@@ -143,11 +143,50 @@ jobs:
           restore-keys: |
             pip-${{ runner.os }}-3.12-
 
-      - name: Strumenti di sistema (ffmpeg, Tesseract)
-        run: choco install ffmpeg tesseract -y --no-progress
-
       - name: Installa dipendenze
         run: pip install -r requirements.txt
+
+      - name: Tesseract (OCR)
+        run: choco install tesseract -y --no-progress
+
+      - name: ffmpeg nel PATH, verificato
+        # Misurato il 19/10/2026: il feed di Chocolatey ha risposto 504 sul
+        # pacchetto ffmpeg, l'installazione e' stata saltata e il passo e'
+        # rimasto verde (choco esce 0 quando installa almeno un pacchetto).
+        # Il KO e' arrivato dopo dal test del PC sano, che leggeva "ffmpeg
+        # non trovato nel PATH": un guasto dell'ambiente travestito da difetto
+        # del codice. Qui l'esito si controlla sul binario, non sull'exit
+        # code di choco, e se il feed cade si usa l'ffmpeg statico che
+        # imageio-ffmpeg (dipendenza di moviepy, gia' installata) porta dentro.
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::warning::Chocolatey non ha installato ffmpeg (uscita $LASTEXITCODE)."
+          }
+
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            Write-Host "::warning::ffmpeg assente dal PATH: uso il binario di imageio-ffmpeg."
+            $sorgente = (python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())").Trim()
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $sorgente)) {
+              Write-Error "imageio-ffmpeg non ha fornito un ffmpeg utilizzabile."
+              exit 1
+            }
+            $cartella = Join-Path $env:RUNNER_TEMP "ffmpeg"
+            New-Item -ItemType Directory -Force -Path $cartella | Out-Null
+            Copy-Item -LiteralPath $sorgente -Destination (Join-Path $cartella "ffmpeg.exe")
+            Add-Content -Path $env:GITHUB_PATH -Value $cartella
+            $env:PATH = "$cartella;$env:PATH"
+          }
+
+          # Fermarsi qui, con la causa in chiaro, e' meglio che far fallire il
+          # test del PC sano: lo stesso binario mancante sembrerebbe un difetto
+          # del programma e la diagnosi costerebbe mezz'ora.
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            Write-Error "ffmpeg non disponibile: i test del PC sano fallirebbero per un guasto dell'ambiente."
+            exit 1
+          }
+          ffmpeg -version | Select-Object -First 1
 
       - name: Test veloci su Windows
         run: python -m unittest discover -s src -p "test_*.py"
