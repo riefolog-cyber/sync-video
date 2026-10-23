@@ -219,6 +219,18 @@ installazione: **non** fallisce con un errore incomprensibile.
 > comunque a chiudere tutto (browser per primo) e rilanciare; scorciatoia
 > immediata: `genera_video.bat --transcriber whisper`.
 >
+> ### Se la GPU NVIDIA c'è ma mancano le librerie CUDA
+>
+> Sintomo: `Library cublas64_12.dll is not found or cannot be loaded` a metà
+> trascrizione. La GPU e il driver funzionano; mancano cuBLAS e cuDNN, che il
+> driver NVIDIA non installa. Doppio clic su `installa_cuda.bat`: installa le
+> due librerie nel Python usato dal programma, aggiunge le cartelle al PATH
+> dell'utente e verifica che Windows le carichi. Poi chiudi e riapri
+> `genera_video.bat`.
+>
+> Il programma, se le trova mancanti, ripiega da solo su CPU avvisando: il
+> video esce lo stesso, più lento.
+>
 > ### Se lanci senza i file del video
 >
 > È il caso normale alla prima esecuzione: scarichi lo ZIP, avvii, e non hai

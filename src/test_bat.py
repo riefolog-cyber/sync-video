@@ -77,3 +77,18 @@ class TestBatEtichette(unittest.TestCase):
                 usate |= {u.lower() for u in CALL_LABEL.findall(codice)}
                 mancanti = sorted(usate - definite)
                 self.assertEqual(mancanti, [], f"etichette mai definite: {mancanti}")
+
+
+class TestInstallaCuda(unittest.TestCase):
+    """Il rimedio per la GPU deve restare quello che serve davvero."""
+
+    def test_installa_le_due_librerie_e_verifica(self) -> None:
+        percorso = RADICE / "installa_cuda.bat"
+        self.assertTrue(percorso.exists(), "manca installa_cuda.bat")
+        testo = percorso.read_text(encoding="utf-8")
+        self.assertIn("nvidia-cublas-cu12", testo)
+        self.assertIn('"nvidia-cudnn-cu12==9.*"', testo)
+        # CTranslate2 usa LoadLibraryA (ricerca standard): winmode=0 e' la
+        # stessa ricerca, mentre il default di ctypes ignora il PATH.
+        self.assertIn("winmode=0", testo)
+        self.assertIn("'User'", testo)
