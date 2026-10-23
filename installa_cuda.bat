@@ -100,8 +100,8 @@ goto fine_errore
 echo.
 echo [ERRORE] L'installazione con pip non e' riuscita.
 echo Controlla la connessione e rilancia questo file.
-echo Se parla di permessi, esegui il Prompt come amministratore oppure a mano:
-echo   !PY_CMD! -m pip install --user --upgrade nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
+echo Se parla di permessi, chiudi ogni altra finestra del programma e riprova;
+echo se non basta, esegui il Prompt come amministratore.
 goto fine_errore
 
 :cartelle_fallite
