@@ -62,6 +62,41 @@ jobs:
       - name: Installa dipendenze
         run: pip install -r requirements.txt
 
+      - name: Strumenti di sistema (ffmpeg, Tesseract)
+        # ubuntu-latest e' passata a Ubuntu 26.04 (immagine ubuntu-26.04) e
+        # non porta piu' ffmpeg ne' Tesseract preinstallati. Prima ci pensava
+        # il bootstrap dentro la suite, ma ogni installazione ha un timeout di
+        # 600s: su un mirror lento scade, e il fallimento arriva poi dai test
+        # del PC sano come se il codice fosse rotto (run 39921954759). Qui
+        # s'installa una volta per job e l'esito si verifica sul binario,
+        # come nel job Windows.
+        run: |
+          sudo apt-get update -qq
+          # L'italiano e' un pacchetto a parte; se il repo non lo espone non
+          # e' un motivo per fermarsi: il bootstrap scarica ita.traineddata
+          # nella cartella del progetto.
+          sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-ita \
+            || sudo apt-get install -y --no-install-recommends tesseract-ocr
+
+          # ffmpeg non da apt: il binario statico di imageio-ffmpeg (dipendenza
+          # di moviepy, gia' installata da requirements.txt) e' lo stesso che
+          # il job Windows usa come ripiego, e risparmia ~80 MB di dipendenze.
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            FFMPEG_BIN="$(python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())")"
+            mkdir -p "$RUNNER_TEMP/ffmpeg"
+            cp "$FFMPEG_BIN" "$RUNNER_TEMP/ffmpeg/ffmpeg"
+            chmod +x "$RUNNER_TEMP/ffmpeg/ffmpeg"
+            echo "$RUNNER_TEMP/ffmpeg" >> "$GITHUB_PATH"
+            export PATH="$RUNNER_TEMP/ffmpeg:$PATH"
+          fi
+
+          # Fermarsi qui, con la causa in chiaro, e' meglio che far fallire
+          # test_disco e test_verifica_pc per un guasto dell'ambiente.
+          command -v ffmpeg
+          command -v tesseract
+          ffmpeg -version | head -1
+          tesseract --version | head -1
+
       - name: Lint (ruff)
         run: python -m ruff check .
 
@@ -113,6 +148,41 @@ jobs:
 
       - name: Installa dipendenze
         run: pip install -r requirements.txt
+
+      - name: Strumenti di sistema (ffmpeg, Tesseract)
+        # ubuntu-latest e' passata a Ubuntu 26.04 (immagine ubuntu-26.04) e
+        # non porta piu' ffmpeg ne' Tesseract preinstallati. Prima ci pensava
+        # il bootstrap dentro la suite, ma ogni installazione ha un timeout di
+        # 600s: su un mirror lento scade, e il fallimento arriva poi dai test
+        # del PC sano come se il codice fosse rotto (run 39921954759). Qui
+        # s'installa una volta per job e l'esito si verifica sul binario,
+        # come nel job Windows.
+        run: |
+          sudo apt-get update -qq
+          # L'italiano e' un pacchetto a parte; se il repo non lo espone non
+          # e' un motivo per fermarsi: il bootstrap scarica ita.traineddata
+          # nella cartella del progetto.
+          sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-ita \
+            || sudo apt-get install -y --no-install-recommends tesseract-ocr
+
+          # ffmpeg non da apt: il binario statico di imageio-ffmpeg (dipendenza
+          # di moviepy, gia' installata da requirements.txt) e' lo stesso che
+          # il job Windows usa come ripiego, e risparmia ~80 MB di dipendenze.
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            FFMPEG_BIN="$(python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())")"
+            mkdir -p "$RUNNER_TEMP/ffmpeg"
+            cp "$FFMPEG_BIN" "$RUNNER_TEMP/ffmpeg/ffmpeg"
+            chmod +x "$RUNNER_TEMP/ffmpeg/ffmpeg"
+            echo "$RUNNER_TEMP/ffmpeg" >> "$GITHUB_PATH"
+            export PATH="$RUNNER_TEMP/ffmpeg:$PATH"
+          fi
+
+          # Fermarsi qui, con la causa in chiaro, e' meglio che far fallire
+          # test_disco e test_verifica_pc per un guasto dell'ambiente.
+          command -v ffmpeg
+          command -v tesseract
+          ffmpeg -version | head -1
+          tesseract --version | head -1
 
       - name: Suite completa (lenti inclusi)
         env:

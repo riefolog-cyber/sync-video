@@ -74,6 +74,29 @@ class TestControlliCopronoLaCi(unittest.TestCase):
         self.assertIn("Get-Command ffmpeg", passo, "l'installazione va verificata sul binario, non sull'exit code")
         self.assertIn("imageio_ffmpeg", passo, "senza ripiego un 504 di Chocolatey fa fallire i test")
 
+    def test_i_job_ubuntu_installano_ffmpeg_e_tesseract(self) -> None:
+        """ubuntu-latest non porta piu' gli strumenti: li deve mettere la CI.
+
+        Il 19/10/2026 ubuntu-latest e' passata a Ubuntu 26.04, che non ha
+        ffmpeg ne' Tesseract preinstallati. Senza un passo dedicato li
+        installa il bootstrap dentro la suite, dove ogni comando ha un
+        timeout di 600s: su un mirror lento scade e test_disco e
+        test_verifica_pc falliscono come se il codice fosse rotto (run
+        39921954759, nightly 3.11). Qui si controlla che entrambi i job che
+        eseguono i test su Linux li installino e ne verifichino il binario.
+        """
+        import yaml
+
+        dati = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+        for job in ("lint-typecheck-test", "nightly-full"):
+            with self.subTest(job=job):
+                passi = [str(p.get("run", "")) for p in dati["jobs"][job]["steps"] if "run" in p]
+                testi = [t for t in passi if "ffmpeg" in t and "tesseract" in t]
+                self.assertTrue(testi, f"il job {job} non installa ffmpeg e Tesseract")
+                passo = "\n".join(testi)
+                self.assertIn("command -v ffmpeg", passo, "l'installazione va verificata sul binario")
+                self.assertIn("command -v tesseract", passo, "l'installazione va verificata sul binario")
+
     def test_il_type_check_copre_le_tre_piattaforme(self) -> None:
         piattaforme: set[str] = set()
         for controllo in controlli._passi():
