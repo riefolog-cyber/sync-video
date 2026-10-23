@@ -14,11 +14,13 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
+import config
 from machine_setup import (
     _CPU_FALLBACK,
     _apply,
     _classify_gpu,
     _fingerprint,
+    _provision,
     _read_hardware,
     _validate,
     _write_hardware,
@@ -237,6 +239,73 @@ class TestReadHardware(_TempConfigMixin, unittest.TestCase):
         self.assertIsNone(_read_hardware())
 
 
+class TestCudaRuntimeLibs(unittest.TestCase):
+    """La ricerca delle DLL CUDA deve imitare quella di Windows, non inventarla."""
+
+    def test_trova_una_dll_nel_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "cublas64_12.dll").write_bytes(b"x")
+            with mock.patch.dict(config.os.environ, {"PATH": tmp}):
+                self.assertTrue(config._cerca_dll_windows("cublas64_12.dll"))
+
+    def test_non_inventa_file_inesistenti(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(config.os.environ, {"PATH": tmp}):
+            self.assertFalse(config._cerca_dll_windows("libreria_inesistente_123.dll"))
+
+    def test_mancante_riporta_la_prima_assente(self):
+        # Su Windows la prima che non si trova e' quella da nominare nel log:
+        # cuBLAS manca piu' spesso di cuDNN, e il suo errore e' quello visto.
+        with (
+            mock.patch.object(config.sys, "platform", "win32"),
+            mock.patch.object(config, "_cerca_dll_windows", side_effect=[True, False]),
+        ):
+            self.assertEqual(config.cuda_runtime_lib_mancante(), "cudnn64_9.dll")
+
+    def test_tutte_presenti_nessun_nome(self):
+        with (
+            mock.patch.object(config.sys, "platform", "win32"),
+            mock.patch.object(config, "_cerca_dll_windows", return_value=True),
+        ):
+            self.assertIsNone(config.cuda_runtime_lib_mancante())
+
+
+class TestProvision(unittest.TestCase):
+    """`_provision` deve accorgersi delle librerie CUDA mancanti PRIMA della run."""
+
+    def test_cuda_without_runtime_libs_falls_back_to_cpu(self):
+        rec = {
+            "transcriber": "whisper",
+            "whisper_device": "cuda",
+            "whisper_compute_type": "float16",
+            "openvino_device": None,
+            "reason": "GPU NVIDIA",
+        }
+        with (
+            mock.patch("machine_setup.cuda_available", return_value=True),
+            mock.patch(
+                "machine_setup.cuda_runtime_lib_mancante",
+                return_value="cudnn64_9.dll",
+            ),
+        ):
+            out = _provision(dict(rec), Path(tempfile.gettempdir()))
+        self.assertEqual(out, _CPU_FALLBACK)
+
+    def test_cuda_with_runtime_libs_is_untouched(self):
+        rec = {
+            "transcriber": "whisper",
+            "whisper_device": "cuda",
+            "whisper_compute_type": "float16",
+            "openvino_device": None,
+            "reason": "GPU NVIDIA",
+        }
+        with (
+            mock.patch("machine_setup.cuda_available", return_value=True),
+            mock.patch("machine_setup.cuda_runtime_lib_mancante", return_value=None),
+        ):
+            out = _provision(dict(rec), Path(tempfile.gettempdir()))
+        self.assertEqual(out["whisper_device"], "cuda")
+
+
 class TestValidate(unittest.TestCase):
     """`_validate` e' il controllo che impedisce di morire su un device assente."""
 
@@ -266,10 +335,29 @@ class TestValidate(unittest.TestCase):
     def test_cuda_with_cuda_device_is_kept(self):
         with (
             mock.patch("machine_setup.cuda_available", return_value=True),
+            mock.patch("machine_setup.cuda_runtime_lib_mancante", return_value=None),
             mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
         ):
             out = _validate(dict(self._CUDA), None)
         self.assertEqual(out["whisper_device"], "cuda")
+
+    def test_cuda_without_runtime_libs_falls_back_to_cpu(self):
+        # GPU e driver a posto, ma mancano cuBLAS/cuDNN: CTranslate2 le carica
+        # solo al primo calcolo, quindi senza questo controllo la run morirebbe
+        # a meta' trascrizione (visto su un PC reale, 10/2026).
+        with (
+            mock.patch("machine_setup.cuda_available", return_value=True),
+            mock.patch(
+                "machine_setup.cuda_runtime_lib_mancante",
+                return_value="cublas64_12.dll",
+            ),
+            mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
+        ):
+            out = _validate(dict(self._CUDA), None)
+        self.assertEqual(out["transcriber"], "whisper")
+        self.assertEqual(out["whisper_device"], "cpu")
+        self.assertEqual(out["whisper_compute_type"], "int8")
+        self.assertIn("cublas64_12.dll", out["reason"])
 
     def test_openvino_without_runtime_falls_back_to_cpu(self):
         with mock.patch("machine_setup.importlib.util.find_spec", return_value=None):

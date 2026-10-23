@@ -617,6 +617,75 @@ def cuda_available() -> bool:
         return False
 
 
+# =====================================================================
+# LIBRERIE CUDA (cuBLAS / cuDNN)
+# =====================================================================
+# CTranslate2 carica cuBLAS e cuDNN al PRIMO calcolo, non quando costruisce il
+# modello. Su un PC con GPU NVIDIA e il solo driver (che NON installa queste
+# due librerie) la costruzione riesce, il decoding a batch fallisce e il
+# percorso sequenziale muore a meta' trascrizione con:
+#     Library cublas64_12.dll is not found or cannot be loaded
+# Misurato su un PC di un collega (10/2026). Qui il difetto viene riconosciuto
+# prima di OCR e trascrizione, cosi' si puo' ripiegare su CPU con un avviso
+# invece di perdere la run.
+_CUDA_RUNTIME_LIBS = {
+    "win32": ("cublas64_12.dll", "cudnn64_9.dll"),
+    "linux": ("libcublas.so.12", "libcudnn.so.9"),
+}
+
+# Testo unico per log e referto: il rimedio e' lo stesso ovunque compaia.
+CUDA_LIBS_REMEDY = (
+    'Installa cuBLAS 12 e cuDNN 9 con: py -m pip install --upgrade '
+    'nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*", poi aggiungi al PATH le due '
+    "cartelle bin di nvidia/cublas e nvidia/cudnn e riapri la finestra "
+    "(vedi docs/troubleshooting.md)."
+)
+
+
+def _cerca_dll_windows(nome: str) -> bool:
+    """True se Windows troverebbe `nome` con una LoadLibrary standard.
+
+    Non si usa ctypes.CDLL: carica davvero la libreria (centinaia di MB) e da
+    Python 3.8 in poi NON cerca nel PATH, quindi darebbe falsi negativi proprio
+    nel caso da riconoscere. Qui si replica la ricerca di LoadLibrary: cartella
+    dell'eseguibile, directory corrente, System32, CUDA_PATH\\bin, PATH.
+    """
+    cartelle = [Path(sys.executable).parent, Path.cwd()]
+    system_root = os.environ.get("SYSTEMROOT")
+    if system_root:
+        cartelle.append(Path(system_root) / "System32")
+    cuda_path = os.environ.get("CUDA_PATH")
+    if cuda_path:
+        cartelle.append(Path(cuda_path) / "bin")
+    cartelle += [Path(p) for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    return any((cartella / nome).is_file() for cartella in cartelle)
+
+
+def cuda_runtime_lib_mancante() -> str | None:
+    """Nome della libreria CUDA che CTranslate2 non riuscirebbe a caricare.
+
+    None se entrambe sono raggiungibili. Su Windows si controlla il filesystem
+    con la stessa ricerca di LoadLibrary; su Linux si prova a caricarle con
+    dlopen (che cerca in LD_LIBRARY_PATH, come fa CTranslate2). Su macOS non
+    esiste CUDA: None.
+    """
+    if sys.platform == "win32":
+        for nome in _CUDA_RUNTIME_LIBS["win32"]:
+            if not _cerca_dll_windows(nome):
+                return nome
+        return None
+    if not sys.platform.startswith("linux"):
+        return None
+    import ctypes
+
+    for nome in _CUDA_RUNTIME_LIBS["linux"]:
+        try:
+            ctypes.CDLL(nome)
+        except OSError:
+            return nome
+    return None
+
+
 def openvino_device_available() -> bool:
     """True se il runtime OpenVINO espone un device 'GPU' (iGPU Intel).
 

@@ -56,6 +56,10 @@ class TestMotoreReferto(unittest.TestCase):
         with (
             mock.patch.object(builtins, "__import__", import_),
             mock.patch.object(transcription, "openvino_device_available", lambda: gpu),
+            # Questi test parlano di OpenVINO: senza il patch, su un PC con
+            # GPU NVIDIA e CUDA funzionante il referto direbbe "su CUDA" e i
+            # tre scenari non sarebbero piu' deterministici.
+            mock.patch("config.cuda_available", return_value=False),
         ):
             return verifica_pc._motore_senza_openvino("whisper")
 
@@ -127,6 +131,7 @@ class TestDalVeroIngresso(unittest.TestCase):
         with (
             mock.patch.object(transcription, "resolved_transcriber", lambda *a, **k: "whisper"),
             mock.patch.object(transcription, "openvino_usable", lambda *a, **k: False),
+            mock.patch("config.cuda_available", return_value=False),
         ):
             verifica_pc.prova_motore(r)
         return next(e for e in r.esiti if e.nome == "Motore")
@@ -145,6 +150,35 @@ class TestDalVeroIngresso(unittest.TestCase):
             any(c in e.dettaglio for c in cause),
             f"nessuna delle cause note ({cause}) compare in: {e.dettaglio}",
         )
+
+
+class TestCudaNelReferto(unittest.TestCase):
+    """GPU NVIDIA: il referto deve dire se CUDA e' DAVVERO utilizzabile.
+
+    Il caso reale (10/2026): una GPU c'era e il driver la esponeva, ma
+    mancavano cuBLAS/cuDNN. Il referto non poteva dirlo, e la run moriva a
+    meta' trascrizione con "Library cublas64_12.dll is not found or cannot be
+    loaded". Ora il difetto si vede prima, col rimedio.
+    """
+
+    def _esito(self, mancante: str | None) -> verifica_pc.Esito:
+        with (
+            mock.patch("config.cuda_available", return_value=True),
+            mock.patch("config.cuda_runtime_lib_mancante", return_value=mancante),
+        ):
+            return verifica_pc._motore_senza_openvino("whisper")
+
+    def test_gpu_e_librerie_ok(self) -> None:
+        e = self._esito(None)
+        self.assertEqual(e.stato, verifica_pc.OK)
+        self.assertIn("CUDA", e.dettaglio)
+
+    def test_gpu_senza_librerie_dice_cosa_installare(self) -> None:
+        e = self._esito("cublas64_12.dll")
+        self.assertEqual(e.stato, verifica_pc.AVV)
+        self.assertIn("cublas64_12.dll", e.dettaglio)
+        self.assertIn("nvidia-cublas-cu12", e.rimedio)
+        self.assertIn("CPU", e.rimedio)
 
 
 if __name__ == "__main__":

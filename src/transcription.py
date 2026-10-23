@@ -19,6 +19,7 @@ from typing import Any, cast
 from chunks import Word
 from config import (
     CACHE_DIR,
+    CUDA_LIBS_REMEDY,
     DEFAULT_MIN_WORD_LENGTH,
     DEFAULT_OPENVINO_MODEL_DIR,
     DEFAULT_OPENVINO_MODEL_ID,
@@ -29,6 +30,7 @@ from config import (
     OPENVINO_MODEL_REVISIONI,
     TRANSITION_WORDS_ITA,
     atomic_write_text,
+    cuda_runtime_lib_mancante,
     get_stopwords,
     log,
     openvino_device_available,
@@ -720,6 +722,34 @@ def transcribe_with_whisper(
     from faster_whisper import WhisperModel
 
     _device_was_explicit = device_explicit
+
+    # CTranslate2 carica cuBLAS/cuDNN al primo calcolo, non alla costruzione
+    # del modello: se mancano, il decoding a batch fallisce e anche il
+    # percorso sequenziale muore a meta' trascrizione con "Library
+    # cublas64_12.dll is not found or cannot be loaded". Qui il difetto si
+    # vede PRIMA di iniziare, quindi si puo' ripiegare su CPU senza perdere
+    # la run (o fermarsi subito, se l'utente ha chiesto CUDA esplicitamente).
+    if device == "cuda":
+        mancante = cuda_runtime_lib_mancante()
+        if mancante:
+            if _device_was_explicit:
+                log.error(
+                    "   GPU NVIDIA ma manca %s: non posso usare CUDA. %s",
+                    mancante,
+                    CUDA_LIBS_REMEDY,
+                )
+                raise RuntimeError(
+                    f"libreria CUDA mancante ({mancante}). {CUDA_LIBS_REMEDY}"
+                )
+            log.warning(
+                "   ⚠️ GPU NVIDIA ma manca %s: CTranslate2 non puo' usare CUDA. "
+                "%s Ripiego su faster-whisper su CPU (int8): piu' lento, ma la "
+                "run prosegue.",
+                mancante,
+                CUDA_LIBS_REMEDY,
+            )
+            device = "cpu"
+            compute_type = "int8"
 
     log.info(
         "2. Trascrizione con faster-whisper (%s, %s, %s, beam=%d, batch=%d)...",

@@ -59,8 +59,10 @@ from typing import Protocol
 
 from config import (
     CACHE_DIR,
+    CUDA_LIBS_REMEDY,
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
     cuda_available,
+    cuda_runtime_lib_mancante,
     log,
     openvino_device_available,
 )
@@ -272,9 +274,19 @@ def _provision(rec: dict, model_dir: Path) -> dict:
         if not _provision_openvino(model_dir):
             log.warning("   ⚠️ OpenVINO non pronto, ripiego su faster-whisper su CPU.")
             return dict(_CPU_FALLBACK)
-    elif rec["whisper_device"] == "cuda" and not cuda_available():
-        log.warning("   ⚠️ CUDA non disponibile, uso faster-whisper su CPU.")
-        return dict(_CPU_FALLBACK)
+    elif rec["whisper_device"] == "cuda":
+        if not cuda_available():
+            log.warning("   ⚠️ CUDA non disponibile, uso faster-whisper su CPU.")
+            return dict(_CPU_FALLBACK)
+        mancante = cuda_runtime_lib_mancante()
+        if mancante:
+            log.warning(
+                "   ⚠️ GPU NVIDIA ma manca %s: CTranslate2 non puo' usare CUDA. "
+                "%s Per ora uso faster-whisper su CPU (piu' lento).",
+                mancante,
+                CUDA_LIBS_REMEDY,
+            )
+            return dict(_CPU_FALLBACK)
     return rec
 
 
@@ -326,6 +338,13 @@ def _validate(rec: dict, model_dir: Path | None) -> dict:
             return _downgrade(rec, "faster-whisper non e' installato")
         if not cuda_available():
             return _downgrade(rec, "nessun device CUDA utilizzabile")
+        # La GPU c'e' e il driver la espone, ma CTranslate2 carica cuBLAS e
+        # cuDNN solo al primo calcolo: se mancano, la run muore a meta'
+        # trascrizione (vedi il commento su _CUDA_RUNTIME_LIBS in config).
+        mancante = cuda_runtime_lib_mancante()
+        if mancante:
+            log.warning("   ⚠️ %s", CUDA_LIBS_REMEDY)
+            return _downgrade(rec, f"mancano le librerie CUDA ({mancante})")
     return rec
 
 

@@ -470,6 +470,27 @@ def _motore_senza_openvino(scelto: str) -> Esito:
     Promettere OpenVINO li' sarebbe falso nello stesso modo di prima, solo con
     un'altra frase. Per questo la terza condizione e' openvino_device_available.
     """
+    # GPU NVIDIA: whisper puo' usare CUDA. Se le librerie ci sono davvero va
+    # detto (prima il referto scriveva "whisper su CPU" anche su un PC che
+    # trascriveva su GPU); se mancano e' esattamente il caso che faceva morire
+    # la run a meta' trascrizione, e va segnalato col rimedio.
+    try:
+        from config import CUDA_LIBS_REMEDY, cuda_available, cuda_runtime_lib_mancante
+
+        if cuda_available():
+            mancante = cuda_runtime_lib_mancante()
+            if mancante:
+                return Esito(
+                    "Motore",
+                    AVV,
+                    f"{scelto} su CPU (GPU NVIDIA ma manca {mancante})",
+                    CUDA_LIBS_REMEDY
+                    + " Nel frattempo la trascrizione usa la CPU, piu' lenta.",
+                )
+            return Esito("Motore", OK, f"{scelto} su CUDA (float16)")
+    except ImportError:
+        pass
+
     dettaglio = f"{scelto} su CPU"
     try:
         import openvino_genai  # noqa: F401

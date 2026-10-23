@@ -421,6 +421,52 @@ class TestBatchedDecoding(unittest.TestCase):
         self.assertEqual({w["start"] for w in words}, {3.5})
 
 
+class TestCudaLibsPreflight(unittest.TestCase):
+    """Senza cuBLAS/cuDNN non si deve morire a meta' trascrizione.
+
+    CTranslate2 carica quelle librerie al primo calcolo, non alla costruzione
+    del modello: senza il controllo preventivo la run arrivava a decodificare e
+    poi falliva con "Library cublas64_12.dll is not found or cannot be loaded".
+    """
+
+    def _run(self, mancante, device_explicit=False):
+        from transcription import transcribe_with_whisper
+
+        modello = mock.MagicMock()
+        faster_whisper = mock.MagicMock(WhisperModel=modello)
+        info = mock.MagicMock(language="it", language_probability=0.99)
+        with (
+            mock.patch.dict(sys.modules, {"faster_whisper": faster_whisper}),
+            mock.patch("transcription.cuda_runtime_lib_mancante", return_value=mancante),
+            mock.patch("transcription._transcribe_with_fallback", return_value=([], info)),
+            mock.patch("transcription._write_raw_transcript"),
+        ):
+            transcribe_with_whisper(
+                Path("audio.mp3"),
+                device="cuda",
+                compute_type="float16",
+                device_explicit=device_explicit,
+                openvino_available=False,
+            )
+        return modello
+
+    def test_missing_libs_fall_back_to_cpu(self):
+        modello = self._run("cublas64_12.dll")
+        self.assertEqual(modello.call_args.kwargs["device"], "cpu")
+        self.assertEqual(modello.call_args.kwargs["compute_type"], "int8")
+
+    def test_explicit_cuda_does_not_fall_back_silently(self):
+        # Chi ha chiesto CUDA deve sapere subito perche' non si puo' usare,
+        # non ritrovarsi su CPU senza capire.
+        with self.assertRaises(RuntimeError):
+            self._run("cublas64_12.dll", device_explicit=True)
+
+    def test_libs_present_keeps_cuda(self):
+        modello = self._run(None)
+        self.assertEqual(modello.call_args.kwargs["device"], "cuda")
+        self.assertEqual(modello.call_args.kwargs["compute_type"], "float16")
+
+
 class TestResolvedTranscriber(unittest.TestCase):
     """Motore RISOLTO: è ciò che finisce nella chiave di cache della trascrizione."""
 
