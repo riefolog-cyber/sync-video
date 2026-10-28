@@ -30,6 +30,7 @@ requirements.txt         ← Dipendenze pip
 ruff.toml                ← Configurazione lint (guardrail di stile)
 mypy.ini                 ← Configurazione type-check
 PROMPT_PRESENTAZIONE (PREDEFINITO).md ← Prompt NotebookLM: presentazione → podcast
+PROMPT_PRESENTAZIONE (FONTI MULTIPLE).md ← Variante (non validata): podcast con le altre fonti come contorno
 tessdata/                ← Modelli lingua Tesseract portatili
 docs/                    ← Documentazione (queste pagine) + diagramma architettura
 sync-video-architecture (in docs/) ← Diagramma architettura (generato con archify)

@@ -125,6 +125,7 @@ Un solo processo di input:
 | Prompt | Flusso | Quando usarlo |
 |---|---|---|
 | [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>) | deck → podcast con ancore `slide N` | Confini **misurati** (è lo speaker a dichiarare il tempo). Podcast più strutturato. Fragile a un errore operativo: se il deck cambia dopo il podcast, le ancore puntano a pagine che non esistono più |
+| [`PROMPT_PRESENTAZIONE (FONTI MULTIPLE).md`](<PROMPT_PRESENTAZIONE (FONTI MULTIPLE).md>) | deck → podcast con gli altri materiali come contorno | **Variante sperimentale, non validata**: stesse ancore del predefinito, ma le altre fonti restano in NotebookLM e riempiono le sezioni. Non è coperta da `test_prompts.py`. I criteri per giudicarla sono nel file |
 
 Il prompt richiede che ogni pagina abbia una sezione di parlato **sviluppata**:
 una sezione che si limita a elencare produce una pagina che nel video scorre
