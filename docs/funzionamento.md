@@ -125,10 +125,12 @@ recupero salti.
    Se è 0 il prompt non è stato seguito: rigenera il podcast.
 4. `python src/main.py` → auto-detection `slide-audio`, ancore deterministiche, allineamento embedding locale.
 
-**Se il podcast non pronuncia le ancore** (dibattito libero): il pipeline si
-**interrompe** con "Nessun flusso rilevato". Rigenera il podcast
-annunciando le slide (`PROMPT_PRESENTAZIONE (PREDEFINITO).md`), oppure forza
-`--flow slide-audio` se sai cosa fai.
+**Se il podcast non pronuncia le ancore** (dibattito libero): il pipeline
+**procede comunque**, in modalità stimata — flusso assunto `slide-audio`, zero
+ancore, confini decisi dal contenuto — e lo dichiara con un avviso. Per
+confini esatti rigenera il podcast annunciando le slide
+(`PROMPT_PRESENTAZIONE (PREDEFINITO).md`) o forza `--flow slide-audio`; per
+fermarti invece di procedere usa `--require-flow`.
 
 Risultato su test reali (NotebookLM, presentazione come UNICA fonte): 11/11, 13/14 e 12/13 ancore, durate 37s–2m05s senza pavimenti anti-flicker, fiducia del motore alta (picco 0.53–0.74 su soglia 0.45) e frame-check pieno. Sincronizzazione misurata, non stimata.
 

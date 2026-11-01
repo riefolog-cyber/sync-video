@@ -113,10 +113,12 @@ Override manuale: `python src/main.py --flow audio-slide` (oppure `--flow slide-
 > Se il podcast segue i vincoli del prompt NotebookLM (`slide N` o
 > `blocco successivo`) usa il flusso corrispondente e rispetta le ancore.
 >
-> ⛔ **Un audio senza riferimenti riconoscibili non è supportato.** Se la
-> trascrizione non contiene né "slide N" né "blocco successivo" non è
-> sincronizzabile: la pipeline si **interrompe** con un errore chiaro che chiede
-> di rigenerare il podcast annunciando le slide.
+> **Un audio senza riferimenti riconoscibili produce comunque il video.** Se
+> la trascrizione non contiene né "slide N" né "blocco successivo" il flusso
+> viene **assunto** (`slide-audio`), le ancore restano zero e i confini delle
+> slide li decide il contenuto del parlato (timeline stimata): un avviso nel log
+> lo dichiara. Per confini esatti rigenera il podcast annunciando le slide, come
+> sotto; per **fermarti** invece di procedere usa `--require-flow`.
 
 ### 📝 Prompt NotebookLM (come generare presentazione e podcast)
 
@@ -125,7 +127,6 @@ Un solo processo di input:
 | Prompt | Flusso | Quando usarlo |
 |---|---|---|
 | [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>) | deck → podcast con ancore `slide N` | Confini **misurati** (è lo speaker a dichiarare il tempo). Podcast più strutturato. Fragile a un errore operativo: se il deck cambia dopo il podcast, le ancore puntano a pagine che non esistono più |
-| [`PROMPT_PRESENTAZIONE (FONTI MULTIPLE).md`](<PROMPT_PRESENTAZIONE (FONTI MULTIPLE).md>) | deck → podcast con gli altri materiali come contorno | **Variante sperimentale, non validata**: stesse ancore del predefinito, ma le altre fonti restano in NotebookLM e riempiono le sezioni. Non è coperta da `test_prompts.py`. I criteri per giudicarla sono nel file |
 
 Il prompt richiede che ogni pagina abbia una sezione di parlato **sviluppata**:
 una sezione che si limita a elencare produce una pagina che nel video scorre

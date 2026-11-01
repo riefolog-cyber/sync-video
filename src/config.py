@@ -1674,6 +1674,15 @@ DEFAULT_SEMANTIC_TEMPERATURE = _env_float("SEMANTIC_TEMPERATURE", 0.15)
 # 0.5 = almeno meta' transizioni ancorate; 0 disattiva (procede sempre).
 DEFAULT_MIN_ANCHOR_COVERAGE = _env_float("MIN_ANCHOR_COVERAGE", 0.5)
 
+# Flusso ASSUNTO quando la trascrizione non annuncia le slide (nessun
+# riferimento "slide N" ne' "blocco successivo"): la run prosegue lo
+# stesso, le ancore restano zero e i confini delle slide li decide il
+# contenuto del parlato. "slide-audio" perche' l'ancora "slide N" e' la
+# piu' precisa e la piu' frequente nei materiali presentazione -> podcast;
+# con zero ancore nel testo i due flussi estraggono comunque niente
+# (vedi main._resolve_flow).
+DEFAULT_FALLBACK_FLOW = "slide-audio"
+
 # Lunghezza massima del ciclo che il rilevatore di testo inaffidabile
 # (timeline.repetition_loops) considera "allucinazione del decoder". Nasceva sui
 # cicli di 1-3 parole ("la c' la c'...", run del 13/10), ma il beam greedy
@@ -2184,6 +2193,14 @@ Esempi:
         "Piu' morbido di --require-full-anchors, che pretende il 100%%.",
     )
     parser.add_argument(
+        "--require-flow",
+        action="store_true",
+        help="Interrompi se l'audio non annuncia le slide (nessun "
+        "riferimento 'slide N' / 'blocco successivo'): senza ancore la "
+        "timeline e' stimata dal contenuto. Default: procede comunque "
+        "in modalita' stimata.",
+    )
+    parser.add_argument(
         "--openvino-download",
         action="store_true",
         help="Scarica una tantum il modello Whisper OpenVINO IR "
@@ -2279,8 +2296,8 @@ Esempi:
         help="Flusso di sincronizzazione: 'slide-audio' (speaker dicono "
         "'passiamo alla slide X') o 'audio-slide' (speaker dicono "
         "'passiamo al blocco successivo'). Default: auto-detect. "
-        "Un podcast senza riferimenti riconoscibili viene rifiutato "
-        "con errore chiaro (nessun flusso rilevato).",
+        "Un podcast senza riferimenti riconoscibili procede in "
+        "modalita' stimata (vedi --require-flow per interrompere).",
     )
     parser.add_argument(
         "--skip-slides",

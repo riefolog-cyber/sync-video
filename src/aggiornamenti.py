@@ -5,13 +5,15 @@ Controllo e aggiornamento dei pacchetti (script standalone).
 Esegue il bootstrap delle dipendenze e poi il controllo aggiornamenti con
 richiesta S/N per installare i pacchetti NON pinnati (e i pinnati testabili
 A/B, solo se equivalenti). I salti di major version vengono solo segnalati,
-mai installati automaticamente.Uso:
+mai installati automaticamente.
+
+Uso:
   python aggiornamenti.py            chiede S/N prima di installare
   python aggiornamenti.py --no-update   notifica e basta, non installa
   python aggiornamenti.py --no-update-check   non controlla nulla su PyPI
   python aggiornamenti.py --frozen-report   perche' i pacchetti non si aggiornano
                                             (referto, non installa nulla)
-op pure (doppio click): aggiornamenti.bat [--no-update] [--no-update-check]
+oppure (doppio click): aggiornamenti.bat [--no-update] [--no-update-check]
                                          [--frozen-report]
 """
 

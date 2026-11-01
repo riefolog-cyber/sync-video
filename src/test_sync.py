@@ -5956,3 +5956,96 @@ class TestConfiniStimatiNonSostenuti(unittest.TestCase):
         # Nessuna diagnostica del raffinamento: il confine stimato non viene
         # dichiarato incerto per sentito dire.
         self.assertNotIn("L'inizio della slide", out)
+
+class TestFlussoAssunto(unittest.TestCase):
+    """Un audio senza annunci non ferma piu' la run.
+
+    Un podcast generato con un prompt diverso (o un dibattito libero) non ha
+    ancore: prima la pipeline si interrompeva con "Nessun flusso rilevato",
+    lasciando l'utente senza video e senza alternativa se non scoprire --flow
+    leggendo l'errore. Ora il flusso viene assunto e i confini li decide il
+    contenuto; --require-flow ripristina l'interruzione.
+    """
+
+    def _args(self, **kwargs):
+        from config import parse_args
+
+        args = parse_args([])
+        for nome, valore in kwargs.items():
+            setattr(args, nome, valore)
+        return args
+
+    def test_senza_riferimenti_il_flusso_viene_assunto(self):
+        from config import DEFAULT_FALLBACK_FLOW
+        from main import _resolve_flow
+
+        flow, assumed = _resolve_flow(self._args(), "una chiacchierata sul tema", None)
+        self.assertEqual(flow, DEFAULT_FALLBACK_FLOW)
+        self.assertTrue(assumed)
+
+    def test_con_un_riferimento_il_flusso_e_rilevato(self):
+        from main import _resolve_flow
+
+        flow, assumed = _resolve_flow(self._args(), "passiamo alla slide 3", None)
+        self.assertEqual(flow, "slide-audio")
+        self.assertFalse(assumed)
+
+    def test_il_flusso_manuale_vince(self):
+        from main import _resolve_flow
+
+        flow, assumed = _resolve_flow(self._args(flow="audio-slide"), "una chiacchierata", None)
+        self.assertEqual(flow, "audio-slide")
+        self.assertFalse(assumed)
+
+    def test_require_flow_interrompe(self):
+        import main
+
+        with self.assertRaises(SystemExit):
+            main._resolve_flow(self._args(require_flow=True), "una chiacchierata", None)
+
+    def test_la_soglia_non_ferma_il_flusso_assunto(self):
+        from main import _coverage_gate_fails
+
+        # Zero ancore su 14 transizioni: senza il fallback la soglia del 50%
+        # fermerebbe la run sempre, cioe' il fallback non esisterebbe.
+        self.assertFalse(_coverage_gate_fails(True, 0, 15, 0.5))
+        self.assertTrue(_coverage_gate_fails(False, 0, 15, 0.5))
+        self.assertTrue(_coverage_gate_fails(False, 4, 14, 0.5))
+        self.assertFalse(_coverage_gate_fails(False, 13, 14, 0.5))
+        self.assertFalse(_coverage_gate_fails(False, 0, 15, 0.0))
+
+    def test_require_flow_e_nel_parser(self):
+        from config import parse_args
+
+        self.assertTrue(parse_args(["--require-flow"]).require_flow)
+        self.assertFalse(parse_args([]).require_flow)
+
+class TestTrascrizioniIdentiche(unittest.TestCase):
+    """Il confronto A/B si salta se le due decodifiche danno le stesse parole.
+
+    Misurato sulla run del 01/11 (OpenVINO su iGPU): 186 blocchi su 186 con
+    picco medio identico a 4 decimali, cioe' ~18s di embedding per decretare
+    "pari" per costruzione.
+    """
+
+    def test_stesse_parole_e_stessi_tempi(self):
+        from main import _same_words
+
+        a = [{"word": "ciao", "start": 1.0}, {"word": "mondo", "start": 1.4}]
+        b = [{"word": " ciao ", "start": 1.0}, {"word": "mondo", "start": 1.4000001}]
+        self.assertTrue(_same_words(a, b))
+
+    def test_parola_diversa(self):
+        from main import _same_words
+
+        self.assertFalse(_same_words([{"word": "slide", "start": 1.0}], [{"word": "slide0", "start": 1.0}]))
+
+    def test_tempo_diverso(self):
+        from main import _same_words
+
+        self.assertFalse(_same_words([{"word": "slide", "start": 1.0}], [{"word": "slide", "start": 2.0}]))
+
+    def test_lunghezze_diverse(self):
+        from main import _same_words
+
+        self.assertFalse(_same_words([{"word": "a", "start": 0.0}], []))

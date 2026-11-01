@@ -35,6 +35,10 @@ tqdm>=4.66.0
 # per e5-large, cambiando gli embedding rispetto alla baseline validata (A/B).
 # A/B re-test 2026-08 vs 0.8.0 su dati reali (check_fastembed_upgrade.py):
 # coseno medio 0.935, decision match 47% -> VERDETTO DIVERGENTE, pin confermato.
+# A/B re-test 2026-11-01 vs 0.9.1 (stessi 15 slide/186 blocchi del run reale):
+# coseno medio 0.928, decision match 73.3%, argmax 55.9% -> DIVERGENTE, pin
+# confermato. La tendenza migliora (47% -> 73%) ma la soglia e' il 95%:
+# si ritesta quando cambia la major di fastembed, non a ogni patch.
 fastembed==0.5.1
 
 

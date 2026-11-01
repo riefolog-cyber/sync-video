@@ -24,6 +24,7 @@ from config import (
     BASE_DIR,
     CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+    DEFAULT_FALLBACK_FLOW,
     DEFAULT_PDF,
     DEFAULT_RECOVERY_MAX_ZONE_SHARE,
     DEFAULT_VIDEO_BUFFER_SEC,
@@ -1700,6 +1701,26 @@ def _accurate_beam_worth_it(pinned_slides: int, total_slides: int, min_coverage:
     return pinned_slides / transitions < _beam_escalation_threshold(min_coverage)
 
 
+def _same_words(a: list[Word], b: list[Word]) -> bool:
+    """True se due trascrizioni hanno le stesse parole negli stessi tempi.
+
+    Serve a non pagare il confronto A/B quando non c'e' niente da confrontare:
+    con alcuni backend il beam non cambia il testo (misurato: OpenVINO su iGPU,
+    run del 01/11, 186 blocchi su 186 con picco medio identico a 4 decimali),
+    e la misura costerebbe ~18s per decretare "pari" per costruzione.
+    I tempi si confrontano a 10ms, non come stringhe: due trascrizioni identiche
+    possono differire per rumore di floating point nei timestamp.
+    """
+    if len(a) != len(b):
+        return False
+    for x, y in zip(a, b, strict=False):
+        if str(x.get("word", "")).strip() != str(y.get("word", "")).strip():
+            return False
+        if abs(float(x.get("start", 0.0) or 0.0) - float(y.get("start", 0.0) or 0.0)) > 0.01:
+            return False
+    return True
+
+
 def _beam_ab_cache_key(slides_key: str, audio_hash: str, args: Any) -> str:
     """Chiave della misura di confronto fra le due trascrizioni.
 
@@ -1948,6 +1969,66 @@ def _detect_flow(transcript: str, words: list[Word] | None = None) -> str | None
         return None
 
 
+def _resolve_flow(
+    args: Any, transcript: str, words: list[Word] | None
+) -> tuple[str, bool]:
+    """Sceglie il flusso di sincronizzazione: manuale, rilevato o assunto.
+
+    Il fallback ESISTE perche' un audio senza annunci non e' un errore:
+    il podcast puo' essere stato generato con un altro prompt o essere
+    un dibattito libero, ma il parlato parla comunque delle slide.
+    Fermare la run prima della sincronizzazione lasciava l'utente senza
+    video e senza alternativa, perche' l'unico modo di procedere
+    (``--flow``) andava scoperto leggendo l'errore.
+
+    Senza riferimenti riconoscibili si assume ``DEFAULT_FALLBACK_FLOW``
+    (con zero ancore nel testo i due flussi estraggono comunque niente,
+    e se un'ancora sfuggita al rilevatore c'e' "slide N" e' la piu'
+    precisa) e la timeline viene STIMATA dal contenuto.
+    ``--require-flow`` ripristina l'interruzione per chi preferisce
+    fallire invece di degradare (batch/CI).
+
+    Returns:
+        ``(flusso, assunto)``: ``assunto`` e' True solo nel fallback, e
+        chi chiama lo usa per non applicare la soglia di copertura
+        (con zero ancore fallirebbe sempre, cioe' disattiverebbe il
+        fallback stesso).
+    """
+    if args.flow is not None:
+        log.info("   Flusso specificato manualmente: %s", args.flow)
+        return args.flow, False
+
+    detected = _detect_flow(transcript, words)
+    if detected is not None:
+        log.info("   Flusso auto-rilevato: %s (usa --flow per sovrascrivere)", detected)
+        return detected, False
+
+    if getattr(args, "require_flow", False):
+        _abort(
+            "Nessun flusso rilevato: nella trascrizione non ci sono "
+            "riferimenti riconoscibili ('slide N' per slide-audio, "
+            "'blocco successivo' per audio-slide), e con --require-flow la "
+            "run si ferma. Rigenera l'audio annunciando le slide "
+            "('Passiamo alla slide N', vedi PROMPT_PRESENTAZIONE "
+            "(PREDEFINITO).md), oppure togli --require-flow per procedere "
+            "con la timeline stimata."
+        )
+
+    log.warning(
+        "\n   [Avviso] Nessun riferimento alle slide nella trascrizione "
+        "('slide N' / 'blocco successivo').\n"
+        "   Procedo comunque in modalita' stimata (flusso assunto: %s): "
+        "senza ancore i confini delle slide li decide il CONTENUTO del "
+        "parlato, non gli annunci.\n"
+        "   Il video esce; la precisione dei confini e' quella che l'audio "
+        "permette. Per confini esatti rigenera il podcast annunciando le "
+        "slide (vedi PROMPT_PRESENTAZIONE (PREDEFINITO).md); per "
+        "fermarti invece di procedere usa --require-flow.",
+        DEFAULT_FALLBACK_FLOW,
+    )
+    return DEFAULT_FALLBACK_FLOW, True
+
+
 def _anchor_coverage_ok(n_anchored: int, total_slides: int, minimum: float) -> bool:
     """True se la copertura delle ancore raggiunge la soglia minima.
 
@@ -1958,6 +2039,22 @@ def _anchor_coverage_ok(n_anchored: int, total_slides: int, minimum: float) -> b
     if transitions <= 0 or minimum <= 0:
         return True
     return n_anchored / transitions >= minimum
+
+
+def _coverage_gate_fails(
+    flow_assumed: bool, n_anchored: int, total_slides: int, minimum: float
+) -> bool:
+    """True se la soglia di copertura deve FERMARE la run.
+
+    Con il flusso assunto le ancore sono zero per definizione: applicare
+    la soglia significherebbe fermarsi sempre, cioe' annullare il
+    fallback che esiste apposta per far uscire il video anche senza
+    annunci. Il gate esplicito ``--require-full-anchors`` resta attivo,
+    perche' li' la scelta di fermarsi e' dell'utente.
+    """
+    if flow_assumed:
+        return False
+    return minimum > 0 and not _anchor_coverage_ok(n_anchored, total_slides, minimum)
 
 
 def _thin_slide_advice() -> str:
@@ -2741,23 +2838,12 @@ def main(argv: list | None = None) -> None:
         floor_min: float = 0.0
 
         # --- Auto-detection flusso (dopo trascrizione, prima della sincronizzazione) ---
-        flow: str
-        if args.flow is not None:
-            flow = args.flow
-            log.info("   Flusso specificato manualmente: %s", flow)
-        else:
-            detected = _detect_flow(transcript, words_raw)
-            if detected is None:
-                _abort(
-                    "Nessun flusso rilevato: nella trascrizione non ci sono "
-                    "riferimenti riconoscibili ('slide N' per slide-audio, "
-                    "'blocco successivo' per audio-slide). Rigenera l'audio "
-                    "annunciando le slide ('Passiamo alla slide N', vedi "
-                    "PROMPT_PRESENTAZIONE (PREDEFINITO).md) oppure forza "
-                    "--flow slide-audio se sai cosa fai."
-                )
-            flow = detected
-            log.info("   Flusso auto-rilevato: %s (usa --flow per sovrascrivere)", flow)
+        flow, flow_assumed = _resolve_flow(args, transcript, words_raw)
+        # La provenienza del flusso finisce nel report: un flusso ASSUNTO
+        # significa ancore assenti e confini stimati dal contenuto, e senza
+        # questo dato una timeline stimata sembra identica a una vincolata.
+        if flow_assumed:
+            sync_notes["flow"] = {"chosen": flow, "assumed": True}
 
         # --- Ancore deterministiche disponibili ---
         # Calcolate una volta: servono al recupero delle zone cieche, alla scelta
@@ -2898,7 +2984,21 @@ def main(argv: list | None = None) -> None:
             # di entrambe (~25s l'una), quindi si fa solo qui, dove la seconda
             # trascrizione esiste già e il caso è quello in cui il testo decide
             # tutto; la misura viene messa in cache e riusata.
-            if greedy_words and words_raw:
+            # Trascrizioni IDENTICHE: niente da misurare. Il confronto A/B
+            # costa ~18s (embedding di entrambe) e qui decreterebbe "pari"
+            # per costruzione, perche' le ancore e i blocchi sono gli stessi.
+            # E' il caso del backend OpenVINO, che con beam 1 e beam 5
+            # restituisce lo stesso testo: pagarlo sarebbe lavoro sprecato
+            # in ogni run. Nel report la voce dice perche' non c'e'.
+            if greedy_words and words_raw and _same_words(greedy_words, words_raw):
+                beam_note["ab"] = {
+                    "skipped": "trascrizioni identiche: stesse parole, stessi tempi"
+                }
+                log.info(
+                    "   [Beam] Le due decodifiche hanno prodotto le stesse parole: "
+                    "confronto A/B saltato (nessuna differenza da misurare)."
+                )
+            elif greedy_words and words_raw:
                 ab_note = _compare_transcript_alignment(
                     args,
                     slide_texts,
@@ -3028,9 +3128,14 @@ def main(argv: list | None = None) -> None:
             # provata PRIMA di fermarsi. Fermarsi al primo tentativo, quando ne
             # restava uno tarato esattamente su questo caso, era il vero difetto.
             min_cov = float(getattr(args, "min_anchor_coverage", 0.5) or 0)
-            if (
-                min_cov > 0
-                and not _anchor_coverage_ok(len(early_anchors), total_slides, min_cov)
+            if flow_assumed:
+                log.info(
+                    "   [Ancore] Soglia di copertura non applicata: l'audio "
+                    "non annuncia le slide (flusso assunto), quindi non ci "
+                    "sono ancore da contare."
+                )
+            if _coverage_gate_fails(
+                flow_assumed, len(early_anchors), total_slides, min_cov
             ):
                 _abort(
                     "Copertura ancore insufficiente: "

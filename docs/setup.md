@@ -483,6 +483,7 @@ installazione: **non** fallisce con un errore incomprensibile.
 > Gli interruttori sono gli stessi di `main.py` e di `genera_video.bat`:
 > `--no-update` (notifica senza installare), `--no-update-check` (non
 > controllare PyPI), `--frozen-report` (referto dei pacchetti fermi),
+> `--help` (elenca le opzioni, le stampa lo script Python),
 > `--no-pause` (non fermarsi, per l'uso in automazione).
 
 ---

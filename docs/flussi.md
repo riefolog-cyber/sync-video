@@ -10,10 +10,13 @@ con `--flow`):
 | `slide-audio` | *"passiamo alla slide N"* |
 | `audio-slide` | *"passiamo al blocco successivo"* |
 
-Un audio **senza** questi riferimenti non è sincronizzabile: il programma si
-ferma **prima** di generare il video con l'errore "Nessun flusso rilevato".
-Rimedio: rigenera l'audio annunciando le slide ("Passiamo alla slide N", vedi
-`PROMPT_PRESENTAZIONE (PREDEFINITO).md`).
+Un audio **senza** questi riferimenti non ferma più la run: il flusso viene
+**assunto** (`slide-audio`), le ancore restano zero e i confini delle slide li
+decide il contenuto del parlato (timeline stimata). Il video esce comunque,
+con un avviso nel log e `flow.assumed` in `.cache/sync_report.json`.
+Per confini esatti rigenera l'audio annunciando le slide ("Passiamo alla
+slide N", vedi `PROMPT_PRESENTAZIONE (PREDEFINITO).md`); per **fermarti**
+invece di procedere usa `--require-flow`.
 
 > **`--require-full-anchors` e `--min-anchor-coverage`**: ogni pagina deve
 > essere annunciata. La soglia `--min-anchor-coverage` (default 50%) interrompe
