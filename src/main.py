@@ -904,10 +904,18 @@ def _log_plain_summary(
             if _conteggi:
                 _dominante = max(_conteggi, key=lambda k: _conteggi[k])
                 if _dominante and _conteggi[_dominante] >= 2:
+                    # Un offset dominante NON e' una prova: il parlato che
+                    # segue un annuncio anticipa spesso la pagina successiva
+                    # (bridge). Caso del 01/11: +1 sembrava dominante e
+                    # applicarlo mostro' Socrate mentre si parlava del pendolo,
+                    # mentre la numerazione era gia' 1:1. Il rimedio resta, ma
+                    # solo come conferma di cio' che si e' VISTO nel video.
                     _messaggio += (
-                        f" Se invece le slide sono tutte spostate di {_dominante:+d}, "
-                        f"rilancia con --slide-offset {_dominante:+d}: applica lo "
-                        "spostamento esatto ai tempi annunciati a voce."
+                        f" Se GUARDANDO il video vedi che ogni slide compare una "
+                        f"pagina indietro ({_dominante:+d} in numerazione), "
+                        f"rilancia con --slide-offset {_dominante:+d}: non "
+                        "dedurlo da questi numeri, perché dopo un annuncio il "
+                        "parlato spesso anticipa già la pagina seguente."
                     )
             incerti.append(_messaggio)
         else:
