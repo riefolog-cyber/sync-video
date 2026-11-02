@@ -190,6 +190,31 @@ class TestRunFfmpeg(unittest.TestCase):
         with patch("video.subprocess.Popen", return_value=_fake_popen(0, lines)):
             _run_ffmpeg(["ffmpeg"], 10.0)  # non deve sollevare
 
+    def test_progress_lines_non_mascherano_l_errore(self):
+        """Le righe key=value del progresso non devono invadere la coda d'errore."""
+        lines = [
+            "frame=1",
+            "fps=0.00",
+            "bitrate=0.0kbits/s",
+            "total_size=0",
+            "out_time=00:00:01.000000",
+            "dup_frames=0",
+            "drop_frames=0",
+            "speed=0.10x",
+            "progress=continue",
+            "stream_0_0_q=28.0",
+            "Conversion failed!",
+        ]
+        with (
+            patch("video.subprocess.Popen", return_value=_fake_popen(1, lines)),
+            self.assertRaises(RuntimeError) as ctx,
+        ):
+            _run_ffmpeg(["ffmpeg"], 10.0)
+        messaggio = str(ctx.exception)
+        self.assertIn("Conversion failed!", messaggio)
+        self.assertNotIn("frame=", messaggio)
+        self.assertNotIn("stream_0_0_q=", messaggio)
+
 
 class TestBuildVideoFfmpeg(unittest.TestCase):
     def test_missing_audio_raises(self):

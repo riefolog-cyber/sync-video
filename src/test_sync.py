@@ -1639,6 +1639,7 @@ class TestRecuperoZoneCieche(unittest.TestCase):
 
     def setUp(self):
         import main as m
+        import transcription
 
         self._m = m
         self._tmp = tempfile.TemporaryDirectory()
@@ -1646,6 +1647,14 @@ class TestRecuperoZoneCieche(unittest.TestCase):
         self._audio = pathlib.Path(self._tmp.name) / "podcast.m4a"
         self._audio.touch()
         self._args = mock.MagicMock(whisper_model="small", lang="ita")
+
+        # Il RAW vive nella cache (nome per-audio): nei test la cache va
+        # isolata nel tempdir, altrimenti ogni run sporca il .cache vero.
+        patch_cache = mock.patch.object(
+            transcription, "CACHE_DIR", pathlib.Path(self._tmp.name) / ".cache"
+        )
+        patch_cache.start()
+        self.addCleanup(patch_cache.stop)
 
     def _recover(
         self,
@@ -2122,6 +2131,17 @@ class TestBeamAbQuality(unittest.TestCase):
                 embed_fn=_FakeThemedEmbed(self.THEMES),
             )
         )
+
+    def test_min_gap_blocks_usa_ceil_e_ripiega_sul_minimo_rappresentabile(self):
+        from semantic_sync import _min_gap_blocks
+
+        # 7s / 5s = 1.4: il minimo sono 2 blocchi; `int` ne dava 1 e faceva
+        # divergere il confronto A/B dalla sincronizzazione vera.
+        self.assertEqual(_min_gap_blocks(4, 20, 7.0, 5.0), 2)
+        # Il minimo dichiarato non entra nell'audio: si scende al minimo
+        # rappresentabile (un blocco per slide), mai sotto 1.
+        self.assertEqual(_min_gap_blocks(4, 6, 7.0, 5.0), 1)
+        self.assertEqual(_min_gap_blocks(4, 3, 7.0, 5.0), 1)
 
 
 class TestEmbedCache(unittest.TestCase):
@@ -3861,7 +3881,7 @@ class TestPlainSummary(unittest.TestCase):
         self.assertIn(".cache/verify_frames/", out)
 
     def test_content_verdicts_become_doubts(self):
-        out = self._render(verdicts={2: "disallineata", 3: "incerto"})
+        out = self._render(verdicts={1: "disallineata", 2: "incerto"})
         self.assertIn("Il parlato della slide 2 somiglia di più", out)
         self.assertIn("La durata della slide 3 è anomala", out)
         self.assertIn("COSA NON È CERTO", out)
@@ -3995,7 +4015,7 @@ class TestPlainSummary(unittest.TestCase):
         # tra i dubbi da controllare a mano, perché non c'è nulla da correggere.
         out = self._render(
             durations=[8.0, 60.0, 60.0],
-            verdicts={1: "incerto"},
+            verdicts={0: "incerto"},
             floor_report={
                 "min_seconds": 8.0,
                 "guaranteed": [{"slide": 1, "before": 4.3, "duration": 8.0}],
@@ -4054,14 +4074,19 @@ class TestPlainSummary(unittest.TestCase):
         self.assertIn("la slide 2", out)
 
     def test_single_anomalous_slide_is_worded_in_the_singular(self):
-        out = self._render(verdicts={2: "disallineata", 13: "incerto"})
+        out = self._render(
+            durations=[60.0, 60.0],
+            slide_ids=[2, 13],
+            total_duration=120.0,
+            verdicts={0: "disallineata", 1: "incerto"},
+        )
         self.assertIn("Il parlato della slide 2 somiglia", out)
         self.assertIn("La durata della slide 13 è anomala", out)
         self.assertNotIn("per le slide 13", out)
 
     def test_no_floor_report_keeps_the_old_summary(self):
         # Nessun pavimento applicato (senza ancore): nessuna riga in più.
-        out = self._render(verdicts={3: "incerto"})
+        out = self._render(verdicts={2: "incerto"})
         self.assertNotIn("Per garantire il minimo di", out)
         self.assertIn("La durata della slide 3 è anomala", out)
 
@@ -4257,7 +4282,7 @@ class TestAnomalousContentValidation(unittest.TestCase):
             ]
         )
         verdicts = self._validate([(3, 400.0)], [100.0, 100.0, 400.0, 100.0], [1, 2, 3, 4], words)
-        self.assertEqual(verdicts[3], "coerente")
+        self.assertEqual(verdicts[2], "coerente")
 
     def test_long_segment_matching_other_slide_flagged(self):
         # Slide 3 dura 400s ma il parlato del segmento parla di termodinamica
@@ -4272,7 +4297,7 @@ class TestAnomalousContentValidation(unittest.TestCase):
             ]
         )
         verdicts = self._validate([(3, 400.0)], [100.0, 100.0, 400.0, 100.0], [1, 2, 3, 4], words)
-        self.assertEqual(verdicts[3], "disallineata")
+        self.assertEqual(verdicts[2], "disallineata")
 
     def test_repeated_slide_uses_the_right_occurrence(self):
         # La stessa slide può comparire più volte nella
@@ -4310,13 +4335,13 @@ class TestAnomalousContentValidation(unittest.TestCase):
         anomalous = _find_anomalous_durations(durations, slide_ids)
         self.assertEqual(anomalous, [(2, 1, 2.0)])  # la 2a occorrenza della slide 1
         verdicts = _validate_anomalous_segments(anomalous, slides, words, durations)
-        self.assertEqual(verdicts[1], "disallineata")
+        self.assertEqual(verdicts[2], "disallineata")
         # Sanity: leggendo la posizione sbagliata il verdetto sarebbe l'altro,
         # quindi il test distingue davvero le due finestre.
         sbagliato = _validate_anomalous_segments(
             [(0, 1, 2.0)], slides, words, durations
         )
-        self.assertEqual(sbagliato[1], "coerente")
+        self.assertEqual(sbagliato[0], "coerente")
 
     def test_no_lexical_overlap_uncertain(self):
         # Parlato senza alcuna parola in comune con le slide: segnale debole,
@@ -4330,7 +4355,7 @@ class TestAnomalousContentValidation(unittest.TestCase):
             ]
         )
         verdicts = self._validate([(3, 400.0)], [100.0, 100.0, 400.0, 100.0], [1, 2, 3, 4], words)
-        self.assertEqual(verdicts[3], "incerto")
+        self.assertEqual(verdicts[2], "incerto")
 
     def test_sync_report_lists_segments_and_verdicts(self):
         # Il report è l'artefatto verificabile: una voce per slide con
@@ -4341,7 +4366,7 @@ class TestAnomalousContentValidation(unittest.TestCase):
             [100.0, 50.0, 150.0],
             [1, 2, 3],
             300.0,
-            {2: "disallineata"},
+            {1: "disallineata"},
         )
         self.assertEqual(report["audio_duration"], 300.0)
         segments = report["segments"]
@@ -5826,12 +5851,11 @@ class TestRefineConEmbeddingInCache(unittest.TestCase):
         self.assertEqual(diagnosi_prima, diagnosi_dopo)
         self.assertEqual(diagnosi_dopo[0]["decision"], "spostato")
         # Il primo giro fa tre chiamate (slide, finestre dei candidati, prova di
-        # stabilità); il secondo ne fa due in meno perché gli embedding delle
-        # SLIDE arrivano dalla cache (content-addressed). Le finestre di parlato
-        # si ricalcolano: sono il lavoro per-confine, non una cache. Il test
-        # tiene ferme entrambe le cose, così un "salto" introdotto per sbaglio
-        # nella cache calda si vede subito.
-        self.assertEqual(len(embed.calls), 5)
+        # stabilità); il secondo non ne fa nessuna, perché tutte e tre le liste
+        # sono content-addressed e identiche al giro precedente. Prima le
+        # finestre si ricalcolavano a ogni run: erano il lavoro per-confine che
+        # dominava la sincronizzazione senza ancore (~290s), non la matematica.
+        self.assertEqual(len(embed.calls), 3)
 
 
 class TestConfiniStimatiNonSostenuti(unittest.TestCase):

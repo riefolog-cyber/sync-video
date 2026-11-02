@@ -50,7 +50,13 @@ def clean_orphan_cache(active_keys: set[str], cache_dir: Path | None = None) -> 
         if key in KEEP_CACHE_STEMS:
             continue
         if key not in active_keys:
-            cache_file.unlink()
+            try:
+                cache_file.unlink()
+            except OSError as e:
+                # La pulizia è housekeeping: un file bloccato (antivirus,
+                # editor) non deve abortire l'avvio.
+                log.debug("   🧹 Cache orfana non rimossa (%s): %s", cache_file.name, e)
+                continue
             removed += 1
             log.debug("   🧹 Cache orfana rimossa: %s", cache_file.name)
     return removed
@@ -96,15 +102,33 @@ def load_sync_report(cache_dir: Path | None = None) -> dict[str, object] | None:
     return data if isinstance(data, dict) else None
 
 
-def latest_transcript_words(cache_dir: Path | None = None) -> list[dict]:
+def latest_transcript_words(cache_dir: Path | None = None, preferred_key: str | None = None) -> list[dict]:
     """Parole della trascrizione più recente in cache (vuota se non c'è).
 
     Serve alla revisione dei report scritti prima del controllo incrociato: lì
     ``mentions_off`` non esiste e va ricalcolato dalle parole. Il nome del file
     contiene la chiave della cache (modello, lingua, beam): la più recente è
     quella coerente col report che le sta accanto.
+
+    ``preferred_key`` (se presente) ha la precedenza: è la chiave che la run
+    ha effettivamente usato, quindi le sue parole sono quelle giuste anche se
+    un'altra trascrizione è più recente. Si prova prima la variante con le zone
+    ricucite (``_gap``), poi la base.
     """
     cd = cache_dir if cache_dir is not None else CACHE_DIR
+    if preferred_key:
+        for suffix in ("_gap", ""):
+            path = cd / f"{preferred_key}{suffix}.json"
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as e:
+                log.debug("   Trascrizione in cache illeggibile (%s): %s", path, e)
+                continue
+            words = data.get("words_raw") if isinstance(data, dict) else None
+            if isinstance(words, list) and words:
+                return [w for w in words if isinstance(w, dict)]
     for path in sorted(
         cd.glob("transcript_*.json"), key=lambda p: p.stat().st_mtime, reverse=True
     ):
@@ -149,6 +173,14 @@ def load_cache(key: str, cache_dir: Path | None = None) -> dict | None:
 
 
 def save_cache(key: str, data: dict, cache_dir: Path | None = None) -> None:
-    """Salva dati nella cache."""
-    atomic_write_text(cache_path(key, cache_dir), json.dumps(data, ensure_ascii=False, indent=2))
-    log.debug("   Cache salvata: %s", key)
+    """Salva dati nella cache (errore di scrittura ignorato: è un'ottimizzazione).
+
+    La cache non deve mai uccidere una run che ha già il risultato in mano:
+    disco pieno, ACL o share di rete in sola lettura costano un ricalcolo alla
+    prossima esecuzione, non la run corrente.
+    """
+    try:
+        atomic_write_text(cache_path(key, cache_dir), json.dumps(data, ensure_ascii=False, indent=2))
+        log.debug("   Cache salvata: %s", key)
+    except OSError as e:
+        log.debug("   Cache non salvata (%s): %s", key, e)

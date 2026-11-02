@@ -116,12 +116,18 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> None:
     segments = cast("list[dict[str, object]]", report.get("segments") or [])
     starts: dict[int, float] = {}
     for seg in segments:
-        starts[int(cast("int", seg.get("slide") or 0))] = float(
-            cast("float", seg.get("start") or 0.0)
-        )
+        slide = int(cast("int", seg.get("slide") or 0))
+        # Prima occorrenza, come la run (setdefault): con slide ripetute l'ultima
+        # sovrascriveva la prima e `--skip-slides` divergeva dal calcolo reale.
+        starts.setdefault(slide, float(cast("float", seg.get("start") or 0.0)))
     if not starts:
         log.error("   [Revisione] Il report non contiene segmenti: niente da rivedere.")
         return
+
+    # N reale del deck = numero di segmenti del report (le slide saltate restano
+    # nel report come segmenti con durata 0 o sono escluse: usare max(starts)
+    # faceva sparire le menzioni delle slide fuori dal range).
+    total_slides_review = len(segments) if segments else max(starts)
 
     anchors = cast("dict[str, object]", report.get("anchors") or {})
     items = [
@@ -130,14 +136,20 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> None:
     ]
     ricalcolati = False
     if not items:
-        words = cast("list[Word]", latest_transcript_words(cache_dir=cache_dir))
+        words = cast(
+            "list[Word]",
+            latest_transcript_words(
+                cache_dir=cache_dir,
+                preferred_key=cast("str | None", anchors.get("transcript_cache_key")),
+            ),
+        )
         if words:
             items = [
                 {"slide": s, "mention": m, "declared": d}
                 for s, m, d in announcements_off_timeline(
                     words,
                     starts,
-                    max(starts),
+                    total_slides_review,
                     slide_offset=int(cast(int, anchors.get("spoken_offset") or 0)),
                 )
             ]

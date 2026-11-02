@@ -10,8 +10,10 @@ Due motori disponibili:
 """
 
 import contextlib
+import hashlib
 import json
 import re
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -87,13 +89,44 @@ def _compress_words(
     return "\n".join(blocks)
 
 
-def _write_raw_transcript(words: list[Word], audio_path: Path) -> Path:
-    """Salva la trascrizione RAW ('parola [X.Xs]' per riga) per debug, accanto
-    all'audio. Consumata da ``main._parse_transcript_raw`` come fallback per
-    le parole raw."""
-    raw_path = audio_path.parent / "transcript_raw.txt"
+def raw_transcript_path(audio_path: Path) -> Path:
+    """Percorso del transcript RAW, nella cache e derivato dall'audio.
+
+    Il nome non è più fisso accanto all'audio (``transcript_raw.txt``): due
+    podcast nella stessa cartella si sovrascrivevano a vicenda e il fallback
+    per mtime di ``main.py`` poteva leggere le parole di uno come se fossero
+    dell'altro. La chiave è il percorso del file, non il contenuto: qui serve
+    distinguere i file, non firmarli (l'hash del contenuto è già la chiave
+    della trascrizione vera).
+
+    Vive in ``CACHE_DIR`` perché è diagnostica/fallback, non un input
+    dell'utente: la pulizia delle cache non lo tocca (guarda i ``.json``) e
+    ``--clean-cache`` lo rimuove insieme al resto della cache.
+    """
+    try:
+        ident = str(audio_path.resolve())
+    except OSError:
+        ident = str(audio_path.absolute())
+    key = hashlib.sha1(ident.encode("utf-8")).hexdigest()[:12]
+    return CACHE_DIR / f"transcript_raw_{key}.txt"
+
+
+def _write_raw_transcript(words: list[Word], audio_path: Path) -> Path | None:
+    """Salva la trascrizione RAW ('parola [X.Xs]' per riga) nella cache, per debug.
+
+    Consumata da ``main._parse_transcript_raw`` come fallback per le parole
+    raw. Non è un input della pipeline: se la scrittura fallisce (disco pieno,
+    cartella non scrivibile, share di rete) si prosegue, perché il risultato
+    della trascrizione è già in memoria e perderlo per un file di diagnostica
+    sarebbe assurdo.
+    """
+    raw_path = raw_transcript_path(audio_path)
     raw_lines = [f"{w['word']} [{w['start']:.1f}s]" for w in words]
-    raw_path.write_text("\n".join(raw_lines), encoding="utf-8")
+    try:
+        atomic_write_text(raw_path, "\n".join(raw_lines))
+    except OSError as e:
+        log.debug("   Trascrizione RAW non salvata (%s): %s", raw_path, e)
+        return None
     log.debug("   Trascrizione RAW salvata in: %s", raw_path)
     return raw_path
 
@@ -194,16 +227,67 @@ def download_openvino_model(model_dir: Path, model_id: str = DEFAULT_OPENVINO_MO
 def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
     """Carica l'audio come float32 mono 16kHz (formato richiesto da Whisper).
 
+    Decodifica in streaming via ffmpeg (f32le) per non caricare in RAM tutto il
+    PCM originale: pydub teneva ~2-3 GB di picco su audio lunghi, proprio dove
+    ``decide_transcriber`` misura la memoria libera. Il risultato è identico
+    (float32 in [-1, 1], 16 kHz, mono). Se ffmpeg non è disponibile si ripiega
+    su pydub (che carica tutto, ma è il caso raro).
+
     Returns:
         (campioni float32 in [-1, 1], sample rate)
     """
+    import shutil
+
+    import numpy as np
+
+    ffmpeg = shutil.which("ffmpeg")
+
+    if ffmpeg:
+        cmd = [
+            ffmpeg,
+            "-v", "error",
+            "-i", str(audio_path),
+            "-ac", "1",
+            "-ar", "16000",
+            "-f", "f32le",
+            "-",
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert proc.stdout is not None
+        buf = bytearray()
+        try:
+            while True:
+                block = proc.stdout.read(65536)
+                if not block:
+                    break
+                buf.extend(block)
+        finally:
+            proc.stdout.close()
+        stderr_bytes = b""
+        if proc.stderr is not None:
+            stderr_bytes = proc.stderr.read()
+            proc.stderr.close()
+        returncode = proc.wait()
+        if returncode != 0:
+            raise RuntimeError(
+                f"Decodifica audio fallita (ffmpeg exit {returncode}): "
+                f"{stderr_bytes.decode('utf-8', errors='replace')[:500]}"
+            )
+        if not buf:
+            raise RuntimeError("Decodifica audio fallita: output vuoto.")
+        samples = np.frombuffer(bytes(buf), dtype=np.float32).copy()
+        return samples, 16000
+
+    # Fallback (ffmpeg assente): pydub, che carica tutto in RAM.
     from pydub import AudioSegment
 
     seg = AudioSegment.from_file(str(audio_path))
     seg = seg.set_frame_rate(16000).set_channels(1)
     samples = seg.get_array_of_samples()
-    import numpy as np
-
     return (np.array(samples, dtype=np.float32) / 32768.0), 16000
 
 

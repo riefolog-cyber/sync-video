@@ -47,8 +47,10 @@ per un percorso spento. Rimosso insieme a `9router-maintenance/`,
 Il flusso libero allineava le slide per contenuto senza ancore, con
 l'anti-flicker interno al motore, e il prompt "podcast → presentazione" lo
 alimentava. Non era più usato e non era verificabile (nessuna ancora da
-contare): un audio senza "slide N"/"blocco successivo" ora fa **interrompere**
-la run con un errore chiaro. Rimossi il ramo `free`, gli argomenti
+contare). Il caso senza ancore, però, oggi non è più un errore: il flusso viene
+**assunto** (`slide-audio`) e la timeline è stimata per contenuto dal motore
+embedding, con avviso nel log e nel report (`--require-flow` ripristina
+l'interruzione). Rimossi quindi il ramo `free`, gli argomenti
 `--flow free`/`--no-free-ordered-fallback`, `PROMPT_PODCAST.md` e i relativi
 riferimenti. Le due funzioni di gate che distinguevano il flusso rilevato da
 quello effettivo (`_anchor_gate_applies`, il ramo libero di `_thin_slide_advice`)

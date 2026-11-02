@@ -1243,6 +1243,75 @@ class TestFallbackIntegrazione(unittest.TestCase):
         self.assertFalse((self.radice / "openvino_attempt.json").exists())
 
 
+class TestTranscriptRawInCache(unittest.TestCase):
+    """Il RAW è per-audio, vive nella cache e una scrittura fallita non è fatale."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.radice = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        patch_cache = mock.patch.object(transcription, "CACHE_DIR", self.radice / ".cache")
+        patch_cache.start()
+        self.addCleanup(patch_cache.stop)
+
+    def test_due_audio_stessa_cartella_non_si_sovrascrivono(self) -> None:
+        uno = self.radice / "uno.m4a"
+        due = self.radice / "due.m4a"
+        uno.write_bytes(b"a")
+        due.write_bytes(b"b")
+        self.assertNotEqual(
+            transcription.raw_transcript_path(uno),
+            transcription.raw_transcript_path(due),
+        )
+        self.assertEqual(transcription.raw_transcript_path(uno).parent, self.radice / ".cache")
+
+    def test_scrittura_fallita_non_e_fatale(self) -> None:
+        audio = self.radice / "podcast.m4a"
+        audio.write_bytes(b"a")
+        parole = cast(list, [{"word": "ciao", "start": 1.0}])
+        with mock.patch.object(
+            transcription, "atomic_write_text", side_effect=OSError("disco pieno")
+        ):
+            self.assertIsNone(transcription._write_raw_transcript(parole, audio))
+
+
+class TestLoadAudio16k(unittest.TestCase):
+    """Decodifica audio in streaming: forma e tipo giusti, niente crash."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.radice = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        # WAV 0.5s, 44.1kHz, stereo, 16-bit: esercita il resampling e il downmix.
+        import math
+        import struct
+        import wave
+
+        self.audio = self.radice / "test.wav"
+        sr = 44100
+        n = sr // 2
+        with wave.open(str(self.audio), "w") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(sr)
+            for i in range(n):
+                v = int(32767 * 0.1 * math.sin(2 * math.pi * 440 * i / sr))
+                w.writeframes(struct.pack("<hh", v, v))
+
+    def test_decodifica_in_float32_mono_16k(self) -> None:
+        import numpy as np
+
+        from transcription import _load_audio_16k
+
+        samples, sr = _load_audio_16k(self.audio)
+        self.assertEqual(sr, 16000)
+        self.assertEqual(samples.dtype, np.float32)
+        # 0.5s a 16kHz = 8000 campioni (con tolleranza del resampler).
+        self.assertGreater(samples.shape[0], 7000)
+        self.assertLess(samples.shape[0], 9000)
+        self.assertLessEqual(float(np.abs(samples).max()), 1.0)
+
+
 class TestRamAvailable(unittest.TestCase):
     """Il sensore di RAM libera risponde un numero sensato (o None)."""
 

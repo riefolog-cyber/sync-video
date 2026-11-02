@@ -348,17 +348,21 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza
         with contextlib.suppress(OSError):
             stale.unlink()
 
-    # Prova converter nativo se disponibile
-    if has_converter:
-        converter: str
-        cmd: list[str]
-        if soffice:
-            converter = "LibreOffice"
-            cmd = [soffice, "--headless", "--convert-to", "pdf", "--outdir", str(out_dir), str(ppt_path)]
-            env_extra: dict[str, str] = {}
-        elif genoffice:
-            converter = "GenOffice"
-            cmd = [
+    # Prova i converter nativi disponibili, in ordine di preferenza, finche' uno
+    # produce un PDF non vuoto. Prima il codice ne provava UNO solo (il primo
+    # installato) e, se falliva, si arrendeva senza tentare gli altri.
+    candidati: list[tuple[str, list[str], dict[str, str], int]] = []
+    if soffice:
+        candidati.append((
+            "LibreOffice",
+            [soffice, "--headless", "--convert-to", "pdf", "--outdir", str(out_dir), str(ppt_path)],
+            {},
+            180,
+        ))
+    if genoffice:
+        candidati.append((
+            "GenOffice",
+            [
                 genoffice[0],
                 genoffice[1],
                 "convert",
@@ -368,18 +372,18 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza
                 "--out",
                 str(pdf_path),
                 "--force",
-            ]
+            ],
             # La CLI non e' un eseguibile autonomo: e' uno script Node che gira
             # sul runtime Electron dell'app. Senza questa variabile Electron
             # aprirebbe la GUI e il processo non restituirebbe l'output.
-            env_extra = {"ELECTRON_RUN_AS_NODE": "1"}
-        elif powerpoint:
-            converter = "PowerPoint"
-            # Non c'e' un equivalente di --headless per PowerPoint: l'unica
-            # via e' pilotarlo via COM, e lo fa uno script PowerShell. Non
-            # richiede pywin32 perche' PowerShell parla COM nativamente.
-            ps = shutil.which("powershell") or shutil.which("pwsh")
-            cmd = [
+            {"ELECTRON_RUN_AS_NODE": "1"},
+            180,
+        ))
+    if powerpoint:
+        ps = shutil.which("powershell") or shutil.which("pwsh")
+        candidati.append((
+            "PowerPoint",
+            [
                 ps or "powershell",
                 "-NoProfile",
                 "-ExecutionPolicy",
@@ -388,40 +392,52 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza
                 str(_office_converter_script()),
                 str(ppt_path),
                 str(pdf_path),
-            ]
-            env_extra = {}
-        else:
-            converter = "ONLYOFFICE"
-            cmd = [onlyoffice, str(ppt_path), str(pdf_path)]  # type: ignore[list-item]
-            env_extra = {}
-        log.info("   Conversione %s -> PDF (%s)...", ext_upper, converter)
-        # PowerPoint via COM avvia l'applicazione: su un deck grosso, o su un
-        # PC lento, 180s non bastano e il timeout ucciderebbe la conversione
-        # lasciando PowerPoint aperto. Gli altri sono headless e veloci.
-        timeout = 300 if converter == "PowerPoint" else 180
-        proc = None
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-                env={**os.environ, **env_extra} if env_extra else None,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-            )
-        except subprocess.TimeoutExpired:
-            log.warning("   Conversione %s->PDF timeout (%ds)", ext_upper, timeout)
-        except OSError as e:
-            # soffice/x2t presenti nel PATH ma non eseguibili (ACL, voce
-            # spazzatura, architettura sbagliata, permessi). Senza questo
-            # l'utente prende un traceback invece del messaggio costruito in
-            # fondo, che spiega cosa provare.
-            log.warning("   %s non eseguibile (%s)", converter, e)
-        if proc is not None:
-            # x2t ritorna exit !=0 anche quando produce il PDF con warning:
-            # il successo si valuta dalla presenza del file, non dall'exit code.
-            if pdf_path.exists() and pdf_path.stat().st_size > 0:
+            ],
+            {},
+            # PowerPoint via COM avvia l'applicazione: su un deck grosso, o su un
+            # PC lento, 180s non bastano e il timeout ucciderebbe la conversione
+            # lasciando PowerPoint aperto. Gli altri sono headless e veloci.
+            300,
+        ))
+    if onlyoffice:
+        candidati.append((
+            "ONLYOFFICE",
+            [onlyoffice, str(ppt_path), str(pdf_path)],
+            {},
+            180,
+        ))
+
+    if candidati:
+        for converter, cmd, env_extra, timeout in candidati:
+            log.info("   Conversione %s -> PDF (%s)...", ext_upper, converter)
+            proc = None
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                    encoding="utf-8",
+                    errors="replace",
+                    env={**os.environ, **env_extra} if env_extra else None,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+                )
+            except subprocess.TimeoutExpired:
+                log.warning("   Conversione %s->PDF timeout (%ds)", ext_upper, timeout)
+                log.warning("   Provo il prossimo converter...")
+                continue
+            except OSError as e:
+                # soffice/x2t presenti nel PATH ma non eseguibili (ACL, voce
+                # spazzatura, architettura sbagliata, permessi). Senza questo
+                # l'utente prende un traceback invece del messaggio costruito in
+                # fondo, che spiega cosa provare.
+                log.warning("   %s non eseguibile (%s)", converter, e)
+                log.warning("   Provo il prossimo converter...")
+                continue
+            if proc is not None and pdf_path.exists() and pdf_path.stat().st_size > 0:
+                # x2t ritorna exit !=0 anche quando produce il PDF con warning:
+                # il successo si valuta dalla presenza del file, non dall'exit code.
                 if proc.returncode != 0:
                     log.debug(
                         "   %s warning (exit=%d): %s",
@@ -435,7 +451,7 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza
             log.warning(
                 "   %s fallito (exit=%d): %s",
                 converter,
-                proc.returncode,
+                proc.returncode if proc is not None else -1,
                 (proc.stderr or proc.stdout or "")[:600],
             )
             log.warning("   Provo il prossimo converter...")
@@ -493,12 +509,23 @@ def config_module_path() -> str:
     return str(Path(__file__).with_name("main.py"))
 
 
+MAX_RENDER_PIXELS = 16_000_000
+
+
 def _render_page(args: tuple[str, int, str, int]) -> str:
     """Renderizza una singola pagina PDF in PNG (eseguita in processo separato)."""
     pdf_path, page_num, output_path, dpi = args
     doc = fitz.open(str(pdf_path))
     try:
         page = doc.load_page(page_num)
+        # Tetto sui pixel: un poster A0 o una pagina con MediaBox enorme a 300 dpi
+        # produrrebbe gigabyte di pixmap e OOM/disco pieno. Si scala il dpi.
+        rect = page.rect
+        base_w = max(1, int(rect.width * dpi / 72))
+        base_h = max(1, int(rect.height * dpi / 72))
+        if base_w * base_h > MAX_RENDER_PIXELS:
+            scale = (MAX_RENDER_PIXELS / (base_w * base_h)) ** 0.5
+            dpi = max(72, int(dpi * scale))
         pix = page.get_pixmap(dpi=dpi)
         pix.save(str(output_path))
     finally:
@@ -562,6 +589,10 @@ def _ocr_single_slide(image_path: Path, lang: str, max_retries: int = 3) -> str:
             raw = pt.image_to_string(str(image_path), lang=lang)
             break
         except (pt.TesseractError, OSError) as e:
+            # Tesseract assente: non ha senso riprovare, il risultato è lo stesso
+            # su ogni slide. Si propaga subito invece di sprecare 3xN tentativi.
+            if isinstance(e, pt.TesseractNotFoundError):
+                raise
             if attempt < max_retries - 1:
                 wait = (attempt + 1) * 1.0
                 log.debug(
@@ -594,7 +625,13 @@ def extract_slides_text_ocr(
     log.info("1. Analisi del PDF: Estrazione OCR dei testi per l'IA...")
     output_dir.mkdir(parents=True, exist_ok=True)
     doc = fitz.open(str(pdf_path))
+    if doc.needs_pass:
+        doc.close()
+        raise RuntimeError(f"Il PDF è protetto da password: {pdf_path}")
     total_pages = len(doc)
+    if total_pages == 0:
+        doc.close()
+        raise RuntimeError(f"Il PDF non contiene pagine: {pdf_path}")
     doc.close()
 
     slide_files: list[str] = []
@@ -649,7 +686,22 @@ def extract_slides_text_ocr(
     # Tesseract non installato, e va detto adesso invece di produrre un video
     # che sembra a posto e non lo è.
     if _ocr_tutto_vuoto(slide_texts):
-        raise RuntimeError(_MESSAGGIO_OCR_VUOTO.format(n=total_pages))
+        # Tesseract assente ≠ presentazione solo immagini. Se Tesseract risponde,
+        # il segnaposto su tutte le slide è legittimo (deck fotografico) e si
+        # procede; altrimenti è il caso "non installato" e va detto chiaramente.
+        tesseract_presente = False
+        try:
+            _tesseract().get_tesseract_version()
+            tesseract_presente = True
+        except Exception:
+            tesseract_presente = False
+        if tesseract_presente:
+            log.warning(
+                "   OCR completato ma nessuna slide ha testo riconoscibile "
+                "(presentazione solo immagini?): procedo con i segnaposto."
+            )
+        else:
+            raise RuntimeError(_MESSAGGIO_OCR_VUOTO.format(n=total_pages))
 
     for i, txt in enumerate(slide_texts):
         preview = txt[:80] + "..." if len(txt) > 80 else txt

@@ -25,15 +25,19 @@ pipeline prende una strada diversa a seconda del segnale presente nell'audio.
 | **`slide-audio`** | "Passiamo alla slide 3" | Estratte ancore deterministiche "slide N" (cifre, cardinali o **ordinali**: "la terza diapositiva") → vincoli ad alta precisione. Verifica mapping ancore: se la numerazione parlata è sfasata rispetto al PDF, l'**euristica deterministica** (embeddings locali, offline) corregge gli offset sistematici. Sincronizzazione semantica (embedding e5-large offline): ogni blocco audio → slide più vicina, DP monotona. Le slide SENZA ancora vengono posizionate per contenuto dal motore embedding (nessun LLM); le ancore restano esatte. Riconciliazione (tempi crescenti, durate positive); se impossibile → **interruzione**. Slide in ordine 1→N. Un log diagnostico distingue riferimenti trovati/usati/scartati e segnala le slide senza ancora esplicita. |
 | **`audio-slide`** | "Passiamo al blocco successivo" | Stesse ancore (numeriche o ordinali), stessa pipeline ordinata; la slide cambia sulle transizioni di blocco non numerate. |
 
-Un audio **senza** questi riferimenti riconoscibili non è sincronizzabile: la
-pipeline si **interrompe** con un errore chiaro che chiede di rigenerare il
-podcast annunciando le slide.
+Un audio **senza** questi riferimenti riconoscibili non blocca la run: il
+flusso viene **assunto** (`slide-audio`, il più preciso se una menzione è
+sfuggita al rilevatore) e la timeline è stimata dal contenuto, con un avviso
+nel log e nel report. Per confini esatti conviene comunque rigenerare il
+podcast annunciando le slide; `--require-flow` ripristina l'interruzione per
+chi preferisce fallire invece di degradare (batch/CI).
 
 Il raggruppamento in finestre temporali e la costruzione dei blocchi per la
 sincronizzazione vivono in `chunks.py` (`build_windows`).
 
-**In tutte le strade**: timeline → durate → MoviePy (slide 1080p, fps 5,
-buffer 3s) → `video_finale.mp4`, con pulizia finale della cache orfana.
+**In tutte le strade**: timeline → durate → ffmpeg concat demuxer (slide 1080p,
+fps 5, buffer 3s; MoviePy resta per le transizioni richieste) →
+`video_finale.mp4`, con pulizia finale della cache orfana.
 Se il segnale è insufficiente il programma **si interrompe con avviso**,
 mai inventando distribuzioni uniformi.
 
@@ -103,10 +107,11 @@ sono simili e mostra quella slide in quel momento.
 
 ### Quale prompt usare
 
-Un solo processo di input: **presentazione → podcast**. Il podcast deve
-pronunciare le ancore "slide N" **in cifre** a ogni sezione: senza ancore il
-pipeline non può sapere dove cambia la slide e **si interrompe** con un errore
-chiaro.
+Un solo processo di input: **presentazione → podcast**. Il podcast dovrebbe
+pronunciare le ancore "slide N" **in cifre** a ogni sezione: sono la misura più
+precisa di dove cambia la slide. Senza ancore la run non si ferma — il flusso
+viene assunto e i confini sono stimati dal contenuto — ma la stima è meno
+affidabile e il log lo dichiara.
 
 Il prompt [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](../<PROMPT_PRESENTAZIONE (PREDEFINITO).md>)
 guida sia la generazione della presentazione (Studio → Slide Deck, dalle tue

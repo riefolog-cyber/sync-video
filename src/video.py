@@ -6,6 +6,7 @@ Include riconciliazione timeline e supporto per transizioni.
 
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Sequence
 from contextlib import suppress
@@ -56,15 +57,20 @@ def _resize_for_video(image_path: str, max_width: int, max_height: int) -> np.nd
 # =====================================================================
 # MOTORE FFMPEG — concat demuxer (encoding diretto, senza MoviePy)
 # =====================================================================
-def _fitted_size(img: Image.Image) -> tuple[int, int]:
-    """Dimensione dell'immagine adattata entro DEFAULT_VIDEO_RES (no upscale),
-    arrotondata per difetto a numeri pari (requisito libx264)."""
-    w, h = img.size
+def _fitted_size_from_size(size: tuple[int, int]) -> tuple[int, int]:
+    """Dimensione adattata entro DEFAULT_VIDEO_RES (no upscale), pari a libx264."""
+    w, h = size
     max_w, max_h = DEFAULT_VIDEO_RES
     if w > max_w or h > max_h:
         scale = min(max_w / w, max_h / h)
         w, h = int(w * scale), int(h * scale)
     return w - w % 2, h - h % 2
+
+
+def _fitted_size(img: Image.Image) -> tuple[int, int]:
+    """Dimensione dell'immagine adattata entro DEFAULT_VIDEO_RES (no upscale),
+    arrotondata per difetto a numeri pari (requisito libx264)."""
+    return _fitted_size_from_size(img.size)
 
 
 def _open_slide_retry(slide_path: str, attempts: int = 4, delay: float = 0.75) -> Image.Image:
@@ -73,6 +79,29 @@ def _open_slide_retry(slide_path: str, attempts: int = 4, delay: float = 0.75) -
     for i in range(attempts):
         try:
             return Image.open(slide_path).convert("RGB")
+        except (UnidentifiedImageError, OSError) as e:
+            last = e
+            if i < attempts - 1:
+                time.sleep(delay * (i + 1))
+    raise RuntimeError(
+        f"Lettura slide non riuscita dopo {attempts} prove: {slide_path} ({last})."
+    ) from last
+
+
+def _slide_header_size(slide_path: str, attempts: int = 4, delay: float = 0.75) -> tuple[int, int]:
+    """Dimensione della slide leggendo il solo header, senza decodificare.
+
+    ``Image.open`` è lazy: ``.size`` non tocca i pixel. Serve al primo
+    passaggio di ``_prepare_slides_for_concat``, che deve solo sapere quanto
+    sarà grande il canvas. Ripete i tentativi come ``_open_slide_retry`` perché
+    un file appena scritto può essere ancora bloccato su Windows.
+    """
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            with Image.open(slide_path) as img:
+                w, h = img.size
+                return int(w), int(h)
         except (UnidentifiedImageError, OSError) as e:
             last = e
             if i < attempts - 1:
@@ -116,28 +145,29 @@ def _prepare_slides_for_concat(slide_files: Sequence[str], workdir: Path) -> lis
     ogni slide viene adattata (senza upscale) e poi centrata con letterbox
     nero su un canvas unico, grande quanto la slide adattata più grande.
     Restituisce i percorsi dei PNG pronti, nello stesso ordine degli input.
-    """
-    fitted: list[tuple[int, int]] = []
-    images: list[Image.Image] = []
-    try:
-        for slide_path in slide_files:
-            img = _open_slide_retry(slide_path)
-            images.append(img)
-            fitted.append(_fitted_size(img))
-        canvas_w, canvas_h = _canvas_size(fitted)
-        workdir.mkdir(parents=True, exist_ok=True)
 
-        prepared: list[Path] = []
-        for i, (img, (w, h)) in enumerate(zip(images, fitted, strict=True)):
+    Due passate: la prima legge solo gli header per calcolare il canvas, la
+    seconda apre, adatta e salva UNA slide alla volta. Tenere tutte le immagini
+    decodificate insieme costava ~27 MB l'una a 300 dpi (oltre 4 GB su un deck
+    da 150 slide) e quel picco non serviva a niente: il PNG di destinazione è
+    già su disco.
+    """
+    fitted = [_fitted_size_from_size(_slide_header_size(slide_path)) for slide_path in slide_files]
+    canvas_w, canvas_h = _canvas_size(fitted)
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    prepared: list[Path] = []
+    for i, (slide_path, (w, h)) in enumerate(zip(slide_files, fitted, strict=True)):
+        img = _open_slide_retry(slide_path)
+        try:
             if (w, h) != img.size:
-                log.debug("   Resize %s: %dx%d -> %dx%d", Path(str(slide_files[i])).name, *img.size, w, h)
+                log.debug("   Resize %s: %dx%d -> %dx%d", Path(str(slide_path)).name, *img.size, w, h)
             out_png = workdir / f"seg_{i:04d}.png"
             _letterbox(img, canvas_w, canvas_h).save(out_png, format="PNG")
             prepared.append(out_png)
-        return prepared
-    finally:
-        for img in images:
+        finally:
             img.close()
+    return prepared
 
 
 def _letterbox_references(slide_files: Sequence[str], workdir: Path) -> list[Path] | None:
@@ -189,11 +219,39 @@ def _write_concat_file(entries: Sequence[tuple[Path, float]], list_path: Path) -
     list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+# Senza output per questo tempo ffmpeg è considerato bloccato (driver, device
+# su share, encoder accelerato che non parte): il watchdog lo uccide e il
+# chiamante ripiega su libx264. Con `-progress pipe:1` le righe arrivano ogni
+# ~0.5s, quindi 120s di silenzio sono un blocco vero, non lentezza.
+_FFMPEG_STALL_SECONDS = 120.0
+
+# Righe key=value emesse da `-progress pipe:1`: non sono errori, e se finiscono
+# nella coda del messaggio finale nascondono l'errore vero.
+_FFMPEG_PROGRESS_PREFIXES = (
+    "frame=",
+    "fps=",
+    "bitrate=",
+    "total_size=",
+    "out_time=",
+    "out_time_ms=",
+    "out_time_us=",
+    "dup_frames=",
+    "drop_frames=",
+    "speed=",
+    "progress=",
+)
+
+
 def _run_ffmpeg(cmd: list[str], total_duration: float) -> None:
     """Esegue ffmpeg, loggando il progresso (`-progress pipe:1`).
 
     stdout e stderr sono uniti: il progresso arriva come righe key=value,
     gli eventuali errori compaiono in coda. Solleva RuntimeError se exit != 0.
+
+    Un encoder accelerato che si blocca non produce più righe: senza watchdog
+    la pipeline resterebbe ferma per sempre davanti all'ultimo "Encoding: 40%".
+    Dopo ``_FFMPEG_STALL_SECONDS`` senza output il processo viene ucciso e
+    RuntimeError fa scattare il ripiego su libx264.
     """
     log.debug("   Comando: %s", " ".join(cmd))
     proc = subprocess.Popen(
@@ -207,8 +265,26 @@ def _run_ffmpeg(cmd: list[str], total_duration: float) -> None:
     assert proc.stdout is not None
     output_lines: list[str] = []
     last_pct = -10
+    last_output = time.monotonic()
+    done = threading.Event()
+
+    def _watchdog() -> None:
+        nonlocal last_output
+        while not done.wait(5.0):
+            if time.monotonic() - last_output > _FFMPEG_STALL_SECONDS:
+                log.warning(
+                    "   ffmpeg non produce output da %.0fs: lo interrompo.",
+                    _FFMPEG_STALL_SECONDS,
+                )
+                with suppress(OSError):
+                    proc.kill()
+                return
+
+    watcher = threading.Thread(target=_watchdog, name="ffmpeg-watchdog", daemon=True)
+    watcher.start()
     try:
         for line in proc.stdout:
+            last_output = time.monotonic()
             line = line.strip()
             if line.startswith("out_time="):
                 try:
@@ -222,9 +298,10 @@ def _run_ffmpeg(cmd: list[str], total_duration: float) -> None:
                     log.info("   Encoding: %d%%", pct)
             elif line.startswith("progress=end"):
                 log.info("   Encoding: 100%")
-            else:
+            elif line and not line.startswith(_FFMPEG_PROGRESS_PREFIXES) and not line.startswith("stream_"):
                 output_lines.append(line)
     finally:
+        done.set()
         proc.stdout.close()
         returncode = proc.wait()
     if returncode != 0:

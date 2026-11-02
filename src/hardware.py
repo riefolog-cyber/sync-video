@@ -293,8 +293,22 @@ def choose_video_encoder(vendor: str, available_encoders: frozenset[str]) -> str
 
 
 def _cache_fingerprint() -> str:
-    """Identita' macchina + ffmpeg: la cache vale solo per questa combinazione."""
-    return f"{platform.system()}/{platform.machine()}"
+    """Identita' macchina + ffmpeg: la cache vale solo per questa combinazione.
+
+    L'eseguibile entra nella fingerprint con mtime e dimensione: dopo un
+    aggiornamento di ffmpeg la lista degli encoder puo' cambiare (uno appena
+    compilato, o uno rimosso), e senza questo la cache resterebbe ferma fino a
+    sette giorni. Un `stat` costa nulla; il probe costerebbe ~100 ms.
+    """
+    ffmpeg_id = "assente"
+    percorso = shutil.which("ffmpeg")
+    if percorso:
+        try:
+            st = Path(percorso).stat()
+            ffmpeg_id = f"{percorso}:{st.st_mtime_ns}:{st.st_size}"
+        except OSError:
+            ffmpeg_id = percorso
+    return f"{platform.system()}/{platform.machine()}/{ffmpeg_id}"
 
 
 def ffmpeg_encoders(refresh: bool = False) -> frozenset[str]:

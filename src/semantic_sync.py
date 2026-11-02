@@ -76,7 +76,11 @@ _EMBED_SECONDS = 0.0
 # in memoria per la singola run, dove lo stesso embedding serve più volte (il
 # confronto fra trascrizioni e la sincronizzazione embeddano gli stessi blocchi).
 _EMBED_CACHE_DIR: Path = CACHE_DIR / "embedding_cache"
-_EMBED_CACHE_MAX = 40
+# Una run ancorata scrive ~3 voci (slide+blocchi, refine, stabilità); una run
+# senza ancore ne scrive ~18, perché le finestre del refine sono una lista per
+# confine. Il tetto va dimensionato su quest'ultimo caso, altrimenti la cache
+# del raffinamento viene potata prima che il rerun possa usarla.
+_EMBED_CACHE_MAX = 120
 _EMBED_MEMO: dict[str, tuple[np.ndarray, float]] = {}
 
 # ``--no-cache`` deve ignorare anche questi vettori, altrimenti il flag
@@ -503,8 +507,15 @@ def zscore_matrix(
     """
     m = np.array(sim, dtype=np.float64, copy=True)
     std = m.std(axis=0)
-    std[std < eps] = eps
-    return cast(np.ndarray, (m - m.mean(axis=0)) / std)
+    # Soglia assoluta (non 1e-9): una colonna quasi-costante (segnaposto OCR,
+    # OCR illeggibile) ha std dell'ordine di 1e-3 e la divisione gonfiava il
+    # rumore. Una colonna con picchi reali ha std >= ~4e-3 e resta attiva.
+    soglia = 2e-3
+    maschera = std < soglia
+    std_safe = np.where(maschera, 1.0, std)
+    out = (m - m.mean(axis=0)) / std_safe
+    out[:, maschera] = 0.0
+    return cast(np.ndarray, out)
 
 
 def _mean_pair_scores(
@@ -892,6 +903,37 @@ def monotonic_alignment(
 # =====================================================================
 # TIMELINE SEMANTICA (pura: embedder iniettabile per i test)
 # =====================================================================
+def _min_gap_blocks(
+    total_slides: int,
+    n_blocks: int,
+    min_slide_duration: float,
+    window_seconds: float,
+) -> int:
+    """Numero minimo di blocchi per slide, con lo stesso metro in ogni catena.
+
+    ``ceil`` e non ``int``: con una durata minima di 3s e finestre da 4s il
+    rapporto è 0.75 e ``int`` lo tronca a 0 (poi corretto a 1 dalla ``max``),
+    mentre il senso è "un blocco ogni tot secondi" e troncare un rapporto fra 0
+    e 1 non dice nulla.
+
+    Se il minimo dichiarato non entra nell'audio si scende al minimo
+    rappresentabile (un blocco per slide): meglio una segmentazione grossolana
+    che ``build_candidates`` a ``None`` con la diagnosi sbagliata ("mancano
+    informazioni" invece di "il vincolo è più grande dell'audio"). I chiamanti
+    hanno già verificato ``n_blocks >= total_slides``, quindi il risultato non
+    scende sotto 1.
+
+    La sincronizzazione vera e il confronto A/B fra trascrizioni devono usare
+    questa stessa funzione: prima l'A/B usava ``int`` e un metro diverso,
+    quindi con ``--semantic-min-duration`` non nullo confrontava due
+    segmentazioni diverse (vedi ``TestBeamAbQuality``).
+    """
+    min_gap = max(1, math.ceil(min_slide_duration / window_seconds))
+    if min_gap * total_slides > n_blocks:
+        return max(1, n_blocks // total_slides)
+    return min_gap
+
+
 def semantic_timeline_from_texts(
     slide_texts: Sequence[str],
     blocks: Sequence[dict[str, Any]],
@@ -950,21 +992,13 @@ def semantic_timeline_from_texts(
             report["confusability"] * 100,
         )
 
-    # Il minimo di durata per slide, in blocchi. `int()` tronca: con una
-    # durata minima di 3s e finestre da 4s dava 0, poi corretto a 1 dalla
-    # `max`. La `ceil` dice la stessa cosa ma senza dipendere dalla scala:
-    # quello che si vuole è "un blocco ogni tot secondi", e troncando un
-    # rapporto fra 0 e 1 si ottiene sempre 0.
-    min_gap = max(1, math.ceil(min_slide_duration / window_seconds))
-    # Con più slide che blocchi lo spazio non basta: `build_candidates`
-    # ritornerebbe None e la run morirebbe con "sincronizzazione impossibile
-    # senza distribuzioni inventate", che è una diagnosi sbagliata (il problema
-    # è che il vincolo di minimo è più grande dell'audio, non che manchino
-    # informazioni). Meglio un blocco per slide, che è il minimo che la
-    # segmentazione può rappresentare, e dirlo.
-    if total_slides > len(blocks):
-        min_gap = 1
-    elif min_gap * total_slides > len(blocks):
+    # Il minimo di durata per slide, in blocchi. Il calcolo (e il ripiego al
+    # minimo rappresentabile) sta in `_min_gap_blocks`, condiviso con il
+    # confronto A/B: due metri diversi renderebbero il confronto una misura
+    # di un'altra segmentazione.
+    _min_gap_nominale = max(1, math.ceil(min_slide_duration / window_seconds))
+    min_gap = _min_gap_blocks(total_slides, len(blocks), min_slide_duration, window_seconds)
+    if min_gap < _min_gap_nominale:
         log.warning(
             "   [Semantico] Minimo di durata %.1fs non compatibile con %d blocchi "
             "e %d slide: uso il minimo rappresentabile (1 blocco per slide).",
@@ -972,7 +1006,6 @@ def semantic_timeline_from_texts(
             len(blocks),
             total_slides,
         )
-        min_gap = max(1, len(blocks) // total_slides)
 
     candidates = build_candidates(
         len(blocks),
@@ -1063,6 +1096,20 @@ def semantic_timeline_from_texts(
     # "slide N" al tempo T, la slide deve comparire esattamente in quel momento
     # (T è già verificato essere entro ±1 blocco dall'inizio scelto). La
     # monotonicità viene preservata con un piccolo margine di sicurezza.
+    # Scarta ancore fuori portata: un "slide 15" su 14 pagine, o un tempo oltre
+    # la durata dell'audio, non e' un vincolo valido e romperebbe la
+    # riconciliazione (ValueError) con un messaggio fuorviante.
+    if anchors:
+        _valide = {
+            s: t for s, t in anchors.items()
+            if 2 <= s <= total_slides and 0.0 <= t < total_duration
+        }
+        if len(_valide) != len(anchors):
+            log.warning(
+                "   [Semantico] Scartate %d ancore fuori portata (slide>deck o tempo fuori durata).",
+                len(anchors) - len(_valide),
+            )
+        anchors = _valide
     if anchors:
         for s in anchors:
             if s > 1:
@@ -1209,7 +1256,9 @@ def alignment_quality_from_words(
         return None
     sim, report = embedded
 
-    min_gap = max(1, int(opts.min_slide_duration / opts.window_seconds))
+    min_gap = _min_gap_blocks(
+        total_slides, len(blocks), opts.min_slide_duration, opts.window_seconds
+    )
     candidates = build_candidates(len(blocks), total_slides, min_gap, blocks, anchors)
     if candidates is None:
         return None
@@ -1738,7 +1787,9 @@ def _refine_wins_under_perturbation(
             return False
         texts.extend((before, after))
     try:
-        embs = np.asarray(embed_fn(texts), dtype=np.float32)
+        # Dalla cache come il resto del refine: la prova costa 4 embedding per
+        # confine e senza cache ogni rerun li ripaga da capo.
+        embs = np.asarray(_embed_list(embed_fn, texts, "Refine stabilità"), dtype=np.float32)
     except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
         log.debug("   [Refine] Prova di stabilità non calcolabile (%s).", e)
         return False
@@ -1934,7 +1985,11 @@ def refine_segment_boundaries(
                 pair.append(seen[txt])
             indexed.append((t, pair[0], pair[1]))
         try:
-            embs = np.asarray(embed_fn(texts), dtype=np.float32)
+            # `_embed_list` invece di `embed_fn` diretto: è la stessa lista di
+            # testi a ogni rerun sullo stesso audio, quindi la cache
+            # content-addressed evita di ripagare ~290s di embedding. Il run a
+            # freddo non cambia (prima chiamata = cache miss).
+            embs = np.asarray(_embed_list(embed_fn, texts, "Refine finestre"), dtype=np.float32)
             if embs.ndim != 2 or embs.shape[0] != len(texts):
                 continue
             embs = (embs / np.maximum(np.linalg.norm(embs, axis=1, keepdims=True), 1e-9)).astype(np.float32)

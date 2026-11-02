@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -330,11 +331,23 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
     Una scrittura interrotta (crash, Ctrl+C, disco pieno) non lascia mai
     un file di cache corrotto: il .tmp viene ignorato dai lettori e il
     file definitivo resta nella versione precedente.
+
+    Il nome del temporaneo è univoco (``mkstemp``) e non fisso: due run sulla
+    stessa cartella scrivevano lo stesso ``.tmp`` e su Windows il secondo
+    troncava il file del primo oppure ``os.replace`` falliva con
+    ``PermissionError``. In caso di errore il temporaneo viene rimosso.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding=encoding)
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 # =====================================================================
@@ -550,7 +563,14 @@ def _list_tessdata(tesseract_exe: str) -> tuple[set[str], Path | None]:
     risponde o se l'intestazione non è quella prevista.
     """
     try:
-        res = subprocess.run([tesseract_exe, "--list-langs"], capture_output=True, text=True, timeout=10)
+        res = subprocess.run(
+            [tesseract_exe, "--list-langs"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
     except (OSError, subprocess.TimeoutExpired):
         return set(), None
     out = res.stdout or ""

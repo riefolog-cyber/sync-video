@@ -59,7 +59,7 @@ class TestPrimaSezione(unittest.TestCase):
         durations = [self.DUR, 60.0, 60.0, 60.0]
         return main._validate_anomalous_segments(
             [(0, 1, self.DUR)], self.SLIDE_TEXTS, _parla(introduzione, self.DUR), durations
-        ).get(1)
+        ).get(0)
 
     def test_audio_coerente_con_la_primapagina(self) -> None:
         # Il caso reale del 04/10: il conduttore apre parlando del libro e la

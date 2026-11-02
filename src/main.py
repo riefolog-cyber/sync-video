@@ -135,6 +135,7 @@ from timeline import (
 from transcription import (
     _write_raw_transcript,
     correct_transcript_names,
+    raw_transcript_path,
     resolved_transcriber,
     retranscribe_zone,
     transcribe_audio,
@@ -789,9 +790,14 @@ def _log_plain_summary(
                     )
 
     # --- Cosa NON è certo: i dubbi da verificare a mano ---
-    misaligned = sorted(s for s, v in verdicts.items() if v == "disallineata")
+    misaligned = sorted(
+        slide_ids[pos] for pos, v in verdicts.items()
+        if v == "disallineata" and pos < len(slide_ids)
+    )
     uncertain = sorted(
-        s for s, v in verdicts.items() if v == "incerto" and s not in floor_guaranteed
+        slide_ids[pos] for pos, v in verdicts.items()
+        if v == "incerto" and pos < len(slide_ids)
+        and slide_ids[pos] not in floor_guaranteed
     )
     if floor_unguaranteed:
         incerti.append(
@@ -1517,7 +1523,7 @@ def _validate_anomalous_segments(
             continue
         start = offsets[pos]
         speech = _speech_tokens_in_window(words_raw, start, start + d)
-        verdicts[s] = _segment_content_verdict(speech, all_slide_tokens, s)
+        verdicts[pos] = _segment_content_verdict(speech, all_slide_tokens, s)
     return verdicts
 
 
@@ -1544,14 +1550,14 @@ def _build_sync_report(
     verdicts = verdicts or {}
     start = 0.0
     segments: list[dict[str, object]] = []
-    for s, d in zip(slide_ids, durations, strict=True):
+    for i, (s, d) in enumerate(zip(slide_ids, durations, strict=True)):
         segment: dict[str, object] = {
             "slide": int(s),
             "start": round(start, 3),
             "end": round(start + float(d), 3),
             "duration": round(float(d), 3),
         }
-        verdict = verdicts.get(int(s))
+        verdict = verdicts.get(i) if verdicts else None
         if verdict is not None:
             segment["verdict"] = verdict
         segments.append(segment)
@@ -1593,7 +1599,7 @@ def _transcript_cache_key(audio_hash: str, args: Any, beam: int | None = None) -
     """
     engine = resolved_transcriber(args.transcriber, Path(args.openvino_model_dir))
     if engine == "openvino":
-        engine_params = [args.openvino_device]
+        engine_params = [args.openvino_device, "decode-ffmpeg-f32le"]
     else:
         engine_params = [
             args.whisper_device,
@@ -2842,6 +2848,11 @@ def main(argv: list | None = None) -> None:
     # --whisper-model non deve riusarsi la cache di un altro, che produce
     # timestamp/token diversi.
     cache_key_transcript = _transcript_cache_key(audio_hash, args)
+    # La trascrizione "ricucita" dal recupero delle zone cieche è una variante
+    # della stessa decodifica: chiave derivata, così non si confonde con il
+    # testo grezzo (che resta la base per il confronto A/B) e non si paga due
+    # volte la ritrascrizione mirata a ogni run.
+    cache_key_transcript_gap = cache_key_transcript + "_gap"
     # Entrambe le trascrizioni possibili dell'audio corrente (veloce e accurata)
     # sono cache ATTIVE: la scelta automatica del beam può produrle tutte e due,
     # e cancellare la seconda a fine run farebbe ripagare la trascrizione
@@ -2857,6 +2868,7 @@ def main(argv: list | None = None) -> None:
     active_cache_keys: set[str] = {
         cache_key_slides,
         cache_key_transcript,
+        cache_key_transcript_gap,
         cache_key_transcript_accurate,
         cache_key_beam_ab,
     }
@@ -2932,26 +2944,49 @@ def main(argv: list | None = None) -> None:
     t_ocr = time.time() - t_phase_start
 
     # --- Durata audio ---
+    # AudioFileClip serve solo qui, per la durata: aprirlo e chiuderlo subito
+    # evita di tenere un reader aperto per tutta la pipeline (su Windows il file
+    # resta anche bloccato). Un audio corrotto o con codec non supportato deve
+    # diventare un _abort con il percorso, non un traceback grezzo.
     audio_clip: AudioFileClip | None = None
     try:
-        audio_clip = AudioFileClip(str(audio_path))
-        total_duration = audio_clip.duration
+        try:
+            audio_clip = AudioFileClip(str(audio_path))
+            total_duration = float(audio_clip.duration)
+        except (OSError, TypeError, ValueError) as e:
+            _abort(f"Impossibile leggere l'audio '{audio_path}': {e}")
+        finally:
+            if audio_clip is not None:
+                audio_clip.close()
+                audio_clip = None
         log.info("   Durata audio: %.1f secondi", total_duration)
 
         # --- Fase 2: Trascrizione (con cache) ---
         t_phase_start = time.time()
 
         if not args.no_cache:
-            cached = _load_cache(cache_key_transcript)
+            # La versione con le zone ricucite è strettamente migliore della
+            # grezza (stesse parole tranne le zone ritrascritte): se c'è, si
+            # usa quella. Senza, ogni run ripagherebbe ffmpeg + Whisper sulle
+            # stesse zone cieche.
+            cached_gap = _load_cache(cache_key_transcript_gap)
+            _from_gap_cache = bool(cached_gap and "transcript" in cached_gap)
+            cached = cached_gap if _from_gap_cache else _load_cache(cache_key_transcript)
             if cached and "transcript" in cached:
                 transcript = cached["transcript"]
                 # Fix A: recupera anche le parole raw dalla cache se presenti
                 if "words_raw" in cached:
                     words_raw = cached["words_raw"]
-                log.info(
-                    "2. [CACHE] Trascrizione recuperata dalla cache: nessuna decodifica "
-                    "(stesso audio, stesso modello, stessi parametri)."
-                )
+                if _from_gap_cache:
+                    log.info(
+                        "2. [CACHE] Trascrizione con zone ricucite recuperata dalla cache: "
+                        "nessuna decodifica né ritrascrizione mirata."
+                    )
+                else:
+                    log.info(
+                        "2. [CACHE] Trascrizione recuperata dalla cache: nessuna decodifica "
+                        "(stesso audio, stesso modello, stessi parametri)."
+                    )
 
         if transcript is None:
             # Perché si rifà: senza questa riga un parametro cambiato (o un audio
@@ -2989,15 +3024,16 @@ def main(argv: list | None = None) -> None:
         t_transcribe = time.time() - t_phase_start
 
         # --- Recupero parole raw (serve a detection flusso + deterministica) ---
-        # Se words_raw non è in cache, prova a leggerlo da transcript_raw.txt
-        if not words_raw:
-            raw_txt = audio_path.parent / "transcript_raw.txt"
+        # Se words_raw non è in cache, prova a leggerlo dal transcript RAW
+        # nella cache (nome derivato dall'audio: vedi transcription.raw_transcript_path).
+        if not words_raw and not args.no_cache:
+            raw_txt = raw_transcript_path(audio_path)
             if raw_txt.exists() and raw_txt.stat().st_mtime >= audio_path.stat().st_mtime:
                 log.debug("   Leggo parole raw da %s", raw_txt.name)
                 words_raw = _parse_transcript_raw(raw_txt)
             elif raw_txt.exists():
                 log.warning(
-                    "   [Avviso] Ignoro transcript_raw.txt obsoleto (più vecchio dell'audio): "
+                    "   [Avviso] Ignoro il transcript RAW obsoleto (più vecchio dell'audio): "
                     "appartiene a un podcast precedente, non lo uso come fallback."
                 )
 
@@ -3092,6 +3128,16 @@ def main(argv: list | None = None) -> None:
             _gap_recovered = _zones.recovered
             _gap_deferred = _zones.skipped
             t_transcribe += _gap_seconds
+
+            # Le zone ritrascritte sono un costo vero (ffmpeg + Whisper, ~25s
+            # l'una): se restassero solo in memoria, la run successiva
+            # ripartirebbe dal testo veloce e le rifarebbe da capo. Chiave
+            # derivata perché il testo grezzo serve ancora al confronto A/B.
+            if not args.no_cache and _gap_seconds > 0 and words_raw:
+                _save_cache(
+                    cache_key_transcript_gap,
+                    {"transcript": transcript, "words_raw": words_raw},
+                )
 
         # --- Beam automatico: la decisione arriva DOPO il recupero -------------
         # Prima si poteva decidere solo sulla decodifica veloce, e la scelta era
@@ -3245,6 +3291,13 @@ def main(argv: list | None = None) -> None:
                         t_transcribe += _zones.seconds
                         beam_note["pinned_slides"] = len(flow_anchors)
                         beam_note["recovered_after_revert"] = list(_gap_recovered)
+                        # Stessa ragione del recupero principale: senza cache
+                        # queste zone si ritrascriverebbero a ogni run.
+                        if not args.no_cache and _zones.seconds > 0 and words_raw:
+                            _save_cache(
+                                cache_key_transcript_gap,
+                                {"transcript": transcript, "words_raw": words_raw},
+                            )
                 log.info(
                     "   [Beam] Uso la trascrizione %s: %s.",
                     "ACCURATA" if use_accurate else "VELOCE",
@@ -3379,6 +3432,18 @@ def main(argv: list | None = None) -> None:
         # evita una seconda scansione identica (e il suo log duplicato).
         slide_ids: list[int]
         semantic_anchors = flow_anchors
+        # Scarta ancore fuori portata: un "slide 15" su 14 pagine, o un tempo oltre
+        # la durata dell'audio, non e' un vincolo valido e romperebbe la
+        # riconciliazione con un messaggio fuorviante.
+        _fuori_portata = [
+            s for s, t in semantic_anchors.items()
+            if s < 2 or s > total_slides or t < 0.0 or t >= total_duration
+        ]
+        if _fuori_portata:
+            log.warning("   [Ancore] Scartate ancore fuori portata: %s", _fuori_portata)
+            semantic_anchors = {
+                s: t for s, t in semantic_anchors.items() if s not in _fuori_portata
+            }
         # Offset forzato dall'utente (--slide-offset): la numerazione parlata
         # e' sfasata di N pagine (tipico: copertina non contata, "slide 1" ->
         # 2). Si applica QUI, prima della verifica, e la sostituisce: chi ha
@@ -3486,7 +3551,20 @@ def main(argv: list | None = None) -> None:
         # su un PDF da 14): la menzione è fuori portata, quindi la verifica del
         # mapping non la vede. Il TEMPO però è la misura dello speaker, e senza
         # di esso l'ultima slide resta posizionata a tentativi.
-        _tail = out_of_range_tail_anchor(words_raw, total_slides, semantic_anchors)
+        if _offset_utente:
+            # In spazio parlato (prima dell'offset) il deck ha
+            # total_slides - offset pagine: si riammette l'ultima transizione
+            # lì, poi si riporta la chiave in spazio reale.
+            _spoken_total = total_slides - _offset_utente
+            if _spoken_total >= 2:
+                _tail_spoken = out_of_range_tail_anchor(
+                    words_raw, _spoken_total, _prima_mappa
+                )
+                _tail = {s + _offset_utente: t for s, t in _tail_spoken.items()}
+            else:
+                _tail = {}
+        else:
+            _tail = out_of_range_tail_anchor(words_raw, total_slides, semantic_anchors)
         if _tail:
             for _s, _t in _tail.items():
                 log.info(
@@ -3770,6 +3848,9 @@ def main(argv: list | None = None) -> None:
         # Il report dei segmenti va salvato SEMPRE, anche senza anomalie: è
         # l'artefatto che rende verificabile a posteriori cosa è stato mostrato,
         # con quale verdetto di contenuto e quale motore è stato scelto.
+        # La chiave della trascrizione usata, per `--review`: permette di
+        # rileggere le parole giuste invece di affidarsi al mtime.
+        sync_notes["transcript_cache_key"] = cache_key_transcript
         sync_report = _build_sync_report(
             durations,
             slide_ids,
@@ -3780,12 +3861,18 @@ def main(argv: list | None = None) -> None:
         )
         _save_sync_report(sync_report)
         if anomalous:
-            coherent = sorted(s for s, v in verdicts.items() if v == "coerente")
+            coherent = sorted(
+                slide_ids[pos] for pos, v in verdicts.items() if v == "coerente" and pos < len(slide_ids)
+            )
             misaligned = [
-                (s, d) for _, s, d in anomalous if verdicts.get(s) == "disallineata"
+                (slide_ids[pos], d)
+                for pos, s, d in anomalous
+                if pos < len(slide_ids) and verdicts.get(pos) == "disallineata"
             ]
             uncertain = [
-                (s, d) for _, s, d in anomalous if verdicts.get(s) in (None, "incerto")
+                (slide_ids[pos], d)
+                for pos, s, d in anomalous
+                if pos < len(slide_ids) and verdicts.get(pos) in (None, "incerto")
             ]
             if coherent:
                 log.info(
@@ -3934,6 +4021,12 @@ def main(argv: list | None = None) -> None:
                     slide_offset=_offset_utente,
                 )
             ]
+
+        # Il report in memoria è lo STESSO dict di sync_notes["anchors"], quindi
+        # il controllo incrociato appena aggiunto a `mentions_off` deve finire
+        # su disco anche nel percorso default (prima la seconda scrittura
+        # avveniva solo con --verify-video, e con --dry-run non avveniva mai).
+        _save_sync_report(sync_report)
 
         # --- Dry-run: fermati qui ---
         if args.dry_run:
