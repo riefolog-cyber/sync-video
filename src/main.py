@@ -706,6 +706,9 @@ def _log_plain_summary(
     # davvero sfalsata) o "mista" (è il motore che non distingue). Cambia il
     # messaggio, non i tempi.
     _disaccordo = str(anchor_info.get("disaccordo") or "")
+    # Offset forzato dall'utente: non e' una correzione del programma,
+    # quindi va detto fra le cose certe (i tempi sono annunciati).
+    _spoken_offset = int(cast(int, anchor_info.get("spoken_offset") or 0))
     unconfirmed = sorted(
         int(cast("int", u.get("slide") or 0))
         for u in cast("Sequence[dict[str, object]]", anchor_info.get("unconfirmed") or [])
@@ -728,6 +731,12 @@ def _log_plain_summary(
     gia_dichiarati = {
         int(cast(int, f.get("slide") or 0)) for f in fatti_stimati
     }
+    if _spoken_offset:
+        certi.append(
+            f"La numerazione parlata è stata spostata di {_spoken_offset:+d} "
+            "pagine su tua richiesta (--slide-offset): i cambi di slide restano "
+            "quelli annunciati a voce, applicati alla pagina indicata."
+        )
     if transitions:
         stimate = transitions - anchored
         if stimate <= 0 and not senza_ancora:
@@ -875,12 +884,32 @@ def _log_plain_summary(
             # questo è falso (run del 05/10: 13 ancore su 14 esatte al
             # millisecondo) e spingeva a riguardare i cambi di slide, che erano
             # tutti corretti. Ora dice cosa è vero: il confronto non conclude.
-            incerti.append(
+            _messaggio = (
                 "Il programma non è riuscito a controllare da solo che i numeri "
                 "detti a voce corrispondano alle pagine: non ha cambiato niente, "
                 "i tempi sono quelli annunciati. Se il video finito ha le slide "
                 "giuste, puoi ignorare questo punto."
             )
+            # Un offset ripetuto fra le ancore non confermate e' il caso normale
+            # del deck con la copertina non contata: senza questa riga si legge
+            # "non ci sono riuscito" senza sapere che il rimedio esiste.
+            _conteggi: dict[int, int] = {}
+            for _u in cast(
+                "Sequence[dict[str, object]]", anchor_info.get("unconfirmed") or []
+            ):
+                _d = int(cast(int, _u.get("points_to") or 0)) - int(
+                    cast(int, _u.get("slide") or 0)
+                )
+                _conteggi[_d] = _conteggi.get(_d, 0) + 1
+            if _conteggi:
+                _dominante = max(_conteggi, key=lambda k: _conteggi[k])
+                if _dominante and _conteggi[_dominante] >= 2:
+                    _messaggio += (
+                        f" Se invece le slide sono tutte spostate di {_dominante:+d}, "
+                        f"rilancia con --slide-offset {_dominante:+d}: applica lo "
+                        "spostamento esatto ai tempi annunciati a voce."
+                    )
+            incerti.append(_messaggio)
         else:
             incerti.append(
                 "I numeri delle slide detti a voce non tornano con la "
@@ -2470,6 +2499,33 @@ def _primo_avvio_senza_materiali(
     log.info("\n".join(righe))
 
 
+
+
+def _apply_slide_offset(
+    anchors: dict[int, float], offset: int, total_slides: int
+) -> dict[int, float]:
+    """Applica al deck l'offset forzato dall'utente (--slide-offset).
+
+    Serve quando la numerazione parlata e' sfasata in modo sistematico ma
+    l'euristica automatica non puo' deciderlo: basta UNA ancora rumorosa per
+    rendere gli offset "misti" e far rinunciare alla regola dell'offset
+    uniforme. Chi ha visto il video sa qual e' lo sfasamento vero, e questo
+    lo applica in modo esatto invece di indovinarlo.
+
+    La slide 1 non e' una transizione (il video parte da 0.0) e le pagine
+    fuori dal deck non esistono: meglio un confine stimato dal contenuto che
+    un vincolo su una pagina sbagliata.
+    """
+    if offset == 0:
+        return dict(anchors)
+    spostate: dict[int, float] = {}
+    for s, tempo in anchors.items():
+        target = s + offset
+        if target <= 1 or target > total_slides:
+            continue
+        spostate[target] = tempo
+    return spostate
+
 def main(argv: list | None = None) -> None:
     args = parse_args(argv)
 
@@ -3190,6 +3246,22 @@ def main(argv: list | None = None) -> None:
         # evita una seconda scansione identica (e il suo log duplicato).
         slide_ids: list[int]
         semantic_anchors = flow_anchors
+        # Offset forzato dall'utente (--slide-offset): la numerazione parlata
+        # e' sfasata di N pagine (tipico: copertina non contata, "slide 1" ->
+        # 2). Si applica QUI, prima della verifica, e la sostituisce: chi ha
+        # visto il video lo sa, l'euristica no, e sommare le due correzioni
+        # sposterebbe di due.
+        _offset_utente = int(getattr(args, "slide_offset", 0) or 0)
+        if _offset_utente:
+            _prima_offset = len(semantic_anchors)
+            semantic_anchors = _apply_slide_offset(
+                semantic_anchors, _offset_utente, total_slides
+            )
+            log.info(
+                "   [Ancore] Offset %+d forzato sui numeri parlati (%d -> %d): "
+                "verifica automatica del mapping saltata.",
+                _offset_utente, _prima_offset, len(semantic_anchors),
+            )
         # Riferimento parlato alla "slide 1": la slide 1 reale è sempre 0.0,
         # ma la numerazione dello speaker può essere sfasata (dice "slide 1"
         # mostrando la slide 2 del PDF). Viene passato alla verifica del
@@ -3234,7 +3306,7 @@ def main(argv: list | None = None) -> None:
         # se la numerazione parlata è sistematicamente sfasata (es.
         # copertina esclusa: "slide 1" -> slide 2 del PDF) la corregge
         # senza rete.
-        if len(verify_anchors) >= 2:
+        if len(verify_anchors) >= 2 and not _offset_utente:
             _mapping_checked = True
             verified = verify_anchor_mapping_embedding(
                 slide_texts,
@@ -3300,6 +3372,9 @@ def main(argv: list | None = None) -> None:
             "mapping_checked": _mapping_checked,
             "mapping_suspicious": bool(_anchor_report.get("suspicious", False)),
             "mapping_corrected": _mapping_corrected,
+            # Offset imposto dall'utente: i numeri dell'artefatto NON
+            # sono quelli parlati, e va detto sull'artefatto.
+            "spoken_offset": _offset_utente,
             # Le ancore "non confermate" sono calcolate sul NUMERO PARLATO:
             # se il mapping è stato corretto, il disaccordo è spiegato e
             # rivolerlo come dubbio sarebbe un falso allarme su tutte le
@@ -3703,7 +3778,10 @@ def main(argv: list | None = None) -> None:
             cast("dict[str, object]", sync_notes["anchors"])["mentions_off"] = [
                 {"slide": s, "mention": m, "declared": d}
                 for s, m, d in announcements_off_timeline(
-                    list(words_raw), _declared, total_slides
+                    list(words_raw),
+                    _declared,
+                    total_slides,
+                    slide_offset=_offset_utente,
                 )
             ]
 

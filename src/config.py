@@ -2332,6 +2332,17 @@ Esempi:
         "Costo: una decina di secondi su un video di 15 minuti.",
     )
     parser.add_argument(
+        "--slide-offset",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Sposta di N pagine i numeri di slide detti a voce: se il relatore "
+        "dice 'slide 1' mostrando la pagina 2 (copertina non contata) usa +1, "
+        "e i tempi annunciati finiscono sulla pagina giusta. La verifica "
+        "automatica del mapping viene saltata: decide il tuo offset. I numeri "
+        "che escono dal deck sono scartati. Default: 0",
+    )
+    parser.add_argument(
         "--semantic-model",
         default=DEFAULT_EMBEDDING_MODEL,
         help=f"Modello embedding per la sincronizzazione semantica "

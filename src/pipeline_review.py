@@ -134,7 +134,12 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> None:
         if words:
             items = [
                 {"slide": s, "mention": m, "declared": d}
-                for s, m, d in announcements_off_timeline(words, starts, max(starts))
+                for s, m, d in announcements_off_timeline(
+                    words,
+                    starts,
+                    max(starts),
+                    slide_offset=int(cast(int, anchors.get("spoken_offset") or 0)),
+                )
             ]
             ricalcolati = True
 

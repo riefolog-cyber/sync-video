@@ -6049,3 +6049,61 @@ class TestTrascrizioniIdentiche(unittest.TestCase):
         from main import _same_words
 
         self.assertFalse(_same_words([{"word": "a", "start": 0.0}], []))
+
+class TestOffsetParlato(unittest.TestCase):
+    """--slide-offset: lo spostamento esatto dei numeri parlati.
+
+    Caso reale del 01/11: 9 ancore su 11 puntavano a N+1 (copertina non
+    contata), ma due ancore rumorose rendevano gli offset "misti" e
+    l'euristica non poteva correggere: il video e' uscito con tutte le
+    slide indietro di una. Il flag applica lo sfasamento visto dall'utente.
+    """
+
+    def test_offset_zero_non_tocca_nulla(self):
+        from main import _apply_slide_offset
+
+        ancore = {2: 10.0, 3: 20.0}
+        self.assertEqual(_apply_slide_offset(ancore, 0, 15), ancore)
+        # Copia, non alias: le ancore restano il dato grezzo per il report.
+        self.assertIsNot(_apply_slide_offset(ancore, 0, 15), ancore)
+
+    def test_offset_positivo_sposta_i_tempi_sulle_pagine_dopo(self):
+        from main import _apply_slide_offset
+
+        spostate = _apply_slide_offset({3: 220.7, 4: 332.6, 5: 448.3}, 1, 15)
+        self.assertEqual(spostate, {4: 220.7, 5: 332.6, 6: 448.3})
+
+    def test_offset_scarta_slide_uno_e_pagine_inesistenti(self):
+        from main import _apply_slide_offset
+
+        # -1 manderebbe la slide 2 sulla 1 (non e' una transizione); +1
+        # manderebbe la 15 sulla 16, che non esiste.
+        self.assertEqual(_apply_slide_offset({2: 5.0}, -1, 15), {})
+        self.assertEqual(_apply_slide_offset({15: 5.0}, 1, 15), {})
+
+class TestAnnunciConOffset(unittest.TestCase):
+    """Il controllo annunci/confini deve seguire l'offset forzato.
+
+    Caso reale del 01/11: con --slide-offset +1 il riepilogo segnalava ogni
+    slide ("la 13 viene annunciata a 22m18s ma il video la mostra da
+    20m29s") solo perche' confrontava l'annuncio 13 con la pagina 13 invece
+    che con la 14: un offset corretto produceva un allarme su tutto il video.
+    """
+
+    def test_offset_fa_confrontare_la_pagina_giusta(self):
+        from timeline import announcements_off_timeline
+
+        words = [
+            {"word": w, "start": t}
+            for w, t in [
+                ("passiamo", 1338.0), ("alla", 1338.2),
+                ("slide", 1338.4), ("tredici", 1338.6),
+            ]
+        ]
+        starts = {13: 1229.8, 14: 1338.6}
+        # Senza offset il confronto cade sulla pagina 13: sembra un errore.
+        self.assertEqual(len(announcements_off_timeline(words, starts, 15)), 1)
+        # Con l'offset l'annuncio "13" riguarda la pagina 14, che combacia.
+        self.assertEqual(
+            announcements_off_timeline(words, starts, 15, slide_offset=1), []
+        )

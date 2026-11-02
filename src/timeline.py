@@ -775,6 +775,7 @@ def announcements_off_timeline(
     total_slides: int,
     tolerance: float = 5.0,
     lookback: int = 6,
+    slide_offset: int = 0,
 ) -> list[tuple[int, float, float]]:
     """Annunci "slide N" lontani dal confine dichiarato per quella slide.
 
@@ -798,6 +799,11 @@ def announcements_off_timeline(
         words: parole Whisper con 'word' e 'start'.
         starts: inizio dichiarato (secondi) di ogni slide della timeline finale.
         total_slides: numero di slide del deck, per delimitare i numeri validi.
+        slide_offset: sfasamento dei numeri parlati applicato alla timeline
+            (--slide-offset). Il numero detto va riportato alla pagina
+            dell'artefatto PRIMA di cercarne il confine: senza, ogni annuncio
+            contraddirebbe il confine della pagina sbagliata e il riepilogo
+            segnalerebbe tutte le slide mentre la correzione e' giusta.
         tolerance: scarto (secondi) oltre il quale l'annuncio e il confine sono
             considerati in contraddizione. Un'ancora vera sta a frazioni di
             secondo dal proprio annuncio (``_reference_boundary``), quindi la
@@ -827,7 +833,11 @@ def announcements_off_timeline(
                 break
         if slide_num is None or boundary is None:
             continue
-        declared = starts.get(slide_num)
+        # Il numero detto parla della pagina sfasata: si riporta al deck.
+        pagina = slide_num + slide_offset
+        if pagina <= 1 or pagina > total_slides:
+            continue
+        declared = starts.get(pagina)
         if declared is None:
             continue
         if _is_closing_recap(words, i):
@@ -836,7 +846,7 @@ def announcements_off_timeline(
             continue
         if abs(boundary - float(declared)) <= tolerance:
             continue
-        found.append((slide_num, boundary, float(declared)))
+        found.append((pagina, boundary, float(declared)))
     return sorted(found, key=lambda item: item[1])
 
 
