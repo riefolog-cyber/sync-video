@@ -110,7 +110,7 @@ python -m unittest test_sync test_integration test_chunks
 | `--openvino-download` | — | Scarica modello OpenVINO IR (una tantum) |
 | `--prefetch-models` | — | Scarica **tutti** i modelli ML (embedding, pesi Whisper, OpenVINO IR) e esce, senza toccare PDF o audio. Utile dopo un clone o un cambio di macchina: tiene i download fuori dalla prima run reale |
 | `--semantic-model` | `intfloat/multilingual-e5-large` | Modello embedding (serve l'id completo del repo, non `e5-large`: fastembed non accetta l'abbreviazione) |
-| `--slide-offset` | `0` | Sposta di N pagine i numeri "slide N" detti a voce: se il relatore dice "slide 1" mostrando la pagina 2 (copertina non contata) usa `+1`. I tempi restano quelli annunciati, la verifica automatica del mapping viene saltata. Da usare solo dopo aver visto il video: dopo un annuncio il parlato anticipa spesso la pagina seguente, quindi un offset "dominante" nei numeri non è una prova |
+| `--slide-offset` | `0` | Sposta di N pagine i numeri "slide N" detti a voce: se il relatore dice "slide 1" mostrando la pagina 2 (copertina non contata) usa `+1`. I tempi restano quelli annunciati, la verifica automatica del mapping viene saltata. Da usare solo dopo aver visto il video: dopo un annuncio il parlato anticipa spesso la pagina seguente, quindi un offset "dominante" nei numeri non è una prova. Nel log elenca per ogni annuncio la pagina e il titolo su cui finisce, così un offset sbagliato si vede subito |
 | `--semantic-window` | `4.0` | Secondi per blocco |
 | `--semantic-min-duration` | `3.0` | Durata minima slide (s) |
 | `--semantic-temperature` | `0.15` | Competizione softmax (più bassa = picchi più netti) |

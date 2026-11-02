@@ -542,6 +542,7 @@ def _log_plain_summary(
     floor_report: dict[str, object] | None = None,
     anchors: dict[str, object] | None = None,
     refine: Sequence[dict[str, object]] = (),
+    never_discussed: Sequence[tuple[int, float, str]] = (),
     title: str = "IL VIDEO È PRONTO — COSA C'È DENTRO",
 ) -> None:
     """Riepilogo finale in parole semplici (quello che l'utente vuole sapere).
@@ -691,6 +692,19 @@ def _log_plain_summary(
             f"minimo di {floor_min:.0f}s e nel video scorrono veloci. Per "
             "rimediare, rigenera l'audio chiedendo una sezione per ciascuna "
             "pagina (vedi PROMPT_PRESENTAZIONE (PREDEFINITO).md)."
+        )
+
+    # --- Pagine che il parlato non cita mai ---
+    # Non e' un dubbio sulla timeline: e' una pagina che il video mostra
+    # senza che nessuno la discuta. Run del 01/11: la pagina Socrate restava
+    # a schermo per due minuti mentre si parlava del pendolo e di Agostino,
+    # e il rimedio (toglierla dal deck) non era deducibile dal riepilogo.
+    for _pagina, _sim, _titolo in never_discussed:
+        incerti.append(
+            f"La pagina {_pagina} («{_titolo}») non viene mai discussa: il "
+            f"parlato non la cita in nessun punto (somiglianza {_sim:.2f} su "
+            "tutta la registrazione). Se il relatore l'ha saltata, "
+            f"--skip-slides {_pagina} la toglie dal video lasciando l'audio com'è."
         )
 
     # --- Copertura delle ancore: dice COSA la fiducia del motore sta misurando ---
@@ -2534,6 +2548,117 @@ def _apply_slide_offset(
         spostate[target] = tempo
     return spostate
 
+def _short_title(text: str, limit: int = 58) -> str:
+    """Titolo leggibile di una pagina: testo su una riga, accorciato a parola."""
+    flat = " ".join(str(text or "").split())
+    if not flat:
+        return "senza testo"
+    if len(flat) <= limit:
+        return flat
+    return flat[:limit].rsplit(" ", 1)[0] + "…"
+
+
+def _offset_targets(
+    anchors: dict[int, float],
+    offset: int,
+    slide_texts: Sequence[str],
+    total_slides: int,
+) -> list[tuple[int, float, int, str]]:
+    """Dove finisce ogni annuncio con l'offset: (parlato, tempo, pagina, titolo).
+
+    L'offset e' una correzione alla cieca: se e' sbagliato lo si scopre solo dal
+    video finito (run del 01/11: +1 sembrava giusto e mise Socrate mentre si
+    parlava del pendolo). Con pagina e titolo sotto ogni annuncio l'errore si
+    legge nel log, senza guardare il video.
+    """
+    righe: list[tuple[int, float, int, str]] = []
+    for s in sorted(anchors):
+        target = s + offset
+        if not 1 <= target <= total_slides:
+            continue
+        titolo = ""
+        if 1 <= target <= len(slide_texts):
+            titolo = _short_title(slide_texts[target - 1])
+        righe.append((s, float(anchors[s]), target, titolo))
+    return righe
+
+
+def _log_offset_targets(
+    anchors: dict[int, float],
+    offset: int,
+    slide_texts: Sequence[str],
+    total_slides: int,
+) -> None:
+    """Scrive nel log la destinazione di ogni annuncio spostato."""
+    righe = _offset_targets(anchors, offset, slide_texts, total_slides)
+    if not righe:
+        return
+    log.info("   [Ancore] Dove finiscono gli annunci con offset %+d:", offset)
+    for parlato, tempo, pagina, titolo in righe:
+        log.info(
+            '      "slide %d" (%s) -> pagina %d: %s',
+            parlato,
+            _format_time(tempo),
+            pagina,
+            titolo or "(titolo non letto)",
+        )
+
+
+def _never_discussed_slides(
+    slide_texts: Sequence[str],
+    words_raw: Sequence[Word],
+    window_seconds: float = 45.0,
+    step_seconds: float = 15.0,
+    min_tokens: int = 8,
+    min_similarity: float = 0.20,
+    max_ratio: float = 0.65,
+) -> list[tuple[int, float]]:
+    """Pagine che il parlato non sembra citare mai: (pagina, somiglianza max).
+
+    Il confronto e' con finestre di TUTTO l'audio, non con il segmento della
+    pagina: una pagina che nessuno discute non vince mai, pero' resta a schermo
+    perche' un'ancora "slide N" le ha dato un tempo (run del 01/11: la pagina
+    Socrate, mai nominata, mostrata mentre si parlava del pendolo e di
+    Agostino). La soglia e' anche relativa alla mediana del deck: su
+    presentazioni concise tutte le pagine stanno basse, e una soglia assoluta
+    le segnalerebbe tutte.
+    """
+    pagine = [set(_slide_tokens(str(t))) for t in slide_texts]
+    utili = [i for i, p in enumerate(pagine) if len(p) >= min_tokens]
+    if not words_raw or len(utili) < 4:
+        return []
+    fine = max(float(w["start"]) for w in words_raw) + window_seconds
+    finestre: list[list[str]] = []
+    t = 0.0
+    while t < fine:
+        finestre.append(_speech_tokens_in_window(words_raw, t, t + window_seconds))
+        t += step_seconds
+    if not finestre:
+        return []
+    punteggi = {
+        i: max(_token_f1(sorted(pagine[i]), w) for w in finestre) for i in utili
+    }
+    mediana = sorted(punteggi.values())[len(punteggi) // 2]
+    soglia = min(min_similarity, max_ratio * mediana)
+    return [(i + 1, round(v, 3)) for i, v in sorted(punteggi.items()) if v < soglia]
+
+
+def _never_discussed_note(
+    slide_texts: Sequence[str], words_raw: Sequence[Word], skip_slides: str | None
+) -> list[tuple[int, float, str]]:
+    """Pagine mai discusse con il titolo, saltando quelle gia' nascoste a video."""
+    salta = {int(x) for x in str(skip_slides or "").split(",") if x.strip().isdigit()}
+    fuori: list[tuple[int, float, str]] = []
+    for pagina, sim in _never_discussed_slides(slide_texts, words_raw):
+        if pagina in salta:
+            continue
+        titolo = ""
+        if 1 <= pagina <= len(slide_texts):
+            titolo = _short_title(slide_texts[pagina - 1])
+        fuori.append((pagina, sim, titolo))
+    return fuori
+
+
 def main(argv: list | None = None) -> None:
     args = parse_args(argv)
 
@@ -3259,9 +3384,25 @@ def main(argv: list | None = None) -> None:
         # 2). Si applica QUI, prima della verifica, e la sostituisce: chi ha
         # visto il video lo sa, l'euristica no, e sommare le due correzioni
         # sposterebbe di due.
+        # Pagine che il parlato non cita in nessun punto del podcast (mai
+        # annunciate, mai discusse): calcolate una volta sola, cosi' anche il
+        # riepilogo del dry-run puo' proporre --skip-slides.
+        _never_note = _never_discussed_note(
+            slide_texts, words_raw, getattr(args, "skip_slides", None)
+        )
+        for _np, _ns, _nt in _never_note:
+            log.warning(
+                '   [Slide] La pagina %d ("%s") non viene mai citata dal parlato '
+                "(somiglianza %.2f): se il relatore l'ha saltata, --skip-slides %d "
+                "la toglie dal video.",
+                _np, _nt, _ns, _np,
+            )
         _offset_utente = int(getattr(args, "slide_offset", 0) or 0)
         if _offset_utente:
             _prima_offset = len(semantic_anchors)
+            # La mappa PRIMA dello spostamento: serve a dire nel log dove
+            # finisce ogni annuncio, con il titolo della pagina d'arrivo.
+            _prima_mappa = dict(semantic_anchors)
             semantic_anchors = _apply_slide_offset(
                 semantic_anchors, _offset_utente, total_slides
             )
@@ -3270,6 +3411,7 @@ def main(argv: list | None = None) -> None:
                 "verifica automatica del mapping saltata.",
                 _offset_utente, _prima_offset, len(semantic_anchors),
             )
+            _log_offset_targets(_prima_mappa, _offset_utente, slide_texts, total_slides)
         # Riferimento parlato alla "slide 1": la slide 1 reale è sempre 0.0,
         # ma la numerazione dello speaker può essere sfasata (dice "slide 1"
         # mostrando la slide 2 del PDF). Viene passato alla verifica del
@@ -3820,6 +3962,7 @@ def main(argv: list | None = None) -> None:
                 floor_report=floor_note,
                 anchors=cast("dict[str, object] | None", sync_notes.get("anchors")),
                 refine=cast("Sequence[dict[str, object]]", sync_notes.get("refine") or ()),
+                never_discussed=_never_note,
                 title="TIMELINE PRONTA — COSA CONTERRÀ IL VIDEO",
             )
             log.info("\n" + "=" * 70)
@@ -4009,6 +4152,7 @@ def main(argv: list | None = None) -> None:
             floor_report=floor_note,
             anchors=cast("dict[str, object] | None", sync_notes.get("anchors")),
             refine=cast("Sequence[dict[str, object]]", sync_notes.get("refine") or ()),
+            never_discussed=_never_note,
         )
 
     finally:

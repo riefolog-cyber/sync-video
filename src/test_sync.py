@@ -6107,3 +6107,126 @@ class TestAnnunciConOffset(unittest.TestCase):
         self.assertEqual(
             announcements_off_timeline(words, starts, 15, slide_offset=1), []
         )
+
+class TestTracceOffset(unittest.TestCase):
+    """L'offset deve dichiarare su quale pagina finisce ogni annuncio.
+
+    Caso reale del 01/11: --slide-offset +1 sembrava corretto, ma mandava
+    "slide 2" sulla pagina di Socrate mentre il relatore parlava del pendolo.
+    Pagina e titolo nel log rendono l'errore visibile prima del video.
+    """
+
+    def test_ogni_ancora_mostra_pagina_e_titolo(self):
+        from main import _offset_targets
+
+        righe = _offset_targets(
+            {2: 107.7, 3: 220.1},
+            1,
+            ["Copertina", "Il pendolo", "Socrate", "Agostino"],
+            4,
+        )
+        self.assertEqual(
+            righe,
+            [(2, 107.7, 3, "Socrate"), (3, 220.1, 4, "Agostino")],
+        )
+
+    def test_pagina_fuori_dal_deck_non_compare(self):
+        from main import _offset_targets
+
+        self.assertEqual(_offset_targets({1: 5.0}, -1, ["Copertina", "Due"], 2), [])
+        self.assertEqual(_offset_targets({2: 9.0}, 5, ["Copertina", "Due"], 2), [])
+
+    def test_titolo_lungo_non_allunga_la_riga(self):
+        from main import _short_title
+
+        titolo = _short_title("parola " * 40)
+        self.assertLessEqual(len(titolo), 60)
+        self.assertTrue(titolo.endswith("…"))
+        self.assertEqual(_short_title(""), "senza testo")
+
+class TestPagineMaiDiscusse(unittest.TestCase):
+    """Una pagina che il parlato non cita mai deve emergere da sola.
+
+    Run del 01/11: la pagina Socrate non era mai nominata, ma un'ancora
+    "slide 3" le dava 111 secondi a schermo mentre si parlava del pendolo e di
+    Agostino. Il confronto e' con finestre di tutta la registrazione, non con
+    il suo segmento, altrimenti il difetto sarebbe invisibile.
+    """
+
+    # Le pagine hanno >= 8 parole distinte: sotto quella soglia l'OCR e' troppo
+    # povero per giudicare e la funzione non deve dire nulla.
+    # Tuple e non liste: un attributo di classe mutabile sarebbe un default
+    # condiviso fra i test, e la linter lo segnala (RUF012).
+    SLIDES = (
+        "pendolo oscillazione ragione fede superbia necessita storia verita",
+        "socrate oracolo delfi maieutica ironia ateniese enigma divino",
+        "agostino male libero arbitrio teodicea confessione interiorita peccato",
+        "anselmo proslogion definizione ipotesi contraddizione esistenza ontologica teologia",
+        "tommaso aristotele cinque vie teologia scolastica matrice fede",
+    )
+    PARLATO = (
+        "il pendolo oscilla fra ragione e fede, fra superbia e necessita, "
+        "e la storia cerca verita",
+        "agostino e il male: libero arbitrio, teodicea, confessione, "
+        "interiorita, peccato",
+        "anselmo e il proslogion: definizione, ipotesi, contraddizione, "
+        "esistenza, ontologica",
+        "tommaso, aristotele, cinque vie, teologia, scolastica, matrice, fede",
+    )
+
+    def _words(self, testi, passo=10.0):
+        parole = []
+        t = 0.0
+        for testo in testi:
+            for parola in testo.split():
+                parole.append({"word": parola, "start": t})
+                t += 0.4
+            t += passo
+        return parole
+
+    def test_pagina_mai_citata_viene_segnalata(self):
+        from main import _never_discussed_slides
+
+        trovate = _never_discussed_slides(self.SLIDES, self._words(self.PARLATO))
+        self.assertEqual([p for p, _ in trovate], [2])
+        # La somiglianza dichiarata e' quella vera: zero parole in comune.
+        self.assertEqual(trovate[0][1], 0.0)
+
+    def test_deck_tutto_discusso_non_produce_allarmi(self):
+        from main import _never_discussed_slides
+
+        # Il parlato nomina anche Socrate: nessuna pagina resta fuori.
+        parlato = self._words([*self.PARLATO, "socrate, oracolo di delfi e maieutica"])
+        self.assertEqual(_never_discussed_slides(self.SLIDES, parlato), [])
+
+    def test_pagine_discusse_non_finiscono_nel_sospetto(self):
+        from main import _never_discussed_slides
+
+        # Deck di 4 pagine: il parlato copre pendolo, Agostino e Anselmo,
+        # quindi Socrate resta l'unica fuori. Fissa che il metro e' la
+        # somiglianza, e che una pagina discussa non finisce nel sospetto
+        # solo per l'ordine in cui compare.
+        slides = [self.SLIDES[0], self.SLIDES[1], self.SLIDES[2], self.SLIDES[3]]
+        trovate = _never_discussed_slides(slides, self._words(self.PARLATO))
+        self.assertEqual([p for p, _ in trovate], [2])
+
+    def test_senza_parlato_o_con_poche_pagine_non_giudica(self):
+        from main import _never_discussed_slides
+
+        self.assertEqual(_never_discussed_slides(self.SLIDES, []), [])
+        # OCR troppo povero (meno di 8 parole): non si giudica.
+        self.assertEqual(
+            _never_discussed_slides(["pendolo ragione fede"] * 5, self._words(self.PARLATO)),
+            [],
+        )
+
+    def test_la_pagina_gia_saltata_non_si_ripete(self):
+        from main import _never_discussed_note
+
+        parlato = self._words(self.PARLATO)
+        self.assertEqual(
+            [p for p, _, _ in _never_discussed_note(self.SLIDES, parlato, None)], [2]
+        )
+        # Con --skip-slides la pagina non arriva a schermo: inutile avvisare.
+        self.assertEqual(_never_discussed_note(self.SLIDES, parlato, "2"), [])
+
