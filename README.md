@@ -10,7 +10,7 @@ Sincronizza automaticamente una presentazione PDF con un podcast audio e genera 
 graph LR
     A[PDF] -->|OCR Tesseract| B[Testi Slide]
     C[Audio] -->|Whisper| D[Trascrizione]
-    D -->|riferimenti 'slide N'| E[Ancore]
+    D -->|riferimenti 'slide N' / 'pagina N' / 'la prossima'| E[Ancore]
     B --> F[Sincronizzazione semantica - embeddings]
     D --> F
     E -->|vincoli di precisione| F
@@ -59,6 +59,29 @@ genera_video.bat
 > Dettagli e come disattivare l'installazione automatica:
 > [docs/setup.md](docs/setup.md#primo-avvio-automatico).
 
+> ## ♻️ Rilanci: il programma riusa quello che ha già fatto
+>
+> Rilanciando **senza cambiare nulla** il programma non rifà il lavoro:
+>
+> - **il video già renderizzato viene riusato** (nessuna ricodifica, ~71 s
+>   risparmiati): l'impronta copre il contenuto delle slide, i tempi, il
+>   contenuto dell'audio e i parametri di rendering. Se hai toccato il file di
+>   output, o vuoi rifare tutto, usa `--no-cache`;
+> - **l'audio viene copiato** nel video (niente ricodifica lossy) quando la
+>   sorgente è già un MP4/AAC; con mp3 o wav viene convertito in AAC 160 k;
+> - le **trascrizioni, gli OCR e gli embedding** si riprendono dalle cache, e
+>   il riuso degli embedding è **per testo**: una parola cambiata ricalcola
+>   solo i blocchi nuovi, non tutti.
+>
+> Due run sulla stessa cartella non si pestano: la seconda **aspetta fino a
+> 15 minuti** che la prima finisca e poi si ferma con un avviso (il blocco è
+> del sistema operativo: se la prima muore, il blocco si libera da solo).
+>
+> La **verifica del video** (`--verify-video`) lascia in
+> `.cache/verify_frames/` **solo i fotogrammi dei segmenti sbagliati**: sono
+> gli unici da guardare, e una cartella vuota vuol dire che tutti i segmenti
+> erano corretti.
+
 ### 🔒 Ambiente dedicato (consigliato)
 
 Il programma funziona anche col Python di sistema, ma quel Python è **condiviso con tutti gli altri programmi del PC**: un `pip install` fatto altrove può cambiare una versione e impedire l'avvio. Misurato il 16/09/2026: un'altra installazione ha messo `numpy 1.24.3` e `pandas` (dipendenza di pytesseract) non si importava più, quindi la pipeline non partiva nemmeno per le fasi che non usano l'OCR.
@@ -98,14 +121,19 @@ La venv **riusa i modelli già scaricati** (cartella `.cache` e cache di Hugging
 > avvisa. `.env` resta per gli override espliciti tuoi (che hanno precedenza);
 > se cambi GPU restando sullo stesso sistema, `--force-setup` rileva di nuovo.
 
-> **Precisione assoluta**: il programma non distribuisce mai le slide uniformemente. La timeline viene costruita dal **solo** allineamento semantico (embeddings offline, senza LLM), vincolato dai riferimenti espliciti "slide N" nella trascrizione. Se non è generabile → **interruzione con avviso**.
+> **Precisione assoluta**: il programma non distribuisce mai le slide uniformemente. La timeline nasce dai **tempi pronunciati dal relatore** quando ogni cambio di slide è annunciato ("passiamo alla slide 3", "passiamo alla pagina 3", "passiamo alla prossima"); per i cambi **non** annunciati li stima il motore embedding (offline, senza LLM) dal contenuto del parlato. Se non c'è nessun riferimento riconoscibile il flusso viene **assunto** (`slide-audio`) e la run prosegue in modalità stimata, con avviso nel log e nel riepilogo; per fermarsi sempre usa `--require-flow`.
 
 ### 🔀 Flussi supportati
 
 | Flusso | Segnale nell'audio | Esempio |
 |---|---|---|
-| `slide-audio` | *"Passiamo alla slide 3"* | Speaker nominano il numero slide: in cifre (*"slide 3"*), in cardinali (*"slide tre"*) o in ordinali (*"la terza diapositiva"*, *"la sesta slide"*) |
+| `slide-audio` | *"Passiamo alla slide 3"* | Speaker nominano il numero slide: in cifre (*"slide 3"*), in cardinali (*"slide tre"*), in ordinali (*"la terza diapositiva"*, *"la sesta slide"*) o con la parola *"pagina"* (*"passiamo alla pagina 3"*) |
 | `audio-slide` | *"Passiamo al blocco successivo"* | Dibattito, poi slide generate dopo |
+
+Il numero può anche **non essere detto**: *"passiamo alla prossima slide"* vale
+"l'ultima slide annunciata + 1" (il programma lo deduce, ma solo con un verbo
+di transizione vicino: *"a pagina 3 del libro"* è una citazione, non un cambio
+di slide).
 
 Override manuale: `python src/main.py --flow audio-slide` (oppure `--flow slide-audio`)
 
@@ -144,17 +172,22 @@ rientri.
 
 ### ✅ Ricetta validata (5 run verdi consecutive)
 
-Procedura congelata: deck da 12–15 slide generato dal prompt, **presentazione come UNICA fonte** per il podcast, annunci `slide N` su tutte le transizioni, sezioni da 45s in su. Gate `--min-anchor-coverage` (default 50%) attivo in `genera_video.bat`.
+Procedura congelata: deck da 12–15 slide generato dal prompt, **presentazione come UNICA fonte** per il podcast, annunci `slide N` su tutte le transizioni, sezioni da 45s in su. Gate `--min-anchor-coverage` (default 50%, variabile d'ambiente `MIN_ANCHOR_COVERAGE` per cambiarlo): la run si ferma se le transizioni annunciate sono sotto soglia. Con il flusso **assunto** (nessun riferimento riconoscibile) il gate non si applica: il video esce in modalità stimata — `--require-flow` e `--require-full-anchors` restano per chi vuole fermarsi sempre.
 
-| Run | Slide | Ancore | Durata min | Fiducia motore | Frame-check | Dubbi manuali |
+| Run | Slide | Ancore | Durata min | Fiducia | Frame-check | Dubbi manuali |
 |---|---|---|---|---|---|---|
-| 1 | 12 | 11/11 | 45s | 0.74 alta | 12/12 | 2 (non allarmi) |
-| 2 | 15 | 13/14 | 58s | 0.62 alta | 15/15 | 2 (non allarmi) |
-| 3 | 14 | 12/13 | 37s | 0.53 alta | 14/14 | 2 (non allarmi) |
-| 4 | 15 | 13/14 | 58s | 0.79 alta | 15/15 | **nessuno** |
-| 5 | 15 | 11/14 | 45s | 0.65 alta | 15/15 | **nessuno** |
+| 1 | 12 | 11/11 | 45s | ALTO | 12/12 | 2 (non allarmi) |
+| 2 | 15 | 13/14 | 58s | ALTO | 15/15 | 2 (non allarmi) |
+| 3 | 14 | 12/13 | 37s | ALTO | 14/14 | 2 (non allarmi) |
+| 4 | 15 | 13/14 | 58s | ALTO | 15/15 | **nessuno** |
+| 5 | 15 | 11/14 | 45s | ALTO | 15/15 | **nessuno** |
 
-Se i materiali seguono le regole (fonte unica, tutte le pagine annunciate, sezioni sviluppate), il risultato si ripete: non modificare prompt né soglie senza rieseguire `python -m unittest test_prompts test_sync`.
+Con la procedura sopra (tutte le transizioni annunciate) la fiducia è **ALTO**:
+i confini sono quelli pronunciati dal relatore, e il programma non ha dovuto
+stimarli dal contenuto. Quando qualche transizione **non** è annunciata, la
+fiducia si legge nel riepilogo finale (*"Quanto è sicuro il programma"*).
+
+Se i materiali seguono le regole (fonte unica, tutte le pagine annunciate, sezioni sviluppate), il risultato si ripete: non modificare prompt né soglie senza rieseguire `python -m unittest discover -s src -p "test_*.py"`.
 
 
 > **Consiglio**: nominare la slide quando si cambia argomento (*"passiamo alla slide 3"*) regala ancore deterministiche ad alta precisione. Senza di esse il semantico allinea comunque per contenuto, ma per stima. Prompt NotebookLM: [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<PROMPT_PRESENTAZIONE (PREDEFINITO).md>).
@@ -192,13 +225,20 @@ Questo README copre avvio rapido e uso quotidiano. Il resto e' in [`docs/`](docs
 | [`docs/setup.md`](docs/setup.md) | Setup su un altro PC |
 | [`docs/flussi.md`](docs/flussi.md) | Due flussi di lavoro (e i loro avvisi) |
 | [`docs/comandi.md`](docs/comandi.md) | Comandi |
-| [`docs/verifica.md`](docs/verifica.md) | Verifica post-run (analysis_sync.py) |
+| [`docs/verifica.md`](docs/verifica.md) | Verifica post-run: la prova sul materiale reale e `analysis_sync.py` |
 | [`docs/diagrammi.md`](docs/diagrammi.md) | Diagrammi (archify) |
 | [`docs/struttura.md`](docs/struttura.md) | Struttura progetto |
 | [`docs/funzionamento.md`](docs/funzionamento.md) | Come funziona |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Troubleshooting |
+| [`docs/PIANO_OTTIMIZZAZIONI.md`](docs/PIANO_OTTIMIZZAZIONI.md) | Registro delle ottimizzazioni (batch 1→10: cosa è stato fatto e misurato) |
 
 | [`docs/sync-video-architecture.html`](docs/sync-video-architecture.html) | Diagramma architettura |
+
+> **Prova sul materiale vero**: `python src/scripts/prova_materiale_reale.py`
+> lancia la pipeline sul tuo PDF e sul tuo podcast e confronta la timeline con
+> un riferimento salvato: esce con 0 se è **identica**, con 1 se un confine si
+> è spostato (e di quanto). È il modo più rapido per capire se una modifica
+> ha cambiato qualcosa. Dettagli: [docs/verifica.md](docs/verifica.md).
 
 ---
 

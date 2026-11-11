@@ -76,14 +76,11 @@ _EMBED_SECONDS = 0.0
 # in memoria per la singola run, dove lo stesso embedding serve più volte (il
 # confronto fra trascrizioni e la sincronizzazione embeddano gli stessi blocchi).
 _EMBED_CACHE_DIR: Path = CACHE_DIR / "embedding_cache"
-# Una run ancorata scrive ~3 voci (slide+blocchi, refine, stabilità); una run
-# senza ancore ne scrive ~18, perché le finestre del refine sono una lista per
-# confine. Il tetto va dimensionato su quest'ultimo caso, altrimenti la cache
-# del raffinamento viene potata prima che il rerun possa usarla.
-_EMBED_CACHE_MAX = 120
-# Tetto in BYTE (non in file): una voce da 386 testi pesa 1,5 MB, una da 15
-# testi 48 KB. Contare i file potava per prima la voce che costa di più da
-# ricalcolare.
+# Il tetto e' in BYTE e in ETA', non in numero di file: una run ancorata scrive
+# ~3 voci (slide+blocchi, refine, stabilita') e una run senza ancore ~18 (le
+# finestre del refine sono una lista per confine); una voce da 386 testi pesa
+# 1,5 MB e una da 15 testi 48 KB, e contare i file poteva per prima la voce
+# che costa di piu' da ricalcolare.
 _EMBED_CACHE_MAX_BYTES = 300 * 1024 * 1024
 # Una voce non riusata da 30 giorni non serve piu' a nessuno.
 _EMBED_CACHE_MAX_ETA_GIORNI = 30

@@ -24,4 +24,6 @@
 | Audio troncato | Già protetto da fps=5 + buffer 3.0s |
 | Video senza audio | `winget install ffmpeg` |
 | Slide vecchie nel video | Usa `--no-cache` |
+| `Un'altra run è già in corso su questa cartella` | Due run sulla stessa cartella non si pestano: la seconda **aspetta fino a 15 minuti** che la prima finisca e poi si ferma con questo avviso. Il blocco è del sistema operativo: se la prima muore, il blocco si libera da solo. Aspetta e rilancia, oppure chiudi la finestra della run precedente |
+| Il video non cambia dopo una modifica | Il programma **riusa** il video già renderizzato quando slide, tempi, audio e parametri sono gli stessi (è il caso normale se hai cambiato qualcosa che non influisce sul video). Usa `--no-cache` per rifare tutto, oppure tocca il file di output: se lo modifichi, il programma lo rifà |
 

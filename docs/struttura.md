@@ -76,7 +76,7 @@ fallback OCR, bootstrap).
 | `video_finale.mp4` | Output video |
 | `transcript_raw.txt` | Trascrizione completa (debug) |
 | `temp_slides/` | Slide renderizzate |
-| `.cache/embedding_cache/` | Vettori embedding content-addressed (`.npz`, max 40 voci) |
+| `.cache/embedding_cache/` | Vettori embedding content-addressed (`.npz`); potatura per **byte** (300 MB) e per **età** (30 giorni) |
 | `.cache/` | Cache OCR, trascrizione, embedding |
 
 La cache della trascrizione è indicizzata da **tutto ciò che cambia il testo

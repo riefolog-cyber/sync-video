@@ -5,16 +5,19 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 5 (audit completo del codice: 6 difetti corretti e
-7 ottimizzazioni misurate), dopo la chiusura del piano (P2 #11 archiviata come
-non consigliata, primo avvio automatico di Python su Windows).
+Ultimo aggiornamento: batch 10 (la prova sul materiale reale), dopo il batch 5
+(audit completo del codice: 6 difetti corretti e 7 ottimizzazioni misurate) e la
+chiusura del piano (P2 #11 archiviata come non consigliata, primo avvio automatico
+di Python su Windows).
 
 ## Batch 5 — audit completo (2026-11)
 
 Un audit del codice letto riga per riga (con misure sui dati reali in
 `.cache/`) ha trovato 6 difetti e 7 ottimizzazioni. Le correzioni hanno un
 test che le copre; le ottimizzazioni sono misurate sul run di riferimento
-(OCR 8 s / trascrizione 207 s / sync 80 s / video 88 s).
+(OCR 8 s / trascrizione 207 s / sync 80 s / video 88 s). Sono i tempi DEL PRIMO
+batch: da allora la sincronizzazione e' scesa a 3-8 s quando tutte le
+transizioni sono ancorate e il video non viene piu' ricodificato (71 s -> 43 s).
 
 **Difetti corretti**
 
@@ -205,12 +208,12 @@ di solito e' un rilancio mentre la prima finisce, non due run in competizione.
 Il blocco e' del sistema operativo, quindi quando la prima finisce (o muore)
 il blocco si libera da solo e la seconda parte.
 
-Verifiche: 1105 test verdi (5 nuovi), ruff e mypy puliti su tre piattaforme,
+Verifiche: 1110 test verdi (5 nuovi), ruff e mypy puliti su tre piattaforme,
 run reale con **timeline identica**.
 
 ## Batch 10 — la prova sul materiale reale (2026-11)
 
-La suite (1105 test) e' **tutta finta**: l'OCR di un PDF finto, la
+La suite (1110 test) e' **tutta finta**: l'OCR di un PDF finto, la
 trascrizione di un audio finto, un video costruito al volo. Le cose che
 contano — le ancore, i confini, il riconoscimento — si verificano solo sul
 materiale vero, e fino a ieri lo verificavo a mano (una volta sola).

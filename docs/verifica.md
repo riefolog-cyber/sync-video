@@ -26,7 +26,7 @@ Dopo una generazione puoi controllare la QUALITÀ della sincronizzazione
 (quanto il video è davvero allineato al parlato) con lo strumento standalone:
 
 ```bash
-python analysis_sync.py
+python src/scripts/analysis_sync.py
 ```
 
 Analizza la timeline e il video più recenti in `.cache/` e verifica: durate
@@ -44,6 +44,22 @@ misurata** dal motore (`quality`: `avg_sim` grezza, `avg_z` normalizzata,
 soglia usata) e il verdetto `weak_signal` e — con `--verify-video` — l'esito
 del confronto frame vs slide. Così la
 sincronizzazione resta verificabile a posteriori senza rigenerare il video.
+
+Nello stesso report trovi anche quello che la run ha **deciso** e **misurato**:
+
+- `correzioni_nomi` — i nomi propri che l'ASR aveva storpiato e che il
+  programma ha corretto (dal vocabolario del deck): quali e quante.
+- `dpi_effettivo` — il DPI **realmente** usato per il rendering: se il tetto
+  di 16 megapixel per pagina l'ha abbassato, il valore è diverso da quello
+  richiesto e il report lo dice.
+- `tempi` — i secondi per fase (`ocr`, `trascrizione`, `sincronizzazione`):
+  con la cache e i tempi nello stesso posto si capisce perché una run è stata
+  lenta senza rileggere i log.
+
+Il riepilogo finale ha tre blocchi: **COSA È CERTO**, **COSA NON È CERTO** e
+**COSA HA DECISO IL PROGRAMMA**, più la riga *"Quanto è sicuro il programma"*
+(ALTO quando i cambi di slide sono tutti quelli annunciati a voce, BASSO
+quando le slide si somigliano troppo).
 
 Nel flusso con le ancore il report contiene anche **`anchors`**, che è la parte da
 leggere per prima quando un confine sembra sbagliato:

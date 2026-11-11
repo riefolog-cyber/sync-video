@@ -30,7 +30,7 @@ python src/main.py --transcriber openvino
 python src/main.py --transcriber whisper
 
 # Esegui i test (pipeline, chunking, integrazione)
-python -m unittest test_sync test_integration test_chunks
+python -m unittest discover -s src -p "test_*.py"
 ```
 
 ### Opzioni principali
@@ -44,7 +44,7 @@ python -m unittest test_sync test_integration test_chunks
 | `--dry-run` | — | Solo timeline, niente video |
 | `--review` | — | Rilegge report e trascrizione dell'ultima run e ristampa i dubbi sui confini con le anteprime, dal video già esistente: nessuna pipeline, nessun download |
 | `--preview` | — | Mostra timeline e esci |
-| `--no-cache` | — | Ignora cache |
+| `--no-cache` | — | Ignora le cache **e** non riusa il video già renderizzato |
 | `--debug` | — | Log dettagliato |
 | `--transitions` | `0.0` | Dissolvenza tra slide (s) |
 | `--lang` | `ita` | Lingua OCR |
@@ -120,7 +120,7 @@ python -m unittest test_sync test_integration test_chunks
 | `--require-flow` | — | Interrompi se l'audio non annuncia le slide (nessun "slide N" e nessun "blocco successivo"). Senza questo flag la run **procede** in modalità stimata: flusso assunto `slide-audio`, zero ancore, confini decisi dal contenuto |
 | `--min-anchor-coverage` | `0.5` | Nel flusso slide → podcast, **interrompi prima della sincronizzazione** se la frazione di transizioni con ancora `slide N` è sotto la soglia (default 50%: con `--no-confirm` la pausa interattiva viene saltata e senza gate un podcast condensato generava un video degradato in silenzio). La soglia è anche il metro della decodifica accurata: sotto di essa la trascrizione dell'audio intero col beam accurato viene tentata PRIMA di fermarsi, e il recupero delle zone cieche prima ancora, quindi gate e avviso arrivano solo dopo i rimedi e dicono cosa è stato provato. `0` disattiva. Più morbido di `--require-full-anchors`, che pretende il 100% |
 | `--strict-sync` | — | Modalità "non consegnare un video sospetto". Blocca PRIMA della generazione se un segmento di durata anomala risulta disallineato dal contenuto (il parlato somiglia a un'altra slide); blocca DOPO la generazione (il video resta su disco, ma l'esito è un errore) se la verifica frame vs slide trova segmenti con la slide sbagliata. Attiva automaticamente `--verify-video`. Default: avviso soltanto. Il report dei segmenti è salvato comunque in `.cache/sync_report.json` |
-| `--verify-video` | — | Dopo la generazione estrae un frame a metà di ogni segmento e lo confronta con la slide attesa: è l'unico controllo sull'ARTEFATTO (la timeline può essere coerente e il video comunque sbagliato). I frame restano in `.cache/verify_frames/` e l'esito finisce in `sync_report.json`. `genera_video.bat` lo attiva di default (pochi secondi in più) |
+| `--verify-video` | — | Dopo la generazione estrae un frame a metà di ogni segmento e lo confronta con la slide attesa: è l'unico controllo sull'ARTEFATTO (la timeline può essere coerente e il video comunque sbagliato). In `.cache/verify_frames/` restano **solo i fotogrammi dei segmenti sbagliati** (gli unici da guardare: una cartella vuota vuol dire che tutti i segmenti erano corretti) e l'esito finisce in `sync_report.json`. `genera_video.bat` lo attiva di default (pochi secondi in più) |
 | `--no-auto-repair` | — | Disattiva la **riparazione automatica**. Quando la verifica del video trova un segmento con la slide sbagliata, la pipeline sposta da sola quel confine (motore embedding, solo nella direzione indicata dall'evidenza) e rigenera il video, poi lo ricontrolla. Con questo flag l'esito resta un avviso e il video non viene rifatto |
 | `--force-setup` | — | Rileva l'hardware da capo e riscrive i fatti in `.cache/machine_setup.json` (utile se hai cambiato GPU o spostato la cartella). La *decisione* sul motore viene comunque ricalcolata a ogni run |
 | `--no-auto-setup` | — | Salta il rilevamento hardware: il motore è solo quello passato con `--transcriber` |
@@ -130,6 +130,12 @@ python -m unittest test_sync test_integration test_chunks
 | `--engine` | `ffmpeg` | Motore di rendering video (`ffmpeg` veloce, `moviepy` richiesto per `--transitions`) |
 | `--ocr-workers` | `min(6, core fisici)` | Thread per l'OCR (sovrappone `OCR_WORKERS`) |
 | `--dpi` | `300` | Risoluzione di rendering delle slide per l'OCR |
+| `--fallback-senza-grafica` | — | Converte il PPTX ricostruendo le slide dal solo testo (niente layout, colori o sfondi), quando nessun convertitore è installato. Di default il programma si ferma: la sincronizzazione peggiorerebbe senza che nessuno lo veda |
+| `--ignora-spazio` | — | Non fermarti quando lo spazio disco non basta per i modelli: avvisa e prosegue. Di default il download non parte, perché a metà lascia il PC con una cache corrotta |
+| `--cache-du` | — | Mostra il peso di ogni voce di `.cache/` ed esci (non genera il video) |
+| `--clean-cache` | — | Pulisce la cache sicura (JSON orfani, embedding oltre il tetto, frame di verifica) ed esce. Non tocca i modelli pesanti: per quelli serve anche `--include-models` |
+| `--include-models` | — | Con `--clean-cache`, rimuove anche i modelli ML scaricati (GB di re-download al prossimo avvio) |
+| `--yes` | — | Con `--clean-cache --include-models`, salta la conferma interattiva |
 | `--slides-dir` | `temp_slides` | Cartella delle slide renderizzate |
 | `--skip-slides` | — | Esclude un elenco di slide (indici 1-based, es. `1,4,9`) dal flusso |
 | `--no-confirm` | — | Non chiedere conferma interattiva (per batch/CI) |
