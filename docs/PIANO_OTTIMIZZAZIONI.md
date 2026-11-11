@@ -68,6 +68,47 @@ test che le copre; le ottimizzazioni sono misurate sul run di riferimento
 - Due run sulla stessa cartella si pestano (slide, cache, frame di verifica):
   manca un blocco per le run concorrenti.
 
+## Batch 6 — le voci aperte, chiuse (2026-11)
+
+Le cinque voci lasciate aperte dal batch 5 sono state fatte. Ognuna ha un
+test che la copre.
+
+**L'embedding dei blocchi quando tutte le transizioni sono ancorate.** Se OGNI
+cambio di slide e' annunciato a voce, la timeline la fa il podcast: la DP
+viene poi sovrascritta dalle ancore, quindi embeddare i 300+ blocchi non
+posizionava niente (36 s su 79 s di sync, misurati). Ora, con tutte le
+transizioni ancorate, si salta l'embedding dei blocchi e si costruisce la
+timeline dagli stessi tempi pronunciati: **la timeline e' identica** (verificato
+sulla run reale, file per file) e la sincronizzazione scende da 60 s a 3 s.
+Si perde la MISURA del segnale (picco medio, concordanza), non la
+sincronizzazione: il riepilogo lo dice ("i cambi di slide sono tutti quelli
+annunciati a voce") invece di fare finta. Il controllo che il parlato dopo
+l'annuncio parli davvero della slide annunciata resta, e il suo costo non
+cambia (e' un'altra catena, molto piu' piccola).
+
+**Le zone cieche non si ritrascrivono due volte.** Ogni zona ritrascritta ha
+un'impronta del suo CONTENUTO; le impronte stanno nella cache della
+trascrizione ricucita. Una zona con lo stesso contenuto non viene
+ritrascritta (~25 s l'una risparmiati a ogni run): se una parola cambia,
+l'impronta cambia e la zona viene rifatta davvero.
+
+**Un solo ffmpeg per tutti i frame della verifica.** Fin qui era un ffmpeg
+per segmento (decine di processi, decine di aperture del container). Ora si
+aprono N input dello stesso video, ognuno con la sua seek, e si esce con N
+file: i frame risultano identici bit per bit (verificato sul video di prova)
+e il percorso uno per uno resta come ripiego.
+
+**La cache della trascrizione non si perde quando cambia il nome della chiave.**
+I parametri che determinano il testo sono ora dentro la cache: una cache con
+gli stessi parametri ma un nome diverso vale quanto quella con il nome
+giusto. Il 02/11 quel cambio di nome era costato 3 min 27 s di Whisper; ora
+costa zero.
+
+**Le run concorrenti non si pestano piu'.** Blocco esclusivo del sistema
+operativo su `.cache/run.lock`: se una run e' gia' in corso sulla stessa
+cartella, la seconda si ferma e lo dice. Il blocco e' del SO, quindi se la run
+muore il blocco muore con lei (nessun file da pulire a mano).
+
 
 ## Stato delle voci
 

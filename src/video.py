@@ -690,6 +690,48 @@ def _extract_frame(video_path: Path, t: float, out: Path) -> bool:
     return out.exists() and out.stat().st_size > 0
 
 
+def _extract_frames_batch(
+    video_path: Path, times: Sequence[float], out_files: Sequence[Path]
+) -> bool:
+    """Estrae tutti i frame richiesti con UNA sola invocazione di ffmpeg.
+
+    Un ffmpeg per segmento sono decine di processi e decine di aperture del
+    container: su un video da 15 minuti con 80 segmenti, secondi. Qui si
+    aprono N input dello stesso video, ognuno con la sua seek, e si esce con
+    N file: la decodifica e' la stessa, il processo e' uno solo, e i frame
+    risultano identici bit per bit (verificato sul video di prova).
+
+    False se qualcosa non torna (frame mancanti, errore di ffmpeg): il
+    chiamante ripiega sul percorso uno per uno, che resta la reference.
+    """
+    if not times or len(times) != len(out_files):
+        return False
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    for t in times:
+        cmd += ["-ss", f"{float(t):.3f}", "-i", str(video_path)]
+    for i, out in enumerate(out_files):
+        cmd += ["-map", f"{i}:v:0", "-frames:v", "1", "-q:v", "2", str(out)]
+    try:
+        res = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            # La decodifica avviene N volte (un input per seek): il margine
+            # scala con il numero di segmenti, ma resta un tetto.
+            timeout=max(60, 20 * len(times)),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if res.returncode != 0:
+        log.debug(
+            "   [Verifica] Estrazione in blocco fallita (ffmpeg %d): %s",
+            res.returncode,
+            (res.stderr or b"").decode("utf-8", "replace").strip()[:200],
+        )
+        return False
+    return all(p.exists() and p.stat().st_size > 0 for p in out_files)
+
+
 def frame_consistency_check(
     video_path: str | Path,
     segments: Sequence[tuple[int, float, float]],
@@ -749,12 +791,29 @@ def frame_consistency_check(
         # confronta con la matrice (prodotto matriciale), senza più riaprire
         # le PNG delle slide a ogni segmento.
         ref_matrix = _reference_matrix(slide_paths)
+        # I frame di tutti i segmenti con UNA invocazione di ffmpeg: un ffmpeg
+        # per segmento sono decine di processi e decine di aperture del
+        # container (su un video da 15 minuti: secondi). Il percorso uno per
+        # uno resta come ripiego (ed e' la reference dei test).
+        candidati: list[tuple[int, int, float, Path]] = []
         for i, (slide, start, end) in enumerate(segments):
             if not 1 <= int(slide) <= len(slide_paths):
                 continue
             t = (float(start) + float(end)) / 2
-            frame = frames_dir / f"seg{i:02d}_t{t:07.1f}_slide{int(slide):02d}.png"
-            if not _extract_frame(video, t, frame):
+            candidati.append(
+                (i, int(slide), t, frames_dir / f"seg{i:02d}_t{t:07.1f}_slide{int(slide):02d}.png")
+            )
+        if not _extract_frames_batch(
+            video,
+            [t for _, _, t, _ in candidati],
+            [f for _, _, _, f in candidati],
+        ):
+            log.debug("   [Verifica] Estrazione in blocco non riuscita: i frame uno per uno.")
+            for _, _, t, frame in candidati:
+                _extract_frame(video, t, frame)
+
+        for i, slide, t, frame in candidati:
+            if not frame.exists() or frame.stat().st_size == 0:
                 log.debug("   [Verifica] Frame non estratto a %.1fs (segmento %d).", t, i)
                 continue
             checked += 1

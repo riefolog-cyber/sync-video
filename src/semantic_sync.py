@@ -765,21 +765,36 @@ def signal_quality_report(
     total_pairs = N * (N - 1) / 2.0
     concordance = concord / total_pairs if total_pairs else 1.0
 
-    confusability = 0.0
-    if slide_emb is not None and slide_emb.shape[0] == N and N > 1:
-        s2s, senza_direzione = _centered(slide_emb)
-        coppie = N * (N - 1) // 2
-        duplicati = sum(
-            1
-            for i in range(N)
-            for j in range(i + 1, N)
-            if senza_direzione[i]
-            or senza_direzione[j]
-            or float(s2s[i, j]) > duplicate_threshold
-        )
-        confusability = duplicati / coppie if coppie else 0.0
+    return {
+        "concordance": concordance,
+        "confusability": confusability_slides(slide_emb, duplicate_threshold),
+    }
 
-    return {"concordance": concordance, "confusability": confusability}
+
+def confusability_slides(
+    slide_emb: np.ndarray | None, duplicate_threshold: float = 0.6
+) -> float:
+    """Frazione di coppie di slide quasi-duplicati (slide vs slide).
+
+    Misura solo sulle slide: non serve l'audio, quindi si puo' calcolare anche
+    quando i blocchi non sono stati embeddati (tutti i cambi di slide ancorati).
+    """
+    if slide_emb is None or slide_emb.ndim != 2:
+        return 0.0
+    N = slide_emb.shape[0]
+    if N < 2:
+        return 0.0
+    s2s, senza_direzione = _centered(slide_emb)
+    coppie = N * (N - 1) // 2
+    duplicati = sum(
+        1
+        for i in range(N)
+        for j in range(i + 1, N)
+        if senza_direzione[i]
+        or senza_direzione[j]
+        or float(s2s[i, j]) > duplicate_threshold
+    )
+    return duplicati / coppie if coppie else 0.0
 
 
 # Sotto questa norma un embedding centrato è nullo: la slide coincide con la
@@ -1065,6 +1080,90 @@ def _min_gap_blocks(
     return min_gap
 
 
+def _clamp_monotono(
+    timeline: dict[int, float], anchor_slides: set[int], total_slides: int
+) -> list[int]:
+    """Clamp di monotonicita' + elenco delle ancore spostate dal clamp.
+
+    Sposta in avanti i confini che non possono stare indietro (la monotonicita'
+    e' obbligatoria) e dice QUALI ancore sono state spostate: un'ancora
+    spostata in avanti dal clamp significa che la sua posizione e'
+    incompatibile con quella delle slide precedenti, quindi il video non
+    mostrera' la slide al timestamp pronunciato. Non e' silenzioso: va
+    segnalato (analysis_sync.py ricontrolla la timeline).
+    """
+    prev_t = 0.0
+    displaced: list[int] = []
+    for s in range(2, total_slides + 1):
+        clamped = max(timeline[s], prev_t + 0.5)
+        if s in anchor_slides and clamped > timeline[s] + 1e-6:
+            displaced.append(s)
+        timeline[s] = clamped
+        prev_t = timeline[s]
+    return displaced
+
+
+def _timeline_solo_ancore(
+    ancore: dict[int, float],
+    total_slides: int,
+    total_duration: float,
+    embed_fn: EmbedFn,
+    slide_texts: Sequence[str],
+    min_avg_z: float,
+) -> dict[int, float] | None:
+    """Timeline quando OGNI cambio di slide e' annunciato a voce.
+
+    La timeline e' la STESSA del percorso col motore embedding (le ancore
+    sovrascrivono la DP), senza il costo di embeddare i blocchi: ~36s
+    risparmiati su un podcast da 20 minuti, cioe' la voce che domina la
+    sincronizzazione.
+
+    Si perde la MISURA del segnale (picco medio, concordanza), non la
+    sincronizzazione: il controllo che il parlato dopo l'annuncio parli
+    davvero della slide annunciata resta (e' un'altra catena, molto piu'
+    piccola: le slide e gli estratti).
+    """
+    timeline: dict[int, float] = {1: 0.0}
+    for s in range(2, total_slides + 1):
+        timeline[s] = float(ancore[s])
+    displaced = _clamp_monotono(timeline, set(ancore), total_slides)
+    if displaced:
+        log.warning(
+            "   [Semantico] Ancora/e spostata/e dal vincolo di monotonicita' "
+            "(la slide non compare al timestamp pronunciato): %s. "
+            "Verifica la timeline.",
+            ", ".join(f"slide {s}" for s in displaced),
+        )
+    try:
+        reconcile_timeline(timeline, total_slides, total_duration)
+    except ValueError as e:
+        log.warning("   [Semantico] Timeline non valida: %s", e)
+        return None
+
+    # La qualita' che si puo' ancora calcolare: solo fra slide (non serve
+    # l'audio). Il picco medio e la concordanza chiedono i blocchi: senza
+    # blocchi embeddati non esistono, e meglio dirlo che far finta.
+    _LAST_QUALITY.clear()
+    try:
+        slide_emb = _embed_list(
+            embed_fn,
+            [_clean_slide_text(t) for t in slide_texts[:total_slides]],
+            "Semantico",
+        )
+        _LAST_QUALITY.update(
+            {"min_avg_z": min_avg_z, "confusability": confusability_slides(slide_emb)}
+        )
+    except Exception as e:  # noqa: BLE001 - embedding può fallire per molti motivi
+        log.warning("   [Semantico] Embedding delle slide non riuscito: %s", e)
+
+    log.info(
+        "   [Semantico] Tutti i %d cambi di slide sono ancorati: i confini "
+        "vengono dai tempi pronunciati (l'embedding dei blocchi non servirebbe).",
+        total_slides - 1,
+    )
+    return timeline
+
+
 def semantic_timeline_from_texts(
     slide_texts: Sequence[str],
     blocks: Sequence[dict[str, Any]],
@@ -1102,6 +1201,29 @@ def semantic_timeline_from_texts(
             total_slides,
         )
         return None
+
+    # --- Ancoraggio completo: i confini li dice il podcast, non il motore ---
+    # Se OGNI cambio di slide e' annunciato a voce, la timeline la fa il
+    # podcast: l'embed dei blocchi (300+ testi, ~36s misurati) non
+    # posizionerebbe niente, perche' la timeline e' poi sovrascritta dalle
+    # ancore. Il controllo che il parlato dopo l'annuncio parli davvero della
+    # slide annunciata RESTA (e' un'altra catena, molto piu' piccola: le slide
+    # e gli estratti). Non si rinuncia a nulla sulla timeline: e' la stessa,
+    # costruita dagli stessi tempi.
+    _ancore_valide = {
+        s: t
+        for s, t in (anchors or {}).items()
+        if 2 <= s <= total_slides and 0.0 <= t < total_duration
+    }
+    if len(_ancore_valide) == total_slides - 1:
+        return _timeline_solo_ancore(
+            _ancore_valide,
+            total_slides,
+            total_duration,
+            embed_fn,
+            slide_texts,
+            min_avg_z,
+        )
 
     embedded = _embed_and_report(slide_texts, blocks, total_slides, embed_fn, "Semantico")
     if embedded is None:
@@ -1246,18 +1368,7 @@ def semantic_timeline_from_texts(
             if s > 1:
                 timeline[s] = float(anchors[s])
     anchor_slides = set(anchors) if anchors else set()
-    prev_t = 0.0
-    displaced: list[int] = []
-    for s in range(2, total_slides + 1):
-        clamped = max(timeline[s], prev_t + 0.5)
-        # Un'ancora spostata in avanti dal clamp di monotonicità significa che
-        # la sua posizione è incompatibile con quella delle slide precedenti:
-        # il video non mostrerà la slide al timestamp pronunciato. Non è
-        # silenzioso: va segnalato (analysis_sync.py ricontrolla la timeline).
-        if s in anchor_slides and clamped > timeline[s] + 1e-6:
-            displaced.append(s)
-        timeline[s] = clamped
-        prev_t = timeline[s]
+    displaced = _clamp_monotono(timeline, anchor_slides, total_slides)
     if displaced:
         log.warning(
             "   [Semantico] Ancora/e spostata/e dal vincolo di monotonicità "

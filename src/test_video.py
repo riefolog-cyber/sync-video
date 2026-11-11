@@ -5,6 +5,8 @@ Test unitari per il modulo video (motore ffmpeg concat demuxer + dispatch).
 Esegui con: python -m unittest test_video -v
 """
 
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +21,7 @@ from video import (
     _compose_sheet,
     _concat_quote,
     _extract_frame,
+    _extract_frames_batch,
     _fitted_size,
     _letterbox,
     _letterbox_references,
@@ -490,6 +493,65 @@ class TestMixedAspectRatiosMatch(unittest.TestCase):
             refs = _letterbox_references(files, tmp / "ref")
             for enc, ref in zip(encoder, refs, strict=True):
                 self.assertEqual(enc.read_bytes(), ref.read_bytes())
+
+
+class TestExtractFramesBatch(unittest.TestCase):
+    """I frame di tutti i segmenti con UNA invocazione di ffmpeg.
+
+    Un ffmpeg per segmento sono decine di processi e decine di aperture del
+    container. Il blocco apre N input dello stesso video (uno per seek) e
+    produce N file: la decodifica e' la stessa, i frame devono essere
+    IDENTICI a quelli del percorso uno per uno (e' la reference).
+    """
+
+    def test_un_ingresso_per_frame_e_un_uscita_per_frame(self):
+        finto = MagicMock(returncode=0, stderr=b"")
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            out1 = tmp / "a.png"
+            out2 = tmp / "b.png"
+            out1.write_bytes(b"x" * 10)
+            out2.write_bytes(b"x" * 10)
+            with patch("video.subprocess.run", return_value=finto) as run:
+                ok = _extract_frames_batch(tmp / "v.mp4", [1.0, 2.0], [out1, out2])
+            self.assertTrue(ok)
+            cmd = run.call_args[0][0]
+            self.assertEqual(cmd.count("-i"), 2, "un input per frame")
+            self.assertEqual(cmd.count("-frames:v"), 2, "un output per frame")
+
+    def test_ritorno_di_errore_non_inganna(self):
+        finto = MagicMock(returncode=1, stderr=b"Invalid data found")
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            out = tmp / "a.png"
+            out.write_bytes(b"x" * 10)
+            with patch("video.subprocess.run", return_value=finto):
+                self.assertFalse(_extract_frames_batch(tmp / "v.mp4", [1.0], [out]))
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg non disponibile")
+    def test_i_frame_in_blocco_sono_identici_a_quelli_singoli(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            video = tmp / "v.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "color=c=red:s=320x240:r=5:d=3",
+                    str(video),
+                ],
+                check=True,
+                timeout=60,
+            )
+            tempi = [0.5, 1.5, 2.5]
+            in_blocco = [tmp / f"blocco{i}.png" for i in range(len(tempi))]
+            singoli = [tmp / f"singolo{i}.png" for i in range(len(tempi))]
+
+            self.assertTrue(_extract_frames_batch(video, tempi, in_blocco))
+            for t, out in zip(tempi, singoli, strict=True):
+                self.assertTrue(_extract_frame(video, t, out))
+
+            for a, b in zip(in_blocco, singoli, strict=True):
+                self.assertEqual(a.read_bytes(), b.read_bytes())
 
 
 class TestReferenceMatrix(unittest.TestCase):

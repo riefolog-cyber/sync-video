@@ -2411,6 +2411,59 @@ class TestSemanticSync(unittest.TestCase):
         times = [tl[s] for s in sorted(tl)]
         self.assertTrue(all(b > a for a, b in pairwise(times)))
 
+    def test_tutti_i_cambi_ancorati_non_embedda_i_blocchi(self):
+        """Con tutti i cambi annunciati a voce, l'embed dei blocchi non serve.
+
+        La timeline e' la STESSA (le ancore sovrascrivono la DP), ma il motore
+        non deve piu' embeddare i blocchi: era la voce che dominava la
+        sincronizzazione (~36s su un podcast da 20 minuti, misurati).
+        """
+        themes = ["alfa", "beta", "gamma", "delta"]
+        blocchi = self._blocks_sequential(themes)
+        chiamate: list[int] = []
+        finto = self._fake_embed(themes)
+
+        def _embed(texts):
+            chiamate.append(len(texts))
+            return finto(texts)
+
+        tl = semantic_timeline_from_texts(
+            [f"{t} slide" for t in themes],
+            blocchi,
+            total_slides=4,
+            total_duration=40.0,
+            embed_fn=_embed,
+            options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
+            anchors={2: 12.3, 3: 27.8, 4: 33.0},
+        )
+        self.assertEqual(tl, {1: 0.0, 2: 12.3, 3: 27.8, 4: 33.0})
+        # Solo le slide (4 testi): i blocchi (8) non sono stati embeddati.
+        self.assertEqual(chiamate, [4])
+
+    def test_con_un_cambio_senza_ancora_i_blocchi_si_embeddano(self):
+        # Il percorso veloce vale solo se NON manca nessun confine: con una
+        # transizione non annunciata i blocchi servono (la durata di quella
+        # slide e' una stima).
+        themes = ["alfa", "beta", "gamma", "delta"]
+        chiamate: list[int] = []
+        finto = self._fake_embed(themes)
+
+        def _embed(texts):
+            chiamate.append(len(texts))
+            return finto(texts)
+
+        semantic_timeline_from_texts(
+            [f"{t} slide" for t in themes],
+            self._blocks_sequential(themes),
+            total_slides=4,
+            total_duration=40.0,
+            embed_fn=_embed,
+            options=SemanticOptions(window_seconds=5.0, min_slide_duration=2.0),
+            anchors={2: 12.3, 3: 27.8},
+        )
+        # Slide (4) + blocchi (8).
+        self.assertEqual(chiamate, [4, 8])
+
     def test_too_few_blocks_returns_none(self):
         themes = ["alfa", "beta", "gamma", "delta"]
         tl = semantic_timeline_from_texts(

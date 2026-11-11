@@ -4,6 +4,8 @@ Orchestratore principale del pipeline slide-audio.
 Gestisce cache/resume, dry-run, e coordina tutte le fasi.
 """
 
+import hashlib
+import json
 import logging
 import os
 import re
@@ -17,6 +19,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn, cast
 
+from blocco_run import BloccoRun
 from config import (
     AUTO_BEAM_AB_MARGIN,
     AUTO_BEAM_CONFUSABILITY_MAX,
@@ -999,8 +1002,13 @@ def _quality_phrase(
     nel caso in cui le ancore ci sono tutte.
     """
     if not quality:
+        if all_anchored:
+            return (
+                "ALTO — i cambi di slide sono tutti quelli annunciati a voce: "
+                "il programma non ha dovuto stimarli dal contenuto"
+            )
         return "non lo sappiamo (misura non disponibile)"
-    avg_z = float(quality.get("avg_z") or 0.0)
+    avg_z = quality.get("avg_z")
     min_z = float(quality.get("min_avg_z") or 0.0)
     avg_sim = float(quality.get("avg_sim") or 0.0)
     if weak:
@@ -1018,6 +1026,15 @@ def _quality_phrase(
                 "a voce"
             )
         return f"BASSO — {motivo}, quindi le durate sono state stimate dal contenuto"
+    if avg_z is None:
+        # Tutti i cambi ancorati: la misura del picco non e' stata calcolata
+        # (non serviva, i confini li dava il podcast). Il numero non si inventa.
+        if all_anchored:
+            return (
+                "ALTO — i cambi di slide sono tutti quelli annunciati a voce: "
+                "il programma non ha dovuto stimarli dal contenuto"
+            )
+        return "non lo sappiamo (misura non disponibile)"
     # Tre decimali: la soglia si sfiora (0.445 contro 0.450) e con due decimali
     # il numero sembra identico alla soglia proprio nel caso limite.
     return (
@@ -1603,6 +1620,60 @@ def _build_sync_report(
 # =====================================================================
 # CACHE SYSTEM (primitive in pipeline_cache.py, re-esportate sopra)
 # =====================================================================
+def _transcript_params(audio_hash: str, args: Any, beam: int | None = None) -> dict[str, str]:
+    """Parametri che determinano il TESTO prodotto da una trascrizione.
+
+    Sono gli stessi della chiave, ma in forma leggibile: cosi' una cache
+    scritta con una chiave di formato diverso (o con una chiave piu' vecchia)
+    puo' essere riconosciuta come la stessa trascrizione e ripresa, invece di
+    costringere a rifare minuti di Whisper.
+    """
+    engine = resolved_transcriber(args.transcriber, Path(args.openvino_model_dir))
+    if engine == "openvino":
+        engine_params = [args.openvino_device, "decode-ffmpeg-f32le"]
+    else:
+        engine_params = [
+            args.whisper_device,
+            args.whisper_compute_type,
+            f"beam{args.whisper_beam if beam is None else beam}",
+            f"batch{args.whisper_batch}",
+        ]
+    return {
+        "audio": audio_hash,
+        "lang": str(args.lang),
+        "model": str(args.whisper_model),
+        "engine": engine,
+        "engine_params": ",".join(str(p) for p in engine_params),
+    }
+
+
+def _trascrizione_equivalente(chiave: str, params: dict[str, str]) -> str | None:
+    """Chiave di una cache con gli STESSI parametri, ma nome diverso.
+
+    Serve quando il formato della chiave cambia (e' successo: e' stato
+    aggiunto il tag del percorso di decodifica): la cache valida c'era, ma
+    con un nome diverso, e senza questo la run rifaceva minuti di Whisper per
+    un cambio di nome. Le cache vecchie non hanno i parametri dentro: quelle
+    non si possono riconoscere, e vengono potate come prima.
+
+    Returns:
+        La chiave della cache con gli stessi parametri, o None.
+    """
+    for path in sorted(CACHE_DIR.glob("transcript_*.json")):
+        nome = path.stem
+        if nome == chiave or nome.endswith(("_gap", "_accurate")):
+            continue
+        try:
+            dati = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(dati, dict):
+            continue
+        if dati.get("params") == params:
+            return nome
+    return None
+
+
 def _transcript_cache_key(audio_hash: str, args: Any, beam: int | None = None) -> str:
     """Chiave di cache della trascrizione.
 
@@ -2156,6 +2227,10 @@ class ZoneRecovery(NamedTuple):
     ``skipped`` dice che le zone non sono state ritrascritte perché coprivano
     troppo audio: chi chiama DEVE poterlo distinguere da "ritrascritte e non ha
     trovato niente", perché nel primo caso il rimedio è ancora da fare.
+
+    ``tried`` sono le impronte delle zone tentate (anche quelle saltate perché
+    il contenuto non è cambiato): senza questo registro ogni run ritrascrive
+    le stesse zone (~25s l'una) per trovare, di nuovo, niente.
     """
 
     words: list[Word]
@@ -2163,6 +2238,25 @@ class ZoneRecovery(NamedTuple):
     seconds: float
     recovered: list[int]
     skipped: bool
+    tried: list[str]
+
+
+def _zone_hash(words: Sequence[Word], lo: float, hi: float) -> str:
+    """Impronta del CONTENUTO di una zona cieca.
+
+    Due zone con lo stesso contenuto (stesse parole, stessi tempi) sono la
+    stessa zona: ritrascriverla darebbe lo stesso risultato. L'impronta
+    cambia se cambia una parola o un tempo, e in quel caso la zona va
+    ritrascritta davvero.
+    """
+    dentro = [
+        f"{w['word']}@{float(w['start']):.2f}"
+        for w in words
+        if lo <= float(w["start"]) <= hi
+    ]
+    return hashlib.sha1(
+        ("|".join(dentro) + f"@{lo:.1f}-{hi:.1f}").encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def _recover_anchor_zones(
@@ -2174,6 +2268,7 @@ def _recover_anchor_zones(
     args: Any,
     flow: str,
     max_zone_share: float | None = DEFAULT_RECOVERY_MAX_ZONE_SHARE,
+    zones_tentate: Sequence[str] = (),
 ) -> ZoneRecovery:
     """Ritrascrive le zone cieche e restituisce le ancore che ne tornano.
 
@@ -2217,6 +2312,9 @@ def _recover_anchor_zones(
         flow: flusso rilevato: le ancore si rileggono con la stessa grammatica.
         max_zone_share: quota massima di audio copribile dalle zone (vedi sopra),
             oppure None per ritrascrivere sempre.
+        zones_tentate: impronte delle zone gia' ritrascritte in una run
+            precedente. Una zona con lo STESSO contenuto viene saltata: il
+            risultato sarebbe lo stesso (e costerebbe ~25s).
 
     Returns:
         Uno ``ZoneRecovery``: le parole ricucite, le ancore complete, il tempo
@@ -2251,8 +2349,39 @@ def _recover_anchor_zones(
             f"{coperta / total_duration:.0%}",
             len(fuse),
         )
-        return ZoneRecovery(words, dict(flow_anchors), 0.0, [], True)
+        return ZoneRecovery(words, dict(flow_anchors), 0.0, [], True, list(zones_tentate))
+
+    # Le zone gia' ritrascritte con lo STESSO contenuto non si rifanno: il
+    # risultato sarebbe lo stesso (misurato: ~25s l'una, a ogni run). L'impronta
+    # e' del CONTENUTO, non dei limiti: se una parola e' cambiata la zona
+    # cambia e va ritrascritta davvero.
+    tentate = set(zones_tentate)
+    da_fare: list[tuple[float, float]] = []
+    impronte: list[str] = []
+    for lo, hi in fuse:
+        impronta = _zone_hash(words, lo, hi)
+        impronte.append(impronta)
+        if impronta in tentate:
+            log.info(
+                "   [Gap] Zona %.1f-%.1fs gia' ritrascritta con lo stesso "
+                "contenuto: la salto (risparmio ~25s, risultato identico).",
+                lo,
+                hi,
+            )
+            continue
+        da_fare.append((lo, hi))
+
+    def _fusa(lo: float, hi: float) -> tuple[float, float]:
+        """La zona fused che contiene questa zona (per i log)."""
+        for flo, fhi in fuse:
+            if lo >= flo - 1.0 and hi <= fhi + 1.0:
+                return flo, fhi
+        return lo, hi
+
+    _da_fare = set(da_fare)
     for mancanti, lo, hi in anchor_gaps(flow_anchors, total_slides):
+        if _fusa(lo, hi) not in _da_fare:
+            continue
         log.info(
             "   [Gap] Slide %s senza ancora tra due ancore (%.1f-%.1fs): "
             "ritrascrivo la zona col beam accurato...",
@@ -2261,12 +2390,14 @@ def _recover_anchor_zones(
             hi,
         )
     for lo, hi in zone_loop:
+        if _fusa(lo, hi) not in _da_fare:
+            continue
         log.info(
             "   [Gap] Testo inaffidabile (loop %.1f-%.1fs): ritrascrivo la zona col beam accurato...",
             lo,
             hi,
         )
-    if zone_tail:
+    if zone_tail and _fusa(zone_tail[1], zone_tail[2]) in _da_fare:
         log.info(
             "   [Gap] Coda senza ancora a destra (%s): ritrascrivo %.1f-%.1fs "
             "per cercarne l'annuncio col beam accurato...",
@@ -2275,7 +2406,7 @@ def _recover_anchor_zones(
             zone_tail[2],
         )
     seconds = 0.0
-    for lo, hi in fuse:
+    for lo, hi in da_fare:
         t0 = time.time()
         nuove = retranscribe_zone(
             audio_path,
@@ -2307,7 +2438,12 @@ def _recover_anchor_zones(
             ", ".join(f"slide {s} a {dopo[s]:.1f}s" for s in recuperate),
         )
     return ZoneRecovery(
-        words, {**flow_anchors, **{s: dopo[s] for s in recuperate}}, seconds, recuperate, False
+        words,
+        {**flow_anchors, **{s: dopo[s] for s in recuperate}},
+        seconds,
+        recuperate,
+        False,
+        impronte,
     )
 
 
@@ -2319,6 +2455,7 @@ def _deferred_zone_recovery(
     audio_path: Path,
     args: Any,
     flow: str,
+    zones_tentate: Sequence[str] = (),
 ) -> ZoneRecovery:
     """Il recupero delle zone cieche rifatto quando era stato differito.
 
@@ -2345,6 +2482,7 @@ def _deferred_zone_recovery(
         args,
         flow,
         max_zone_share=None,
+        zones_tentate=zones_tentate,
     )
 
 
@@ -2749,6 +2887,20 @@ def main(argv: list | None = None) -> None:
         _review_boundary_doubts(Path(args.output_video))
         return
 
+    # --- Blocco: una run per volta sulla stessa cartella ---
+    # Due run insieme si pestano a vicenda (le slide, la cache, i frame di
+    # verifica): il risultato e' un video a meta' costruito con i pezzi
+    # dell'altro, senza errori in console. Il blocco e' del sistema operativo,
+    # quindi se la run muore il blocco muore con lei: nessun file da pulire a
+    # mano.
+    _blocco = BloccoRun(CACHE_DIR)
+    if not _blocco.acquired():
+        _abort(
+            "Un'altra run è già in corso su questa cartella (blocco "
+            f"{_blocco.path}). Due run insieme si pestano le slide e le cache: "
+            "aspetta che l'altra finisca e rilancia."
+        )
+
     # Bootstrap esplicito: verifica dipendenze prima di tutto
     # `ignora_spazio`: di default, se lo spazio non basta per i modelli il
     # bootstrap FERMA il download invece di avvisare e proseguire. Un download
@@ -2889,6 +3041,14 @@ def main(argv: list | None = None) -> None:
     # rifarla a ogni run costerebbe due embedding completi per una decisione che
     # non cambia.
     cache_key_beam_ab = _beam_ab_cache_key(cache_key_slides, audio_hash, args)
+    # Una cache della trascrizione con gli STESSI parametri ma nome diverso
+    # (perche' il formato della chiave e' cambiato) vale quanto quella con il
+    # nome giusto: si riusa. Senza questo, un aggiornamento del programma
+    # costava minuti di Whisper per un cambio di nome.
+    _params_trascrizione = _transcript_params(audio_hash, args)
+    _chiave_trascrizione_equivalente = (
+        None if args.no_cache else _trascrizione_equivalente(cache_key_transcript, _params_trascrizione)
+    )
     active_cache_keys: set[str] = {
         cache_key_slides,
         cache_key_transcript,
@@ -2896,6 +3056,10 @@ def main(argv: list | None = None) -> None:
         cache_key_transcript_accurate,
         cache_key_beam_ab,
     }
+    if _chiave_trascrizione_equivalente:
+        # La cache equivalente resta: la pulizia degli orfani non deve
+        # cancellarla mentre la run la riusa.
+        active_cache_keys.add(_chiave_trascrizione_equivalente)
 
     # --- Pulizia cache ALL'AVVIO ---
     # A ogni nuova run rimuove subito le cache di slide/trascrizione di
@@ -2988,6 +3152,11 @@ def main(argv: list | None = None) -> None:
         # --- Fase 2: Trascrizione (con cache) ---
         t_phase_start = time.time()
 
+        # Impronte delle zone cieche gia' ritrascritte: una zona con lo stesso
+        # contenuto non viene ritrascritta di nuovo (costa ~25s e dà lo stesso
+        # risultato). Vengono dalla cache della trascrizione ricucita.
+        _zones_tentate: list[str] = []
+
         if not args.no_cache:
             # La versione con le zone ricucite è strettamente migliore della
             # grezza (stesse parole tranne le zone ritrascritte): se c'è, si
@@ -2995,7 +3164,20 @@ def main(argv: list | None = None) -> None:
             # stesse zone cieche.
             cached_gap = _load_cache(cache_key_transcript_gap)
             _from_gap_cache = bool(cached_gap and "transcript" in cached_gap)
+            if cached_gap:
+                _tentate = cached_gap.get("zones_tentate")
+                if isinstance(_tentate, list):
+                    _zones_tentate = [str(x) for x in _tentate]
             cached = cached_gap if _from_gap_cache else _load_cache(cache_key_transcript)
+            if cached is None and _chiave_trascrizione_equivalente:
+                # Stessi parametri, nome diverso: la cache vale lo stesso (il
+                # testo e' quello che conta, non il nome del file).
+                cached = _load_cache(_chiave_trascrizione_equivalente)
+                if cached:
+                    log.info(
+                        "2. [CACHE] Trascrizione recuperata dalla cache con un nome "
+                        "diverso ma gli stessi parametri: nessuna decodifica."
+                    )
             if cached and "transcript" in cached:
                 transcript = cached["transcript"]
                 # Fix A: recupera anche le parole raw dalla cache se presenti
@@ -3036,12 +3218,17 @@ def main(argv: list | None = None) -> None:
                 whisper_device_explicit=getattr(args, "whisper_device_explicit", False),
             )
             if not args.no_cache:
-                # Fix A: salva anche le parole raw per estrazione deterministica
+                # Fix A: salva anche le parole raw per estrazione deterministica.
+                # I PARAMETRI dentro la cache: permettono di riconoscere una
+                # cache con gli stessi parametri ma un nome diverso (e quindi
+                # di non rifare minuti di Whisper quando il formato della
+                # chiave cambia).
                 _save_cache(
                     cache_key_transcript,
                     {
                         "transcript": transcript,
                         "words_raw": words_raw,
+                        "params": _transcript_params(audio_hash, args),
                     },
                 )
 
@@ -3146,21 +3333,32 @@ def main(argv: list | None = None) -> None:
                 args,
                 flow,
                 max_zone_share=_zone_share,
+                zones_tentate=_zones_tentate,
             )
             words_raw, flow_anchors = _zones.words, _zones.anchors
             _gap_seconds = _zones.seconds
             _gap_recovered = _zones.recovered
             _gap_deferred = _zones.skipped
+            _zones_tentate = list(_zones.tried)
             t_transcribe += _gap_seconds
 
             # Le zone ritrascritte sono un costo vero (ffmpeg + Whisper, ~25s
             # l'una): se restassero solo in memoria, la run successiva
             # ripartirebbe dal testo veloce e le rifarebbe da capo. Chiave
             # derivata perché il testo grezzo serve ancora al confronto A/B.
-            if not args.no_cache and _gap_seconds > 0 and words_raw:
+            #
+            # Si scrive anche quando NON e' stata recuperata nessuna ancora:
+            # e' il caso che piu' costa, perche' la stessa zona viene
+            # ritrascritta a ogni run per trovare, di nuovo, niente. Le
+            # impronte delle zone tentate sono il ricordo di quei tentativi.
+            if not args.no_cache and words_raw and (_gap_seconds > 0 or _zones.tried):
                 _save_cache(
                     cache_key_transcript_gap,
-                    {"transcript": transcript, "words_raw": words_raw},
+                    {
+                        "transcript": transcript,
+                        "words_raw": words_raw,
+                        "zones_tentate": list(_zones.tried),
+                    },
                 )
 
         # --- Beam automatico: la decisione arriva DOPO il recupero -------------
@@ -3307,20 +3505,28 @@ def main(argv: list | None = None) -> None:
                             audio_path,
                             args,
                             flow,
+                            zones_tentate=_zones_tentate,
                         )
                         words_raw, flow_anchors = _zones.words, _zones.anchors
                         _gap_seconds += _zones.seconds
                         _gap_recovered = _zones.recovered
                         _gap_deferred = _zones.skipped
+                        _zones_tentate = list(_zones.tried)
                         t_transcribe += _zones.seconds
                         beam_note["pinned_slides"] = len(flow_anchors)
                         beam_note["recovered_after_revert"] = list(_gap_recovered)
                         # Stessa ragione del recupero principale: senza cache
                         # queste zone si ritrascriverebbero a ogni run.
-                        if not args.no_cache and _zones.seconds > 0 and words_raw:
+                        if not args.no_cache and words_raw and (
+                            _zones.seconds > 0 or _zones.tried
+                        ):
                             _save_cache(
                                 cache_key_transcript_gap,
-                                {"transcript": transcript, "words_raw": words_raw},
+                                {
+                                    "transcript": transcript,
+                                    "words_raw": words_raw,
+                                    "zones_tentate": list(_zones.tried),
+                                },
                             )
                 log.info(
                     "   [Beam] Uso la trascrizione %s: %s.",
