@@ -98,7 +98,7 @@ exit /b 1
 
 :ffmpeg_ok
 
-rem --- Scelta Python: helper condiviso (preferisce 3.11, vedi _python.bat) ---
+rem --- Scelta Python: helper condiviso (vedi _python.bat) ---
 rem Se sul PC non c'e' nessun Python, il helper prova a installarlo con
 rem winget; se non riesce esce con 1 e ha gia' spiegato cosa fare.
 call "%~dp0_python.bat"

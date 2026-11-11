@@ -85,7 +85,7 @@ def clean_cache(
     Non tocca mai: chiavi KEEP_STEMS, modelli pesanti (salvo
     include_models=True).
     """
-    import main as _main
+    from pipeline_cache import clean_orphan_cache as _clean_orphan_cache
     from semantic_sync import _prune_embed_cache  # import locale: evita cicli
 
     esito: dict[str, int] = {"orphan_json": 0, "embed_npz": 0, "verify_frames": 0, "model_bytes": 0}
@@ -93,7 +93,7 @@ def clean_cache(
         return esito
     # 1. JSON orfani (slide/trascrizioni di run precedenti): senza chiavi
     # attive, rimuove solo ciò che non è housekeeping.
-    esito["orphan_json"] = _main._clean_orphan_cache(set())
+    esito["orphan_json"] = _clean_orphan_cache(set(), cache_dir=cache_dir)
     # 2. embedding content-addressed oltre il tetto (300 MB e 30 giorni).
     emb_dir = cache_dir / "embedding_cache"
     prima = len(list(emb_dir.glob("emb_*.npz"))) if emb_dir.exists() else 0

@@ -10,7 +10,7 @@ echo    Verifica aggiornamenti HuggingFace
 echo ========================================
 echo.
 
-rem --- Scelta Python: helper condiviso (preferisce 3.11, vedi _python.bat) ---
+rem --- Scelta Python: helper condiviso (vedi _python.bat) ---
 rem Se non c'e' nessun Python il helper prova a installarlo con winget ed
 rem esce con 1 se non riesce: ha gia' spiegato cosa fare.
 call "%~dp0_python.bat"
