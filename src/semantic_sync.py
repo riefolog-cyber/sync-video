@@ -81,6 +81,12 @@ _EMBED_CACHE_DIR: Path = CACHE_DIR / "embedding_cache"
 # confine. Il tetto va dimensionato su quest'ultimo caso, altrimenti la cache
 # del raffinamento viene potata prima che il rerun possa usarla.
 _EMBED_CACHE_MAX = 120
+# Tetto in BYTE (non in file): una voce da 386 testi pesa 1,5 MB, una da 15
+# testi 48 KB. Contare i file potava per prima la voce che costa di più da
+# ricalcolare.
+_EMBED_CACHE_MAX_BYTES = 300 * 1024 * 1024
+# Una voce non riusata da 30 giorni non serve piu' a nessuno.
+_EMBED_CACHE_MAX_ETA_GIORNI = 30
 _EMBED_MEMO: dict[str, tuple[np.ndarray, float]] = {}
 
 # ``--no-cache`` deve ignorare anche questi vettori, altrimenti il flag
@@ -413,24 +419,37 @@ def _riuso_parziale(
 
 
 def _prune_embed_cache() -> None:
-    """Tiene solo le cache di embedding più recenti (LRU per data del file).
+    """Tiene la cache di embedding entro un tetto di BYTE e di ETA'.
 
     Le cache sono content-addressed (si invalidano da sole quando l'input
-    cambia), quindi non vanno cancellate: senza un tetto però crescono a ogni
-    podcast nuovo. Il tetto tiene il costo di disco prevedibile (~1 MB per
-    voce con e5-large) senza toccare quelle appena usate.
+    cambia), quindi non vanno cancellate: senza un tetto pero' crescono a ogni
+    podcast nuovo.
+
+    Il tetto e' in BYTE, non in numero di file: una voce da 386 testi (la
+    trascrizione) e' 1,5 MB, una voce da 15 testi (le slide) 48 KB: con un
+    tetto di file contati, la voce grande si potava per prima e costava 36s di
+    embedding da rifare. Il tetto in byte e' quello che interessa: il disco.
+
+    L'ETA' e' il secondo criterio: una voce non riusata da 30 giorni non
+    serve piu' a nessuno (i testi che la richiederebbero non si ripresentano
+    cosi' spesso).
     """
     try:
-        files = sorted(
-            _EMBED_CACHE_DIR.glob("emb_*.npz"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
+        voci = [
+            (p, p.stat().st_mtime, p.stat().st_size)
+            for p in _EMBED_CACHE_DIR.glob("emb_*.npz")
+        ]
     except OSError:
         return
-    for old in files[_EMBED_CACHE_MAX:]:
-        with contextlib.suppress(OSError):
-            old.unlink()
+    voci.sort(key=lambda v: v[1], reverse=True)
+    totale = 0
+    for path, mtime, size in voci:
+        troppo_vecchia = (time.time() - mtime) > _EMBED_CACHE_MAX_ETA_GIORNI * 86400
+        if troppo_vecchia or totale + size > _EMBED_CACHE_MAX_BYTES:
+            with contextlib.suppress(OSError):
+                path.unlink()
+            continue
+        totale += size
 
 
 def _embed_list_cached(

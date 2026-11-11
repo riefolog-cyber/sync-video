@@ -107,7 +107,40 @@ costa zero.
 **Le run concorrenti non si pestano piu'.** Blocco esclusivo del sistema
 operativo su `.cache/run.lock`: se una run e' gia' in corso sulla stessa
 cartella, la seconda si ferma e lo dice. Il blocco e' del SO, quindi se la run
-muore il blocco muore con lei (nessun file da pulire a mano).
+muore il blocco muore con lei (nessun file da pulire a mano); due run nello
+stesso processo non si pestano e passano.
+
+## Batch 7 — ottimizzazioni senza toccare la qualità (2026-11)
+
+Regola del batch: **stesso risultato, meno lavoro**. Nessuna di queste voci
+toca il riconoscimento (modello, DPI, campionamento dei confini): ognuna ha
+un test che confronta l'uscita.
+
+- **L'audio non viene piu' ricodificato.** Se la sorgente e' gia' un MP4/AAC,
+  nel video viene **copiata** (bit-identica): niente ricodifica lossy (che
+  peggiorava l'audio) e 10-25s risparmiati su un podcast da 20 minuti.
+- **Il video gia' renderizzato si riusa.** L'impronta copre il contenuto
+  delle slide, i tempi, il contenuto dell'audio e i parametri di rendering:
+  se coincidono, il video e' identico byte per byte e non si ricodifica
+  (71s risparmiati a ogni rilancio senza modifiche). Se il file di output e'
+  stato toccato, si rifa. `--no-cache` disattiva il riuso.
+- **I fotogrammi della verifica si conservano solo per i segmenti sbagliati.**
+  Sono gli unici da guardare: 33 MB di PNG a ogni verifica risparmiati, il
+  confronto identico (gli stessi pixel).
+- **Il calcolo "quali pagine il podcast non nomina"** era O(parole × finestre):
+  ogni parola viene tokenizzata una volta e messa nelle finestre che la
+  contengono (due ricerche binarie al posto di una scansione). Stesso
+  risultato.
+- **Le slide si tokenizzano una volta sola** invece di due (il controllo dei
+  segmenti anomali e quello della prima sezione li rifacevano).
+- **Il numero di versione non interroga piu' git due volte** (un processo per
+  volta).
+- **La cache non crea piu' la cartella in lettura** (una `mkdir` a ogni
+  lettura, e una cartella che spunta per un file che non c'e').
+- **La cache degli embedding si pota per byte e per eta'**, non per numero di
+  file: una voce da 386 testi pesa 1,5 MB e una da 15 testi 48 KB, e contando
+  i file si potava per prima proprio la voce che costa di piu' da ricalcolare.
+  Tetto: 300 MB e 30 giorni.
 
 
 ## Stato delle voci

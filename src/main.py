@@ -4,6 +4,7 @@ Orchestratore principale del pipeline slide-audio.
 Gestisce cache/resume, dry-run, e coordina tutte le fasi.
 """
 
+import bisect
 import hashlib
 import json
 import logging
@@ -1401,7 +1402,7 @@ def _speech_tokens_in_window(
     ]
 
 
-def _token_f1(a: list[str], b: list[str]) -> float:
+def _token_f1(a: Collection[str], b: Collection[str]) -> float:
     """F1 sull'intersezione degli insiemi di token (0 se disgiunti)."""
     if not a or not b:
         return 0.0
@@ -1507,6 +1508,8 @@ def _validate_anomalous_segments(
     slide_texts: Sequence[str],
     words_raw: Sequence[Word],
     durations: Sequence[float],
+    *,
+    all_slide_tokens: Sequence[list[str]] | None = None,
 ) -> dict[int, str]:
     """Verifica di contenuto dei segmenti anomali (durata molto fuori mediana).
 
@@ -1523,8 +1526,13 @@ def _validate_anomalous_segments(
     sequenza mostrata (es. con --skip-slides) e gli offset temporali sono posizionali.
     Vedi il commento nel corpo: con il solo numero di slide si leggeva la
     finestra sbagliata.
+
+    ``all_slide_tokens`` evita di tokenizzare le slide due volte nella stessa
+    run (il controllo dei segmenti anomali e quello della prima sezione): e'
+    il calcolo identico, fatto una volta sola.
     """
-    all_slide_tokens = [_slide_tokens(t) for t in slide_texts]
+    if all_slide_tokens is None:
+        all_slide_tokens = [_slide_tokens(t) for t in slide_texts]
     verdicts: dict[int, str] = {}
     offsets = [0.0]
     for d in durations:
@@ -1552,6 +1560,7 @@ def _first_section_verdict(
     durations: Sequence[float],
     slide_texts: Sequence[str],
     words_raw: Sequence[Word],
+    all_slide_tokens: Sequence[list[str]] | None = None,
 ) -> str | None:
     """Verdetto di contenuto della PRIMA sezione, se c'è.
 
@@ -1564,7 +1573,11 @@ def _first_section_verdict(
     if not slide_ids or not durations:
         return None
     return _validate_anomalous_segments(
-        [(0, slide_ids[0], durations[0])], slide_texts, words_raw, durations
+        [(0, slide_ids[0], durations[0])],
+        slide_texts,
+        words_raw,
+        durations,
+        all_slide_tokens=all_slide_tokens,
     ).get(0)
 
 
@@ -2796,15 +2809,36 @@ def _never_discussed_slides(
     if not words_raw or len(utili) < 4:
         return []
     fine = max(float(w["start"]) for w in words_raw) + window_seconds
-    finestre: list[list[str]] = []
+    # Le finestre sono contigue e sovrapposte: ogni parola cade in poche
+    # finestre consecutive. Ogni parola viene tokenizzata UNA volta e messa
+    # nelle finestre che la contengono: prima ogni finestra riscannava TUTTE
+    # le parole (O(parole x finestre): 320k confronti su un podcast da 20
+    # minuti). Stesso risultato, un ordine di grandezza in meno.
+    starts: list[float] = []
     t = 0.0
     while t < fine:
-        finestre.append(_speech_tokens_in_window(words_raw, t, t + window_seconds))
+        starts.append(t)
         t += step_seconds
-    if not finestre:
+    if not starts:
         return []
+    finestre: list[set[str]] = [set() for _ in starts]
+    for w in words_raw:
+        ts = float(w["start"])
+        tokens = [
+            tok
+            for tok in re.findall(r"[a-zà-ù]+", str(w["word"]).lower())
+            if len(tok) >= 3 and tok not in STOPWORDS_ITA
+        ]
+        if not tokens:
+            continue
+        # Finestre con inizio in (ts - window, ts]: sono consecutive, e le
+        # trovo con due ricerche binarie invece di scandire tutte le finestre.
+        primo = bisect.bisect_right(starts, ts - window_seconds)
+        ultimo = bisect.bisect_right(starts, ts)
+        for k in range(primo, ultimo):
+            finestre[k].update(tokens)
     punteggi = {
-        i: max(_token_f1(sorted(pagine[i]), w) for w in finestre) for i in utili
+        i: max(_token_f1(pagine[i], w) for w in finestre) for i in utili
     }
     mediana = sorted(punteggi.values())[len(punteggi) // 2]
     soglia = min(min_similarity, max_ratio * mediana)
@@ -2831,10 +2865,13 @@ def main(argv: list | None = None) -> None:
     args = parse_args(argv)
 
     # Versione subito e senza effetti: deve funzionare anche su un PC rotto.
+    # Il numero si calcola UNA volta: `git describe` e' un processo, e la run
+    # lo chiedeva due volte (log iniziale e report).
+    _versione = versione_programma()
     if args.version:
-        print(versione_programma())
+        print(_versione)
         return
-    log.info("Sync Video %s", versione_programma())
+    log.info("Sync Video %s", _versione)
 
     # --- Misura / pulizia cache e uscita (P1: policy sicura) ---
     # PRIMA di bootstrap/setup/update-check: sono comandi di ispezione che non
@@ -4061,9 +4098,12 @@ def main(argv: list | None = None) -> None:
             )
             if s not in floor_guaranteed
         ]
+        # I token delle slide si calcolano UNA volta: li usano sia il controllo
+        # dei segmenti anomali sia quello della prima sezione.
+        _tokens_slide = [_slide_tokens(str(t)) for t in slide_texts]
         verdicts = (
             _validate_anomalous_segments(
-                anomalous, slide_texts, words_raw, durations
+                anomalous, slide_texts, words_raw, durations, all_slide_tokens=_tokens_slide
             )
             if anomalous
             else {}
@@ -4094,7 +4134,7 @@ def main(argv: list | None = None) -> None:
             total_duration,
             verdicts,
             notes=sync_notes,
-            versione=versione_programma(),
+            versione=_versione,
         )
         _save_sync_report(sync_report)
         if anomalous:
@@ -4157,7 +4197,9 @@ def main(argv: list | None = None) -> None:
         # seconda in poi), l'attesa è definita: i primi secondi di audio devono
         # parlare di cosa c'è sulla pagina 1.
         if durations:
-            _primo = _first_section_verdict(slide_ids, durations, slide_texts, words_raw)
+            _primo = _first_section_verdict(
+                slide_ids, durations, slide_texts, words_raw, all_slide_tokens=_tokens_slide
+            )
             if _primo == "coerente":
                 log.info(
                     "\n   [Verifica] La prima sezione parla del contenuto della "
@@ -4323,6 +4365,8 @@ def main(argv: list | None = None) -> None:
             transition_duration=args.transitions,
             engine=args.engine,
             encoder=getattr(args, "video_encoder", "libx264"),
+            # --no-cache vuol dire "rifai tutto": quindi niente video riusato.
+            reuse=not args.no_cache,
         )
         t_video = time.time() - t_phase_start
 
@@ -4395,7 +4439,11 @@ def main(argv: list | None = None) -> None:
                     if anomalous:
                         anomalous = [(pos, s, durations[pos]) for pos, s, _ in anomalous]
                         verdicts = _validate_anomalous_segments(
-                            anomalous, slide_texts, words_raw, durations
+                            anomalous,
+                            slide_texts,
+                            words_raw,
+                            durations,
+                            all_slide_tokens=_tokens_slide,
                         )
                     sync_report["segments"] = _build_sync_report(
                         durations, slide_ids, total_duration, verdicts
@@ -4410,6 +4458,10 @@ def main(argv: list | None = None) -> None:
                         transition_duration=args.transitions,
                         engine=args.engine,
                         encoder=getattr(args, "video_encoder", "libx264"),
+                        # Qui i confini sono cambiati: il video da riusare
+                        # sarebbe un altro, ma il riuso lo esclude da se'
+                        # (l'impronta cambia coi tempi).
+                        reuse=not args.no_cache,
                     )
                     t_video = time.time() - t_phase_start
                     # I frame del video precedente li rimuove la verifica stessa

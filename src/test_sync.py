@@ -6,6 +6,7 @@ Coprono la logica di "precisione assoluta": niente distribuzioni uniformi,
 interruzione con avviso se la sincronizzazione è impossibile.
 """
 
+import os
 import pathlib
 import re
 import tempfile
@@ -2293,13 +2294,34 @@ class TestEmbedCache(unittest.TestCase):
         self._ss._embed_list(embed, ["uno"], "test")
         self.assertEqual(len(embed.calls), 2)
 
-    def test_prune_keeps_most_recent(self):
+    def test_prune_keeps_within_the_byte_cap(self):
+        # Il tetto e' in BYTE, non in numero di file: una voce da 386 testi
+        # pesa 1,5 MB e una da 15 testi 48 KB, e contare i file poteva per
+        # prima proprio la voce che costa di piu' da ricalcolare.
         d = self._ss._EMBED_CACHE_DIR
         d.mkdir(parents=True, exist_ok=True)
-        for i in range(self._ss._EMBED_CACHE_MAX + 3):
-            np.savez(d / f"emb_{i:016d}.npz", emb=np.zeros((1, 3)), seconds=np.float32(0.1))
+        for i in range(5):
+            np.savez(
+                d / f"emb_{i:016d}.npz",
+                emb=np.zeros((1, 1024), dtype=np.float32),
+                seconds=np.float32(0.1),
+            )
+        with mock.patch.object(self._ss, "_EMBED_CACHE_MAX_BYTES", 10_000):
+            self._ss._prune_embed_cache()
+        rimaste = sorted(d.glob("emb_*.npz"), key=lambda p: p.stat().st_mtime, reverse=True)
+        self.assertLess(len(rimaste), 5, "oltre il tetto di byte la cache viene potata")
+        self.assertTrue(rimaste, "il piu' recente resta: e' quello che la run usa")
+
+    def test_prune_drops_entries_never_used_again(self):
+        # Una voce non riusata da 40 giorni non serve piu' a nessuno.
+        d = self._ss._EMBED_CACHE_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        vecchia = d / "emb_vecchia.npz"
+        np.savez(vecchia, emb=np.zeros((1, 3)), seconds=np.float32(0.1))
+        indietro = time.time() - 40 * 86400
+        os.utime(vecchia, (indietro, indietro))
         self._ss._prune_embed_cache()
-        self.assertEqual(len(list(d.glob("emb_*.npz"))), self._ss._EMBED_CACHE_MAX)
+        self.assertFalse(vecchia.exists(), "una voce vecchia non deve sopravvivere")
 
     def test_embed_seconds_counts_vector_time(self):
         class _StubModel:

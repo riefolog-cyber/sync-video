@@ -166,16 +166,22 @@ def file_hash(path: Path) -> str:
     return md5.hexdigest()
 
 
-def cache_path(key: str, cache_dir: Path | None = None) -> Path:
-    """Percorso del file di cache per una data chiave."""
+def cache_path(key: str, cache_dir: Path | None = None, *, create: bool = True) -> Path:
+    """Percorso del file di cache per una data chiave.
+
+    ``create=False`` non crea la cartella: la LETTURA di una cache non deve
+    scrivere nulla su disco (una syscall di `mkdir` a ogni lettura, e una
+    cartella che spunta per un file che non c'e').
+    """
     cd = cache_dir if cache_dir is not None else CACHE_DIR
-    cd.mkdir(parents=True, exist_ok=True)
+    if create:
+        cd.mkdir(parents=True, exist_ok=True)
     return cd / f"{key}.json"
 
 
 def load_cache(key: str, cache_dir: Path | None = None) -> dict | None:
     """Carica dati dalla cache, o None se non presente/corrotto."""
-    path = cache_path(key, cache_dir)
+    path = cache_path(key, cache_dir, create=False)
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))

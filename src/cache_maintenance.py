@@ -94,7 +94,7 @@ def clean_cache(
     # 1. JSON orfani (slide/trascrizioni di run precedenti): senza chiavi
     # attive, rimuove solo ciò che non è housekeeping.
     esito["orphan_json"] = _main._clean_orphan_cache(set())
-    # 2. embedding content-addressed oltre il tetto LRU (120 voci).
+    # 2. embedding content-addressed oltre il tetto (300 MB e 30 giorni).
     emb_dir = cache_dir / "embedding_cache"
     prima = len(list(emb_dir.glob("emb_*.npz"))) if emb_dir.exists() else 0
     # La cache è un'ottimizzazione: mai far fallire la pulizia per un prune.

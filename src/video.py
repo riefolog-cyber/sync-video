@@ -4,6 +4,7 @@ FASE 4 — Assemblaggio video con MoviePy.
 Include riconciliazione timeline e supporto per transizioni.
 """
 
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -30,6 +31,7 @@ from config import (
     log,
 )
 from hardware import encoder_args
+from video_riuso import chiave_video, segna_video, video_riutilizzabile
 
 
 # =====================================================================
@@ -317,6 +319,19 @@ def _run_ffmpeg(cmd: list[str], total_duration: float) -> None:
         raise RuntimeError(f"ffmpeg è fallito (exit code {returncode}). Ultimo output:\n{tail}")
 
 
+def _audio_copy_args(audio_path: Path) -> list[str]:
+    """Come mettere l'audio nel video: copia o ricodifica.
+
+    Se la sorgente e' gia' un contenitore MP4/AAC, la copia e' bit-identica:
+    si evita una ricodifica lossy che peggiorava l'audio e costava tempo
+    (misurato: ~10-25s su un podcast di 20 minuti). Con altri formati si
+    ricodifica in AAC, come prima.
+    """
+    if audio_path.suffix.lower() in (".m4a", ".mp4", ".aac", ".m4b"):
+        return ["-c:a", "copy"]
+    return ["-c:a", "aac", "-b:a", "160k"]
+
+
 def _build_video_ffmpeg(
     slide_files: list[str],
     durations: list[float],
@@ -371,7 +386,7 @@ def _build_video_ffmpeg(
                 # l'opzione di output -r produce overshoot di secondi sull'ultima
                 # immagine, il filtro fps resta entro un frame di tolleranza.
                 "-vf", f"fps={fps}", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "160k",
+                *_audio_copy_args(audio),
                 # Con un encoder accelerato i thread CPU non servono: il
                 # lavoro e' sulla GPU e forzarli aggiunge solo contention.
                 *([] if enc != "libx264" else ["-threads", str(threads)]),
@@ -408,6 +423,7 @@ def build_video(
     transition_duration: float = 0.0,
     engine: str = DEFAULT_VIDEO_ENGINE,
     encoder: str = "libx264",
+    reuse: bool = True,
 ) -> None:
     """
     Assembla il video finale:
@@ -429,6 +445,9 @@ def build_video(
         engine: 'ffmpeg' (default, veloce) o 'moviepy' (legacy)
         encoder: encoder H.264 scelto dal rilevamento hardware; se quello
             accelerato fallisce si ripiega automaticamente su libx264
+        reuse: riusa il video gia' renderizzato se slide, tempi, audio e
+            parametri sono gli stessi (71s risparmiati a ogni rilancio senza
+            modifiche). False per non riusarlo (--no-cache).
     """
     log.info("\n4. Generazione rapida del flusso video definitivo...")
 
@@ -439,6 +458,11 @@ def build_video(
         raise ValueError(
             f"slide_files ({len(slide_files)}) != durations ({len(durations)}). Impossibile assemblare il video."
         )
+
+    # I tempi come l'utente li ha dati, PRIMA dell'estensione per il buffer:
+    # l'impronta del video deve descrivere gli input, non quello che ne deriva
+    # (l'estensione e' deterministica, quindi non cambia la decisione).
+    _durate_input = [float(d) for d in durations]
 
     # Buffer: estendi l'ultima slide per proteggere l'audio finale.
     # Fatto PRIMA della list comprehension per evitare clip orfani e
@@ -468,17 +492,36 @@ def build_video(
         transition_compensation,
     )
 
-    # --- Dispatch motore ---
-    engine_normalized = (engine or "").strip().lower()
+    # --- Riuso del video gia' renderizzato ---
+    # Stessi slide, stessi tempi, stesso audio, stessi parametri: il video
+    # verrebbe identico byte per byte. Rilanciare la pipeline per guardare
+    # qualcosa non doveva costare 71s di encoding.
     if isinstance(audio_source, (str, Path)):
         audio_path: str | Path | None = audio_source
     else:
         # AudioFileClip: usa il file sottostante se disponibile (evita doppie aperture)
         audio_path = getattr(audio_source, "filename", None)
+    _engine_norm = (engine or "").strip().lower()
+    _chiave = chiave_video(
+        list(slide_files),
+        _durate_input,
+        audio_path,
+        fps,
+        transition_duration,
+        _engine_norm,
+        encoder,
+    )
+    if reuse and video_riutilizzabile(output_path, _chiave):
+        log.info(
+            "   Video riusato: slide, tempi, audio e parametri sono gli stessi "
+            "della run precedente (nessuna ricodifica)."
+        )
+        log.info("\n[COMPLETATO] File sincronizzato salvato in: %s", output_path)
+        return
 
-    use_moviepy = engine_normalized == "moviepy" or transition_duration > 0 or audio_path is None
+    use_moviepy = _engine_norm == "moviepy" or transition_duration > 0 or audio_path is None
     if use_moviepy:
-        if engine_normalized == "ffmpeg" and transition_duration > 0:
+        if _engine_norm == "ffmpeg" and transition_duration > 0:
             log.info(
                 "   Transizioni richieste (%.2fs): non supportate dal motore ffmpeg, uso MoviePy.",
                 transition_duration,
@@ -491,6 +534,7 @@ def build_video(
         _build_video_ffmpeg(slide_files, durations, audio_path, output_path, fps, threads, encoder=encoder)
 
     log.info("\n[COMPLETATO] File sincronizzato salvato in: %s", output_path)
+    segna_video(output_path, _chiave)
 
 
 def _build_video_moviepy(
@@ -753,9 +797,11 @@ def frame_consistency_check(
         segments: sequenza di ``(slide, start, end)`` effettivamente usati.
         slide_files: percorsi delle slide (indice 0 = slide 1).
         frames_dir: dove salvare i frame estratti (per la diagnosi manuale).
-            Viene svuotata prima di scrivere: la cartella deve contenere solo i
-            frame dell'artefatto appena verificato, non quelli delle run
-            precedenti (in produzione era cresciuta fino a 191 file / 297 MB).
+            Viene svuotata prima di scrivere e riceve SOLO i fotogrammi dei
+            segmenti sbagliati: sono gli unici da guardare (i corretti non
+            servono a nessuno). La cartella deve contenere i frame
+            dell'artefatto appena verificato, non quelli delle run precedenti
+            (in produzione era cresciuta fino a 191 file / 297 MB).
         min_similarity: soglia sotto cui il match non è considerato affidabile.
 
     Returns:
@@ -782,7 +828,9 @@ def frame_consistency_check(
     # la riparazione automatica attiva il confine veniva spostato su rumore,
     # peggio che non verificare. Le reference si ricostruiscono in una cartella
     # temporanea: frames_dir deve contenere solo i frame dell'artefatto.
-    with tempfile.TemporaryDirectory(prefix="syncvideo_ref_") as refdir:
+    with tempfile.TemporaryDirectory(prefix="syncvideo_ref_") as refdir, tempfile.TemporaryDirectory(
+        prefix="syncvideo_fr_"
+    ) as framedir:
         slide_paths = _letterbox_references(slide_files, Path(refdir))
         if slide_paths is None:
             log.warning("   [Verifica] Slide non leggibili: confronto frame-vs-slide saltato.")
@@ -795,13 +843,22 @@ def frame_consistency_check(
         # per segmento sono decine di processi e decine di aperture del
         # container (su un video da 15 minuti: secondi). Il percorso uno per
         # uno resta come ripiego (ed e' la reference dei test).
+        #
+        # I frame vivono in una cartella TEMPORANEA: nella cartella dell'utente
+        # finisce solo il fotogramma di un segmento SBAGLIATO, che e' l'unico
+        # da guardare (33 MB di PNG a ogni verifica risparmiati).
         candidati: list[tuple[int, int, float, Path]] = []
         for i, (slide, start, end) in enumerate(segments):
             if not 1 <= int(slide) <= len(slide_paths):
                 continue
             t = (float(start) + float(end)) / 2
             candidati.append(
-                (i, int(slide), t, frames_dir / f"seg{i:02d}_t{t:07.1f}_slide{int(slide):02d}.png")
+                (
+                    i,
+                    int(slide),
+                    t,
+                    Path(framedir) / f"seg{i:02d}_t{t:07.1f}_slide{int(slide):02d}.png",
+                )
             )
         if not _extract_frames_batch(
             video,
@@ -831,6 +888,12 @@ def frame_consistency_check(
                         "time": round(t, 1),
                     }
                 )
+                # Il fotogramma del segmento SBAGLIATO si conserva nella
+                # cartella dell'utente: e' la prova da guardare. Quelli
+                # corretti non servono a nessuno (33 MB di PNG a ogni
+                # verifica risparmiati).
+                with suppress(OSError):
+                    shutil.copy2(frame, frames_dir / frame.name)
     return {"checked": checked, "coherent": coherent, "mismatches": mismatches}
 
 
