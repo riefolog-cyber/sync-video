@@ -153,6 +153,95 @@ class TestSlideAudioFlow(unittest.TestCase):
         anchors = extract_slide_anchors(words, total_slides=4, flow="slide-audio")
         self.assertEqual(anchors, {2: 33.0}, "la pagina del libro non deve diventare un'ancora")
 
+    def test_la_prossima_slide_e_un_ancora_implicita(self):
+        # Il relatore spesso non dice il numero: "passiamo alla prossima".
+        # Il numero implicito vale "l'ultima slide menzionata + 1": il confine
+        # diventa MISURATO invece che stimato.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("alla", 30.3),
+                ("slide", 30.6),
+                ("2", 30.9),
+                ("e", 31.2),
+                ("ora", 31.5),
+                ("passiamo", 31.8),
+                ("alla", 32.1),
+                ("prossima", 32.4),
+                ("slide", 32.7),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=4, flow="slide-audio")
+        # Il tempo dell'ancora e' la fine della frase (la parola dopo il
+        # numero), come per le slide.
+        self.assertEqual(anchors, {2: 31.2, 3: 32.7})
+
+    def test_la_slide_successiva_e_un_ancora_implicita(self):
+        # L'ordine inverso ("la slide successiva") vale come "la prossima slide".
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("alla", 30.3),
+                ("slide", 30.6),
+                ("2", 30.9),
+                ("e", 31.2),
+                ("procediamo", 31.5),
+                ("con", 31.8),
+                ("la", 32.0),
+                ("slide", 32.3),
+                ("successiva", 32.6),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=4, flow="slide-audio")
+        self.assertEqual(anchors, {2: 31.2, 3: 32.6})
+
+    def test_la_prossima_senza_verbo_non_e_un_ancora(self):
+        # "la prossima pagina del capitolo" non è un cambio di slide: senza il
+        # verbo di transizione la menzione non entra.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("guardiamo", 30.0),
+                ("la", 30.3),
+                ("prossima", 30.6),
+                ("pagina", 30.9),
+                ("del", 31.2),
+                ("capitolo", 31.5),
+                ("passiamo", 31.8),
+                ("alla", 32.1),
+                ("slide", 32.4),
+                ("2", 32.7),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=4, flow="slide-audio")
+        self.assertEqual(anchors, {2: 32.7}, "la prossima pagina del capitolo non è un'ancora")
+
+    def test_la_prossima_oltre_il_deck_non_e_un_ancora(self):
+        # L'ultima slide non ha una successiva nel deck: la menzione vale
+        # "l'ultima slide detta + 1", che non esiste.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("alla", 30.3),
+                ("slide", 30.6),
+                ("2", 30.9),
+                ("e", 31.2),
+                ("passiamo", 31.5),
+                ("alla", 31.8),
+                ("prossima", 32.1),
+                ("slide", 32.4),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=2, flow="slide-audio")
+        self.assertEqual(anchors, {2: 31.2})
+
     def test_il_conteggio_di_pagine_non_e_un_ancora(self):
         # "le 13 pagine del documento" è un conteggio, non una transizione:
         # non ha verbo di transizione, quindi non entra.

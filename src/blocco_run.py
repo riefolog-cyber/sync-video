@@ -17,6 +17,7 @@ pulizia manuale.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import IO, Any
 
@@ -60,14 +61,34 @@ class BloccoRun:
         self.path = cache_dir / _NOME_FILE
         self._file: IO[str] | None = None
 
-    def acquired(self) -> bool:
-        """Prende il blocco. False se un altro processo lo ha gia'."""
+    def acquired(self, attesa_secondi: float = 0.0) -> bool:
+        """Prende il blocco. False se un altro processo lo ha gia'.
+
+        Con ``attesa_secondi`` si ASPETTA che l'altra run finisca (il blocco e'
+        del sistema operativo: quando l'altra run muore il blocco si libera
+        da solo). Serve a chi aspetta: due run non si pestano, e la seconda
+        parte quando la prima ha finito.
+        """
         global _proprietario
         if _proprietario is not None:
             # Questo processo ha gia' il blocco: la run precedente (o un
             # test che avvia la pipeline) lo tiene ancora. Non e' una run
             # concorrente: si prosegue.
             return True
+        deadline = time.time() + max(0.0, attesa_secondi)
+        while True:
+            if self._prova():
+                return True
+            if time.time() >= deadline:
+                return False
+            log.info(
+                "   Un'altra run è già in corso su questa cartella: aspetto che finisca."
+            )
+            time.sleep(2.0)
+
+    def _prova(self) -> bool:
+        """Un tentativo di prendere il blocco (True se preso)."""
+        global _proprietario
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fh = open(self.path, "a+", encoding="utf-8")  # noqa: SIM115 - resta aperto col blocco

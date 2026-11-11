@@ -186,6 +186,11 @@ def extract_slide_anchors(
         transitions = _collect_transitions(words, window_seconds)
         return {i + 2: t for i, t in enumerate(transitions[: max(0, total_slides - 1)])}
     mention_kinds = _collect_slide_mention_kinds(words, total_slides)
+    # Le menzioni col numero implicito ("la prossima slide") entrano insieme
+    # alle altre, risolte come "l'ultima slide menzionata + 1".
+    mention_kinds = _risolvi_mentioni_implicite(
+        mention_kinds, _collect_implicit_mentions(words), total_slides
+    )
     ordered, deferred = split_ordered_mentions(mention_kinds)
     # Le menzioni in ordine sono già coerenti fra loro (per costruzione non
     # scendono mai di numero): il LIS resta come rete di sicurezza.
@@ -424,6 +429,108 @@ def split_ordered_mentions(
 # =====================================================================
 # FLUSSO audio-slide: "Passiamo al blocco successivo"
 # =====================================================================
+# Aggettivi che rendono implicito il numero della slide: "passiamo alla
+# prossima slide", "la slide successiva". Il numero vale "l'ultima slide
+# menzionata + 1", e serve un verbo di transizione vicino: senza, "la
+# prossima pagina" del libro non è un cambio di slide.
+_IMPLICIT_ADJECTIVES = frozenset(
+    {"prossima", "prossimo", "successiva", "successivo"}
+)
+
+
+def _is_implicit_adjective(word: str) -> bool:
+    """True se ``word`` e' un aggettivo che rende implicito il numero."""
+    return _normalize(word) in _IMPLICIT_ADJECTIVES
+
+
+def _collect_implicit_mentions(words: list[Word]) -> list[tuple[float, bool]]:
+    """Menzioni di slide col numero IMPLICITO ("la prossima slide").
+
+    Il relatore spesso non dice il numero: dice "passiamo alla prossima".
+    Il numero implicito vale "l'ultima slide menzionata + 1" (la risoluzione
+    avviene in ``_risolvi_mentioni_implicite``).
+
+    Servono tre cose insieme, altrimenti la frase non e' una transizione:
+    un aggettivo ("prossima/successiva"), la parola slide/diapositiva/pagina
+    accanto, e un verbo di transizione vicino ("passiamo", "procediamo",
+    "andiamo", "ora"). Senza il verbo, "a pagina 3 del libro" e "la prossima
+    pagina del capitolo" non sono cambi di slide.
+
+    Returns:
+        I tempi delle menzioni implicite (in ordine cronologico).
+    """
+    found: list[tuple[float, bool]] = []
+    for i, w in enumerate(words):
+        if not _is_implicit_adjective(w["word"]):
+            continue
+        # La parola slide puo' stare PRIMA ("la prossima slide") o DOPO
+        # ("la slide successiva").
+        indice_slide: int | None = None
+        for j in range(i + 1, min(i + 4, len(words))):
+            if _is_slide_word(words[j]["word"]) or _is_page_word(words[j]["word"]):
+                indice_slide = j
+                break
+        if indice_slide is None:
+            for j in range(max(0, i - 3), i):
+                if _is_slide_word(words[j]["word"]) or _is_page_word(words[j]["word"]):
+                    indice_slide = j
+                    break
+        if indice_slide is None:
+            continue
+        if _is_closing_recap(words, indice_slide):
+            continue
+        if not _has_transition_verb(words, indice_slide):
+            continue
+        found.append((_reference_boundary(words, max(i, indice_slide)), False))
+    return found
+
+
+def _risolvi_mentioni_implicite(
+    kinds: dict[int, list[tuple[float, bool]]],
+    implicite: list[tuple[float, bool]],
+    total_slides: int,
+) -> dict[int, list[tuple[float, bool]]]:
+    """Assegna un numero alle menzioni che non lo avevano.
+
+    Il numero implicito ("la prossima slide") vale "l'ultima slide menzionata
+    + 1": e' cosi' che un relatore parla. La numerazione e' quella del
+    RELATORE (che puo' essere sfalsata rispetto al deck: la correzione del
+    mapping, piu' avanti, sposta tutte le ancore dello stesso delta).
+
+    Il vincolo e' la MONOTONIA': una menzione implicita che punta a una slide
+    gia' detta (o oltre il deck) non vale niente (e' un richiamo, non una
+    transizione) e non sposta nulla.
+    """
+    if not implicite:
+        return kinds
+    eventi: list[tuple[float, int | None, bool]] = []
+    for slide, items in kinds.items():
+        for t, is_count in items:
+            eventi.append((t, slide, is_count))
+    for t, is_count in implicite:
+        eventi.append((t, None, is_count))
+    eventi.sort(key=lambda e: e[0])
+    ultima: int | None = None
+    for t, numero, is_count in eventi:
+        if is_count:
+            # Un conteggio ("le 13 slide") non e' una transizione: non sposta
+            # il "numero implicito" successivo.
+            continue
+        if numero is None:
+            if ultima is None:
+                continue  # senza un numero noto non c'e' nulla da cui partire
+            candidata = ultima + 1
+            if candidata > total_slides:
+                continue
+        else:
+            candidata = numero
+        if ultima is not None and candidata <= ultima:
+            continue  # richiamo di una slide gia' detta
+        kinds.setdefault(candidata, []).append((t, False))
+        ultima = max(ultima or 0, candidata)
+    return kinds
+
+
 def _extract_audio_slide_flow(
     words: list[Word],
     total_slides: int,

@@ -178,6 +178,36 @@ abbassa in silenzio il dpi (300 richiesti -> 280 su un deck 16:9), e
 `--dpi` sembrava fare una cosa e ne faceva un'altra. Ora lo dice. Il rendering
 NON cambia: e' solo trasparenza.
 
+## Batch 9 — le ancore senza numero, il report, e il blocco che aspetta (2026-11)
+
+**"Passiamo alla prossima slide" diventa un'ancora.** La grammatica delle
+ancore chiedeva un **numero**: chi non lo diceva ("passiamo alla prossima")
+si ritrovava con quei confini *stimati* dal contenuto invece che *misurati*.
+Ora il numero implicito vale "l'ultima slide menzionata + 1", con tre condizioni
+insieme: un aggettivo ("prossima/successiva"), la parola slide/diapositiva/
+pagina accanto, e un verbo di transizione vicino. Senza il verbo, "la
+prossima pagina del capitolo" non e' un cambio di slide. Il numero implicito
+e' nella numerazione del RELATORE (che puo' essere sfalsata rispetto al deck:
+la correzione del mapping sposta poi tutte le ancore dello stesso delta).
+
+**Il report della run racconta la run.** In `sync_report.json` finiscono
+adesso: le **correzioni dei nomi** fatte (quali e quante), il **DPI effettivo**
+del rendering e i **tempi per fase**. Con la cache e i tempi in un posto solo
+si puo' capire perche' una run e' stata lenta senza rileggere i log.
+
+**Il tool di revisione (`--review`) estrae i fotogrammi in blocco.** Le
+anteprime dei confini dubbiosi costavano due ffmpeg per dubbio: ora e' una
+sola invocazione per tutti.
+
+**Il blocco delle run concorrenti aspetta invece di fermarsi.** Se un'altra run
+e' gia' al lavoro sulla stessa cartella, la seconda ASPETTA (un quarto d'ora):
+di solito e' un rilancio mentre la prima finisce, non due run in competizione.
+Il blocco e' del sistema operativo, quindi quando la prima finisce (o muore)
+il blocco si libera da solo e la seconda parte.
+
+Verifiche: 1105 test verdi (5 nuovi), ruff e mypy puliti su tre piattaforme,
+run reale con **timeline identica**.
+
 
 ## Stato delle voci
 

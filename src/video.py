@@ -967,11 +967,18 @@ def boundary_review_sheet(
     if not moments or not video.exists():
         return None
     with tempfile.TemporaryDirectory(prefix="syncvideo_preview_") as tmp:
-        frames: list[tuple[str, Path]] = []
-        for i, (caption, t) in enumerate(moments):
-            frame = Path(tmp) / f"frame_{i}.png"
-            if _extract_frame(video, float(t), frame):
-                frames.append((caption, frame))
+        # Tutti i fotogrammi del foglio con UNA invocazione di ffmpeg: due per
+        # dubbio, e un dubbio per confine, erano decine di processi.
+        tempi = [float(t) for _, t in moments]
+        uscite = [Path(tmp) / f"frame_{i}.png" for i in range(len(moments))]
+        if not _extract_frames_batch(video, tempi, uscite):
+            for i, t in enumerate(tempi):
+                _extract_frame(video, t, uscite[i])
+        frames: list[tuple[str, Path]] = [
+            (caption, uscita)
+            for (caption, _), uscita in zip(moments, uscite, strict=True)
+            if uscita.exists() and uscita.stat().st_size > 0
+        ]
         if not frames:
             log.debug("   [Anteprima] Nessun fotogramma estratto da %s.", video)
             return None

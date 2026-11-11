@@ -199,7 +199,9 @@ def vocabolario_del_deck(slide_texts: Sequence[str], min_occorrenze: int = 2) ->
 
 
 def correct_transcript_names(
-    words: list[Word], vocabolario: dict[str, int] | None = None
+    words: list[Word],
+    vocabolario: dict[str, int] | None = None,
+    correzioni: list[str] | None = None,
 ) -> list[Word]:
     """Corregge i nomi propri sistematicamente storpiato dall'ASR.
 
@@ -228,6 +230,8 @@ def correct_transcript_names(
 
     Returns:
         Nuova lista di parole con i nomi corretti (l'originale è intatta).
+        Se ``correzioni`` e' una lista, viene riempita con le correzioni fatte
+        ("da -> a"), cosi' il chiamante puo' metterle nell'artefatto della run.
     """
     if not words:
         return words
@@ -249,7 +253,7 @@ def correct_transcript_names(
     i = 0
     n = len(words)
     fixed = 0
-    correzioni: list[str] = []
+    correzioni_locali: list[str] = []
     while i < n:
         matched = False
         for phrase, correct in _NAME_CORRECTIONS:
@@ -266,7 +270,7 @@ def correct_transcript_names(
                 out.append(cast(Word, merged))
                 i += len(phrase)
                 fixed += 1
-                correzioni.append(f"{' '.join(phrase)} -> {correct}")
+                correzioni_locali.append(f"{' '.join(phrase)} -> {correct}")
                 matched = True
                 break
         if not matched:
@@ -277,7 +281,7 @@ def correct_transcript_names(
                 merged["word"] = nuovo
                 out.append(cast(Word, merged))
                 fixed += 1
-                correzioni.append(f"{parola} -> {nuovo}")
+                correzioni_locali.append(f"{parola} -> {nuovo}")
                 i += 1
                 matched = True
         if not matched:
@@ -285,7 +289,9 @@ def correct_transcript_names(
             i += 1
     if fixed:
         log.info("   [Trascrizione] %d nome/i proprio/i corretto/i.", fixed)
-        log.debug("   [Trascrizione] Correzioni: %s", "; ".join(correzioni[:60]))
+        log.debug("   [Trascrizione] Correzioni: %s", "; ".join(correzioni_locali[:60]))
+    if correzioni is not None:
+        correzioni.extend(correzioni_locali)
     return out
 
 

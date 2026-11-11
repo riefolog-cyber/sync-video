@@ -70,6 +70,39 @@ class TestBloccoRun(unittest.TestCase):
             self.assertTrue(primo.acquired())
             self.assertTrue(secondo.acquired(), "cartelle diverse: nessun conflitto")
 
+    def test_la_run_che_arriva_dopo_aspetta_che_l_altra_finisca(self) -> None:
+        # Il caso reale: un rilancio mentre la prima run e' ancora al lavoro.
+        # La seconda ASPETTA (il blocco e' del sistema operativo: quando la
+        # prima finisce o muore, il blocco si libera da solo).
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            src = str(Path(__file__).resolve().parent)
+            codice = (
+                f"import sys, time; sys.path.insert(0, {src!r})\n"
+                "from pathlib import Path\n"
+                "from blocco_run import BloccoRun\n"
+                f"b = BloccoRun(Path({str(base)!r}))\n"
+                "print('PRESO' if b.acquired() else 'BLOCCATO', flush=True)\n"
+                "time.sleep(3)\n"
+            )
+            figlio = subprocess.Popen(
+                [sys.executable, "-c", codice], stdout=subprocess.PIPE, text=True
+            )
+            uscita = figlio.stdout
+            assert uscita is not None
+            blocco = BloccoRun(base)
+            try:
+                self.assertEqual(uscita.readline().strip(), "PRESO")
+                self.assertTrue(
+                    blocco.acquired(attesa_secondi=30.0),
+                    "la seconda run deve aspettare che la prima finisca",
+                )
+            finally:
+                # Il blocco va rilasciato PRIMA che la cartella temporanea
+                # venga cancellata: su Windows il file aperto non si cancella.
+                blocco.release()
+                figlio.wait(timeout=30)
+
     def test_il_file_di_blocco_puo_restare_sul_disco(self) -> None:
         # Il file resta, ma conta il blocco del SO: dopo la run il file non
         # blocca nessuno (nessuna "pulizia manuale" da fare).

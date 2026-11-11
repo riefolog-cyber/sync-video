@@ -69,7 +69,13 @@ from moviepy import AudioFileClip, VideoFileClip
 
 from chunks import Word
 from machine_setup import machine_setup
-from ocr import PRESENTATION_SUFFIXES, convert_presentation_to_pdf, extract_slides_text_ocr
+from ocr import (
+    PRESENTATION_SUFFIXES,
+    _set_dpi_effettivo,
+    convert_presentation_to_pdf,
+    extract_slides_text_ocr,
+    ultimo_dpi_effettivo,
+)
 
 # =====================================================================
 # MODULI ESTRATTI (P2): cache + report vivono in pipeline_cache /
@@ -2195,6 +2201,12 @@ def _resolve_flow(
     return DEFAULT_FALLBACK_FLOW, True
 
 
+# Quanto una run aspetta che l'altra finisca, prima di rinunciare (il blocco
+# e' del sistema operativo: quando l'altra run muore il blocco si libera da
+# solo, quindi l'attesa non e' un'attesa cieca).
+_BLOCCO_ATTESA_SECONDI = 900.0
+
+
 def _anchor_coverage_ok(n_anchored: int, total_slides: int, minimum: float) -> bool:
     """True se la copertura delle ancore raggiunge la soglia minima.
 
@@ -2931,8 +2943,12 @@ def main(argv: list | None = None) -> None:
     # dell'altro, senza errori in console. Il blocco e' del sistema operativo,
     # quindi se la run muore il blocco muore con lei: nessun file da pulire a
     # mano.
+    #
+    # Se l'altra run e' ancora al lavoro, questa ASPETTA (un quarto d'ora):
+    # di solito e' un rilancio mentre la prima finisce, non due run in
+    # competizione.
     _blocco = BloccoRun(CACHE_DIR)
-    if not _blocco.acquired():
+    if not _blocco.acquired(attesa_secondi=_BLOCCO_ATTESA_SECONDI):
         _abort(
             "Un'altra run è già in corso su questa cartella (blocco "
             f"{_blocco.path}). Due run insieme si pestano le slide e le cache: "
@@ -3134,6 +3150,11 @@ def main(argv: list | None = None) -> None:
             # Cache valida: i file immagine esistono ancora
             slide_files = cached["slide_files"]
             slide_texts = cached["slide_texts"]
+            # Il DPI effettivo resta in cache: con le slide gia' renderizzate
+            # non si puo' ricalcolarlo, ma nell'artefatto serve.
+            _dpi_dalla_cache = cached.get("dpi_effettivo")
+            if isinstance(_dpi_dalla_cache, int):
+                _set_dpi_effettivo(_dpi_dalla_cache)
             log.info("1. [CACHE] Slide OCR recuperate dalla cache (%d slide).", len(slide_files))
 
     if slide_files is None or slide_texts is None:
@@ -3155,6 +3176,10 @@ def main(argv: list | None = None) -> None:
                 {
                     "slide_files": slide_files,
                     "slide_texts": slide_texts,
+                    # Il DPI effettivo del rendering: con le slide in cache non
+                    # si puo' ricalcolarlo, e nell'artefatto serve sapere a
+                    # che risoluzione sono state lette.
+                    "dpi_effettivo": ultimo_dpi_effettivo(),
                 },
             )
 
@@ -3294,14 +3319,28 @@ def main(argv: list | None = None) -> None:
         # propri che il deck contiene davvero (parole iniziali maiuscole che
         # ricorrono piu' volte). Cosi' la correzione vale per QUALSIASI deck,
         # non solo per quello per cui il dizionario e' stato scritto a mano.
+        #
+        # Le correzioni finiscono nell'artefatto della run: si puo' vedere
+        # COSA e' stato corretto (e quindi da quanto il confronto fra parole e
+        # slide si e' mosso).
+        _correzioni_nomi: list[str] = []
         if words_raw:
-            words_raw = correct_transcript_names(words_raw, vocabolario_del_deck(slide_texts))
+            words_raw = correct_transcript_names(
+                words_raw, vocabolario_del_deck(slide_texts), _correzioni_nomi
+            )
 
         # Scelte fatte dalla run che finiscono in sync_report.json (es.
         # escalation per segnale debole, beam automatico): prima esistevano solo
         # nei log. Va inizializzata prima della scelta del beam, che la annota
         # qui dentro, e prima della costruzione del report, più avanti.
         sync_notes: dict[str, object] = {}
+        if _correzioni_nomi:
+            sync_notes["correzioni_nomi"] = list(_correzioni_nomi)
+        # Il DPI effettivo del rendering: se il tetto sui pixel l'ha abbassato,
+        # l'artefatto lo dice (l'opzione --dpi sembrava fare un'altra cosa).
+        _dpi_effettivo = ultimo_dpi_effettivo()
+        if _dpi_effettivo:
+            sync_notes["dpi_effettivo"] = _dpi_effettivo
         # Provenienza delle durate garantite dal pavimento anti-flicker:
         # restano vuoti quando quel pavimento non è stato applicato, così
         # nessun ramo deve indovinare se il dato esiste.
@@ -4134,6 +4173,14 @@ def main(argv: list | None = None) -> None:
         # La chiave della trascrizione usata, per `--review`: permette di
         # rileggere le parole giuste invece di affidarsi al mtime.
         sync_notes["transcript_cache_key"] = cache_key_transcript
+        # I tempi per fase nell'artefatto: con la cache e i tempi in un posto
+        # solo si puo' capire PERCHE' una run e' stata lenta (e se la cache ha
+        # funzionato) senza rileggere i log.
+        sync_notes["tempi"] = {
+            "ocr": round(t_ocr, 1),
+            "trascrizione": round(t_transcribe, 1),
+            "sincronizzazione": round(t_sync, 1),
+        }
         sync_report = _build_sync_report(
             durations,
             slide_ids,

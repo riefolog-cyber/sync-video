@@ -511,6 +511,22 @@ def config_module_path() -> str:
 
 MAX_RENDER_PIXELS = 16_000_000
 
+# L'ultimo DPI EFFETTIVO usato per il rendering (il tetto sui pixel puo'
+# abbassarlo). Esposto per il report: l'opzione --dpi che sembra fare una cosa
+# e ne fa un'altra va detta, non taciuta.
+_ULTIMO_DPI_EFFETTIVO: int | None = None
+
+
+def ultimo_dpi_effettivo() -> int | None:
+    """L'ultimo DPI effettivo del rendering (None se non e' ancora avvenuto)."""
+    return _ULTIMO_DPI_EFFETTIVO
+
+
+def _set_dpi_effettivo(dpi: int) -> None:
+    """Ricorda il DPI effettivo (usato quando le slide arrivano dalla cache)."""
+    global _ULTIMO_DPI_EFFETTIVO
+    _ULTIMO_DPI_EFFETTIVO = dpi
+
 
 def _render_page(args: tuple[str, int, str, int]) -> tuple[str, int]:
     """Renderizza una singola pagina PDF in PNG (eseguita in processo separato).
@@ -702,6 +718,9 @@ def extract_slides_text_ocr(
                 dpi,
                 MAX_RENDER_PIXELS // 1_000_000,
             )
+        if dpi_effettivi:
+            global _ULTIMO_DPI_EFFETTIVO
+            _ULTIMO_DPI_EFFETTIVO = min(dpi_effettivi)
     else:
         log.info("   Tutte le slide sono in cache (nessun rendering necessario).")
 
