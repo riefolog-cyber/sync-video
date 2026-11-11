@@ -1,0 +1,84 @@
+{
+  "materiale": {
+    "pdf": "0849b78dc1e404863bab2f0768670fab",
+    "audio": "c1aaf43e4d4fe81670eed06bbd76643b"
+  },
+  "ancore": 14,
+  "segmenti": [
+    {
+      "slide": 1,
+      "start": 0.0,
+      "end": 130.48
+    },
+    {
+      "slide": 2,
+      "start": 130.48,
+      "end": 228.12
+    },
+    {
+      "slide": 3,
+      "start": 228.12,
+      "end": 313.18
+    },
+    {
+      "slide": 4,
+      "start": 313.18,
+      "end": 410.94
+    },
+    {
+      "slide": 5,
+      "start": 410.94,
+      "end": 495.38
+    },
+    {
+      "slide": 6,
+      "start": 495.38,
+      "end": 582.02
+    },
+    {
+      "slide": 7,
+      "start": 582.02,
+      "end": 655.78
+    },
+    {
+      "slide": 8,
+      "start": 655.78,
+      "end": 739.56
+    },
+    {
+      "slide": 9,
+      "start": 739.56,
+      "end": 812.18
+    },
+    {
+      "slide": 10,
+      "start": 812.18,
+      "end": 891.84
+    },
+    {
+      "slide": 11,
+      "start": 891.84,
+      "end": 957.98
+    },
+    {
+      "slide": 12,
+      "start": 957.98,
+      "end": 1026.18
+    },
+    {
+      "slide": 13,
+      "start": 1026.18,
+      "end": 1095.64
+    },
+    {
+      "slide": 14,
+      "start": 1095.64,
+      "end": 1159.6
+    },
+    {
+      "slide": 15,
+      "start": 1159.6,
+      "end": 1232.17
+    }
+  ]
+}

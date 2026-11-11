@@ -1,5 +1,25 @@
 <!-- Estratto da README.md (righe 729-818). Torna al [README](../README.md). -->
 
+## 🧪 Prova sul materiale reale (prova_materiale_reale.py)
+
+I test della suite sono **tutti finti** (un PDF finto, un audio finto): le
+cose che contano — le ancore, i confini, il riconoscimento — si verificano
+solo sul materiale vero. Questo script lancia la pipeline sul PDF e sull'audio
+della cartella e confronta la timeline con un **riferimento** (file golden):
+
+```bash
+python src/scripts/prova_materiale_reale.py             # verifica
+python src/scripts/prova_materiale_reale.py --aggiorna  # nuovo riferimento
+```
+
+Esce con 0 se la timeline è **identica** al riferimento, con 1 se un confine si
+è spostato (e dice di quanto). Se il materiale non è quello del riferimento
+lo dice, e non confronta (confrontare materiali diversi non significa
+niente): in quel caso il riferimento va riallineato con `--aggiorna`.
+
+La prima volta su un materiale nuovo il lavoro è tutto (OCR + trascrizione:
+qualche minuto); dopo, le cache rendono la prova di qualche secondo.
+
 ## 🔍 Verifica post-run (analysis_sync.py)
 
 Dopo una generazione puoi controllare la QUALITÀ della sincronizzazione

@@ -208,6 +208,25 @@ il blocco si libera da solo e la seconda parte.
 Verifiche: 1105 test verdi (5 nuovi), ruff e mypy puliti su tre piattaforme,
 run reale con **timeline identica**.
 
+## Batch 10 — la prova sul materiale reale (2026-11)
+
+La suite (1105 test) e' **tutta finta**: l'OCR di un PDF finto, la
+trascrizione di un audio finto, un video costruito al volo. Le cose che
+contano — le ancore, i confini, il riconoscimento — si verificano solo sul
+materiale vero, e fino a ieri lo verificavo a mano (una volta sola).
+
+`src/scripts/prova_materiale_reale.py` rende la verifica **ripetibile**: lancia
+la pipeline sul PDF e sull'audio della cartella e confronta la timeline con un
+riferimento (file golden, versionato nel repo). Esce con 0 se la timeline e'
+identica, con 1 se un confine si e' spostato (e dice di quanto). Se il
+materiale non e' quello del riferimento lo dice e non confronta: confrontare
+materiali diversi non significa niente.
+
+Da questo momento ogni batch di qualita' puo' essere provato **sul deck
+vero**, non solo sui test finti. Il riferimento (hash del materiale, numero di
+ancore, i 15 segmenti) diventa la documentazione viva di cio' che il programma
+deve produrre.
+
 
 ## Stato delle voci
 
