@@ -15,6 +15,7 @@ import json
 import re
 import subprocess
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -154,10 +155,70 @@ def _norm_word(word: str) -> str:
     return re.sub(r"[^a-zàèéìòù']", "", word.lower().strip())
 
 
-def correct_transcript_names(words: list[Word]) -> list[Word]:
+def _distanza_le_1(a: str, b: str) -> bool:
+    """True se le due parole differiscono di UNA sola lettera.
+
+    Solo il caso che serve: Whisper storpiando un nome proprio sbaglia
+    una lettera ("sigmond" per "sigmund"), non due. Confronto fatto a mano
+    invece che con Levenshtein: una parola sola, e quattro casi.
+    """
+    if a == b:
+        return False
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        differenze = sum(1 for x, y in zip(a, b, strict=True) if x != y)
+        return differenze == 1
+    # Una parola piu' corta: si prova a togliere un carattere dalla piu' lunga.
+    corta, lunga = (a, b) if len(a) < len(b) else (b, a)
+    return any(lunga[:i] + lunga[i + 1 :] == corta for i in range(len(lunga)))
+
+
+def vocabolario_del_deck(slide_texts: Sequence[str], min_occorrenze: int = 2) -> dict[str, int]:
+    """Nomi propri del deck, con quante volte compaiono.
+
+    Sono le parole **iniziali maiuscole** dell'OCR che ricorrono almeno due
+    volte: e' il segnale che sono nomi ("Freud", "Moro") e non l'inizio di una
+    frase ("Il", "Per"). Una maiuscola che compare una volta sola non entra:
+    il deck la puo' aver messa li' per caso.
+
+    Il vocabolario serve a correggere la trascrizione: l'ASR storpia i nomi
+    e il motore di confronto lavora sulle parole, quindi piu' nomi corretti =
+    slide agganciate meglio.
+    """
+    conteggi: dict[str, int] = {}
+    for testo in slide_texts:
+        for parola in re.findall(r"[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ']+", str(testo)):
+            if not parola[0].isupper():
+                continue
+            chiave = _norm_word(parola)
+            if len(chiave) < 4:
+                continue
+            conteggi[chiave] = conteggi.get(chiave, 0) + 1
+    return {k: v for k, v in conteggi.items() if v >= min_occorrenze}
+
+
+def correct_transcript_names(
+    words: list[Word], vocabolario: dict[str, int] | None = None
+) -> list[Word]:
     """Corregge i nomi propri sistematicamente storpiato dall'ASR.
 
-    Applica ``_NAME_CORRECTIONS`` alle parole raw con timestamp: il termine
+    Due fonti, in quest'ordine:
+
+    1. il dizionario noto (``_NAME_CORRECTIONS``): nomi che l'ASR sbaglia
+       sempre, gia' corretti a mano;
+    2. il **vocabolario del deck** (se fornito): i nomi propri che il deck
+       contiene davvero. Una parola della trascrizione che nel deck non c'e'
+       e che sta a una lettera di distanza da un nome del deck viene
+       corretta: e' il caso "sigmond" -> "sigmund" ma valido per QUALSIASI
+       deck, non solo per quello per cui il dizionario e' stato scritto.
+
+    Una parola gia' presente nel deck non viene toccata (e' gia' giusta), e
+    una parola a distanza 1 da DUE nomi del deck viene lasciata com'e': e'
+    ambigua, e una correzione sbagliata fa scendere la similarita' invece
+    di farla salire.
+
+    Applica le correzioni alle parole raw con timestamp: il termine
     corretto sostituisce la prima parola della frase riconosciuta male e le
     successive vengono scartate (l'intervallo temporale complessivo del gruppo
     viene conservato: inizio della prima, fine dell'ultima). I nomi corretti
@@ -170,10 +231,25 @@ def correct_transcript_names(words: list[Word]) -> list[Word]:
     """
     if not words:
         return words
+    # Indice inverso per il vocabolario: parola trascritta -> nome del deck.
+    correzioni_deck: dict[str, str] = {}
+    if vocabolario:
+        candidati = sorted(vocabolario)
+        for w in words:
+            parola = _norm_word(w["word"])
+            if len(parola) < 4:
+                continue
+            # Una parola gia' nel deck e' gia' giusta: non si tocca.
+            if parola in vocabolario:
+                continue
+            vicini = [c for c in candidati if _distanza_le_1(parola, c)]
+            if len(vicini) == 1:
+                correzioni_deck.setdefault(parola, vicini[0])
     out: list[Word] = []
     i = 0
     n = len(words)
     fixed = 0
+    correzioni: list[str] = []
     while i < n:
         matched = False
         for phrase, correct in _NAME_CORRECTIONS:
@@ -190,13 +266,26 @@ def correct_transcript_names(words: list[Word]) -> list[Word]:
                 out.append(cast(Word, merged))
                 i += len(phrase)
                 fixed += 1
+                correzioni.append(f"{' '.join(phrase)} -> {correct}")
                 matched = True
                 break
+        if not matched:
+            parola = _norm_word(words[i]["word"])
+            nuovo = correzioni_deck.get(parola)
+            if nuovo:
+                merged = dict(words[i])
+                merged["word"] = nuovo
+                out.append(cast(Word, merged))
+                fixed += 1
+                correzioni.append(f"{parola} -> {nuovo}")
+                i += 1
+                matched = True
         if not matched:
             out.append(words[i])
             i += 1
     if fixed:
-        log.info("   [Trascrizione] %d nome/i proprio/i corretto/i (dizionario).", fixed)
+        log.info("   [Trascrizione] %d nome/i proprio/i corretto/i.", fixed)
+        log.debug("   [Trascrizione] Correzioni: %s", "; ".join(correzioni[:60]))
     return out
 
 

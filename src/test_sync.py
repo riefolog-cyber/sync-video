@@ -105,6 +105,78 @@ class TestSlideAudioFlow(unittest.TestCase):
         anchors = extract_slide_anchors(words, total_slides=2, flow="slide-audio")
         self.assertEqual(anchors, {2: 31.9})
 
+    def test_pagina_con_verbs_di_transizione_e_un_ancora(self):
+        # Il relatore dice "pagina" invece di "slide": il confine va MISURATO,
+        # non stimato. Con il verbo di transizione ("passiamo alla pagina 3")
+        # la menzione è una transizione vera. Il tempo dell'ancora è la fine
+        # della frase (la parola dopo il numero), come per le slide.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("passiamo", 30.0),
+                ("alla", 30.3),
+                ("pagina", 30.6),
+                ("3", 30.9),
+                ("e", 31.2),
+                ("procediamo", 31.5),
+                ("con", 31.8),
+                ("la", 32.0),
+                ("pagina", 32.3),
+                ("4", 32.6),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=4, flow="slide-audio")
+        self.assertEqual(anchors, {3: 31.2, 4: 32.6})
+
+    def test_pagina_di_un_libro_non_e_un_ancora(self):
+        # "a pagina 3 del libro" è una citazione, non una transizione: senza
+        # un verbo di transizione la menzione non deve diventare un confine
+        # (un confine sbagliato sposta la slide di minuti).
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("come", 30.0),
+                ("dicevo", 30.3),
+                ("a", 30.6),
+                ("pagina", 30.9),
+                ("3", 31.2),
+                ("del", 31.5),
+                ("libro", 31.8),
+                ("passiamo", 32.1),
+                ("alla", 32.4),
+                ("slide", 32.7),
+                ("2", 33.0),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=4, flow="slide-audio")
+        self.assertEqual(anchors, {2: 33.0}, "la pagina del libro non deve diventare un'ancora")
+
+    def test_il_conteggio_di_pagine_non_e_un_ancora(self):
+        # "le 13 pagine del documento" è un conteggio, non una transizione:
+        # non ha verbo di transizione, quindi non entra.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("questa", 30.0),
+                ("puntata", 30.3),
+                ("copre", 30.6),
+                ("le", 30.9),
+                ("13", 31.2),
+                ("pagine", 31.5),
+                ("del", 31.8),
+                ("documento", 32.1),
+                ("passiamo", 32.4),
+                ("alla", 32.7),
+                ("pagina", 33.0),
+                ("2", 33.3),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=13, flow="slide-audio")
+        self.assertEqual(anchors, {2: 33.3})
+
     def test_early_total_slide_count_does_not_poison_real_anchor(self):
         # Regressione: "le 13 slide di questo documento" a inizio episodio
         # (numero prima di "slide") è un conteggio, non una transizione.

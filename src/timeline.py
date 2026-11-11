@@ -53,6 +53,19 @@ _NOT_SLIDE_WORDS = frozenset(
     }
 )
 
+# Parole che il relatore usa per "slide" quando non dice "slide". "Pagina" e'
+# la piu' comune ("passiamo alla pagina 3"), ma e' anche la parola con cui si
+# cita una pagina di un libro ("a pagina 3 del libro"): qui la menzione vale
+# SOLO con un verbo di transizione vicino (vedi `_collect_page_mentions`).
+# "pag" e' la forma troncata che Whisper produce ("alla pag 3").
+_PAGE_WORDS = frozenset({"pagina", "pagine", "pag"})
+
+
+def _is_page_word(word: str) -> bool:
+    """True se ``word`` e' "pagina" (o una sua forma)."""
+    return _normalize(word) in _PAGE_WORDS
+
+
 # Parole di CHIUSURA/riepilogo finale (es. "e chiudiamo con la slide 14").
 # Un "slide N" preceduto da queste parole non è una transizione di inizio
 # sezione: è un riferimento a posteriori che, usato come ancora, sposterebbe
@@ -737,6 +750,12 @@ def _collect_slide_mention_kinds(
                 num is not None
                 and min_slide <= num <= total_slides
                 and not _preceded_by_slide_word(words, i)
+                # Un numero che appartiene a una frase "pagina N" ("a pagina 3
+                # del libro") non e' un numero che precede la slide: senza
+                # questo, il 3 di "pagina 3" veniva agganciato alla parola
+                # "slide" che viene dopo ("... del libro passiamo alla slide
+                # 2") e diventava una menzione della slide 3.
+                and not _preceded_by_page_word(words, i)
             ):
                 for j in range(i + 1, min(i + 7, len(words))):
                     if _is_slide_word(words[j]["word"]):
@@ -763,6 +782,11 @@ def _collect_slide_mention_kinds(
                                 " (conteggio)" if is_count else "",
                             )
                         break
+    # Le menzioni "pagina N" entrano insieme alle altre: valgono solo con un
+    # verbo di transizione vicino (vedi `_collect_page_mentions`), quindi non
+    # possono essere una citazione di una pagina di un libro.
+    for num, items in _collect_page_mentions(words, total_slides, include_slide_one).items():
+        refs.setdefault(num, []).extend(items)
     return {
         num: [item for item in sorted(times, key=lambda x: x[0])]
         for num, times in refs.items()
@@ -814,7 +838,10 @@ def announcements_off_timeline(
     """
     found: list[tuple[int, float, float]] = []
     for i, w in enumerate(words):
-        if not _is_slide_word(w["word"]):
+        # "pagina N" vale come "slide N" solo con un verbo di transizione
+        # (vedi `_collect_page_mentions`): qui il percorso e' gia' stretto,
+        # basta ammettere la parola.
+        if not (_is_slide_word(w["word"]) or _is_page_word(w["word"])):
             continue
         slide_num: int | None = None
         mention_idx = i
@@ -848,6 +875,70 @@ def announcements_off_timeline(
             continue
         found.append((pagina, boundary, float(declared)))
     return sorted(found, key=lambda item: item[1])
+
+
+def _collect_page_mentions(
+    words: list[Word],
+    total_slides: int,
+    include_slide_one: bool = False,
+) -> dict[int, list[tuple[float, bool]]]:
+    """Menzioni "pagina N", che valgono solo con un verbo di transizione.
+
+    "Pagina" e' la parola con cui il relatore dice spesso "slide" ("passiamo
+    alla pagina 3"), ed e' anche la parola con cui si cita una pagina di un
+    libro ("a pagina 3 del libro"). La differenza e' il verbo di transizione:
+    senza, la menzione NON e' una transizione e non deve diventare un
+    confine (un confine sbagliato sposta la slide di minuti). Con ("passiamo
+    alla pagina 3") e' una transizione, e la pagina va misurata come una
+    slide: piu' confini misurati, meno confini stimati dal contenuto.
+
+    Il numero e' sempre un riferimento, mai un conteggio ("le 13 pagine" non ha
+    un verbo di transizione e quindi non entra).
+    """
+    min_slide = 1 if include_slide_one else 2
+    refs: dict[int, list[tuple[float, bool]]] = {}
+    for i, w in enumerate(words):
+        if not _is_page_word(w["word"]):
+            continue
+        if _is_closing_recap(words, i):
+            continue
+        # Pattern P1: "pagina N" (il numero nelle 8 parole successive).
+        for j in range(i + 1, min(i + 8, len(words))):
+            num = _number_from_word(_normalize(words[j]["word"]))
+            if num is None:
+                continue
+            if min_slide <= num <= total_slides and _has_transition_verb(words, j):
+                refs.setdefault(num, []).append((_reference_boundary(words, j), False))
+                log.debug(
+                    "   [Deterministico] Trovato '%s' con numero %d a %.1fs",
+                    w["word"],
+                    num,
+                    w["start"],
+                )
+            break
+        else:
+            # Pattern P2: "N ... pagina" (il numero prima della parola).
+            for j in range(max(0, i - 6), i):
+                num = _number_from_word(_normalize(words[j]["word"]))
+                if num is None:
+                    continue
+                if (
+                    min_slide <= num <= total_slides
+                    and _has_transition_verb(words, j)
+                    and not _preceded_by_page_word(words, j)
+                ):
+                    refs.setdefault(num, []).append((_reference_boundary(words, i), False))
+                break
+    return refs
+
+
+def _preceded_by_page_word(words: list[Word], idx: int, lookback: int = 8) -> bool:
+    """True se una parola "pagina" precede ``words[idx]`` entro ``lookback``.
+
+    Come per le slide: un numero preceduto da "pagina" appartiene gia' alla
+    frase "pagina N" e non deve essere rilevato anche dal pattern inverso.
+    """
+    return any(_is_page_word(w["word"]) for w in words[max(0, idx - lookback):idx])
 
 
 def _collect_slide_mentions(

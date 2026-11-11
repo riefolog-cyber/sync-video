@@ -13,7 +13,12 @@ from typing import cast
 from unittest import mock
 
 import transcription
-from transcription import correct_transcript_names, openvino_usable, resolved_transcriber
+from transcription import (
+    correct_transcript_names,
+    openvino_usable,
+    resolved_transcriber,
+    vocabolario_del_deck,
+)
 
 
 def _words(items):
@@ -231,6 +236,61 @@ class TestCorrectTranscriptNames(unittest.TestCase):
 
     def test_empty_input(self):
         self.assertEqual(correct_transcript_names([]), [])
+
+
+class TestVocabolarioDelDeck(unittest.TestCase):
+    """I nomi propri del deck correggono la trascrizione, per QUALSIASI deck.
+
+    Fin qui c'era un dizionario scritto a mano (6 nomi di un deck solo). Il
+    vocabolario del deck lo rende automatico: i nomi sono le parole INIZIALI
+    MAIUSCOLE dell'OCR che ricorrono piu' volte.
+    """
+
+    def test_solo_le_maiuscole_ricorrenti(self):
+        vocabolario = vocabolario_del_deck(
+            [
+                "Sigmund Freud e la psicanalisi",
+                "Il pensiero di Sigmund Freud",
+                "Freud e il caso clinico",
+            ]
+        )
+        self.assertIn("freud", vocabolario)
+        # "Il" e' maiuscolo ma compare una volta sola: non e' un nome.
+        self.assertNotIn("il", vocabolario)
+        # "Psicanalisi" e' maiuscolo (inizio di frase) ma una volta sola.
+        self.assertNotIn("psicanalisi", vocabolario)
+
+    def test_il_vocabulario_correggia_il_nome_storpiato(self):
+        # Il deck dice "Sigmund Freud": Whisper ha scritto "Sigmond freud".
+        vocabolario = vocabolario_del_deck(
+            ["Sigmund Freud", "Freud e il caso clinico", "Il Freud di Freud"]
+        )
+        words = _words([("sigmond", 10.0), ("freud", 10.4), ("parlava", 11.0)])
+        out = correct_transcript_names(words, vocabolario)
+        self.assertEqual([w["word"] for w in out], ["sigmund", "freud", "parlava"])
+
+    def test_una_parola_giu_giusta_non_si_tocca(self):
+        # "freud" e' gia' nel deck: non si corregge (niente rischi).
+        vocabolario = vocabolario_del_deck(["Freud", "Freud e il caso"])
+        words = _words([("freud", 10.0)])
+        out = correct_transcript_names(words, vocabolario)
+        self.assertEqual([w["word"] for w in out], ["freud"])
+
+    def test_parola_ambigua_non_si_corregge(self):
+        # Due nomi del deck a distanza 1 dalla stessa parola: la correzione
+        # sarebbe un lancio della moneta, quindi non si corregge.
+        vocabolario = vocabolario_del_deck(["Freud", "Freud e il caso", "Kant", "Kant e la morale"])
+        words = _words([("frand", 10.0)])
+        out = correct_transcript_names(words, vocabolario)
+        self.assertEqual([w["word"] for w in out], ["frand"])
+
+    def test_il_tempo_del_gruppo_e_conservato(self):
+        vocabolario = vocabolario_del_deck(["Freud", "Freud e il caso"])
+        words = _words([("freudd", 10.0), ("freud", 10.4)])
+        out = correct_transcript_names(words, vocabolario)
+        self.assertEqual([w["word"] for w in out], ["freud", "freud"])
+
+
 class TestOpenvinoUsable(unittest.TestCase):
     """openvino_usable: l'avviso OpenVINO va mostrato solo se percorribile.
 

@@ -143,6 +143,7 @@ from transcription import (
     resolved_transcriber,
     retranscribe_zone,
     transcribe_audio,
+    vocabolario_del_deck,
 )
 from updates import run_frozen_report, run_update_check
 from video import (
@@ -3288,8 +3289,13 @@ def main(argv: list | None = None) -> None:
         # --- Correzione nomi propri (Whisper li storpi sistematicamente: "sigmond
         # freud", "thomas mur", "mark chiuse"...). I nomi corretti sono indizi
         # cruciali per il matching slide<->parlato del motore embedding. ---
+        #
+        # Oltre al dizionario noto, si usa il VOCABOLARIO DEL DECK: i nomi
+        # propri che il deck contiene davvero (parole iniziali maiuscole che
+        # ricorrono piu' volte). Cosi' la correzione vale per QUALSIASI deck,
+        # non solo per quello per cui il dizionario e' stato scritto a mano.
         if words_raw:
-            words_raw = correct_transcript_names(words_raw)
+            words_raw = correct_transcript_names(words_raw, vocabolario_del_deck(slide_texts))
 
         # Scelte fatte dalla run che finiscono in sync_report.json (es.
         # escalation per segnale debole, beam automatico): prima esistevano solo

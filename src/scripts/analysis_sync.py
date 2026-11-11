@@ -53,7 +53,7 @@ from config import (
 )
 from semantic_sync import _clean_slide_text, _load_embed_model, _make_embed_fn, segment_verdict
 from timeline import extract_slide_anchors
-from video import _letterbox_references, _reference_matrix, _similarities
+from video import _extract_frames_batch, _letterbox_references, _reference_matrix, _similarities
 
 
 def slide_di_altro_deck(elementi: list, n_slide: int) -> list[int]:
@@ -425,6 +425,31 @@ def _extract_frame(out: Path, t: float) -> None:
     )
 
 
+def _estrai_in_blocco(richieste: list[tuple[float, Path]]) -> None:
+    """Estrae tutti i frame mancanti con UNA invocazione di ffmpeg.
+
+    Un ffmpeg per frame sono decine di processi e aperture del container: su
+    un video da 15 minuti, secondi. I frame gia' in cache (piu' vecchi del
+    video) si saltano, come prima: la cache puo' contenere immagini di un
+    video precedente e produrrebbero falsi mismatch.
+    """
+    mancanti = [
+        (t, out)
+        for t, out in richieste
+        if not (out.exists() and out.stat().st_mtime >= VIDEO.stat().st_mtime)
+    ]
+    if not mancanti:
+        return
+    if not _extract_frames_batch(
+        VIDEO,
+        [t for t, _ in mancanti],
+        [out for _, out in mancanti],
+    ):
+        # Ripiego: uno per uno (il percorso che funziona sempre).
+        for t, out in mancanti:
+            _extract_frame(out, t)
+
+
 def _build_slide_paths() -> list[Path]:
     """Reference delle slide COSI' COME SONO NEL VIDEO (con letterbox).
 
@@ -498,11 +523,18 @@ SLIDE_MATRIX = _slide_matrix()
 
 frame_ok = 0
 mismatches: list[tuple[int, int, float]] = []
+_richieste_frame: list[tuple[float, Path]] = []
 for i, seg in enumerate(segs if slide_paths else []):
     s = seg["slide"]
     t = (seg["start"] + seg["end"]) / 2
     out = FRAMES_DIR / f"seg{i:02d}_t{t:07.1f}_slide{s:02d}.png"
-    _extract_frame(out, t)
+    _richieste_frame.append((t, out))
+# Tutti i frame in una invocazione sola (vedi `_estrai_in_blocco`).
+_estrai_in_blocco(_richieste_frame)
+for i, seg in enumerate(segs if slide_paths else []):
+    s = seg["slide"]
+    t = (seg["start"] + seg["end"]) / 2
+    out = FRAMES_DIR / f"seg{i:02d}_t{t:07.1f}_slide{s:02d}.png"
     sims_img = _frame_sims(out, SLIDE_MATRIX)
     best_img = int(np.argmax(sims_img)) + 1
     best_sim_img = max(sims_img)
@@ -529,13 +561,21 @@ print("=" * 100)
 # ri-raffina a ogni run i confini delle slide senza ancora esplicita, quindi
 # un confine segnalato come disallineato puo' essere atteso (video corretto).
 boundary_ok = 0
+_richieste_confine: list[tuple[float, Path]] = []
 for i, seg in enumerate(segs[1:] if slide_paths else [], start=1):
     s = seg["slide"]
     t = seg["start"] + 1.0  # 1s dopo il taglio
     if t >= AUDIO_DURATION:
         continue
     out = FRAMES_DIR / f"bnd{i:02d}_t{t:07.1f}_slide{s:02d}.png"
-    _extract_frame(out, t)
+    _richieste_confine.append((t, out))
+_estrai_in_blocco(_richieste_confine)
+for i, seg in enumerate(segs[1:] if slide_paths else [], start=1):
+    s = seg["slide"]
+    t = seg["start"] + 1.0  # 1s dopo il taglio
+    if t >= AUDIO_DURATION:
+        continue
+    out = FRAMES_DIR / f"bnd{i:02d}_t{t:07.1f}_slide{s:02d}.png"
     sims_img = _frame_sims(out, SLIDE_MATRIX)
     best_img = int(np.argmax(sims_img)) + 1
     best_sim_img = max(sims_img)

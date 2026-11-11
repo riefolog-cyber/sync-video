@@ -512,8 +512,13 @@ def config_module_path() -> str:
 MAX_RENDER_PIXELS = 16_000_000
 
 
-def _render_page(args: tuple[str, int, str, int]) -> str:
-    """Renderizza una singola pagina PDF in PNG (eseguita in processo separato)."""
+def _render_page(args: tuple[str, int, str, int]) -> tuple[str, int]:
+    """Renderizza una singola pagina PDF in PNG (eseguita in processo separato).
+
+    Ritorna anche il **dpi effettivo**: se il tetto sui pixel l'ha abbassato,
+    il chiamante lo dice (l'opzione --dpi che sembra fare una cosa e ne fa
+    un'altra e' peggio di un'omissione).
+    """
     pdf_path, page_num, output_path, dpi = args
     doc = fitz.open(str(pdf_path))
     try:
@@ -530,7 +535,7 @@ def _render_page(args: tuple[str, int, str, int]) -> str:
         pix.save(str(output_path))
     finally:
         doc.close()
-    return output_path
+    return output_path, dpi
 
 
 def _tesseract() -> Any:
@@ -671,15 +676,32 @@ def extract_slides_text_ocr(
         n_render = len(pages_to_render)
         log.info("   Rendering %d slide (%d cached)...", n_render, total_pages - n_render)
         n_workers = min(workers, n_render)
+        dpi_effettivi: list[int] = []
         # `or n_render <= 1` era un secondo termine morto: n_workers è già il
         # minimo tra workers e n_render, quindi n_render <= 1 implica
         # n_workers <= 1. Resta solo il test sul worker effettivo.
         if n_workers <= 1:
             for args in tqdm(pages_to_render, desc="Rendering slide"):
-                _render_page(args)
+                _, d = _render_page(args)
+                dpi_effettivi.append(d)
         else:
             with Pool(processes=n_workers) as pool:
-                list(tqdm(pool.imap(_render_page, pages_to_render), total=n_render, desc="Rendering slide"))
+                for _, d in tqdm(
+                    pool.imap(_render_page, pages_to_render),
+                    total=n_render,
+                    desc="Rendering slide",
+                ):
+                    dpi_effettivi.append(d)
+        if dpi_effettivi and min(dpi_effettivi) < dpi:
+            # Il tetto sui pixel ha abbassato il dpi: si dice, altrimenti
+            # l'opzione --dpi sembra fare una cosa e ne fa un'altra.
+            log.info(
+                "   OCR a %d dpi (ne' chiesti %d): il tetto di %d megapixel per "
+                "pagina l'ha abbassato.",
+                min(dpi_effettivi),
+                dpi,
+                MAX_RENDER_PIXELS // 1_000_000,
+            )
     else:
         log.info("   Tutte le slide sono in cache (nessun rendering necessario).")
 

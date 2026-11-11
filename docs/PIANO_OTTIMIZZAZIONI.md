@@ -142,6 +142,42 @@ un test che confronta l'uscita.
   i file si potava per prima proprio la voce che costa di piu' da ricalcolare.
   Tetto: 300 MB e 30 giorni.
 
+## Batch 8 — qualita' del riconoscimento (2026-11)
+
+Il riconoscimento e' il cuore del progetto: qui si aggiungono due cose che
+lo rendono **piu' preciso**, non piu' veloci.
+
+**"Passiamo alla pagina 3" diventa un confine misurato.** La grammatica delle
+ancore conosceva "slide N" e "diapositiva N" (piu' le varianti fonetiche
+che Whisper produce). Se il relatore dice "pagina", quei confini non venivano
+misurati: venivano *stimati* dal contenuto, con la durata incerta. Ora
+"pagina N" e' riconosciuto — **solo con un verbo di transizione vicino**
+("passiamo alla pagina 3"): "pagina" e' anche la parola con cui si cita una
+pagina di un libro ("a pagina 3 del libro"), e un confine sbagliato sposta
+la slide di minuti. Il numero di una frase "pagina N" non viene piu'
+agganciato alla parola "slide" che viene dopo (difetto preesistente).
+
+**La trascrizione si corregge con il vocabolario del deck.** I nomi propri
+storpiati dall'ASR si correggevano con un dizionario scritto a mano (6 nomi di
+un deck solo). Ora il vocabolario viene dal **deck stesso**: le parole
+iniziali maiuscole dell'OCR che ricorrono piu' volte sono i nomi propri, e
+una parola della trascrizione che nel deck non c'e' e sta a una lettera di
+distanza da uno di essi viene corretta. Sicurezza: una parola gia' nel deck
+non si tocca, una parola a distanza 1 da DUE nomi del deck resta com'e' (e'
+ambigua), e una maiuscola che compare una volta sola non entra (e' l'inizio
+di una frase). Misurato sul materiale di esempio: **33 nomi corretti** (il
+dizionario a mano ne copriva 6) e **timeline identica** (i confini vengono
+dalle ancore, quindi le correzioni non li spostano).
+
+**Il tool di verifica** (`analysis_sync.py`, quello che si lancia a mano dopo
+la run) estrae i frame con una sola invocazione di ffmpeg invece di una per
+frame.
+
+**Il programma dice il DPI effettivo.** Il tetto di 16 megapixel per pagina
+abbassa in silenzio il dpi (300 richiesti -> 280 su un deck 16:9), e
+`--dpi` sembrava fare una cosa e ne faceva un'altra. Ora lo dice. Il rendering
+NON cambia: e' solo trasparenza.
+
 
 ## Stato delle voci
 
