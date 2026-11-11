@@ -346,6 +346,72 @@ def _embed_cache_key(embed_id: str, texts: Sequence[str]) -> str:
     return h.hexdigest()[:16]
 
 
+def _chiave_testo(testo: str) -> str:
+    """Chiave di un singolo testo (per il riuso parziale fra liste diverse)."""
+    return hashlib.sha1(testo.encode("utf-8")).hexdigest()[:16]
+
+
+def _riuso_parziale(
+    embed_id: str, texts: Sequence[str]
+) -> tuple[dict[int, np.ndarray], list[int]]:
+    """Vettori già calcolati per una lista, anche se la lista è cambiata.
+
+    La cache per lista copre il caso "gli stessi testi, lo stesso modello". Ma
+    il caso reale è un altro: la trascrizione rifatta cambia POCHE parole, e
+    la lista dei blocchi cambia tutta (una chiave diversa, quindi zero
+    riutilizzo) mentre i vettori sono quasi tutti identici. Misurato: 7 cache
+    da 386 testi in 90 minuti, ~15s di embedding pagati a ogni re-run.
+
+    Qui si cerca nelle voci gia' scritte la stessa chiave di testo: un file
+    con i vettori e le chiavi dei testi che li hanno prodotti. Si riusano i
+    vettori trovati e si ricalcolano solo quelli che mancano.
+
+    Le chiavi dei testi NON bastano da sole: lo stesso testo embedding cambia
+    se cambiano modello o batch, quindi ogni voce porta con se' l'identita' del
+    modello e il riuso e' concesso solo a identita' uguale.
+    """
+    if not embed_id or not _EMBED_CACHE_ENABLED:
+        return {}, list(range(len(texts)))
+    wanted = [_chiave_testo(t) for t in texts]
+    trovati: dict[int, np.ndarray] = {}
+    try:
+        candidati = sorted(
+            _EMBED_CACHE_DIR.glob("emb_*.npz"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return {}, list(range(len(texts)))
+    for path in candidati:
+        if len(trovati) == len(texts):
+            break
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                if str(np.asarray(data["model"]).reshape(())) != embed_id:
+                    continue
+                keys = np.asarray(data["keys"]).astype("U16")
+                indice = {str(k): i for i, k in enumerate(keys)}
+                utili = {
+                    pos: indice[chiave]
+                    for pos, chiave in enumerate(wanted)
+                    if pos not in trovati and chiave in indice
+                }
+                if not utili:
+                    # Il file non contiene nessuno dei testi cercati: non si
+                    # carica la matrice dei vettori (il pezzo grosso).
+                    continue
+                emb = np.asarray(data["emb"], dtype=np.float32)
+        except (OSError, ValueError, KeyError):
+            # Voce vecchia (senza chiavi/modello) o illeggibile: non serve.
+            continue
+        if emb.ndim != 2 or emb.shape[0] != len(keys):
+            continue
+        for pos, riga in utili.items():
+            trovati[pos] = emb[riga]
+    mancanti = [pos for pos in range(len(texts)) if pos not in trovati]
+    return trovati, mancanti
+
+
 def _prune_embed_cache() -> None:
     """Tiene solo le cache di embedding più recenti (LRU per data del file).
 
@@ -405,6 +471,12 @@ def _embed_list_cached(
             # riusata con contenuti diversi devono portare al ricalcolo.
             if arr.ndim == 2 and arr.shape[0] == len(texts):
                 _EMBED_MEMO[key] = (arr, saved)
+                # La potatura è un LRU per mtime: senza questo tocco una voce
+                # riusata a ogni run resta "vecchia" e viene eliminata prima di
+                # quelle scritte una volta sola (i raffinamenti), che poi si
+                # ricalcolano da zero senza motivo.
+                with contextlib.suppress(OSError):
+                    path.touch()
                 log.info(
                     "   [%s] Embedding riusati dalla cache: ~%.0fs risparmiati "
                     "(stessi testi, stesso modello).",
@@ -431,27 +503,86 @@ def _embed_list_and_save(
     embed_id = str(getattr(embed_fn, "embed_id", "") or "")
     if not embed_id or not _EMBED_CACHE_ENABLED:
         return arr
+    _salva_cache_voce(embed_id, texts, arr, saved)
+    return arr
+
+
+def _salva_cache_voce(embed_id: str, texts: Sequence[str], arr: np.ndarray, saved: float) -> None:
+    """Scrive una voce di cache: vettori, chiavi dei testi e identita' del modello.
+
+    Le chiavi dei testi e l'identita' del modello servono al riuso PARZIALE:
+    con esse una lista un po' diversa puo' riusare i vettori che gia' ci sono
+    invece di ricalcolarli tutti.
+    """
+    if not embed_id or not _EMBED_CACHE_ENABLED:
+        return
     key = _embed_cache_key(embed_id, texts)
     _EMBED_MEMO[key] = (arr, saved)
     try:
         _EMBED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        np.savez(_EMBED_CACHE_DIR / f"emb_{key}.npz", emb=arr, seconds=np.float32(saved))
+        np.savez(
+            _EMBED_CACHE_DIR / f"emb_{key}.npz",
+            emb=arr,
+            seconds=np.float32(saved),
+            keys=np.array([_chiave_testo(t) for t in texts], dtype="U16"),
+            model=np.array(embed_id),
+        )
         _prune_embed_cache()
     except OSError as e:
         # La cache è un'ottimizzazione: se il disco non collabora si prosegue.
-        log.debug("   [%s] Cache embedding non salvata (%s).", context, e)
-    return arr
+        log.debug("   Cache embedding non salvata (%s).", e)
 
 
 def _embed_list(embed_fn: EmbedFn, texts: Sequence[str], context: str) -> np.ndarray:
     """Embedding di una lista di testi, dalla cache quando possibile.
 
+    Tre strade, in ordine di costo:
+
+    1. la lista e' identica a una gia' calcolata (memo o disco): zero embedding;
+    2. la lista e' cambiata ma quasi tutti i testi esistono gia': si ricalcolano
+       SOLO quelli mancanti (il caso reale: la trascrizione rifatta cambia poche
+       parole, la lista dei blocchi e' un'altra ma i vettori sono gli stessi);
+    3. lista nuova: si calcola tutto.
+
     Gli errori di ``embed_fn`` si propagano al chiamante (che li gestisce come
-    prima): la cache è solo un'accelerazione, non un cambio di semantica.
+    prima): la cache e' solo un'accelerazione, non un cambio di semantica.
     """
     cached = _embed_list_cached(embed_fn, texts, context)
     if cached is not None:
         return cached
+
+    embed_id = str(getattr(embed_fn, "embed_id", "") or "")
+    if embed_id and _EMBED_CACHE_ENABLED and texts:
+        riusati, mancanti = _riuso_parziale(embed_id, texts)
+        if riusati and mancanti and len(mancanti) < len(texts):
+            t0 = time.time()
+            try:
+                nuovi = np.asarray(embed_fn([texts[i] for i in mancanti]), dtype=np.float32)
+            except Exception as e:  # noqa: BLE001 - embed_fn e' iniettabile/esterno
+                log.warning("   [%s] Embedding parziale non riuscito: %s", context, e)
+                nuovi = None
+            if nuovi is not None and nuovi.ndim == 2 and nuovi.shape[0] == len(mancanti):
+                # I vettori riusati devono avere la stessa dimensione di quelli
+                # nuovi: se non ce l'hanno (cache di un modello diverso, per
+                # errore) il riuso si annulla e si ricalcola tutto.
+                dimensioni_ok = all(vec.shape[0] == nuovi.shape[1] for vec in riusati.values())
+                if dimensioni_ok:
+                    arr = np.zeros((len(texts), nuovi.shape[1]), dtype=np.float32)
+                    for k, pos in enumerate(mancanti):
+                        arr[pos] = nuovi[k]
+                    for pos, vec in riusati.items():
+                        arr[pos] = vec
+                    _salva_cache_voce(embed_id, texts, arr, time.time() - t0)
+                    log.info(
+                        "   [%s] Embedding riusato per %d/%d testi (stessi testi, "
+                        "stesso modello): ricalcolati solo i %d nuovi.",
+                        context,
+                        len(riusati),
+                        len(texts),
+                        len(mancanti),
+                    )
+                    return arr
+
     return _embed_list_and_save(embed_fn, texts, context)
 
 
@@ -1456,16 +1587,44 @@ def verify_anchor_mapping_embedding(
         log.warning("   [Ancore] Embedding slide non riuscito: %s", e)
         return _done(None, False)
 
-    pairs: list[tuple[int, float, int]] = []  # (slide parlata, tempo, offset)
+    # Le finestre di parlato si raccolgono PRIMA di embeddare: una sola
+    # chiamata (con la cache content-addressed) invece di una per ancora, che
+    # veniva rifatta a ogni run. Se il batch fallisce si ripiega sul vecchio
+    # comportamento per-ancora: un estratto illeggibile non deve far perdere
+    # gli altri.
+    estratte: list[tuple[int, float, str]] = []
     for s, t in sorted(anchors.items(), key=lambda kv: kv[1]):
         excerpt = words_text_in_window(words_raw, t, t + window_seconds)
         if not excerpt:
             continue
+        estratte.append((s, t, excerpt))
+
+    excerpt_embs: np.ndarray | None = None
+    if estratte:
         try:
-            excerpt_emb = embed_fn([excerpt])[0]
-        except Exception as e:  # noqa: BLE001
-            log.warning("   [Ancore] Embedding del parlato a %.1fs non riuscito: %s", t, e)
-            continue
+            excerpt_embs = _embed_list(embed_fn, [e for _, _, e in estratte], "Ancore")
+        except Exception as e:  # noqa: BLE001 - embedding può fallire per molti motivi
+            log.warning("   [Ancore] Embedding del parlato in blocco non riuscito: %s", e)
+            excerpt_embs = None
+        if excerpt_embs is not None and excerpt_embs.shape[0] != len(estratte):
+            log.warning(
+                "   [Ancore] Embedding del parlato con forma inattesa (%d su %d): "
+                "ricalcolo ogni ancora.",
+                excerpt_embs.shape[0],
+                len(estratte),
+            )
+            excerpt_embs = None
+
+    pairs: list[tuple[int, float, int]] = []  # (slide parlata, tempo, offset)
+    for i, (s, t, excerpt) in enumerate(estratte):
+        if excerpt_embs is not None:
+            excerpt_emb = excerpt_embs[i]
+        else:
+            try:
+                excerpt_emb = embed_fn([excerpt])[0]
+            except Exception as e:  # noqa: BLE001
+                log.warning("   [Ancore] Embedding del parlato a %.1fs non riuscito: %s", t, e)
+                continue
         sims = slide_emb @ excerpt_emb
         best = int(np.argmax(sims)) + 1  # 1-based: slide del PDF più simile
         off = best - s
@@ -1991,6 +2150,12 @@ def refine_segment_boundaries(
             # freddo non cambia (prima chiamata = cache miss).
             embs = np.asarray(_embed_list(embed_fn, texts, "Refine finestre"), dtype=np.float32)
             if embs.ndim != 2 or embs.shape[0] != len(texts):
+                _record_refine(
+                    int(out[i]["slide"]),
+                    from_slide=prev_slide + 1,
+                    current=round(t_current, 2),
+                    decision="non valutabile: embedding delle finestre con forma inattesa",
+                )
                 continue
             embs = (embs / np.maximum(np.linalg.norm(embs, axis=1, keepdims=True), 1e-9)).astype(np.float32)
         except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
@@ -2003,10 +2168,12 @@ def refine_segment_boundaries(
             )
             continue
 
-        scores = [
-            float(embs[pair[1]] @ slide_emb[prev_slide]) + float(embs[pair[2]] @ slide_emb[next_slide])
-            for pair in indexed
-        ]
+        # Un solo prodotto matriciale al posto di ~2·N dotted scalari: stessi
+        # punteggi (float32), meno chiamate numpy per confine.
+        idx_before = np.fromiter((p[1] for p in indexed), dtype=np.intp, count=len(indexed))
+        idx_after = np.fromiter((p[2] for p in indexed), dtype=np.intp, count=len(indexed))
+        punteggi = embs[idx_before] @ slide_emb[prev_slide] + embs[idx_after] @ slide_emb[next_slide]
+        scores = [float(s) for s in punteggi]
         best_idx = int(np.argmax(scores))
         cur_idx = next(i for i, p in enumerate(indexed) if p[0] == t_current)
         delta = float(scores[best_idx] - scores[cur_idx])

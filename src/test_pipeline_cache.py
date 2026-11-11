@@ -15,6 +15,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import config
 from pipeline_cache import (
@@ -68,6 +69,28 @@ class TestSaveFinalTimeline(_CacheTemp):
         save_final_timeline({1: 0.123456}, total_duration=1.0, cache_dir=self.base)
         entries = json.loads((self.base / "timeline_finale.json").read_text(encoding="utf-8"))
         self.assertEqual(entries[0]["start"], 0.123)
+
+    def test_errore_di_scrittura_rimuove_la_timeline_vecchia(self) -> None:
+        # Regressione: la scrittura atomica lascia intatto il file precedente.
+        # analysis_sync.py lo leggerebbe come timeline di QUESTA run e
+        # riporterebbe falsi mismatch su confini che il video non ha usato.
+        vecchia = self.base / "timeline_finale.json"
+        vecchia.write_text('[{"slide": 1, "start": 0.0, "end": 99.0}]', encoding="utf-8")
+
+        with (
+            mock.patch("pipeline_cache.atomic_write_text", side_effect=OSError("disco pieno")),
+            self.assertRaises(OSError),
+        ):
+            save_final_timeline({1: 0.0}, total_duration=10.0, cache_dir=self.base)
+
+        self.assertFalse(vecchia.exists(), "la timeline vecchia non deve sopravvivere")
+
+    def test_errore_di_scrittura_senza_file_vecchio(self) -> None:
+        with (
+            mock.patch("pipeline_cache.atomic_write_text", side_effect=OSError("disco pieno")),
+            self.assertRaises(OSError),
+        ):
+            save_final_timeline({1: 0.0}, total_duration=10.0, cache_dir=self.base)
 
 
 class TestSaveSyncReport(_CacheTemp):

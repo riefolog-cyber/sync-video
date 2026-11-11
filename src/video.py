@@ -178,24 +178,32 @@ def _letterbox_references(slide_files: Sequence[str], workdir: Path) -> list[Pat
     prima di misurare la similarita'. Restituisce None se una slide non e'
     leggibile, cosi' il chiamante puo' saltare la verifica invece di produrre
     un referto inventato.
+
+    Due passate come ``_prepare_slides_for_concat``: la prima legge solo gli
+    header per il canvas, la seconda apre/adatta/salva UNA slide alla volta.
+    Tenere tutte le immagini decodificate insieme costava ~27 MB l'una a 300
+    dpi (oltre 4 GB su un deck da 150 pagine) per dei PNG che finiscono subito
+    su disco.
     """
     try:
-        images = [_open_slide_retry(str(sf)) for sf in slide_files]
+        fitted = [_fitted_size_from_size(_slide_header_size(str(sf))) for sf in slide_files]
     except RuntimeError:
         return None
-    try:
-        fitted = [_fitted_size(img) for img in images]
-        canvas_w, canvas_h = _canvas_size(fitted)
-        workdir.mkdir(parents=True, exist_ok=True)
-        refs: list[Path] = []
-        for i, img in enumerate(images):
+    canvas_w, canvas_h = _canvas_size(fitted)
+    workdir.mkdir(parents=True, exist_ok=True)
+    refs: list[Path] = []
+    for i, sf in enumerate(slide_files):
+        try:
+            img = _open_slide_retry(str(sf))
+        except RuntimeError:
+            return None
+        try:
             out_png = workdir / f"ref_{i:04d}.png"
             _letterbox(img, canvas_w, canvas_h).save(out_png, format="PNG")
             refs.append(out_png)
-        return refs
-    finally:
-        for img in images:
+        finally:
             img.close()
+    return refs
 
 
 def _concat_quote(path: Path) -> str:
@@ -632,10 +640,13 @@ def _extract_frame(video_path: Path, t: float, out: Path) -> bool:
     """Estrae un frame al tempo ``t``. True se il file è stato scritto.
 
     Un fallimento (ffmpeg assente, tempo oltre la durata) non interrompe la
-    pipeline: il segmento viene semplicemente saltato dalla verifica.
+    pipeline: il segmento viene semplicemente saltato dalla verifica. Il codice
+    di uscita di ffmpeg va controllato: senza, un file parziale scritto prima di
+    un errore passava il test "esiste ed è non vuoto" e veniva confrontato come
+    se fosse il frame giusto.
     """
     try:
-        subprocess.run(
+        res = subprocess.run(
             [
                 "ffmpeg",
                 "-y",
@@ -652,6 +663,7 @@ def _extract_frame(video_path: Path, t: float, out: Path) -> bool:
                 str(out),
             ],
             check=False,
+            capture_output=True,
             # Timeout: senza, un ffmpeg bloccato (percorso di rete, container
             # corrotto) tiene la pipeline ferma per sempre e in silenzio, senza
             # sapere che sta aspettando li'. Un singolo frame di un video già
@@ -664,6 +676,16 @@ def _extract_frame(video_path: Path, t: float, out: Path) -> bool:
         return False
     except OSError as e:  # ffmpeg non installato
         log.debug("   [Verifica] ffmpeg non eseguibile: %s", e)
+        return False
+    if res.returncode != 0:
+        log.debug(
+            "   [Verifica] Estrazione frame a %.1fs fallita (ffmpeg %d): %s",
+            t,
+            res.returncode,
+            (res.stderr or b"").decode("utf-8", "replace").strip()[:200],
+        )
+        with suppress(OSError):
+            out.unlink()
         return False
     return out.exists() and out.stat().st_size > 0
 

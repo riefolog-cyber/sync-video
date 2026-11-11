@@ -8,6 +8,7 @@ pulizia cache orfane. ``main.py`` le re-esporta tali e quali, quindi
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from pathlib import Path
@@ -65,7 +66,14 @@ def clean_orphan_cache(active_keys: set[str], cache_dir: Path | None = None) -> 
 def save_final_timeline(
     timeline: dict[int, float], total_duration: float, cache_dir: Path | None = None
 ) -> None:
-    """Persiste la timeline finale come timeline_finale.json (per analysis_sync.py)."""
+    """Persiste la timeline finale come timeline_finale.json (per analysis_sync.py).
+
+    Se la scrittura fallisce il file precedente viene RIMOSSO: la scrittura
+    atomica lo lascerebbe intatto, e ``analysis_sync.py`` lo leggerebbe come la
+    timeline di QUESTA run, riportando falsi mismatch su un video che non ha
+    usato quei confini. Meglio nessun file (la verifica si ferma e lo dice) che
+    un file sbagliato.
+    """
     cd = cache_dir if cache_dir is not None else CACHE_DIR
     cd.mkdir(parents=True, exist_ok=True)
     entries: list[dict[str, float]] = []
@@ -73,7 +81,13 @@ def save_final_timeline(
     for i, s in enumerate(ordered):
         end = timeline[ordered[i + 1]] if i + 1 < len(ordered) else total_duration
         entries.append({"slide": s, "start": round(float(timeline[s]), 3), "end": round(float(end), 3)})
-    atomic_write_text(cd / "timeline_finale.json", json.dumps(entries, ensure_ascii=False))
+    path = cd / "timeline_finale.json"
+    try:
+        atomic_write_text(path, json.dumps(entries, ensure_ascii=False))
+    except OSError:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        raise
     log.info("   Timeline finale salvata in cache per la verifica (timeline_finale.json).")
 
 

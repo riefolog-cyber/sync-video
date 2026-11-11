@@ -576,8 +576,23 @@ def _ocr_tutto_vuoto(slide_texts: list[str]) -> bool:
     return all(t.strip() in ("", _TESTO_NESSUN_TESTO) for t in slide_texts)
 
 
-def _ocr_single_slide(image_path: Path, lang: str, max_retries: int = 3) -> str:
-    """Esegue OCR su una singola immagine con retry e backoff."""
+def _lingue_disponibili() -> set[str]:
+    """Lingue che Tesseract può caricare (dal suo elenco interno).
+
+    Se il binario non c'è o non risponde, l'insieme è vuoto: il chiamante
+    decide cosa fare (meglio '' che tirare a indovinare).
+    """
+    try:
+        return set(_tesseract().get_languages(config=""))
+    except Exception:  # il binario può mancare o essere rotto
+        return set()
+
+
+def _ocr_single_slide(image_path: Path, lang: str | None, max_retries: int = 3) -> str:
+    """Esegue OCR su una singola immagine con retry e backoff.
+
+    ``lang=None`` significa "senza lingua": Tesseract usa il proprio default.
+    """
     pt = _tesseract()
     raw = ""
     for attempt in range(max_retries):
@@ -668,9 +683,30 @@ def extract_slides_text_ocr(
     else:
         log.info("   Tutte le slide sono in cache (nessun rendering necessario).")
 
+    # Preflight delle lingue: se quella richiesta non e' installata
+    # (ita.traineddata NON e' nel repo) ogni pagina fallirebbe tre volte con
+    # backoff, poi riproverebbe senza lingua e il referto finale direbbe
+    # "presentazione solo immagini?". Si controlla UNA volta e si decide qui:
+    # un avviso chiaro e un solo giro di OCR.
+    lang_ocr: str | None = lang
+    lingua_mancante = False
+    lingue = _lingue_disponibili()
+    if lingue and lang not in lingue:
+        lingua_mancante = True
+        lang_ocr = None
+        log.warning(
+            "   Tesseract non ha la lingua '%s' (disponibili: %s): l'OCR va senza "
+            "lingua, quindi riconosce male l'italiano. Installa i dati della "
+            "lingua in tessdata/ (ita.traineddata).",
+            lang,
+            ", ".join(sorted(lingue)),
+        )
+
     slide_texts: list[str] = [""] * total_pages
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_ocr_single_slide, Path(sf), lang): idx for idx, sf in enumerate(slide_files)}
+        futures = {
+            executor.submit(_ocr_single_slide, Path(sf), lang_ocr): idx for idx, sf in enumerate(slide_files)
+        }
         for future in as_completed(futures):
             idx = futures[future]
             slide_texts[idx] = future.result()
@@ -696,10 +732,20 @@ def extract_slides_text_ocr(
         except Exception:
             tesseract_presente = False
         if tesseract_presente:
-            log.warning(
-                "   OCR completato ma nessuna slide ha testo riconoscibile "
-                "(presentazione solo immagini?): procedo con i segnaposto."
-            )
+            if lingua_mancante:
+                log.warning(
+                    "   OCR completato SENZA la lingua '%s' e nessuna slide ha testo "
+                    "riconoscibile: il deck puo' essere solo immagini, ma il caso "
+                    "piu' probabile e' che manchi il file di lingua. Installa "
+                    "tessdata/%s.traineddata e rilancia.",
+                    lang,
+                    lang,
+                )
+            else:
+                log.warning(
+                    "   OCR completato ma nessuna slide ha testo riconoscibile "
+                    "(presentazione solo immagini?): procedo con i segnaposto."
+                )
         else:
             raise RuntimeError(_MESSAGGIO_OCR_VUOTO.format(n=total_pages))
 

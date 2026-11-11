@@ -2255,6 +2255,36 @@ class TestEmbedCache(unittest.TestCase):
         # slide (riusate) + blocchi (riusati): una sola chiamata per lista
         self.assertEqual(len(embed.calls), 2)
 
+    def test_riuso_parziale_ricalcola_solo_i_testi_nuovi(self):
+        """Una parola cambiata non deve rifare centinaia di embedding.
+
+        La cache per lista copre "gli stessi testi". Il caso reale e' un altro:
+        la trascrizione rifatta cambia POCHE parole, la lista dei blocchi e'
+        un'altra (chiave diversa, quindi zero riutilizzo) ma i vettori sono
+        quasi tutti gli stessi. Misurato: 7 cache da 386 testi in 90 minuti,
+        ~15s di embedding pagati a ogni re-run.
+        """
+        embed = self._counting_embed("modello-A")
+        prima = ["uno", "due", "tre", "quattro"]
+        dopo = ["uno", "due", "tre", "quattro-modificato"]
+
+        primo = self._ss._embed_list(embed, prima, "test")
+        secondo = self._ss._embed_list(embed, dopo, "test")
+
+        # La prima lista e' nuova (4 embedding), la seconda riusa 3 vettori e
+        # ne calcola 1 solo.
+        self.assertEqual([len(c) for c in embed.calls], [4, 1])
+        np.testing.assert_array_equal(primo[:3], secondo[:3])
+
+    def test_riuso_parziale_rifiuta_un_modello_diverso(self):
+        # Lo stesso testo embedding cambia se cambia modello o batch: il riuso
+        # e' concesso solo a identita' uguale.
+        embed_a = self._counting_embed("modello-A")
+        embed_b = self._counting_embed("modello-B")
+        self._ss._embed_list(embed_a, ["uno", "due"], "test")
+        self._ss._embed_list(embed_b, ["uno", "due-modificato"], "test")
+        self.assertEqual([len(c) for c in embed_b.calls], [2])
+
     def test_disabled_cache_always_recomputes(self):
         self._ss.set_embed_cache_enabled(False)
         self.addCleanup(self._ss.set_embed_cache_enabled, True)
@@ -4630,6 +4660,50 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
             return np.array(out)
 
         return _embed
+
+    def test_le_estratte_vengono_embeddate_in_un_giro_solo(self):
+        """Regressione: una chiamata di embedding per ancora, fuori dalla cache.
+
+        Con 14 ancore erano 14 forward ONNX a ogni run (anche a cache piena),
+        perche' il percorso degli estratti non passava da `_embed_list`: la
+        cache content-addressed non li vedeva e il costo si ripeteva sempre.
+        Ora le finestre di parlato si embeddano tutte insieme, in un giro.
+        """
+        n = 6
+        chiamate: list[int] = []
+
+        def _embed(texts):
+            chiamate.append(len(texts))
+            out = []
+            for t in texts:
+                v = np.zeros(n)
+                m = re.search(r"pagina(\d+)", t)
+                if m:
+                    v[int(m.group(1)) - 1] = 1.0
+                elif "probe" in t:
+                    v[:] = 0.9
+                out.append(v)
+            return np.array(out)
+
+        slides = [f"pagina{i} slide" for i in range(1, n + 1)]
+        words = [
+            {"word": "probe", "start": 100.0},
+            {"word": "probe", "start": 200.0},
+            {"word": "probe", "start": 300.0},
+        ]
+        anchors = {2: 100.0, 3: 200.0, 4: 300.0}
+
+        verify_anchor_mapping_embedding(
+            slides,
+            words,
+            anchors,
+            total_slides=n,
+            window_seconds=40.0,
+            embed_fn=_embed,
+        )
+
+        # Due giri: le slide, poi TUTTE le estratte insieme.
+        self.assertEqual(chiamate, [n, 3])
 
     def test_offset_di_poche_millesime_non_e_un_dubbio(self):
         """Il caso del 17/10: la pagina sbagliata vince di 4 millesimi.

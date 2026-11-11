@@ -18,6 +18,7 @@ from video import (
     _canvas_size,
     _compose_sheet,
     _concat_quote,
+    _extract_frame,
     _fitted_size,
     _letterbox,
     _letterbox_references,
@@ -163,6 +164,32 @@ class TestPrepareSlides(unittest.TestCase):
             good = td_path / "good.png"
             Image.new("RGB", (320, 200), (0, 0, 0)).save(good)
             self.assertIsNone(_letterbox_references([str(good), str(td_path / "no.png")], td_path / "ref"))
+
+
+class TestExtractFrame(unittest.TestCase):
+    """Un frame non va dato per buono solo perché il file esiste.
+
+    ffmpeg puo' uscire con errore DOPO aver scritto un file parziale: senza il
+    controllo del codice di uscita quel file passava il test "esiste ed e' non
+    vuoto" e veniva confrontato con le slide come se fosse il frame giusto.
+    """
+
+    def test_ritorno_di_errore_scarta_il_file_parziale(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            out = tmp / "frame.png"
+            out.write_bytes(b"parziale")
+            finto = MagicMock(returncode=1, stderr=b"Invalid data found")
+            with patch("video.subprocess.run", return_value=finto):
+                self.assertFalse(_extract_frame(tmp / "video.mp4", 1.0, out))
+            self.assertFalse(out.exists(), "il file parziale deve essere rimosso")
+
+    def test_uscita_zero_ma_file_mancante(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            finto = MagicMock(returncode=0, stderr=b"")
+            with patch("video.subprocess.run", return_value=finto):
+                self.assertFalse(_extract_frame(tmp / "video.mp4", 1.0, tmp / "frame.png"))
 
 
 class TestRunFfmpeg(unittest.TestCase):

@@ -5,8 +5,69 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: chiusura del piano (P2 #11 archiviata come non
-consigliata, primo avvio automatico di Python su Windows).
+Ultimo aggiornamento: batch 5 (audit completo del codice: 6 difetti corretti e
+7 ottimizzazioni misurate), dopo la chiusura del piano (P2 #11 archiviata come
+non consigliata, primo avvio automatico di Python su Windows).
+
+## Batch 5 — audit completo (2026-11)
+
+Un audit del codice letto riga per riga (con misure sui dati reali in
+`.cache/`) ha trovato 6 difetti e 7 ottimizzazioni. Le correzioni hanno un
+test che le copre; le ottimizzazioni sono misurate sul run di riferimento
+(OCR 8 s / trascrizione 207 s / sync 80 s / video 88 s).
+
+**Difetti corretti**
+
+- Il controllo sulla **prima sezione** era codice morto: leggeva il verdetto con
+  la chiave sbagliata (`slide_ids[0]` invece della posizione 0), quindi non
+  parlava mai, nemmeno con `--strict-sync`. Ora c'è `_first_section_verdict`.
+- `timeline_finale.json`: se la scrittura falliva, il file **vecchio** restava
+  e `analysis_sync.py` lo leggeva come timeline di quella run (falsi mismatch).
+  Ora il file vecchio viene rimosso e la run avvisa.
+- `sync_report.json` descriveva i segmenti **prima** di `--skip-slides` e
+  della riparazione automatica: `--review` tagliava i frame sui confini
+  sbagliati. Ora i segmenti vengono ricostruiti sulla sequenza finale.
+- `_extract_frame`: un ffmpeg fallito che lasciava un file parziale passava
+  come frame valido. Ora si controlla il codice di uscita e il file parziale
+  viene rimosso.
+- Il **refine** saltava un confine in silenzio se l'embedder restituiva una
+  forma inattesa: ora lo registra nel referto.
+- **OCR**: con la lingua mancante ogni pagina falliva 3 volte con backoff
+  (~30 s su 40 slide) e il referto finale diceva "presentazione solo
+  immagini?". Ora un preflight solo, e il messaggio giusto.
+
+**Ottimizzazioni**
+
+- Le finestre di parlato delle ancore venivano embeddate **una per ancora**,
+  fuori dalla cache: un solo batch, in cache (riuso fra run).
+- La cache degli embedding è **per lista**: bastava una parola cambiata per
+  rifare 386 embedding (~15 s). Ora il riuso è **per testo** (stesso testo +
+  stesso modello = stesso vettore): si ricalcolano solo i blocchi nuovi.
+- La potatura della cache era un LRU su mtime **senza aggiornare l'mtime sui
+  colpimenti**: le voci più utili venivano potate per prime. Ora il tocco
+  all'uso.
+- `_letterbox_references` decodificava **tutte** le slide insieme (>4 GB su un
+  deck da 150 pagine): ora due passate, una slide alla volta.
+- La decodifica audio teneva **tre copie** del PCM (~240 MB su 20 minuti,
+  ~1.4 GB su due ore): ora una sola, e pipe/processo chiusi sempre.
+- Il punteggio del refine passava da ~2×48 dot product scalari a un prodotto
+  matriciale.
+
+**Aperto (deciso, non fatto)**
+
+- L'embedding dei blocchi si rifà anche quando tutte le transizioni sono
+  ancorate (36 s su 79 s di sync): la timeline la decidono le ancore, ma i
+  vettori servono anche alla metrica di qualità, che ha soglie validate.
+  Cambiarla è una decisione, non un refactor.
+- Le **zone cieche** vengono ritrascritte a ogni run (~25 s l'una): manca una
+  cache "negativa" delle zone già tentate.
+- La verifica del video estrae **un ffmpeg per segmento**: si può fare un
+  invoco solo per tutti i frame.
+- La chiave della cache trascrizione cambia formato quando cambia il percorso
+  di decodifica: la cache valida viene potata e la run rifa 3 min di Whisper.
+- Due run sulla stessa cartella si pestano (slide, cache, frame di verifica):
+  manca un blocco per le run concorrenti.
+
 
 ## Stato delle voci
 

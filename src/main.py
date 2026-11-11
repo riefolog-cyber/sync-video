@@ -1495,8 +1495,11 @@ def _validate_anomalous_segments(
 
     Per ogni segmento anomalo estrae il parlato nel suo intervallo temporale e
     lo confronta con l'OCR di tutte le slide (F1 lessicale). Ritorna
-    ``{slide: 'coerente' | 'disallineata' | 'incerto'}`` così l'avviso può
+    ``{posizione: 'coerente' | 'disallineata' | 'incerto'}`` così l'avviso può
     distinguere un segmento realmente lungo/corto da un allineamento errato.
+    La chiave è la POSIZIONE nel video, non il numero di slide: chi legge il
+    risultato deve usare la stessa posizione passata qui (vedi
+    ``_first_section_verdict``).
 
     ``anomalous_positions`` sono triple ``(posizione, slide, durata)``: la
     posizione è necessaria perché la stessa slide può comparire più volte nella
@@ -1525,6 +1528,27 @@ def _validate_anomalous_segments(
         speech = _speech_tokens_in_window(words_raw, start, start + d)
         verdicts[pos] = _segment_content_verdict(speech, all_slide_tokens, s)
     return verdicts
+
+
+def _first_section_verdict(
+    slide_ids: Sequence[int],
+    durations: Sequence[float],
+    slide_texts: Sequence[str],
+    words_raw: Sequence[Word],
+) -> str | None:
+    """Verdetto di contenuto della PRIMA sezione, se c'è.
+
+    La slide 1 parte a 0.0s: non è una transizione e nessuna ancora la
+    vincola, quindi nessun altro controllo la guarda. Il verdetto va letto per
+    POSIZIONE (0), non per numero di slide: ``.get(slide_ids[0])`` restituiva
+    sempre ``None`` con un deck che parte da 1, e il controllo restava muto
+    anche quando il video apriva con la pagina sbagliata.
+    """
+    if not slide_ids or not durations:
+        return None
+    return _validate_anomalous_segments(
+        [(0, slide_ids[0], durations[0])], slide_texts, words_raw, durations
+    ).get(0)
 
 
 def _build_sync_report(
@@ -3784,8 +3808,15 @@ def main(argv: list | None = None) -> None:
         # run con gli start/end validati.
         try:
             _save_final_timeline(timeline, total_duration)
-        except OSError:
-            log.debug("   Impossibile salvare la timeline finale in cache (ignorato).")
+        except OSError as e:
+            # Il file vecchio è già stato rimosso da save_final_timeline: senza
+            # timeline vera la verifica post-run si ferma invece di confrontare
+            # il video con i confini di un'altra run.
+            log.warning(
+                "   Timeline finale non salvata in cache (%s): la verifica "
+                "post-run non userà dati vecchi.",
+                e,
+            )
 
         # --- Avviso: slide quasi non coperte dalla narrazione ---
         thin = [slide_ids[i] for i, d in enumerate(durations) if d < 2 * args.semantic_min_duration]
@@ -3920,9 +3951,7 @@ def main(argv: list | None = None) -> None:
         # seconda in poi), l'attesa è definita: i primi secondi di audio devono
         # parlare di cosa c'è sulla pagina 1.
         if durations:
-            _primo = _validate_anomalous_segments(
-                [(0, slide_ids[0], durations[0])], slide_texts, words_raw, durations
-            ).get(slide_ids[0])
+            _primo = _first_section_verdict(slide_ids, durations, slide_texts, words_raw)
             if _primo == "coerente":
                 log.info(
                     "\n   [Verifica] La prima sezione parla del contenuto della "
@@ -3960,6 +3989,7 @@ def main(argv: list | None = None) -> None:
             skip_set &= set(range(1, total_slides + 1))
             if skip_set:
                 replaced: dict[int, int] = {}
+                posizioni_cambiate: set[int] = set()
                 for i, s in enumerate(slide_ids):
                     if s not in skip_set:
                         continue
@@ -3974,6 +4004,7 @@ def main(argv: list | None = None) -> None:
                         )
                     slide_ids[i] = prev
                     replaced[s] = prev
+                    posizioni_cambiate.add(i)
                 if replaced:
                     # Riallinea i file immagine alla nuova sequenza (slide_files
                     # è ancora la lista completa 1..N).
@@ -3982,6 +4013,16 @@ def main(argv: list | None = None) -> None:
                         "   [Skip] Slide non mostrate: %s (segmenti mostrano la slide precedente valida).",
                         ", ".join(f"{s}->{p}" for s, p in sorted(replaced.items())),
                     )
+                if posizioni_cambiate:
+                    # L'artefatto deve descrivere il video che verrà generato:
+                    # qui la sequenza mostrata è cambiata, e un verdetto
+                    # calcolato sulla slide saltata non vale più per la
+                    # posizione che ora mostra la precedente.
+                    for pos in posizioni_cambiate:
+                        verdicts.pop(pos, None)
+                    sync_report["segments"] = _build_sync_report(
+                        durations, slide_ids, total_duration, verdicts
+                    )["segments"]
 
         # --- Anteprima timeline (--preview) ---
         if args.preview:
@@ -4140,6 +4181,19 @@ def main(argv: list | None = None) -> None:
                             for r in repairs
                         ),
                     )
+                    # Il report deve descrivere il video NUOVO: la riparazione
+                    # ha spostato i confini, e i segmenti salvati prima
+                    # portavano le durate pre-riparazione (--review tagliava i
+                    # frame proprio lì). I verdetti di contenuto vanno
+                    # ricalcolati sulle finestre nuove, non ereditati.
+                    if anomalous:
+                        anomalous = [(pos, s, durations[pos]) for pos, s, _ in anomalous]
+                        verdicts = _validate_anomalous_segments(
+                            anomalous, slide_texts, words_raw, durations
+                        )
+                    sync_report["segments"] = _build_sync_report(
+                        durations, slide_ids, total_duration, verdicts
+                    )["segments"]
                     build_video(
                         slide_files,
                         durations,

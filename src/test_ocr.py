@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ocr import _ocr_single_slide, convert_presentation_to_pdf
+from ocr import _lingue_disponibili, _ocr_single_slide, convert_presentation_to_pdf
 
 
 class TestOcrTuttoVuoto(unittest.TestCase):
@@ -225,6 +225,36 @@ print("ESITO", "pandas" in sys.modules, "pytesseract" in sys.modules)
         pigro.assert_called_once()
         finto.image_to_string.assert_called_once_with("slide.png", lang="ita")
         self.assertEqual(testo, "testo della slide")
+
+
+class TestLingueTesseract(unittest.TestCase):
+    """Il preflight delle lingue: una domanda a Tesseract, non una per pagina.
+
+    Senza dati della lingua (`ita.traineddata` NON e' nel repo) ogni pagina
+    falliva tre volte con backoff e poi riproverebbe senza lingua: con 40
+    slide sono decine di secondi persi, e il referto finale diceva
+    "presentazione solo immagini?", che non e' la causa.
+    """
+
+    def test_lingue_disponibili_col_binario(self):
+        finto = mock.Mock()
+        finto.get_languages.return_value = ["osd", "eng", "ita"]
+        with mock.patch("ocr._tesseract", return_value=finto):
+            self.assertEqual(_lingue_disponibili(), {"osd", "eng", "ita"})
+
+    def test_lingue_disponibili_con_binario_rotto(self):
+        with mock.patch("ocr._tesseract", side_effect=RuntimeError("Tesseract assente")):
+            self.assertEqual(_lingue_disponibili(), set())
+
+    def test_ocr_senza_lingua_non_il_tesseract(self):
+        # lang=None = "senza lingua": Tesseract usa il proprio default e
+        # pytesseract NON deve ricevere un '-l' vuoto (che Tesseract rifiuta).
+        finto = mock.Mock()
+        finto.image_to_string.return_value = " testo senza lingua "
+        with mock.patch("ocr._tesseract", return_value=finto):
+            testo = _ocr_single_slide(Path("slide.png"), None)
+        finto.image_to_string.assert_called_once_with("slide.png", lang=None)
+        self.assertEqual(testo, "testo senza lingua")
 
 
 class TestNessunaGraficaNonPassaSilenziosamente(unittest.TestCase):

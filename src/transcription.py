@@ -259,18 +259,26 @@ def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
         )
         assert proc.stdout is not None
         buf = bytearray()
-        try:
-            while True:
-                block = proc.stdout.read(65536)
-                if not block:
-                    break
-                buf.extend(block)
-        finally:
-            proc.stdout.close()
         stderr_bytes = b""
-        if proc.stderr is not None:
-            stderr_bytes = proc.stderr.read()
-            proc.stderr.close()
+        try:
+            try:
+                while True:
+                    block = proc.stdout.read(65536)
+                    if not block:
+                        break
+                    buf.extend(block)
+            finally:
+                # stdout e stderr vanno chiusi SEMPRE: se la lettura del PCM
+                # solleva, il processo e i suoi pipe restano aperti.
+                proc.stdout.close()
+                if proc.stderr is not None:
+                    try:
+                        stderr_bytes = proc.stderr.read()
+                    finally:
+                        proc.stderr.close()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
         returncode = proc.wait()
         if returncode != 0:
             raise RuntimeError(
@@ -279,7 +287,10 @@ def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
             )
         if not buf:
             raise RuntimeError("Decodifica audio fallita: output vuoto.")
-        samples = np.frombuffer(bytes(buf), dtype=np.float32).copy()
+        # Un solo buffer: `bytes(buf)` + `.copy()` facevano DUE copie complete
+        # del PCM (circa 240 MB per un podcast di 20 minuti, oltre 1 GB per due
+        # ore). `np.frombuffer` sul bytearray non copia e tiene vivo il buffer.
+        samples = np.frombuffer(buf, dtype=np.float32)
         return samples, 16000
 
     # Fallback (ffmpeg assente): pydub, che carica tutto in RAM.

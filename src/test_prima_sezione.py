@@ -80,5 +80,41 @@ class TestPrimaSezione(unittest.TestCase):
         self.assertEqual(self._verdetto(INTRO_STRANIO), "incerto")
 
 
+class TestPrimaSezioneDallaPipeline(unittest.TestCase):
+    """Il chiamante deve leggere il verdetto per POSIZIONE, non per slide.
+
+    Regressione: main leggeva ``.get(slide_ids[0])`` (cioe' ``.get(1)``) da un
+    dizionario indicizzato per posizione. Con un deck che parte da 1 il
+    risultato era sempre ``None`` e il controllo della prima sezione non
+    parlava mai, nemmeno quando il video apriva con la pagina sbagliata.
+    """
+
+    DUR = 71.0
+    SLIDE_TEXTS: ClassVar[list[str]] = [SLIDE1, SLIDE2, SLIDE3, SLIDE4]
+    SLIDE_IDS: ClassVar[list[int]] = [1, 2, 3, 4]
+
+    def _durations(self) -> list[float]:
+        return [self.DUR, 60.0, 60.0, 60.0]
+
+    def test_prima_sezione_coerente(self) -> None:
+        self.assertEqual(
+            main._first_section_verdict(
+                self.SLIDE_IDS, self._durations(), self.SLIDE_TEXTS, _parla(INTRO_REALE, self.DUR)
+            ),
+            "coerente",
+        )
+
+    def test_prima_sezione_sulla_pagina_sbagliata(self) -> None:
+        self.assertEqual(
+            main._first_section_verdict(
+                self.SLIDE_IDS, self._durations(), self.SLIDE_TEXTS, _parla(INTRO_PAGINA2, self.DUR)
+            ),
+            "disallineata",
+        )
+
+    def test_senza_sezioni_nessun_verdetto(self) -> None:
+        self.assertIsNone(main._first_section_verdict([], [], self.SLIDE_TEXTS, []))
+
+
 if __name__ == "__main__":
     unittest.main()
