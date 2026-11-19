@@ -76,6 +76,23 @@ class TestCleanCache(unittest.TestCase):
             finally:
                 m.CACHE_DIR = old
 
+    def test_le_cache_dei_materiali_correnti_restano(self) -> None:
+        # `--clean-cache` lanciata da sola non conosce gli input della cartella:
+        # senza `active_keys` cancellava anche slide e trascrizione di QUESTA
+        # coppia, e la run dopo rifaceva OCR e Whisper da zero (minuti buttati).
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "slides_abc_300_ita.json").write_text("{}")
+            (base / "transcript_abc_ita_small.json").write_text("{}")
+            (base / "slides_vecchio_300_ita.json").write_text("{}")
+            esito = clean_cache(
+                base, active_keys={"slides_abc_300_ita", "transcript_abc_ita_small"}
+            )
+            self.assertEqual(esito["orphan_json"], 1)
+            self.assertTrue((base / "slides_abc_300_ita.json").exists())
+            self.assertTrue((base / "transcript_abc_ita_small.json").exists())
+            self.assertFalse((base / "slides_vecchio_300_ita.json").exists())
+
     def test_svuota_verify_frames(self) -> None:
         import main as m
 

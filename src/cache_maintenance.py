@@ -84,6 +84,7 @@ def clean_cache(
     *,
     include_models: bool = False,
     clean_verify_frames: bool = True,
+    active_keys: set[str] | None = None,
 ) -> dict[str, int]:
     """Pulizia sicura. Ritorna conteggi {'orphan_json': n, 'embed_npz': n,
     'verify_frames': n, 'parziali': n, 'model_bytes': b}.
@@ -103,9 +104,13 @@ def clean_cache(
     }
     if not cache_dir.exists():
         return esito
-    # 1. JSON orfani (slide/trascrizioni di run precedenti): senza chiavi
-    # attive, rimuove solo ciò che non è housekeeping.
-    esito["orphan_json"] = _clean_orphan_cache(set(), cache_dir=cache_dir)
+    # 1. JSON orfani (slide/trascrizioni di run precedenti): con chiavi attive
+    # rimuove solo ciò che non è housekeeping NE' di un input corrente.
+    # ``active_keys`` e' il punto: lanciata da sola, la pulizia non conosce i
+    # materiali della cartella e senza questo elenco cancellava anche le cache
+    # di trascrizione e slide di QUESTA coppia (misurato: la run successiva
+    # rifaceva OCR e Whisper da zero, minuti buttati).
+    esito["orphan_json"] = _clean_orphan_cache(set(active_keys or ()), cache_dir=cache_dir)
     # 2. embedding content-addressed oltre il tetto (300 MB e 30 giorni).
     # La potatura dice quante voci ha rimosso: un secondo glob qui avrebbe
     # potuto guardare una cartella diversa da quella potata (era il difetto).

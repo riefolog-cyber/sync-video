@@ -2950,7 +2950,33 @@ def main(argv: list | None = None) -> None:
             if risposta not in ("s", "si", "sì", "y", "yes"):
                 log.info("   Pulizia modelli annullata: rimuovo solo la cache sicura.")
                 args.include_models = False
-        esito = clean_cache(CACHE_DIR, include_models=args.include_models)
+        # Le cache dei materiali PRESENTI non sono orfane: senza questo elenco
+        # (che a run avviata si conosce solo dopo l'hash degli input) la
+        # pulizia da sola cancellava trascrizione e slide di QUESTA coppia, e
+        # la run successiva rifaceva OCR e Whisper da zero. Best-effort: se gli
+        # input non si trovano, o non sono leggibili, si torna al comporta-
+        # mento di prima (pulizia piena), perche' una pulizia parziale
+        # silenziosa e' peggio di una pulizia intera dichiarata.
+        attive: set[str] = set()
+        try:
+            pdf_qui = args.pdf_path
+            audio_qui: Path | None = Path(args.audio) if args.audio else None
+            if audio_qui is None:
+                audio_qui = find_audio_file(BASE_DIR)
+            elif not audio_qui.is_absolute():
+                audio_qui = BASE_DIR / audio_qui
+            if pdf_qui.exists() and audio_qui is not None and audio_qui.exists():
+                chiave_slide = f"slides_{_file_hash(pdf_qui)[:12]}_{args.dpi}_{args.lang}"
+                hash_audio = _file_hash(audio_qui)
+                attive = {
+                    chiave_slide,
+                    _transcript_cache_key(hash_audio, args),
+                    _transcript_cache_key(hash_audio, args, beam=DEFAULT_WHISPER_BEAM_ACCURATE),
+                    _beam_ab_cache_key(chiave_slide, hash_audio, args),
+                }
+        except (OSError, TypeError, ValueError, AttributeError):
+            attive = set()
+        esito = clean_cache(CACHE_DIR, include_models=args.include_models, active_keys=attive)
         log.info(
             "Cache pulita: %d JSON orfani, %d embedding oltre il tetto, %d frame di verifica%s.",
             esito["orphan_json"],
@@ -2958,6 +2984,8 @@ def main(argv: list | None = None) -> None:
             esito["verify_frames"],
             f", modelli rimossi ({format_bytes(esito['model_bytes'])})" if esito["model_bytes"] else "",
         )
+        if attive:
+            log.info("   Cache dei materiali in questa cartella conservata (%d chiavi).", len(attive))
         return
 
     # --- Diagnostica dei pacchetti fermi e uscita ---
