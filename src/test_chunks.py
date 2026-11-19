@@ -10,7 +10,7 @@ Esegui con: python -m unittest test_chunks -v
 import threading
 import unittest
 
-from chunks import build_windows, words_in_window, words_text_in_window
+from chunks import TimeIndex, build_windows, words_in_window, words_text_in_window
 
 
 def _words(items):
@@ -154,6 +154,21 @@ class TestWordsInWindow(unittest.TestCase):
         words = _words([("a", 1.0), ("b", 2.0), ("c", 9.0)])
         self.assertEqual(words_text_in_window(words, 0.0, 5.0), "a b")
         self.assertEqual(words_text_in_window(words, 100.0, 200.0), "")
+
+    def test_indice_riusato_da_lo_stesso_risultato(self):
+        # L'indice costruito una volta e riusato su piu' finestre deve dare
+        # esattamente le stesse parole della costruzione per chiamata.
+        words = _words([(f"w{i}", i * 0.5) for i in range(200)])
+        indice = TimeIndex(words)
+        for start, end in [(0.0, 1.0), (3.0, 7.5), (0.0, 100.0), (99.0, 1000.0)]:
+            self.assertEqual(
+                words_in_window(words, start, end, indice),
+                words_in_window(words, start, end),
+            )
+            self.assertEqual(
+                words_text_in_window(words, start, end, index=indice),
+                words_text_in_window(words, start, end),
+            )
 
 
 if __name__ == "__main__":

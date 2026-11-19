@@ -12,9 +12,19 @@ Uso:
     python src/scripts/prova_materiale_reale.py             # verifica
     python src/scripts/prova_materiale_reale.py --aggiorna  # nuovo riferimento
 
-Esito: 0 se la timeline coincide con il riferimento, 1 altrimenti (o se il
-materiale non e' quello del riferimento: in quel caso il confronto non
-significherebbe niente e va prima riallineato il riferimento).
+Esiti:
+    0  la timeline coincide con il riferimento (o il riferimento e' appena
+       stato aggiornato);
+    1  la timeline e' CAMBIATA: un confine si e' spostato (e di quanto);
+    2  NON VERIFICABILE: manca il riferimento, oppure il PDF/audio nella
+       cartella non sono quelli del riferimento. Non e' un fallimento del
+       programma: senza lo stesso materiale il confronto non significherebbe
+       niente. Prima usciva 1 anche qui, quindi un checkout nuovo sembrava
+       rotto.
+
+Il materiale (PDF e audio) NON e' versionato insieme al riferimento: sono
+file dell'utente, esclusi da git. Il riferimento vale per la macchina che ha
+il materiale con quegli hash; altrove la prova si limita a dirlo.
 
 NOTA: la prima volta su un materiale nuovo il lavoro e' tutto (OCR +
 trascrizione: qualche minuto). Dopo, le cache rendono la prova di qualche
@@ -34,7 +44,7 @@ from _bootstrap import CODICE, RADICE
 
 sys.path.insert(0, str(CODICE))
 
-from config import DEFAULT_PDF
+from config import DEFAULT_PDF, atomic_write_text
 from pipeline_cache import file_hash
 
 CACHE = RADICE / ".cache"
@@ -43,6 +53,11 @@ RIFERIMENTO = Path(__file__).resolve().parent / "materiale_riferimento.json"
 # Tolleranza sul confronto dei confini (secondi): le ancore sono esatte, ma un
 # millisecondo di arrotondamento non deve far fallire la prova.
 TOLLERANZA = 0.05
+
+# Esiti (vedi il docstring del modulo).
+ESITO_OK = 0
+ESITO_CAMBIATA = 1
+ESITO_NON_VERIFICABILE = 2
 
 
 def _materiale() -> tuple[Path, Path]:
@@ -167,7 +182,11 @@ def main(argv: list[str] | None = None) -> int:
             riferimento = {}
 
     if args.aggiorna:
-        RIFERIMENTO.write_text(
+        # Scrittura atomica come tutto il resto del progetto: un crash a meta'
+        # lascerebbe un riferimento mezzo scritto che poi "legge" come
+        # materiale diverso.
+        atomic_write_text(
+            RIFERIMENTO,
             json.dumps(
                 {
                     "materiale": materiale,
@@ -178,26 +197,25 @@ def main(argv: list[str] | None = None) -> int:
                 indent=2,
             )
             + "\n",
-            encoding="utf-8",
         )
         print(f"Riferimento aggiornato: {RIFERIMENTO.name}")
-        return 0
+        return ESITO_OK
 
     if not riferimento:
         print(
             "\nNessun riferimento: non c'e' niente contro cui confrontare.\n"
             "Crealo con:  python src/scripts/prova_materiale_reale.py --aggiorna"
         )
-        return 1
+        return ESITO_NON_VERIFICABILE
 
     if riferimento.get("materiale") != materiale:
         print(
             "\nIl materiale NON e' quello del riferimento: il confronto non "
-            "significherebbe niente.\n"
+            "significherebbe niente, quindi non e' un errore del programma.\n"
             "Se il materiale e' cambiato di proposito, allinea il riferimento "
             "con --aggiorna."
         )
-        return 1
+        return ESITO_NON_VERIFICABILE
 
     _segmenti_rif: list[dict[str, object]] = []
     _grezzi = riferimento.get("segmenti")
@@ -209,11 +227,11 @@ def main(argv: list[str] | None = None) -> int:
             f"\nOK: la timeline e' IDENTICA al riferimento "
             f"({len(segmenti)} segmenti, {ancore} ancore)."
         )
-        return 0
+        return ESITO_OK
     print("\nTIMELINE CAMBIATA rispetto al riferimento:")
     for problema in problemi:
         print(f"  - {problema}")
-    return 1
+    return ESITO_CAMBIATA
 
 
 if __name__ == "__main__":

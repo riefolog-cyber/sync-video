@@ -68,6 +68,7 @@ av>=12,<19; platform_machine != "ARM64" and platform_machine != "aarch64"
 openvino>=2025.1.0; platform_machine != "ARM64" and platform_machine != "aarch64"
 openvino-genai>=2025.1.0; platform_machine != "ARM64" and platform_machine != "aarch64"
 
-# Dipendenze di sviluppo
-mypy>=1.10.0
-ruff>=0.16.0
+# Dipendenze di sviluppo: NON qui. Stanno in requirements-dev.txt, cosi' chi
+# usa il programma non installa lint e type-checker (il bootstrap installa
+# solo config._REQUIRED_PACKAGES, che non li contiene). La CI e `controlli.py`
+# installano requirements-dev.txt.

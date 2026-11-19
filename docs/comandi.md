@@ -146,5 +146,18 @@ python -m unittest discover -s src -p "test_*.py"
 | `--semantic-cache-dir` | `.cache/embedding_model` | Cartella dei modelli embedding |
 | `--log-file` | — | Scrivi anche il log su file |
 
+## Codici di uscita
+
+| Codice | Significato |
+|---|---|
+| `0` | Run completata (video scritto, oppure `--dry-run` arrivato in fondo) |
+| `1` | Esecuzione interrotta: un errore, oppure un gate di qualità (`--require-flow`, `--require-full-anchors`, copertura delle ancore sotto soglia) |
+| `2` | Solo `scripts/prova_materiale_reale.py`: confronto **non verificabile** (materiale diverso da quello del riferimento, o riferimento assente). Non è un guasto del programma: su un altro PC il materiale non c'è |
+
+Una run che finisce scrive anche `riepilogo.md` accanto al video: pagine,
+ancore, sezione più corta e cosa guardare a mano. I numeri della tabella
+delle baseline si generano dalla run appena fatta con
+`python src/scripts/riga_baseline.py`.
+
 ---
 

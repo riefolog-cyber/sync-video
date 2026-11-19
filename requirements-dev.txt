@@ -1,0 +1,11 @@
+# Strumenti di SVILUPPO (lint + type-check). Non servono per usare il
+# programma: servono per modificarlo e per i controlli.
+#
+#   pip install -r requirements-dev.txt
+#
+# Il bootstrap (src/config.py) installa solo i pacchetti runtime, quindi chi
+# scarica lo ZIP e lancia genera_video.bat non si porta dietro mypy e ruff.
+# Questi strumenti servono alla CI e a `controlli.bat` / `controlli.py`.
+-r requirements.txt
+mypy>=1.10.0
+ruff>=0.16.0

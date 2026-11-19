@@ -15,18 +15,22 @@ embedder.py              ← Interfaccia embedding (Protocol `Embedder`, backend
 video.py                 ← Fase 4: Assemblaggio MP4 (1080p)
 pipeline_cache.py        ← Hash/caricamento/salvataggio cache (estratto da main)
 pipeline_report.py       ← Formattazione tempi + report (estratto da main)
+riepilogo.py             ← `riepilogo.md` accanto al video (una pagina per lezione)
 cache_maintenance.py     ← `--cache-du` / `--clean-cache` (peso e pulizia sicura)
 controlli.py             ← Verifica completa in un comando (CI + mypy 3 piattaforme + debug)
 test_sync.py             ← Suite di test unitari
 test_chunks.py           ← Test finestre temporali condivise
 test_prompts.py          ← Test dei prompt e dei link del README
 test_integration.py      ← Test di integrazione
+test_end_to_end_minimo.py ← La pipeline intera su materiale vero (lento: run notturna)
+test_fixtures/           ← Materiale minimo per il test end-to-end (voce di 33s)
 src/scripts/             ← Script eseguibili (A/B fastembed, controllo modello, analisi)
 controlli.bat            ← Wrapper Windows di controlli.py
 prova.bat                ← Test rapido senza generare il video (dry-run)
 genera_video.bat         ← Launcher 1-click (Windows)
 crea_venv.bat            ← Crea .venv (Windows)
-requirements.txt         ← Dipendenze pip
+requirements.txt         ← Dipendenze pip (solo runtime)
+requirements-dev.txt     ← Lint e type-check per chi modifica il codice (ruff, mypy)
 ruff.toml                ← Configurazione lint (guardrail di stile)
 mypy.ini                 ← Configurazione type-check
 PROMPT_PRESENTAZIONE (PREDEFINITO).md ← Prompt NotebookLM: presentazione → podcast
@@ -49,7 +53,7 @@ Comandi verificati per chi modifica il codice:
 # Verifica completa in un colpo: CI + mypy 3 piattaforme + debug hardware
 python src/controlli.py
 
-# Test (suite completa, unittest - 1110 test)
+# Test (suite completa, unittest - 1147 test)
 python -m unittest discover -s src -p "test_*.py"
 
 # Type-check (mypy: codice di produzione e test, tranne la deny-list in mypy.ini)

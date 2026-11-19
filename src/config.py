@@ -359,7 +359,10 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
 # la cache, il PDF e l'audio verrebbero cercati dentro `src/` SENZA alcun
 # errore — il sintomo sarebbe "non trovo il tuo podcast".
 BASE_DIR = project_root()
-CACHE_DIR = BASE_DIR / ".cache"
+# SYNC_VIDEO_CACHE_DIR: cartella cache alternativa. La usa il test
+# end-to-end per non scrivere nella cache della macchina (referto, timeline
+# finale) e per girare in una cartella temporanea.
+CACHE_DIR = Path(os.environ.get("SYNC_VIDEO_CACHE_DIR") or (BASE_DIR / ".cache"))
 
 # Nome del file con la versione quando il programma gira da ZIP (niente .git):
 # lo scrive la CI impacchettando (data + sha del commit).

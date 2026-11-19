@@ -95,13 +95,11 @@ def clean_cache(
     # attive, rimuove solo ciò che non è housekeeping.
     esito["orphan_json"] = _clean_orphan_cache(set(), cache_dir=cache_dir)
     # 2. embedding content-addressed oltre il tetto (300 MB e 30 giorni).
-    emb_dir = cache_dir / "embedding_cache"
-    prima = len(list(emb_dir.glob("emb_*.npz"))) if emb_dir.exists() else 0
+    # La potatura dice quante voci ha rimosso: un secondo glob qui avrebbe
+    # potuto guardare una cartella diversa da quella potata (era il difetto).
     # La cache è un'ottimizzazione: mai far fallire la pulizia per un prune.
     with contextlib.suppress(Exception):
-        _prune_embed_cache()
-    dopo = len(list(emb_dir.glob("emb_*.npz"))) if emb_dir.exists() else 0
-    esito["embed_npz"] = max(0, prima - dopo)
+        esito["embed_npz"] = _prune_embed_cache(cache_dir)
     # 3. frame di verifica del video precedente (rigenerati a ogni run).
     if clean_verify_frames:
         vf = cache_dir / "verify_frames"

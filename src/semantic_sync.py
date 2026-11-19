@@ -40,7 +40,7 @@ from typing import Any, cast
 
 import numpy as np
 
-from chunks import Word, build_windows, words_text_in_window
+from chunks import TimeIndex, Word, build_windows, words_text_in_window
 from config import (
     CACHE_DIR,
     DEFAULT_EMBED_THREADS,
@@ -415,8 +415,16 @@ def _riuso_parziale(
     return trovati, mancanti
 
 
-def _prune_embed_cache() -> None:
+def _prune_embed_cache(cache_dir: Path | None = None) -> int:
     """Tiene la cache di embedding entro un tetto di BYTE e di ETA'.
+
+    ``cache_dir``: la cartella della CACHE del progetto (quella che contiene
+    ``embedding_cache/``). Default: quella del progetto. Chi lavora su
+    un'altra cartella la indica qui: potare la cache globale significa
+    cancellare le cose sbagliate.
+
+    Ritorna quante voci ha rimosso: il conteggio lo fa chi pota, non un
+    secondo ``glob`` del chiamante che puo' guardare un'altra cartella.
 
     Le cache sono content-addressed (si invalidano da sole quando l'input
     cambia), quindi non vanno cancellate: senza un tetto pero' crescono a ogni
@@ -431,22 +439,26 @@ def _prune_embed_cache() -> None:
     serve piu' a nessuno (i testi che la richiederebbero non si ripresentano
     cosi' spesso).
     """
+    base = _EMBED_CACHE_DIR if cache_dir is None else cache_dir / "embedding_cache"
     try:
         voci = [
             (p, p.stat().st_mtime, p.stat().st_size)
-            for p in _EMBED_CACHE_DIR.glob("emb_*.npz")
+            for p in base.glob("emb_*.npz")
         ]
     except OSError:
-        return
+        return 0
     voci.sort(key=lambda v: v[1], reverse=True)
     totale = 0
+    rimosse = 0
     for path, mtime, size in voci:
         troppo_vecchia = (time.time() - mtime) > _EMBED_CACHE_MAX_ETA_GIORNI * 86400
         if troppo_vecchia or totale + size > _EMBED_CACHE_MAX_BYTES:
             with contextlib.suppress(OSError):
                 path.unlink()
+                rimosse += 1
             continue
         totale += size
+    return rimosse
 
 
 def _embed_list_cached(
@@ -1720,8 +1732,11 @@ def verify_anchor_mapping_embedding(
     # comportamento per-ancora: un estratto illeggibile non deve far perdere
     # gli altri.
     estratte: list[tuple[int, float, str]] = []
+    # L'indice dei timestamp si costruisce UNA volta: senza, ogni ancora
+    # ripercorreva tutte le parole per ricostruire la lista dei tempi.
+    indice_parole = TimeIndex(words_raw)
     for s, t in sorted(anchors.items(), key=lambda kv: kv[1]):
-        excerpt = words_text_in_window(words_raw, t, t + window_seconds)
+        excerpt = words_text_in_window(words_raw, t, t + window_seconds, index=indice_parole)
         if not excerpt:
             continue
         estratte.append((s, t, excerpt))

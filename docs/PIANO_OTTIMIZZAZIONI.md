@@ -231,6 +231,50 @@ ancore, i 15 segmenti) diventa la documentazione viva di cio' che il programma
 deve produrre.
 
 
+## Batch 11 — la revisione del codice (2026-11)
+
+Una revisione delle ultime quattro batch ha trovato un difetto che rompeva la
+suite — il prompt NotebookLM riformattato: le cancellette con due spazi in più
+non venivano più riconosciute, quindi `test_prompts` non trovava nessun blocco
+da incollare e 6 test fallivano — e sei problemi di comportamento. Corretti
+tutti, i problemi hanno un test che li copre.
+
+- **Il blocco delle run ha tre esiti.** "Occupato" (un'altra run al lavoro: si
+  aspetta) e "non creabile" (cartella in sola lettura, ACL, disco pieno) erano
+  lo stesso valore: il secondo faceva aspettare un quarto d'ora e poi
+  abortiva, contro il commento del modulo ("meglio una run che può pestarsi
+  che una run che non parte"). Ora una run che non può creare il file di
+  blocco parte lo stesso, con un avviso.
+- **Il blocco si libera quando la run finisce.** `main()` non lo rilasciava: per
+  gli script che la chiamano nello stesso processo il lock sopravviveva alla
+  run, e un rilancio da un'altra console aspettava 15 minuti per un lavoro già
+  finito. La suite lo segnalava come `ResourceWarning: unclosed file
+  run.lock`. Ora il blocco è legato alla vita dell'oggetto, e il file non
+  cresce più di una riga per run (la scrittura in `a+` aggiungeva un PID a
+  ogni avvio).
+- **La potatura degli embedding agisce sulla cartella indicata.** Prima
+  contava i file in una cartella e ne potava un'altra: `test_cache_maintenance`
+  potava la cache vera e riportava sempre 0, quindi il test non poteva
+  accorgersene.
+- **L'attesa stampa un avviso al minuto**, non uno ogni 2 secondi (erano 450
+  righe identiche in un quarto d'ora).
+- **Il riuso del video include i thread** nell'impronta (finiscono nei flag di
+  libx264, quindi un video con un altro numero di thread non è garantito
+  identico), e l'audio copiato ha un ritentativo in AAC: un codec non ammesso
+  in MP4 non lascia più la build senza via d'uscita.
+- **L'indice dei timestamp si costruisce una volta** invece di una per ancora:
+  `words_in_window` ricostruiva la lista dei tempi (e ricontrollava l'ordine) a
+  ogni chiamata, quindi il guadagno promesso dal docstring non c'era.
+- **La prova sul materiale reale distingue "non verificabile" (uscita 2) da
+  "timeline cambiata" (1).** Il materiale non è versionato: su un altro
+  checkout la prova diceva "materiale diverso" e usciva 1, come se il codice
+  fosse rotto.
+- **Le dipendenze di sviluppo stanno in `requirements-dev.txt`**: chi usa il
+  programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
+
+Come si verificano: `python -m ruff check .`, `python -m mypy src`,
+`python -m unittest discover -s src -p "test_*.py"` (1147 test).
+
 ## Stato delle voci
 
 | # | Voce | Stato |

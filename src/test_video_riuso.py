@@ -27,6 +27,7 @@ from PIL import Image
 
 from video import (
     _audio_copy_args,
+    _tentativi_encoding,
     build_video,
     frame_consistency_check,
 )
@@ -94,6 +95,11 @@ class TestChiaveVideo(unittest.TestCase):
     def test_cambia_se_cambia_il_motore(self) -> None:
         self.assertNotEqual(self._chiave(), self._chiave(engine="moviepy"))
 
+    def test_cambia_se_cambiano_i_thread(self) -> None:
+        # I thread finiscono nei flag di libx264: un video con un altro numero
+        # di thread non e' garantito identico.
+        self.assertNotEqual(self._chiave(), self._chiave(threads=4))
+
 
 class TestRiusoVideo(unittest.TestCase):
     """Il video gia' renderizzato si riusa solo se la sua chiave coincide."""
@@ -132,7 +138,12 @@ class TestRiusoVideo(unittest.TestCase):
             mock.patch("video_riuso.CACHE_DIR", self.base),
             mock.patch("video._build_video_ffmpeg") as ffmpeg,
         ):
-            segna_video(self.output, self.chiave, cache_dir=self.base)
+            # La chiave deve descrivere la stessa run: build_video usa
+            # threads=4, quindi anche l'impronta del video gia' scritto.
+            chiave_con_threads = chiave_video(
+                [str(self.slide)], [10.0], self.audio, 5, 0.0, "ffmpeg", "libx264", 4
+            )
+            segna_video(self.output, chiave_con_threads, cache_dir=self.base)
             build_video(
                 [str(self.slide)],
                 [10.0],
@@ -194,6 +205,50 @@ class TestFotogrammiSoloDeiProblemi(unittest.TestCase):
                 1,
                 "il fotogramma del segmento sbagliato resta: e' la prova da guardare",
             )
+
+
+class TestVideoPrecedente(unittest.TestCase):
+    """Il video che viene sovrascritto non va perso."""
+
+    def test_il_video_esistente_viene_conservato(self) -> None:
+        from video import _salva_video_precedente
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "video_finale.mp4"
+            out.write_bytes(b"vecchio video")
+            _salva_video_precedente(out)
+            copia = Path(tmp) / "video_finale (precedente).mp4"
+            self.assertTrue(copia.exists())
+            self.assertEqual(copia.read_bytes(), b"vecchio video")
+
+    def test_senza_video_non_crea_nulla(self) -> None:
+        from video import _salva_video_precedente
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "video_finale.mp4"
+            _salva_video_precedente(out)
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+
+class TestTentativiEncoding(unittest.TestCase):
+    """Le reti di sicurezza dell'encoding, nell'ordine in cui si provano."""
+
+    def test_audio_copiato_ritenta_anche_in_aac(self) -> None:
+        self.assertEqual(
+            _tentativi_encoding("h264_nvenc", True, True),
+            [("h264_nvenc", True), ("libx264", True), ("libx264", False)],
+        )
+
+    def test_encoder_software_con_audio_aac_un_solo_tentativo(self) -> None:
+        self.assertEqual(
+            _tentativi_encoding("libx264", False, False), [("libx264", False)]
+        )
+
+    def test_encoder_accelerato_con_audio_aac_non_ritenta_la_copia(self) -> None:
+        self.assertEqual(
+            _tentativi_encoding("h264_qsv", True, False),
+            [("h264_qsv", False), ("libx264", False)],
+        )
 
 
 if __name__ == "__main__":

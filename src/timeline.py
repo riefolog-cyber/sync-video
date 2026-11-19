@@ -471,7 +471,10 @@ def _collect_implicit_mentions(words: list[Word]) -> list[tuple[float, bool]]:
                 indice_slide = j
                 break
         if indice_slide is None:
-            for j in range(max(0, i - 3), i):
+            # All'indietro, partendo dalla parola piu' vicina: con due parole
+            # "slide" prima dell'aggettivo quella che conta e' l'ultima, non
+            # la prima (il ciclo in avanti prendeva la piu' lontana).
+            for j in range(i - 1, max(-1, i - 4), -1):
                 if _is_slide_word(words[j]["word"]) or _is_page_word(words[j]["word"]):
                     indice_slide = j
                     break

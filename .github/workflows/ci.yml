@@ -60,7 +60,7 @@ jobs:
             hf-${{ runner.os }}-
 
       - name: Installa dipendenze
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Strumenti di sistema (ffmpeg, Tesseract)
         # ubuntu-latest e' passata a Ubuntu 26.04 (immagine ubuntu-26.04) e
@@ -160,7 +160,7 @@ jobs:
             hf-${{ runner.os }}-
 
       - name: Installa dipendenze
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Strumenti di sistema (ffmpeg, Tesseract)
         # ubuntu-latest e' passata a Ubuntu 26.04 (immagine ubuntu-26.04) e
@@ -240,7 +240,7 @@ jobs:
             pip-${{ runner.os }}-3.12-
 
       - name: Installa dipendenze
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Tesseract (OCR)
         run: choco install tesseract -y --no-progress

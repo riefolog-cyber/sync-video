@@ -319,17 +319,71 @@ def _run_ffmpeg(cmd: list[str], total_duration: float) -> None:
         raise RuntimeError(f"ffmpeg è fallito (exit code {returncode}). Ultimo output:\n{tail}")
 
 
-def _audio_copy_args(audio_path: Path) -> list[str]:
+def _audio_si_puo_copiare(audio_path: Path) -> bool:
+    """True se la sorgente e' un contenitore in cui la copia ha senso.
+
+    La decisione e' per ESTENSIONE (non si apre il file): mp3/wav si
+    ricodificano in AAC, un MP4/M4A si copia. La copia puo' comunque fallire
+    se il codec audio non e' ammesso in MP4: in quel caso si ritenta con AAC
+    (vedi ``_tentativi_encoding``).
+    """
+    return audio_path.suffix.lower() in (".m4a", ".mp4", ".aac", ".m4b")
+
+
+def _audio_copy_args(audio_path: Path, *, copy: bool | None = None) -> list[str]:
     """Come mettere l'audio nel video: copia o ricodifica.
 
     Se la sorgente e' gia' un contenitore MP4/AAC, la copia e' bit-identica:
     si evita una ricodifica lossy che peggiorava l'audio e costava tempo
     (misurato: ~10-25s su un podcast di 20 minuti). Con altri formati si
     ricodifica in AAC, come prima.
+
+    ``copy`` esplicito vince sull'estensione: serve ai ritentativi (dopo una
+    copia fallita si ricodifica anche se il file e' un MP4).
     """
-    if audio_path.suffix.lower() in (".m4a", ".mp4", ".aac", ".m4b"):
+    copia = _audio_si_puo_copiare(audio_path) if copy is None else copy
+    if copia:
         return ["-c:a", "copy"]
     return ["-c:a", "aac", "-b:a", "160k"]
+
+
+def _salva_video_precedente(output_path: Path) -> None:
+    """Conserva il video gia' presente prima di sovrascriverlo.
+
+    Il riuso evita di rifare un video identico, ma una run che cambia
+    qualcosa riscrive il file: se il risultato nuovo e' peggiore (un'ancora
+    sbagliata, un deck diverso), quello buono sparirebbe. Una copia accanto
+    costa quanto il file e non tocca il flusso.
+    """
+    if not output_path.exists():
+        return
+    copia = output_path.with_name(f"{output_path.stem} (precedente){output_path.suffix}")
+    with suppress(OSError):
+        shutil.copy2(output_path, copia)
+        log.info("   Video precedente conservato in: %s", copia.name)
+
+
+def _tentativi_encoding(
+    encoder: str, accelerato: bool, copia_audio: bool
+) -> list[tuple[str, bool]]:
+    """Le combinazioni (encoder, audio copiato) da provare, in ordine.
+
+    Due reti di sicurezza indipendenti: un encoder accelerato puo' esistere
+    in ffmpeg ma non funzionare (driver vecchio, device non supportato), e un
+    audio copiato puo' non essere ammesso in un MP4. Si prova a scendere: se
+    l'encoder accelerato fallisce si usa libx264; se anche la copia fallisce
+    si ricodifica in AAC (che accetta qualsiasi sorgente).
+    """
+    tentativi: list[tuple[str, bool]] = [(encoder, copia_audio)]
+    if accelerato:
+        tentativi.append(("libx264", copia_audio))
+    if copia_audio:
+        tentativi.append(("libx264", False))
+    unici: list[tuple[str, bool]] = []
+    for tentativo in tentativi:
+        if tentativo not in unici:
+            unici.append(tentativo)
+    return unici
 
 
 def _build_video_ffmpeg(
@@ -374,7 +428,7 @@ def _build_video_ffmpeg(
         concat_path = workdir / "concat.txt"
         _write_concat_file(entries, concat_path)
 
-        def _comando(enc: str) -> list[str]:
+        def _comando(enc: str, copia_audio: bool) -> list[str]:
             return [
                 "ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-nostdin",
                 "-progress", "pipe:1",
@@ -386,7 +440,7 @@ def _build_video_ffmpeg(
                 # l'opzione di output -r produce overshoot di secondi sull'ultima
                 # immagine, il filtro fps resta entro un frame di tolleranza.
                 "-vf", f"fps={fps}", "-pix_fmt", "yuv420p",
-                *_audio_copy_args(audio),
+                *_audio_copy_args(audio, copy=copia_audio),
                 # Con un encoder accelerato i thread CPU non servono: il
                 # lavoro e' sulla GPU e forzarli aggiunge solo contention.
                 *([] if enc != "libx264" else ["-threads", str(threads)]),
@@ -398,19 +452,23 @@ def _build_video_ffmpeg(
                 str(output_path),
             ]
 
-        try:
-            _run_ffmpeg(_comando(encoder), total_duration)
-        except RuntimeError:
-            if not accelerato:
-                raise
-            # Rete di sicurezza: un encoder accelerato puo' essere compilato
-            # in ffmpeg ma non funzionare (driver vecchio, device non
-            # supportato, presenza errata). Il fallback e' sempre software e
-            # funziona su ogni macchina.
-            log.warning(
-                "   ⚠️  Encoding %s fallito: ritento con libx264 (CPU, piu' lento).", encoder
-            )
-            _run_ffmpeg(_comando("libx264"), total_duration)
+        copia_audio = _audio_si_puo_copiare(audio)
+        errore: RuntimeError | None = None
+        for enc, copia in _tentativi_encoding(encoder, accelerato, copia_audio):
+            try:
+                _run_ffmpeg(_comando(enc, copia), total_duration)
+                return
+            except RuntimeError as e:
+                # L'ultimo errore e' quello che esce: contiene il log di ffmpeg
+                # della combinazione piu' "sicura" provata.
+                errore = e
+                log.warning(
+                    "   ⚠️  Encoding %s (audio %s) fallito: provo la combinazione successiva.",
+                    enc,
+                    "copiato" if copia else "AAC",
+                )
+        assert errore is not None
+        raise errore
 
 
 def build_video(
@@ -510,6 +568,7 @@ def build_video(
         transition_duration,
         _engine_norm,
         encoder,
+        threads,
     )
     if reuse and video_riutilizzabile(output_path, _chiave):
         log.info(
@@ -518,6 +577,9 @@ def build_video(
         )
         log.info("\n[COMPLETATO] File sincronizzato salvato in: %s", output_path)
         return
+
+    # Da qui in poi il file viene riscritto: si conserva il precedente.
+    _salva_video_precedente(output_path)
 
     use_moviepy = _engine_norm == "moviepy" or transition_duration > 0 or audio_path is None
     if use_moviepy:

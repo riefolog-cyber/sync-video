@@ -75,7 +75,10 @@ genera_video.bat
 >
 > Due run sulla stessa cartella non si pestano: la seconda **aspetta fino a
 > 15 minuti** che la prima finisca e poi si ferma con un avviso (il blocco è
-> del sistema operativo: se la prima muore, il blocco si libera da solo).
+> del sistema operativo: se la prima muore, il blocco si libera da solo). Se
+> invece il file di blocco non si può creare (cartella in sola lettura, ACL,
+> disco pieno), la run parte lo stesso, con un avviso nel log: fermarsi lì
+> sarebbe peggio che procedere senza la protezione dalle run concorrenti.
 >
 > La **verifica del video** (`--verify-video`) lascia in
 > `.cache/verify_frames/` **solo i fotogrammi dei segmenti sbagliati**: sono
@@ -237,7 +240,8 @@ Questo README copre avvio rapido e uso quotidiano. Il resto e' in [`docs/`](docs
 > **Prova sul materiale vero**: `python src/scripts/prova_materiale_reale.py`
 > lancia la pipeline sul tuo PDF e sul tuo podcast e confronta la timeline con
 > un riferimento salvato: esce con 0 se è **identica**, con 1 se un confine si
-> è spostato (e di quanto). È il modo più rapido per capire se una modifica
+> è spostato (e di quanto), con 2 se il confronto non si può fare (materiale
+> diverso da quello del riferimento, o riferimento assente). È il modo più rapido per capire se una modifica
 > ha cambiato qualcosa. Dettagli: [docs/verifica.md](docs/verifica.md).
 
 ---

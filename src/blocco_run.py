@@ -1,32 +1,39 @@
 #!/usr/bin/env python3
 """Blocco per le run concorrenti sulla stessa cartella.
 
-Due run sulla stessa cartella si pestano: la prima cancella le slide che la
-seconda sta usando (``_clean_directory`` sulle PNG), la pulizia delle cache
-cancella la trascrizione dell'altra, i frame di verifica vengono svuotati
-sotto le mani dell'altra. Fin qui non c'era stato nessuno sblocco: due run
-insieme producevano un video a meta' costruito con i pezzi dell'altro, senza
-errori in console.
+Due run insieme si pestano: la prima cancella le slide che la seconda sta
+usando, la pulizia delle cache cancella la trascrizione dell'altra, i frame di
+verifica vengono svuotati sotto le mani dell'altra. Il risultato e' un video a
+meta' costruito con i pezzi dell'altro, senza errori in console.
 
 Il blocco e' un lock DEL SISTEMA OPERATIVO su un file: il SO lo tiene per il
 processo e lo rilascia quando il processo muore (anche con un crash), quindi
-non esiste il "file di blocco rimasto" da interpretare e non serve nessuna
-pulizia manuale.
+non resta mai un "file di blocco" da interpretare o da pulire a mano.
+
+Tre esiti (``tenta``), perche' "occupato" e "non creabile" sono cose diverse:
+
+- ``PRESO``: la run puo' partire;
+- ``OCCUPATO``: un ALTRO processo tiene il blocco. Con ``attesa_secondi`` si
+  aspetta che finisca, poi si rinuncia;
+- ``NON_DISPONIBILE``: il file di blocco non si crea (cartella in sola
+  lettura, ACL, disco pieno). La run parte lo stesso: meglio una run che puo'
+  pestarsi che una run che non parte. Prima questo caso era indistinguibile
+  da ``OCCUPATO``, quindi faceva aspettare un quarto d'ora per poi fermarsi.
 """
 
 from __future__ import annotations
 
 import os
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import IO, Any
 
 from config import log
 
-# I due modi di bloccare un file sono diversi per sistema operativo, e nessuno
-# dei due esiste sull'altro: si importano con-tolerantemente e si usa quello
-# che c'e'. `Any` perche' il type-check gira sulle tre piattaforme e su una
-# sola dei due moduli e' disponibile.
+# I due modi di bloccare un file non esistono entrambi sullo stesso sistema:
+# si importa quello che c'e'. `Any` perche' il type-check gira sulle tre
+# piattaforme e su una sola dei due moduli e' disponibile.
 fcntl: Any = None
 msvcrt: Any = None
 try:
@@ -42,16 +49,17 @@ try:
 except ImportError:  # pragma: no cover - POSIX
     pass
 
-# Byte bloccato: la posizione 0 del file. Il PID viene scritto DOPO, cosi' il
-# blocco non si sposta quando il contenuto cambia.
-_POSIZIONE_BLOCCO = 0
+# Esiti di ``tenta``.
+PRESO = "preso"
+OCCUPATO = "occupato"
+NON_DISPONIBILE = "non_disponibile"
+
 _NOME_FILE = "run.lock"
 
-# Il blocco TENUTO da questo processo: due run NELLO STESSO processo non si
-# pestano (le slide sono gia' state pulite, la cache e' la stessa), quindi il
-# secondo avvio dentro lo stesso processo passa. Il caso che deve fermarsi e'
-# un altro PROCESSO sulla stessa cartella.
-_proprietario: BloccoRun | None = None
+# Le cartelle gia' bloccate da QUESTO processo: due run nello stesso processo
+# non si pestano (le slide sono gia' state pulite, la cache e' la stessa),
+# quindi la seconda passa. Si ripulisce da sola in ``release``.
+_proprietari: set[Path] = set()
 
 
 class BloccoRun:
@@ -59,80 +67,77 @@ class BloccoRun:
 
     def __init__(self, cache_dir: Path) -> None:
         self.path = cache_dir / _NOME_FILE
+        # Percorso normalizzato: relativo e assoluto sono la stessa cartella,
+        # quindi lo stesso blocco.
+        self._chiave = self.path.resolve()
         self._file: IO[str] | None = None
 
     def acquired(self, attesa_secondi: float = 0.0) -> bool:
-        """Prende il blocco. False se un altro processo lo ha gia'.
+        """True se la run puo' partire (anche quando il blocco non si crea)."""
+        return self.tenta(attesa_secondi=attesa_secondi) != OCCUPATO
 
-        Con ``attesa_secondi`` si ASPETTA che l'altra run finisca (il blocco e'
-        del sistema operativo: quando l'altra run muore il blocco si libera
-        da solo). Serve a chi aspetta: due run non si pestano, e la seconda
-        parte quando la prima ha finito.
+    def tenta(self, attesa_secondi: float = 0.0) -> str:
+        """Prova a prendere il blocco e dice com'e' andata.
+
+        Con ``attesa_secondi`` si aspetta che l'altra run finisca: di solito e'
+        un rilancio mentre la prima lavora, non due run in competizione.
         """
-        global _proprietario
-        if _proprietario is not None:
-            # Questo processo ha gia' il blocco: la run precedente (o un
-            # test che avvia la pipeline) lo tiene ancora. Non e' una run
-            # concorrente: si prosegue.
-            return True
+        if self._chiave in _proprietari:
+            return PRESO
         deadline = time.time() + max(0.0, attesa_secondi)
+        avvisato = False
         while True:
-            if self._prova():
-                return True
+            esito = self._prova()
+            if esito != OCCUPATO:
+                return esito
             if time.time() >= deadline:
-                return False
-            log.info(
-                "   Un'altra run è già in corso su questa cartella: aspetto che finisca."
-            )
+                return OCCUPATO
+            if not avvisato:
+                # Un avviso solo: ripeterlo ogni 2 secondi erano centinaia di
+                # righe identiche.
+                log.info(
+                    "   Un'altra run è già in corso su questa cartella: aspetto che finisca."
+                )
+                avvisato = True
             time.sleep(2.0)
 
-    def _prova(self) -> bool:
-        """Un tentativo di prendere il blocco (True se preso)."""
-        global _proprietario
+    def _prova(self) -> str:
+        """Un tentativo di prendere il blocco."""
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fh = open(self.path, "a+", encoding="utf-8")  # noqa: SIM115 - resta aperto col blocco
         except OSError as e:
-            # Senza blocco la run parte lo stesso: meglio una run che puo'
-            # pestarsi che una run che non parte.
             log.debug("   Blocco run non creato (%s): proseguo senza blocco.", e)
-            return False
+            return NON_DISPONIBILE
         try:
             fh.seek(0, os.SEEK_END)
             if fh.tell() == 0:
-                # Windows vuole un byte da bloccare: il file non puo' essere
-                # vuoto, altrimenti locking fallisce.
+                # Windows non blocca un file vuoto: serve un byte. Non si
+                # scrive nient'altro (nessuno legge il contenuto), quindi il
+                # file non cresce a ogni run.
                 fh.write(" ")
                 fh.flush()
-            fh.seek(_POSIZIONE_BLOCCO)
+            fh.seek(0)
             if fcntl is not None:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             elif msvcrt is not None:
                 msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
         except OSError:
             fh.close()
-            return False
+            return OCCUPATO
         self._file = fh
-        _proprietario = self
-        try:
-            fh.seek(_POSIZIONE_BLOCCO + 1)
-            fh.write(f"{os.getpid()}\n")
-            fh.flush()
-        except OSError:
-            pass
-        return True
+        _proprietari.add(self._chiave)
+        return PRESO
 
     def release(self) -> None:
         """Rilascia il blocco (il SO lo rilascia comunque alla fine del processo)."""
-        global _proprietario
-        if _proprietario is self:
-            _proprietario = None
+        _proprietari.discard(self._chiave)
         fh = self._file
         self._file = None
         if fh is None:
             return
         try:
-            fh.seek(_POSIZIONE_BLOCCO)
+            fh.seek(0)
             if fcntl is not None:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
             elif msvcrt is not None:
@@ -142,11 +147,9 @@ class BloccoRun:
         finally:
             fh.close()
 
-
-def _blocco_attivo(cache_dir: Path) -> bool:
-    """True se un altro processo tiene il blocco (per i messaggi)."""
-    blocco = BloccoRun(cache_dir)
-    if blocco.acquired():
-        blocco.release()
-        return False
-    return True
+    def __del__(self) -> None:
+        # main() non ha un `finally` attorno a tutta la run: se il blocco non
+        # morisse con l'oggetto, un rilancio da un'altra console aspetterebbe
+        # 15 minuti per un lavoro gia' finito.
+        with suppress(Exception):
+            self.release()

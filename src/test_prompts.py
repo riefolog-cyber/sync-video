@@ -283,5 +283,40 @@ class TestRiferimentiReadme(unittest.TestCase):
         self.assertIn(PROMPT.name, testo, f"{PROMPT.name} non e' citato nel README")
 
 
+class TestStrutturaDelFile(unittest.TestCase):
+    """La FORMA del file, non le frasi: e' cio' che si rompe riformattando.
+
+    Le cancellette devono essere esattamente "```" (niente spazi finali) e
+    pari: un blocco che non si apre o non si chiude bene non viene
+    riconosciuto, e una prosa finita dentro un blocco viene incollata in
+    NotebookLM insieme al prompt. E' successo davvero: le frasi c'erano
+    tutte, la forma no, e i test delle frasi non potevano accorgersene.
+    """
+
+    def test_cancellette_pulite_e_pari(self) -> None:
+        righe = PROMPT.read_text(encoding="utf-8").splitlines()
+        cancellette = [i for i, riga in enumerate(righe, 1) if "```" in riga]
+        self.assertTrue(cancellette, "nessuna cancellata nel prompt")
+        self.assertEqual(len(cancellette) % 2, 0, f"cancellette spaiate: righe {cancellette}")
+        for numero in cancellette:
+            self.assertEqual(
+                righe[numero - 1],
+                "```",
+                f"riga {numero}: la cancellata deve essere esattamente ``` "
+                f"(trovato {righe[numero - 1]!r})",
+            )
+
+    def test_nessuna_prosa_dentro_i_blocchi(self) -> None:
+        for blocco in _blocchi(PROMPT):
+            for riga in blocco.splitlines():
+                self.assertFalse(
+                    riga.startswith("**"), f"titolo markdown dentro un blocco: {riga!r}"
+                )
+                self.assertFalse(
+                    riga.strip().startswith("Scarica"),
+                    f"istruzione per l'utente dentro un blocco: {riga!r}",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

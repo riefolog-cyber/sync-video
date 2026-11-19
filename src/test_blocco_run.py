@@ -14,10 +14,11 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from blocco_run import BloccoRun
+from blocco_run import NON_DISPONIBILE, PRESO, BloccoRun
 
 
 class TestBloccoRun(unittest.TestCase):
@@ -65,10 +66,17 @@ class TestBloccoRun(unittest.TestCase):
         with tempfile.TemporaryDirectory() as altra:
             primo = BloccoRun(self.base)
             secondo = BloccoRun(Path(altra))
-            self.addCleanup(primo.release)
-            self.addCleanup(secondo.release)
-            self.assertTrue(primo.acquired())
-            self.assertTrue(secondo.acquired(), "cartelle diverse: nessun conflitto")
+            try:
+                self.assertTrue(primo.acquired())
+                # Prima questo passava senza aprire nulla: il blocco era unico
+                # per processo, non per cartella. Ora i due blocchi sono
+                # davvero indipendenti, e vanno rilasciati entrambi.
+                self.assertTrue(secondo.acquired(), "cartelle diverse: nessun conflitto")
+            finally:
+                # Su Windows un file aperto non si cancella: i blocchi vanno
+                # rilasciati PRIMA che la cartella temporanea sparisca.
+                secondo.release()
+                primo.release()
 
     def test_la_run_che_arriva_dopo_aspetta_che_l_altra_finisca(self) -> None:
         # Il caso reale: un rilancio mentre la prima run e' ancora al lavoro.
@@ -102,6 +110,8 @@ class TestBloccoRun(unittest.TestCase):
                 # venga cancellata: su Windows il file aperto non si cancella.
                 blocco.release()
                 figlio.wait(timeout=30)
+                if figlio.stdout is not None:
+                    figlio.stdout.close()
 
     def test_il_file_di_blocco_puo_restare_sul_disco(self) -> None:
         # Il file resta, ma conta il blocco del SO: dopo la run il file non
@@ -116,6 +126,53 @@ class TestBloccoRun(unittest.TestCase):
         self.addCleanup(secondo.release)
         self.assertTrue(secondo.acquired(), "un file di blocco vecchio non blocca la run")
         secondo.release()
+
+    def test_se_il_file_di_blocco_non_si_crea_la_run_prosegue(self) -> None:
+        # Cartella in sola lettura, ACL, disco pieno: il file di blocco non si
+        # crea. Non e' una ragione per fermarsi (ne' per aspettare un quarto
+        # d'ora): la run parte, con meno garanzie.
+        with tempfile.TemporaryDirectory() as d:
+            ostacolo = Path(d) / "non-una-cartella"
+            ostacolo.write_text("x", encoding="utf-8")
+            blocco = BloccoRun(ostacolo / "sub")
+            inizio = time.time()
+            esito = blocco.tenta(attesa_secondi=30.0)
+            durata = time.time() - inizio
+            self.assertEqual(esito, NON_DISPONIBILE)
+            self.assertTrue(blocco.acquired(attesa_secondi=30.0))
+            self.assertLess(durata, 5.0, "non deve aspettare: il blocco non e' di nessuno")
+
+    def test_una_run_che_prova_a_bloccare_dice_occupato(self) -> None:
+        primo = BloccoRun(self.base)
+        self.addCleanup(primo.release)
+        self.assertTrue(primo.acquired())
+        # Un processo vero: qui dentro lo stesso processo il blocco e' "preso"
+        # per progetto, quindi l'esito OCCUPATO si verifica solo da fuori.
+        self.assertIn("BLOCCATO", self._figlio(self.base))
+        self.assertEqual(primo.tenta(), PRESO)
+
+    def test_il_file_di_blocco_non_cresce_a_ogni_run(self) -> None:
+        # Il file serve solo a dare un byte da bloccare a Windows: nessuno ci
+        # scrive niente, quindi non deve crescere a ogni run.
+        dimensioni: list[int] = []
+        for _ in range(3):
+            blocco = BloccoRun(self.base)
+            self.assertTrue(blocco.acquired())
+            blocco.release()
+            dimensioni.append((self.base / "run.lock").stat().st_size)
+        self.assertEqual(len(set(dimensioni)), 1)
+
+    def test_il_blocco_si_libera_quando_la_run_finisce(self) -> None:
+        # main() non ha un finally attorno alla run: il lock deve morire con
+        # l'oggetto, altrimenti un rilancio da un'altra console aspetta 15
+        # minuti per un lavoro gia' finito.
+        def _una_run() -> None:
+            blocco = BloccoRun(self.base)
+            self.assertTrue(blocco.acquired())
+            # Nessun release(): esce dallo scope e basta.
+
+        _una_run()
+        self.assertIn("LIBERO", self._figlio(self.base))
 
 
 if __name__ == "__main__":

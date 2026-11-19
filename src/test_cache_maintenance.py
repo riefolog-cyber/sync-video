@@ -94,6 +94,35 @@ class TestCleanCache(unittest.TestCase):
             finally:
                 m.CACHE_DIR = old
 
+    def test_la_potatura_embedding_usa_la_cartella_indicata(self) -> None:
+        # Prima la potatura usava la cartella globale di semantic_sync: contava
+        # i file qui e ne cancellava altri. Qui si verifica che agisca sulla
+        # cartella indicata e che la cache vera resti intatta.
+        import os
+        import time
+
+        from semantic_sync import _EMBED_CACHE_DIR as cache_vera
+
+        def _quanti_veri() -> int:
+            return len(list(cache_vera.glob("emb_*.npz"))) if cache_vera.exists() else 0
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            emb = base / "embedding_cache"
+            emb.mkdir()
+            vecchio = emb / "emb_vecchio.npz"
+            vecchio.write_bytes(b"x" * 10)
+            quaranta_giorni = time.time() - 40 * 86400
+            os.utime(vecchio, (quaranta_giorni, quaranta_giorni))
+
+            prima_vera = _quanti_veri()
+            esito = clean_cache(base)
+            dopo_vera = _quanti_veri()
+
+            self.assertEqual(esito["embed_npz"], 1)
+            self.assertFalse(vecchio.exists())
+            self.assertEqual(prima_vera, dopo_vera, "la cache vera non va toccata")
+
 
 if __name__ == "__main__":
     unittest.main()

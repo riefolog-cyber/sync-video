@@ -158,6 +158,18 @@ def _seleziona(tutti: list[Controllo], filtri: list[str]) -> list[Controllo]:
     return [c for c in tutti if any(r in c.nome.lower() for r in ricerche)]
 
 
+def _moduli_mancanti(necessari: set[str]) -> list[str]:
+    """Gli strumenti di sviluppo richiesti dai passi scelti ma non installati.
+
+    ruff e mypy stanno in requirements-dev.txt (non in requirements.txt): chi
+    usa il programma non li ha. Senza questo controllo il passo fallirebbe con
+    "No module named ruff", che sembra un guasto del progetto.
+    """
+    import importlib.util
+
+    return sorted(m for m in necessari if importlib.util.find_spec(m) is None)
+
+
 def main(argv: list[str] | None = None) -> int:
     tutti = _passi()
     filtri = sys.argv[1:] if argv is None else argv
@@ -165,6 +177,17 @@ def main(argv: list[str] | None = None) -> int:
     if not passi:
         print("Nessun controllo corrisponde a: " + ", ".join(filtri))
         print("Disponibili: " + ", ".join(c.nome for c in tutti))
+        return 2
+
+    richiesti: set[str] = set()
+    for controllo in passi:
+        richiesti.update(a for a in ("ruff", "mypy") if a in controllo.argomenti)
+    mancanti = _moduli_mancanti(richiesti)
+    if mancanti:
+        print(
+            "Mancano gli strumenti di sviluppo: " + ", ".join(mancanti) + "\n"
+            "Installali con:  pip install -r requirements-dev.txt"
+        )
         return 2
 
     print("=" * 66)

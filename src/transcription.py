@@ -769,15 +769,77 @@ def transcribe_audio(
     )
 
 
-def _collect_words(segments: Any) -> list[Word]:
+# --- Salvataggio a pezzi della trascrizione --------------------------------
+# faster-whisper non si mette in pausa: se la run muore a meta', il testo gia'
+# prodotto va salvato, altrimenti e' perduto (la decodifica, comunque,
+# ripartira' da capo). Ogni N segmenti le parole fin qui finiscono in un file
+# sotto `.cache/parziali/`: una sottocartella, quindi la pulizia delle cache
+# (che guarda i .json in radice) non li cancella.
+_CHECKPOINT_OGNI_SEGMENTI = 50
+
+
+def percorso_parziale(audio_path: Path) -> Path:
+    """Dove finiscono le parole gia' trascritte di QUEST'audio."""
+    from config import CACHE_DIR
+
+    try:
+        stat = audio_path.stat()
+        firma = f"{audio_path.stem}_{stat.st_size}_{int(stat.st_mtime)}"
+    except OSError:
+        firma = audio_path.stem
+    return CACHE_DIR / "parziali" / f"{firma}.json"
+
+
+def _salva_parziale(audio_path: Path, parole: list[Word]) -> None:
+    """Scrive le parole fin qui (errore ignorato: e' una rete di sicurezza)."""
+    from config import atomic_write_text
+
+    try:
+        path = percorso_parziale(audio_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(
+            path,
+            json.dumps(
+                {"audio": str(audio_path), "parole": len(parole), "words": parole},
+                ensure_ascii=False,
+            ),
+        )
+    except OSError as e:
+        log.debug("   Trascrizione parziale non salvata (%s).", e)
+
+
+def _avvisa_parziale(audio_path: Path) -> None:
+    """Se una run precedente si e' interrotta, dice quanto testo e' rimasto."""
+    try:
+        path = percorso_parziale(audio_path)
+        dati = json.loads(path.read_text(encoding="utf-8"))
+        parole = int(dati.get("parole") or 0)
+    except (OSError, ValueError, TypeError):
+        return
+    if parole:
+        log.warning(
+            "   [Trascrizione] La run precedente si era interrotta: %d parole "
+            "gia' trascritte in %s. La decodifica riparte da capo (faster-whisper "
+            "non riprende a meta' audio), ma il testo non e' perduto.",
+            parole,
+            path,
+        )
+
+
+def _collect_words(segments: Any, audio_path: Path | None = None) -> list[Word]:
     """Consuma i segmenti di faster-whisper e ne estrae le parole con timestamp.
 
     Con ``word_timestamps=True`` ogni segmento porta le sue parole; il ramo
     di riserva (una "parola" per token, con l'inizio del segmento) tiene in
     piedi la pipeline anche se il motore non restituisce i timestamp per parola.
+
+    ``audio_path`` (facoltativo) attiva il salvataggio a pezzi: un crash a
+    meta' non butta via il testo gia' trascritto.
     """
     all_words: list[Word] = []
+    segmenti = 0
     for seg in segments:
+        segmenti += 1
         if not seg.text:
             continue
         if hasattr(seg, "words") and seg.words:
@@ -787,6 +849,12 @@ def _collect_words(segments: Any) -> list[Word]:
         else:
             for token in seg.text.strip().split():
                 all_words.append({"word": token, "start": seg.start})
+        if audio_path is not None and segmenti % _CHECKPOINT_OGNI_SEGMENTI == 0:
+            _salva_parziale(audio_path, all_words)
+    if audio_path is not None:
+        # Trascrizione arrivata in fondo: il parziale non serve piu'.
+        with contextlib.suppress(OSError):
+            percorso_parziale(audio_path).unlink(missing_ok=True)
     return all_words
 
 
@@ -815,6 +883,8 @@ def _transcribe_with_fallback(
     Returns:
         (parole con timestamp, info della trascrizione)
     """
+    _avvisa_parziale(audio_path)
+
     kwargs: dict[str, Any] = {
         "language": language,
         "beam_size": beam_size,
@@ -834,7 +904,7 @@ def _transcribe_with_fallback(
                 segments, info = BatchedInferencePipeline(model=model).transcribe(
                     str(audio_path), batch_size=batch_size, **kwargs
                 )
-                return _collect_words(segments), info
+                return _collect_words(segments, audio_path), info
             except Exception as e:  # ottimizzazione di velocità: mai fatale
                 log.warning(
                     "   ⚠️  Decoding a batch non riuscito (%s): ripiego sul percorso sequenziale.",
@@ -842,7 +912,7 @@ def _transcribe_with_fallback(
                 )
 
     segments, info = model.transcribe(str(audio_path), **kwargs)
-    return _collect_words(segments), info
+    return _collect_words(segments, audio_path), info
 
 
 def _warn_cpu_transcription(model_size: str) -> None:

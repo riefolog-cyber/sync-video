@@ -33,7 +33,11 @@ UPDATES_CACHE = CACHE_DIR / "updates_check.json"
 DEFAULT_UPDATE_TTL_HOURS = 6.0  # ri-check di rete ogni N ore
 
 # Pacchetti da controllare: i nomi pip usati dal progetto (requirements.txt +
-# dipendenze opzionali del machine setup + dev).
+# dipendenze opzionali del machine setup).
+#
+# mypy e ruff NON sono qui: sono strumenti di sviluppo, non dipendenze di chi
+# usa il programma, e stanno in requirements-dev.txt (test_bootstrap tiene
+# questa lista uguale a requirements.txt).
 _PACKAGES: tuple[str, ...] = (
     "av",
     "pymupdf",
@@ -48,8 +52,6 @@ _PACKAGES: tuple[str, ...] = (
     "faster-whisper",
     "openvino",
     "openvino-genai",
-    "mypy",
-    "ruff",
 )
 
 # Pin voluti e documentati: questi NON vanno aggiornati (motivo nel commento).

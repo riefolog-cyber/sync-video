@@ -20,7 +20,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn, cast
 
-from blocco_run import BloccoRun
+from blocco_run import NON_DISPONIBILE, OCCUPATO, BloccoRun
 from config import (
     AUTO_BEAM_AB_MARGIN,
     AUTO_BEAM_CONFUSABILITY_MAX,
@@ -2206,6 +2206,33 @@ def _resolve_flow(
 # solo, quindi l'attesa non e' un'attesa cieca).
 _BLOCCO_ATTESA_SECONDI = 900.0
 
+# Sotto questa durata media per pagina il podcast e' probabilmente troppo
+# sintetico: il prompt chiede sezioni da 45-180 secondi, e a 20s per pagina il
+# video scorre. L'avviso arriva prima della trascrizione (la fase lunga):
+# l'OCR di poche pagine costa un secondo, Whisper costa minuti.
+_SECONDI_MINIMI_PER_PAGINA = 30.0
+
+
+def _avviso_materiale_poco_denso(n_slide: int, audio_path: Path) -> None:
+    """Avvisa se il parlato e' poco rispetto alle pagine (costo: una `stat`)."""
+    try:
+        with AudioFileClip(str(audio_path)) as clip:
+            durata = float(clip.duration or 0.0)
+    except Exception:  # noqa: BLE001 - la stima non deve mai fermare la run
+        return
+    if durata <= 0 or n_slide <= 0:
+        return
+    per_pagina = durata / n_slide
+    if per_pagina < _SECONDI_MINIMI_PER_PAGINA:
+        log.warning(
+            "   ⚠️  %d pagine in %s: %.0fs per pagina. Le sezioni del podcast "
+            "dovrebbero durare 45-180s: cosi' il video scorre. Meglio un "
+            "podcast piu' lungo (o meno pagine).",
+            n_slide,
+            _format_time(durata),
+            per_pagina,
+        )
+
 
 def _anchor_coverage_ok(n_anchored: int, total_slides: int, minimum: float) -> bool:
     """True se la copertura delle ancore raggiunge la soglia minima.
@@ -2948,11 +2975,23 @@ def main(argv: list | None = None) -> None:
     # di solito e' un rilancio mentre la prima finisce, non due run in
     # competizione.
     _blocco = BloccoRun(CACHE_DIR)
-    if not _blocco.acquired(attesa_secondi=_BLOCCO_ATTESA_SECONDI):
+    # Tre esiti, non due. `NON_DISPONIBILE` (file di blocco non creabile:
+    # cartella in sola lettura, ACL, disco pieno) NON e' una ragione per
+    # fermarsi: prima questo caso era indistinguibile da "occupato" e faceva
+    # aspettare un quarto d'ora per poi abortire, contro il commento di
+    # blocco_run ("meglio una run che puo' pestarsi che una run che non
+    # parte").
+    _esito_blocco = _blocco.tenta(attesa_secondi=_BLOCCO_ATTESA_SECONDI)
+    if _esito_blocco == OCCUPATO:
         _abort(
             "Un'altra run è già in corso su questa cartella (blocco "
             f"{_blocco.path}). Due run insieme si pestano le slide e le cache: "
             "aspetta che l'altra finisca e rilancia."
+        )
+    if _esito_blocco == NON_DISPONIBILE:
+        log.warning(
+            "   File di blocco non creabile (%s): proseguo senza blocco delle run concorrenti.",
+            _blocco.path,
         )
 
     # Bootstrap esplicito: verifica dipendenze prima di tutto
@@ -3256,6 +3295,11 @@ def main(argv: list | None = None) -> None:
                         "2. [CACHE] Trascrizione recuperata dalla cache: nessuna decodifica "
                         "(stesso audio, stesso modello, stessi parametri)."
                     )
+
+        # Avviso a costo zero PRIMA di trascrivere: se le pagine sono tante
+        # per la durata del parlato, il problema si vede gratis qui e non
+        # dopo tre minuti di Whisper.
+        _avviso_materiale_poco_denso(len(slide_files), audio_path)
 
         if transcript is None:
             # Perché si rifà: senza questa riga un parametro cambiato (o un audio
@@ -4369,6 +4413,11 @@ def main(argv: list | None = None) -> None:
         # su disco anche nel percorso default (prima la seconda scrittura
         # avveniva solo con --verify-video, e con --dry-run non avveniva mai).
         _save_sync_report(sync_report)
+
+        # Riepilogo leggibile accanto al video: il referto JSON resta tecnico.
+        from riepilogo import scrivi_riepilogo
+
+        scrivi_riepilogo(sync_report, Path(args.output_video))
 
         # --- Dry-run: fermati qui ---
         if args.dry_run:

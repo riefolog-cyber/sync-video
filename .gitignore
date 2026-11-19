@@ -44,6 +44,9 @@ Audio
 *.ogg
 *.flac
 presentazione.pdf
+
+# Eccezione: la voce finta del test end-to-end (33s, 200 KB) serve alla CI.
+!src/test_fixtures/*.m4a
 presentazione.pptx
 presentazione.ppt
 

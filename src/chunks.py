@@ -93,39 +93,61 @@ def build_windows(
     return windows
 
 
+class TimeIndex:
+    """I timestamp delle parole, pronti per le ricerche binarie.
+
+    Le finestre di parlato dietro le ancore "slide N" si chiedono una volta per
+    ancora. Ricostruire ogni volta la lista dei timestamp (e ricontrollare che
+    sia ordinata) costava O(parole) per ancora: con 40 ancore su 20k parole
+    erano 800k letture. L'indice si costruisce UNA volta e ogni finestra costa
+    una ricerca binaria piu' le parole che ci stanno dentro.
+
+    Se i timestamp NON sono crescenti la ricerca binaria darebbe un risultato
+    sbagliato: ``ordered`` lo dice una volta sola e in quel caso si usa la
+    scansione lineare, corretta per definizione.
+    """
+
+    __slots__ = ("ordered", "times", "words")
+
+    def __init__(self, words: Sequence[Word]) -> None:
+        self.words = words
+        self.times = [float(w["start"]) for w in words]
+        self.ordered = all(
+            self.times[i] <= self.times[i + 1] for i in range(len(self.times) - 1)
+        )
+
+    def window(self, start: float, end: float) -> list[str]:
+        """Parole in ``[start, end)``, come
+        ``[w["word"] for w in words if start <= w["start"] < end]``."""
+        if end <= start:
+            return []
+        if not self.ordered:
+            return [str(w["word"]) for w in self.words if start <= float(w["start"]) < end]
+        lo = bisect_left(self.times, start)
+        hi = bisect_left(self.times, end)
+        return [str(w["word"]) for w in self.words[lo:hi]]
+
+
 def words_in_window(
     words: Sequence[Word],
     start: float,
     end: float,
+    index: TimeIndex | None = None,
 ) -> list[str]:
     """Parole pronunciate nella finestra ``[start, end)``, nell'ordine in cui sono.
 
     Usata per gli stralci di parlato che stanno dietro un'ancora "slide N"
-    (verifica del mapping, prompt di verifica). La stessa finestra veniva
-    ricalcolata con una scansione lineare di TUTTE le parole a ogni ancora:
-    con 40 ancore su 20k parole sono 800k confronti, mentre la finestra copre
-    solo una frazione del vocabolario. Con i timestamp già in ordine
-    (garantito dalla trascrizione) due ricerche binariche bastano: la stessa
-    finestra si ottiene in tempo costante invece che lineare.
+    (verifica del mapping, prompt di verifica).
+
+    ``index`` (facoltativo) e' il ``TimeIndex`` delle STESSE parole: passarlo
+    quando le finestre sono piu' di una evita di ricostruirlo ogni volta.
+    Senza, l'indice si costruisce qui (comodo per una chiamata sola).
 
     Il risultato è identico a
-    ``[w["word"] for w in words if start <= w["start"] < end]``: la ricerca
-    binaria individua esattamente l'intervallo che soddisfa la condizione,
-    quindi ordine e contenuto non cambiano.
-
-    Se i timestamp NON fossero crescenti la ricerca binaria darebbe un
-    risultato sbagliato: si ricade allora sulla scansione lineare, corretta
-    per definizione. Il controllo costa O(n) una volta sola e il caso normale
-    (trascrizione ordinata) non lo subisce.
+    ``[w["word"] for w in words if start <= w["start"] < end]``.
     """
-    if end <= start:
-        return []
-    times = [float(w["start"]) for w in words]
-    if not all(times[i] <= times[i + 1] for i in range(len(times) - 1)):
-        return [str(w["word"]) for w in words if start <= float(w["start"]) < end]
-    lo = bisect_left(times, start)
-    hi = bisect_left(times, end)
-    return [str(w["word"]) for w in words[lo:hi]]
+    indice = index if index is not None else TimeIndex(words)
+    return indice.window(start, end)
 
 
 def words_text_in_window(
@@ -133,6 +155,10 @@ def words_text_in_window(
     start: float,
     end: float,
     separator: str = " ",
+    index: TimeIndex | None = None,
 ) -> str:
-    """Come ``words_in_window`` ma già unite in una stringa (con `.strip()`)."""
-    return separator.join(words_in_window(words, start, end)).strip()
+    """Come ``words_in_window`` ma già unite in una stringa (con `.strip()`).
+
+    ``index``: vedi ``words_in_window``.
+    """
+    return separator.join(words_in_window(words, start, end, index)).strip()

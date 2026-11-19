@@ -12,10 +12,19 @@ python src/scripts/prova_materiale_reale.py             # verifica
 python src/scripts/prova_materiale_reale.py --aggiorna  # nuovo riferimento
 ```
 
-Esce con 0 se la timeline è **identica** al riferimento, con 1 se un confine si
-è spostato (e dice di quanto). Se il materiale non è quello del riferimento
-lo dice, e non confronta (confrontare materiali diversi non significa
-niente): in quel caso il riferimento va riallineato con `--aggiorna`.
+Esce con 0 se la timeline è **identica** al riferimento, con 1 se un confine
+si è spostato (e dice di quanto), con **2** se il confronto non si può fare
+(materiale diverso da quello del riferimento, o riferimento assente). In quel
+caso non è un errore del programma: il riferimento va riallineato con `--aggiorna`.
+
+La pipeline INTERA (PDF vero → OCR → voce vera → Whisper → ancore → MP4) gira
+in `test_end_to_end_minimo.py`: costa circa un minuto ed è marcata lenta, quindi
+parte con `SYNC_VIDEO_RUN_SLOW=1` (job notturno). È l'unico test che si accorge
+di un collegamento rotto fra le fasi.
+
+Per la tabella delle baseline in `README.md`, la riga (data, slide, ancore,
+durata minima, fiducia, dubbi) si genera dalla run appena fatta con
+`python src/scripts/riga_baseline.py`.
 
 La prima volta su un materiale nuovo il lavoro è tutto (OCR + trascrizione:
 qualche minuto); dopo, le cache rendono la prova di qualche secondo.
