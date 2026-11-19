@@ -11,7 +11,9 @@ vecchio formato, taglio fallito) che ricadono sulla trascrizione intera.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -139,6 +141,60 @@ class TestRipresa(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("[1, 2, 3]", encoding="utf-8")
         self.assertEqual(_prepara_ripresa(self.audio), ([], self.audio, 0.0))
+
+    def test_il_parziale_salva_i_parametri(self) -> None:
+        params = {"model": "small", "beam": 5}
+        _salva_parziale(self.audio, [{"word": "ciao", "start": 0.0}], 3.0, params)
+        dati = json.loads(percorso_parziale(self.audio).read_text(encoding="utf-8"))
+        self.assertEqual(dati["params"], params)
+
+    def test_parametri_diversi_non_riprendono(self) -> None:
+        # Un transcript mezzo `small` e mezzo `large` sarebbe sbagliato senza
+        # dirlo: se i parametri non coincidono si ricomincia.
+        _salva_parziale(
+            self.audio, [{"word": "ciao", "start": 0.0}], 60.0, {"model": "small"}
+        )
+        iniziali, sorgente, offset = _prepara_ripresa(self.audio, {"model": "large"})
+        self.assertEqual((iniziali, sorgente, offset), ([], self.audio, 0.0))
+
+    def test_parametri_uguali_riprendono(self) -> None:
+        params = {"model": "small", "beam": 5}
+        _salva_parziale(self.audio, [{"word": "ciao", "start": 0.0}], 60.0, params)
+        taglio = self.base / "resto.m4a"
+        taglio.write_bytes(b"x")
+        with mock.patch.object(transcription, "_taglia_audio", return_value=taglio):
+            iniziali, sorgente, offset = _prepara_ripresa(self.audio, dict(params))
+        self.assertEqual(len(iniziali), 1)
+        self.assertEqual((sorgente, offset), (taglio, 60.0))
+
+    def test_parziale_senza_parametri_non_riprende(self) -> None:
+        # Formato di una versione precedente: non si sa con che modello e'
+        # stato fatto, quindi non si mescola.
+        self._scrivi_parziale(
+            parole=1, coperto_fino=60.0, words=[{"word": "ciao", "start": 0.0}]
+        )
+        self.assertEqual(_prepara_ripresa(self.audio, {"model": "small"})[2], 0.0)
+
+    def test_il_percorso_non_cambia_col_touch(self) -> None:
+        # Copiare o toccare l'audio non deve buttare via una trascrizione buona:
+        # il nome del parziale dipende dal CONTENUTO.
+        _salva_parziale(self.audio, [{"word": "ciao", "start": 0.0}], 1.0)
+        prima = percorso_parziale(self.audio)
+        os.utime(self.audio, (time.time() + 60, time.time() + 60))
+        self.assertEqual(percorso_parziale(self.audio), prima)
+
+    def test_la_firma_segue_il_contenuto(self) -> None:
+        prima = percorso_parziale(self.audio)
+        self.audio.write_bytes(b"audio DIVERSO e piu' lungo")
+        self.assertNotEqual(percorso_parziale(self.audio), prima)
+
+    def test_ultima_ripresa_riporta_il_punto(self) -> None:
+        _salva_parziale(self.audio, [{"word": "ciao", "start": 0.0}], 42.0, {"m": 1})
+        taglio = self.base / "r.m4a"
+        taglio.write_bytes(b"x")
+        with mock.patch.object(transcription, "_taglia_audio", return_value=taglio):
+            _prepara_ripresa(self.audio, {"m": 1})
+        self.assertEqual(transcription.ultima_ripresa(), 42.0)
 
     def test_lo_spostamento_dei_timestamp_e_assoluto(self) -> None:
         segmenti = [_Segmento("ciao", 0.0, 1.0), _Segmento("mondo", 1.0, 2.0)]

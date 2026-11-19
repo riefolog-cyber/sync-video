@@ -60,16 +60,22 @@ def _data_lezione(output_path: Path) -> str:
 
 
 def riepilogo_markdown(
-    report: dict[str, object], nome_video: str = "", data: str = ""
+    report: dict[str, object], nome_video: str = "", data: str = "", dry_run: bool = False
 ) -> str:
     """Il riepilogo in markdown, a partire da `sync_report.json`."""
     segmenti = [s for s in cast("list[dict[str, Any]]", report.get("segments") or []) if isinstance(s, dict)]
     anchors = cast("dict[str, Any]", report.get("anchors") or {})
-    notes = cast("dict[str, Any]", report.get("notes") or {})
     if not isinstance(anchors, dict):
         anchors = {}
-    if not isinstance(notes, dict):
-        notes = {}
+    # ATTENZIONE: `_build_sync_report` fa `report.update(notes)`, quindi nel
+    # report VERO le note (tempi, sorgenti, ripresa) stanno in cima, non sotto
+    # "notes". Cercarle solo in `report["notes"]` rendeva invisibili i tempi e
+    # la ripresa nei riepiloghi reali (i test passavano perché il report finto
+    # era annidato). Si accettano entrambe le forme.
+    notes: dict[str, Any] = dict(report)
+    annidate = report.get("notes")
+    if isinstance(annidate, dict):
+        notes.update(annidate)
 
     pagine, totale, minima, corto = _numeri(segmenti)
     media = totale / pagine if pagine else 0.0
@@ -108,6 +114,11 @@ def riepilogo_markdown(
     dpi = notes.get("dpi_effettivo")
     if dpi:
         righe.append(f"| DPI effettivo | {dpi} |")
+    ripresa = notes.get("ripresa_da")
+    if ripresa:
+        righe.append(f"| Trascrizione ripresa da | {format_time(float(ripresa))} |")
+    if dry_run:
+        righe.append("| Video | **non creato** (dry-run) |")
 
     righe += ["", "## Cosa guardare a mano", ""]
     dubbi = _dubbi(anchors)
@@ -141,7 +152,11 @@ def riepilogo_markdown(
 
 
 def scrivi_riepilogo(
-    report: dict[str, object], output_path: Path, *, data: str | None = None
+    report: dict[str, object],
+    output_path: Path,
+    *,
+    data: str | None = None,
+    dry_run: bool = False,
 ) -> Path | None:
     """Scrive `riepilogo.md` accanto al video. Non interrompe MAI la run.
 
@@ -152,7 +167,9 @@ def scrivi_riepilogo(
     try:
         path = output_path.parent / "riepilogo.md"
         giorno = _data_lezione(output_path) if data is None else data
-        atomic_write_text(path, riepilogo_markdown(report, output_path.name, giorno))
+        atomic_write_text(
+            path, riepilogo_markdown(report, output_path.name, giorno, dry_run)
+        )
         log.info("   Riepilogo della lezione: %s", path)
         return path
     except Exception as e:  # noqa: BLE001 - cortesia: mai fatale

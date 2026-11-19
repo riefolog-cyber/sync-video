@@ -224,7 +224,9 @@ jobs:
       - name: Suite completa (lenti inclusi)
         env:
           SYNC_VIDEO_RUN_SLOW: "1"
-          SYNC_VIDEO_E2E_SCARICA: "1"
+          # Solo la 3.12 puo' SCARICARE il modello embedding (2 GB): una volta
+          # in cache, tutte le versioni lo leggono e il test gira ovunque.
+          SYNC_VIDEO_E2E_SCARICA: ${{ matrix.python-version == '3.12' && '1' || '0' }}
         # I .py sono in src/: senza -s src questo comando troverebbe ZERO
         # test e uscirebbe con "OK", facendo passare la CI senza eseguire
         # nulla. E' il perche' del -s esplicito, non una formalta'.

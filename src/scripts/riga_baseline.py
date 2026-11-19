@@ -77,6 +77,12 @@ def _celle(riga_md: str) -> list[str]:
     return [cella.strip() for cella in riga_md.strip().strip("|").split("|")]
 
 
+def _prima_cella(riga_md: str) -> str:
+    """La data della riga, o '' se la riga non e' una riga di tabella."""
+    celle = _celle(riga_md)
+    return celle[0] if celle else ""
+
+
 def _blocco_tabella(righe: list[str]) -> tuple[int, int] | None:
     """(prima riga del corpo, ultima riga) della tabella delle baseline."""
     inizio = next(
@@ -104,7 +110,7 @@ def aggiorna(testo: str, nuova: str, data: str) -> str:
         raise ValueError(f"tabella delle baseline non trovata (cerco una riga che inizia con {INTESTAZIONE!r})")
     prima, ultima = posto
     for i in range(prima, ultima + 1):
-        if _celle(righe[i])[0] == data:
+        if _prima_cella(righe[i]) == data:
             righe[i] = nuova
             break
     else:
@@ -127,6 +133,8 @@ def confronto(vecchia: list[str], nuova: list[str]) -> list[str]:
     etichette = ("slide", "ancore", "durata minima", "fiducia", "dubbi")
     indici = (1, 2, 3, 4, 5)
     differenze: list[str] = []
+    if len(vecchia) <= max(indici) or len(nuova) <= max(indici):
+        return ["   riga di tabella incompleta: confronto saltato"]
     for etichetta, i in zip(etichette, indici, strict=True):
         a, b = vecchia[i], nuova[i]
         if a == b:

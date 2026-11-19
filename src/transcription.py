@@ -426,6 +426,11 @@ def transcribe_with_openvino(
     Usa la iGPU Intel (device 'GPU') o la CPU ('CPU'). Richiede il modello
     in formato OpenVINO IR (es. scaricato da `OpenVINO/whisper-small-fp16-ov`).
 
+    Nota: `generate()` e' una chiamata BLOCCANTE che restituisce tutto in una
+    volta, quindi qui non c'e' un parziale da salvare a pezzi (il testo finisce
+    su disco a fine decodifica, con `_write_raw_transcript`). La ripresa a
+    meta' audio esiste solo nel percorso faster-whisper.
+
     Returns:
         (trascrizione compressa, lista parole raw con timestamp)
     """
@@ -670,6 +675,7 @@ def transcribe_audio(
     whisper_beam: int = DEFAULT_WHISPER_BEAM,
     whisper_batch: int = DEFAULT_WHISPER_BATCH,
     whisper_device_explicit: bool = False,
+    no_ripresa: bool = False,
 ) -> tuple[str, list[Word]]:
     """
     Dispatcher trascrizione: sceglie il motore più veloce disponibile.
@@ -711,6 +717,7 @@ def transcribe_audio(
                     beam_size=whisper_beam,
                     batch_size=whisper_batch,
                     device_explicit=whisper_device_explicit,
+                    riprendi=not no_ripresa,
                 )
             _write_attempt(audio_path)
             try:
@@ -766,6 +773,7 @@ def transcribe_audio(
         beam_size=whisper_beam,
         batch_size=whisper_batch,
         device_explicit=whisper_device_explicit,
+        riprendi=not no_ripresa,
     )
 
 
@@ -778,20 +786,51 @@ def transcribe_audio(
 _CHECKPOINT_OGNI_SEGMENTI = 50
 
 
+# Firme gia' calcolate in questa run: (percorso, dimensione, mtime) -> hash.
+# Il parziale si chiama con l'HASH del contenuto, non con il mtime: copiare
+# l'audio o toccarlo (touch) cambiava il nome del file e buttava via una
+# trascrizione buona. L'hash costa una lettura di due finestre da 256 KB, e
+# solo la prima volta per file.
+_FIRME: dict[tuple[str, int, int], str] = {}
+_FINESTRA_HASH = 256 * 1024
+
+
+def _firma_audio(audio_path: Path) -> str:
+    """Impronta stabile del CONTENUTO: nome + hash di inizio e fine + dimensione."""
+    try:
+        stat = audio_path.stat()
+    except OSError:
+        return audio_path.stem
+    chiave = (str(audio_path), stat.st_size, int(stat.st_mtime))
+    firma = _FIRME.get(chiave)
+    if firma is not None:
+        return firma
+    try:
+        h = hashlib.sha1(usedforsecurity=False)
+        with open(audio_path, "rb") as fh:
+            h.update(fh.read(_FINESTRA_HASH))
+            if stat.st_size > _FINESTRA_HASH:
+                fh.seek(max(_FINESTRA_HASH, stat.st_size - _FINESTRA_HASH))
+                h.update(fh.read(_FINESTRA_HASH))
+        firma = f"{audio_path.stem}_{stat.st_size}_{h.hexdigest()[:16]}"
+    except OSError:
+        firma = f"{audio_path.stem}_{stat.st_size}"
+    _FIRME[chiave] = firma
+    return firma
+
+
 def percorso_parziale(audio_path: Path) -> Path:
     """Dove finiscono le parole gia' trascritte di QUEST'audio."""
     from config import CACHE_DIR
 
-    try:
-        stat = audio_path.stat()
-        firma = f"{audio_path.stem}_{stat.st_size}_{int(stat.st_mtime)}"
-    except OSError:
-        firma = audio_path.stem
-    return CACHE_DIR / "parziali" / f"{firma}.json"
+    return CACHE_DIR / "parziali" / f"{_firma_audio(audio_path)}.json"
 
 
 def _salva_parziale(
-    audio_path: Path, parole: list[Word], coperto_fino: float = 0.0
+    audio_path: Path,
+    parole: list[Word],
+    coperto_fino: float = 0.0,
+    params: dict[str, Any] | None = None,
 ) -> None:
     """Scrive le parole fin qui (errore ignorato: e' una rete di sicurezza).
 
@@ -799,6 +838,10 @@ def _salva_parziale(
     (la fine dell'ultimo segmento lavorato, non l'ultimo timestamp di parola:
     un segmento finisce dove il parlato gira, quindi tagliare li' non perde
     niente). Serve alla ripresa.
+
+    ``params`` sono i parametri della decodifica. Senza, un parziale fatto
+    con `small` verrebbe "ripreso" da una run con `large`: il transcript
+    sarebbe mezzo modello e mezzo altro, senza alcun segnale.
     """
     from config import atomic_write_text
 
@@ -812,6 +855,7 @@ def _salva_parziale(
                     "audio": str(audio_path),
                     "parole": len(parole),
                     "coperto_fino": round(float(coperto_fino), 3),
+                    "params": params or {},
                     "words": parole,
                 },
                 ensure_ascii=False,
@@ -836,6 +880,11 @@ def _taglia_audio(audio_path: Path, da: float) -> Path | None:
     ``-ss`` PRIMA di ``-i``: ffmpeg salta senza decodificare (e per l'audio il
     taglio resta accurato al campione). L'uscita e' AAC in un .m4a, che
     Whisper legge senza altre conversioni.
+
+    Ricodifica anche quando la sorgente e' gia' AAC: con ``-c copy`` il taglio
+    cadrebbe sul pacchetto piu' vicino (~21 ms prima), e Whisper riascolterebbe
+    la coda dell'ultima parola gia' trascritta. Per una trascrizione 21 ms di
+    audio in piu' non valgono una parola doppia.
 
     None se il taglio non riesce: chi chiama ricomincia da capo.
     """
@@ -878,7 +927,19 @@ def _taglia_audio(audio_path: Path, da: float) -> Path | None:
     return resto
 
 
-def _prepara_ripresa(audio_path: Path) -> tuple[list[Word], Path, float]:
+# Fino a che secondo e' stata ripresa l'ultima trascrizione (0 = da capo).
+# Letta dal report: una lezione trascritta in due passate deve dirlo.
+_ULTIMA_RIPRESA = 0.0
+
+
+def ultima_ripresa() -> float:
+    """Il secondo da cui e' ripartita l'ultima trascrizione (0 se da capo)."""
+    return _ULTIMA_RIPRESA
+
+
+def _prepara_ripresa(
+    audio_path: Path, params: dict[str, Any] | None = None
+) -> tuple[list[Word], Path, float]:
     """(parole gia' fatte, file da trascrivere, secondo di partenza).
 
     Riprendere DAVVERO significa decodificare solo la coda: le parole salvate
@@ -886,8 +947,21 @@ def _prepara_ripresa(audio_path: Path) -> tuple[list[Word], Path, float]:
     (parziale vecchio formato, taglio fallito) si ricomincia da capo: meglio
     una trascrizione intera che una trascrizione sbagliata.
     """
+    global _ULTIMA_RIPRESA
+    # NON si azzera qui: main chiama la trascrizione piu' di una volta (la
+    # seconda, "accurata", usa un beam diverso e quindi non riprende).
+    # Azzerare a ogni chiamata cancellava il dato della prima, e il riepilogo
+    # di una lezione ripresa diceva "una passata sola".
     dati = _leggi_parziale(audio_path)
     if dati is None:
+        return [], audio_path, 0.0
+    salvati = dati.get("params")
+    if params is not None and (not isinstance(salvati, dict) or salvati != params):
+        log.info(
+            "   [Trascrizione] C'e' un parziale, ma di un'altra decodifica "
+            "(modello/beam/lingua diversi): lo lascio stare e decodifico tutto. "
+            "Un transcript mezzo modello e mezzo altro sarebbe peggio di uno lento."
+        )
         return [], audio_path, 0.0
     grezze = dati.get("words")
     parole: list[Word] = []
@@ -924,6 +998,7 @@ def _prepara_ripresa(audio_path: Path) -> tuple[list[Word], Path, float]:
         coperto,
         len(parole),
     )
+    _ULTIMA_RIPRESA = coperto
     return parole, resto, coperto
 
 
@@ -933,6 +1008,7 @@ def _collect_words(
     *,
     offset: float = 0.0,
     precedenti: list[Word] | None = None,
+    params: dict[str, Any] | None = None,
 ) -> list[Word]:
     """Consuma i segmenti di faster-whisper e ne estrae le parole con timestamp.
 
@@ -966,7 +1042,7 @@ def _collect_words(
             for token in seg.text.strip().split():
                 all_words.append({"word": token, "start": seg.start + offset})
         if audio_path is not None and segmenti % _CHECKPOINT_OGNI_SEGMENTI == 0:
-            _salva_parziale(audio_path, gia_fatte + all_words, coperto)
+            _salva_parziale(audio_path, gia_fatte + all_words, coperto, params)
     if audio_path is not None:
         # Trascrizione arrivata in fondo: il parziale non serve piu'.
         with contextlib.suppress(OSError):
@@ -985,6 +1061,7 @@ def _transcribe_with_fallback(
     checkpoint_path: Path | None = None,
     offset: float = 0.0,
     precedenti: list[Word] | None = None,
+    params: dict[str, Any] | None = None,
 ) -> tuple[list[Word], Any]:
     """Trascrive usando il decoding a batch quando è disponibile.
 
@@ -1022,7 +1099,11 @@ def _transcribe_with_fallback(
                     str(audio_path), batch_size=batch_size, **kwargs
                 )
                 return _collect_words(
-                    segments, checkpoint_path, offset=offset, precedenti=precedenti
+                    segments,
+                    checkpoint_path,
+                    offset=offset,
+                    precedenti=precedenti,
+                    params=params,
                 ), info
             except Exception as e:  # ottimizzazione di velocità: mai fatale
                 log.warning(
@@ -1032,7 +1113,7 @@ def _transcribe_with_fallback(
 
     segments, info = model.transcribe(str(audio_path), **kwargs)
     return _collect_words(
-        segments, checkpoint_path, offset=offset, precedenti=precedenti
+        segments, checkpoint_path, offset=offset, precedenti=precedenti, params=params
     ), info
 
 
@@ -1084,6 +1165,7 @@ def transcribe_with_whisper(
     cpu_threads: int | None = None,
     batch_size: int = DEFAULT_WHISPER_BATCH,
     device_explicit: bool = False,
+    riprendi: bool = True,
 ) -> tuple[str, list[Word]]:
     """
     Trascrizione audio con faster-whisper.
@@ -1219,7 +1301,22 @@ def transcribe_with_whisper(
     # Il parziale e' dell'audio INTERO (timestamp assoluti) mentre il motore
     # lavora su un file tagliato: da qui i due aggiustamenti (offset e parole
     # gia' fatte).
-    iniziali, sorgente, offset = _prepara_ripresa(audio_path)
+    # I parametri della decodifica vanno nel parziale: sono cio' che rende
+    # sicuro riprendere (un transcript fatto per meta' con `small` e per meta'
+    # con `large` sarebbe sbagliato senza dirlo).
+    _params = {
+        "engine": "faster-whisper",
+        "model": model_size,
+        "beam": int(beam_size),
+        "language": whisper_lang,
+        "vad": bool(vad_filter),
+        "batch": int(batch_size),
+    }
+    if riprendi:
+        iniziali, sorgente, offset = _prepara_ripresa(audio_path, _params)
+    else:
+        iniziali, sorgente, offset = [], audio_path, 0.0
+        log.info("   [Trascrizione] --no-ripresa: decodifico da capo (il parziale resta).")
 
     # Trascrizione (decoding a batch quando possibile, con ripiego sequenziale)
     try:
@@ -1234,6 +1331,7 @@ def transcribe_with_whisper(
             checkpoint_path=audio_path,
             offset=offset,
             precedenti=iniziali,
+            params=_params,
         )
     finally:
         if sorgente != audio_path:

@@ -2269,6 +2269,12 @@ Esempi:
     )
     parser.add_argument("--dry-run", action="store_true", help="Ferma dopo la generazione timeline, non produce video")
     parser.add_argument(
+        "--no-ripresa",
+        dest="no_ripresa",
+        action="store_true",
+        help="Non riprendere una trascrizione interrotta: decodifica tutto da capo",
+    )
+    parser.add_argument(
         "--solo-riepilogo",
         dest="solo_riepilogo",
         action="store_true",

@@ -149,6 +149,7 @@ from transcription import (
     resolved_transcriber,
     retranscribe_zone,
     transcribe_audio,
+    ultima_ripresa,
     vocabolario_del_deck,
 )
 from updates import run_frozen_report, run_update_check
@@ -3335,6 +3336,7 @@ def main(argv: list | None = None) -> None:
                 whisper_beam=args.whisper_beam,
                 whisper_batch=args.whisper_batch,
                 whisper_device_explicit=getattr(args, "whisper_device_explicit", False),
+                no_ripresa=getattr(args, "no_ripresa", False),
             )
             if not args.no_cache:
                 # Fix A: salva anche le parole raw per estrazione deterministica.
@@ -4235,6 +4237,11 @@ def main(argv: list | None = None) -> None:
         # I file di partenza: il referto diventa leggibile anche fra sei mesi,
         # in una cartella che non ricordi.
         sync_notes["sorgenti"] = {"pdf": pdf_path.name, "audio": audio_path.name}
+        # Se la trascrizione e' stata ripresa a meta' (run interrotta), lo dice
+        # il riepilogo: il testo viene da due passate, non da una.
+        _ripresa_da = ultima_ripresa()
+        if _ripresa_da > 0:
+            sync_notes["ripresa_da"] = round(_ripresa_da, 1)
         sync_notes["tempi"] = {
             "ocr": round(t_ocr, 1),
             "trascrizione": round(t_transcribe, 1),
@@ -4432,7 +4439,7 @@ def main(argv: list | None = None) -> None:
         # Riepilogo leggibile accanto al video: il referto JSON resta tecnico.
         from riepilogo import scrivi_riepilogo
 
-        scrivi_riepilogo(sync_report, Path(args.output_video))
+        scrivi_riepilogo(sync_report, Path(args.output_video), dry_run=args.dry_run)
 
         # --- Dry-run: fermati qui ---
         if args.dry_run:

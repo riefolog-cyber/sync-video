@@ -72,6 +72,23 @@ class TestRiepilogo(unittest.TestCase):
         self.assertIn("Una sola pagina", testo)
         self.assertNotIn("stimati dal contenuto", testo)
 
+    def test_dice_se_la_trascrizione_e_stata_ripresa(self) -> None:
+        testo = riepilogo_markdown(_report(notes={"ripresa_da": 720.0}))
+        self.assertIn("| Trascrizione ripresa da | 12m00s |", testo)
+
+    def test_le_note_stanno_in_cima_nel_report_vero(self) -> None:
+        # `_build_sync_report` fa `report.update(notes)`: le note sono in cima,
+        # non sotto "notes". Se il riepilogo le cerca solo annidate, tempi e
+        # ripresa non compaiono mai in un report vero.
+        report = _report(ripresa_da=600.0, tempi={"ocr": 8, "trascrizione": 207})
+        testo = riepilogo_markdown(report)
+        self.assertIn("| Trascrizione ripresa da | 10m00s |", testo)
+        self.assertIn("trascrizione 207s", testo)
+
+    def test_dry_run_dice_che_il_video_non_c_e(self) -> None:
+        testo = riepilogo_markdown(_report(), "video_finale.mp4", dry_run=True)
+        self.assertIn("non creato** (dry-run)", testo)
+
     def test_dice_da_dove_vengono_slide_e_voce(self) -> None:
         testo = riepilogo_markdown(
             _report(sorgenti={"pdf": "lezione 3.pdf", "audio": "voce.m4a"})
@@ -122,6 +139,36 @@ class TestRigenera(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             self.assertEqual(rigenera(base, base / "video_finale.mp4"), 1)
+
+
+class TestSoloRiepilogoDaRigaDiComando(unittest.TestCase):
+    """`--solo-riepilogo` passa dal vero main, non solo da `rigenera`. """
+
+    def _esegui(self, base: Path) -> int:
+        import main as m
+
+        vecchia = m.CACHE_DIR
+        m.CACHE_DIR = base
+        try:
+            with self.assertRaises(SystemExit) as ctx:
+                m.main(["--solo-riepilogo", "--output", str(base / "video_finale.mp4")])
+        finally:
+            m.CACHE_DIR = vecchia
+        codice = ctx.exception.code
+        assert codice is not None
+        return int(codice)
+
+    def test_scrive_il_file_ed_esce_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "sync_report.json").write_text(json.dumps(_report()), encoding="utf-8")
+            (base / "video_finale.mp4").write_bytes(b"x")
+            self.assertEqual(self._esegui(base), 0)
+            self.assertTrue((base / "riepilogo.md").exists())
+
+    def test_senza_report_esce_uno(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._esegui(Path(tmp)), 1)
 
 
 if __name__ == "__main__":

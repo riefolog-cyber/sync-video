@@ -51,44 +51,48 @@ def _percorsi_personali() -> list[re.Pattern[str]]:
     ]
 
 
-def _versionati() -> list[Path]:
-    """I file che finiscono nel repository: tracciati + nuovi non ignorati.
+def _da_git(*extra: str) -> list[Path]:
+    """I file che `git ls-files` elenca (skip se git non c'e')."""
+    try:
+        esito = subprocess.run(
+            ["git", "ls-files", *extra],
+            cwd=RADICE,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        raise unittest.SkipTest(f"git non disponibile: {e}") from e
+    if esito.returncode != 0:
+        raise unittest.SkipTest("git non risponde (non e' un checkout git?)")
+    return [RADICE / riga.strip() for riga in esito.stdout.splitlines() if riga.strip()]
 
-    I secondi sono quelli che stai per committare: e' li' che un percorso
-    personale incollato ieri non ha ancora nessun controllo addosso. Gli
-    ignorati (`.cache/`, gli audio del progetto) restano fuori: non sono
-    pubblici e il loro contenuto non riguarda il repository.
+
+def _file_da_controllare() -> tuple[list[Path], list[Path]]:
+    """(tracciati, nuovi non ignorati).
+
+    Il limite di DIMENSIONE si applica solo ai tracciati: un nuovo file puo'
+    essere un artefatto locale legittimo (il video di una lezione, il PDF del
+    deck) che `.gitignore` non copre per nome, e farlo passare per "file
+    enorme" renderebbe la suite rossa per una cosa normale.
+
+    I SEGRETI e i percorsi personali si cercano in entrambi: e' proprio nei
+    file che stai per committare che non c'e' ancora nessun controllo.
     """
-    comandi = (
-        ["git", "ls-files"],
-        ["git", "ls-files", "--others", "--exclude-standard"],
-    )
-    file: list[Path] = []
-    for comando in comandi:
-        try:
-            esito = subprocess.run(
-                comando,
-                cwd=RADICE,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=120,
-            )
-        except (OSError, subprocess.SubprocessError) as e:
-            raise unittest.SkipTest(f"git non disponibile: {e}") from e
-        if esito.returncode != 0:
-            raise unittest.SkipTest("git non risponde (non e' un checkout git?)")
-        file += [RADICE / riga.strip() for riga in esito.stdout.splitlines() if riga.strip()]
-    if not file:
-        raise unittest.SkipTest("nessun file versionato")
-    return file
+    tracciati = _da_git()
+    nuovi = _da_git("--others", "--exclude-standard")
+    if not tracciati and not nuovi:
+        raise unittest.SkipTest("nessun file da controllare (non e' un checkout git?)")
+    return tracciati, nuovi
 
 
 class TestIgieneRepository(unittest.TestCase):
     def test_nessun_file_enorme(self) -> None:
+        tracciati, _nuovi = _file_da_controllare()
         enormi = [
             (str(p.relative_to(RADICE)), p.stat().st_size)
-            for p in _versionati()
+            for p in tracciati
             if p.is_file() and p.stat().st_size > MASSIMO_BYTE
         ]
         self.assertEqual(
@@ -100,7 +104,8 @@ class TestIgieneRepository(unittest.TestCase):
 
     def test_nessun_percorso_o_chiave_personale(self) -> None:
         trovati: list[str] = []
-        for path in _versionati():
+        tracciati, nuovi = _file_da_controllare()
+        for path in tracciati + nuovi:
             try:
                 testo = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
