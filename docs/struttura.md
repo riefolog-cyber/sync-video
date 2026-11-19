@@ -54,7 +54,7 @@ Comandi verificati per chi modifica il codice:
 # Verifica completa in un colpo: CI + mypy 3 piattaforme + debug hardware
 python src/controlli.py
 
-# Test (suite completa, unittest - 1178 test)
+# Test (suite completa, unittest - 1180 test)
 python -m unittest discover -s src -p "test_*.py"
 
 # Type-check (mypy: codice di produzione e test, tranne la deny-list in mypy.ini)
@@ -80,6 +80,7 @@ fallback OCR, bootstrap).
 |---|---|
 | `video_finale.mp4` | Output video |
 | `transcript_raw.txt` | Trascrizione completa (debug) |
+| `riepilogo.md` | Riepilogo della lezione, accanto al video (`--solo-riepilogo` lo rigenera) |
 | `temp_slides/` | Slide renderizzate |
 | `.cache/embedding_cache/` | Vettori embedding content-addressed (`.npz`); potatura per **byte** (300 MB) e per **età** (30 giorni) |
 | `.cache/` | Cache OCR, trascrizione, embedding |

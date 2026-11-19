@@ -89,6 +89,23 @@ class TestRiepilogo(unittest.TestCase):
         testo = riepilogo_markdown(_report(), "video_finale.mp4", dry_run=True)
         self.assertIn("non creato** (dry-run)", testo)
 
+    def test_dice_quando_il_video_non_c_e_piu(self) -> None:
+        # Un riepilogo che nomina un video assente fa credere che esista: e'
+        # successo davvero (file cancellato dopo la run).
+        testo = riepilogo_markdown(_report(), "video_finale.mp4", video_presente=False)
+        self.assertIn("assente dalla cartella", testo)
+        self.assertNotIn("assente dalla cartella", riepilogo_markdown(_report(), "video_finale.mp4"))
+
+    def test_scrivendo_dice_se_il_video_manca(self) -> None:
+        # La stessa informazione passando dal disco: scrivi_riepilogo guarda il
+        # file, non si fida del nome.
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video_finale.mp4"
+            path = scrivi_riepilogo(_report(), video)
+            self.assertIsNotNone(path)
+            assert path is not None
+            self.assertIn("assente dalla cartella", path.read_text(encoding="utf-8"))
+
     def test_dice_da_dove_vengono_slide_e_voce(self) -> None:
         testo = riepilogo_markdown(
             _report(sorgenti={"pdf": "lezione 3.pdf", "audio": "voce.m4a"})

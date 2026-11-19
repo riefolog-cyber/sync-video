@@ -60,7 +60,11 @@ def _data_lezione(output_path: Path) -> str:
 
 
 def riepilogo_markdown(
-    report: dict[str, object], nome_video: str = "", data: str = "", dry_run: bool = False
+    report: dict[str, object],
+    nome_video: str = "",
+    data: str = "",
+    dry_run: bool = False,
+    video_presente: bool = True,
 ) -> str:
     """Il riepilogo in markdown, a partire da `sync_report.json`."""
     segmenti = [s for s in cast("list[dict[str, Any]]", report.get("segments") or []) if isinstance(s, dict)]
@@ -85,7 +89,14 @@ def riepilogo_markdown(
 
     righe: list[str] = ["# Riepilogo della lezione", ""]
     if nome_video:
-        righe.append(f"Video: `{nome_video}`")
+        # Il nome c'e' ma il file puo' non esserci piu' (spostato, cancellato
+        # dopo la run). Un riepilogo che dice "Video: ..." e basta faceva
+        # credere che ci fosse: e' successo davvero, e il file e' l'unico
+        # posto dove l'utente lo legge.
+        manca = ""
+        if not video_presente and not dry_run:
+            manca = " — **assente dalla cartella**"
+        righe.append(f"Video: `{nome_video}`{manca}")
     if data:
         righe.append(f"Lezione del {data}")
     sorgenti = report.get("sorgenti")
@@ -168,7 +179,15 @@ def scrivi_riepilogo(
         path = output_path.parent / "riepilogo.md"
         giorno = _data_lezione(output_path) if data is None else data
         atomic_write_text(
-            path, riepilogo_markdown(report, output_path.name, giorno, dry_run)
+            path,
+            riepilogo_markdown(
+                report,
+                output_path.name,
+                giorno,
+                dry_run,
+                # Il file del video: se non c'e', il riepilogo lo dice.
+                video_presente=dry_run or output_path.exists(),
+            ),
         )
         log.info("   Riepilogo della lezione: %s", path)
         return path
