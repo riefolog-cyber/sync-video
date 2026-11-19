@@ -12,6 +12,8 @@ lezione, quindi non serve un nome per lezione.
 
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -33,6 +35,8 @@ def _dubbi(anchors: dict[str, Any]) -> list[str]:
     """I confini in cui l'annuncio e il video non coincidono."""
     righe: list[str] = []
     for item in cast("list[dict[str, Any]]", anchors.get("mentions_off") or []):
+        if not isinstance(item, dict):
+            continue
         slide = int(item.get("slide") or 0)
         mention = float(item.get("mention") or 0.0)
         declared = float(item.get("declared") or 0.0)
@@ -47,11 +51,25 @@ def _dubbi(anchors: dict[str, Any]) -> list[str]:
     return righe
 
 
-def riepilogo_markdown(report: dict[str, object], nome_video: str = "") -> str:
+def _data_lezione(output_path: Path) -> str:
+    """Il giorno in cui la lezione e' stata prodotta (mtime del video)."""
+    try:
+        return time.strftime("%d/%m/%Y", time.localtime(output_path.stat().st_mtime))
+    except OSError:
+        return ""
+
+
+def riepilogo_markdown(
+    report: dict[str, object], nome_video: str = "", data: str = ""
+) -> str:
     """Il riepilogo in markdown, a partire da `sync_report.json`."""
     segmenti = [s for s in cast("list[dict[str, Any]]", report.get("segments") or []) if isinstance(s, dict)]
     anchors = cast("dict[str, Any]", report.get("anchors") or {})
     notes = cast("dict[str, Any]", report.get("notes") or {})
+    if not isinstance(anchors, dict):
+        anchors = {}
+    if not isinstance(notes, dict):
+        notes = {}
 
     pagine, totale, minima, corto = _numeri(segmenti)
     media = totale / pagine if pagine else 0.0
@@ -62,6 +80,17 @@ def riepilogo_markdown(report: dict[str, object], nome_video: str = "") -> str:
     righe: list[str] = ["# Riepilogo della lezione", ""]
     if nome_video:
         righe.append(f"Video: `{nome_video}`")
+    if data:
+        righe.append(f"Lezione del {data}")
+    sorgenti = report.get("sorgenti")
+    if isinstance(sorgenti, dict) and (sorgenti.get("pdf") or sorgenti.get("audio")):
+        etichette = {"pdf": "slide da", "audio": "voce da"}
+        pezzi = [
+            f"{etichette[chiave]} `{sorgenti[chiave]}`"
+            for chiave in ("pdf", "audio")
+            if sorgenti.get(chiave)
+        ]
+        righe.append("Sorgenti: " + ", ".join(pezzi))
     versione = report.get("versione")
     if versione:
         righe.append(f"Versione del programma: `{versione}`")
@@ -82,7 +111,11 @@ def riepilogo_markdown(report: dict[str, object], nome_video: str = "") -> str:
 
     righe += ["", "## Cosa guardare a mano", ""]
     dubbi = _dubbi(anchors)
-    if dubbi:
+    if pagine <= 1:
+        # Con una pagina sola non esistono confini: la frase sui confini
+        # "stimati" sarebbe una diagnosi inventata.
+        righe.append("Una sola pagina: non c'è nessun confine da controllare.")
+    elif dubbi:
         righe += dubbi
     elif transitions and anchored >= transitions:
         righe.append("Niente: tutti i confini sono quelli annunciati a voce.")
@@ -107,13 +140,40 @@ def riepilogo_markdown(report: dict[str, object], nome_video: str = "") -> str:
     return "\n".join(righe)
 
 
-def scrivi_riepilogo(report: dict[str, object], output_path: Path) -> Path | None:
-    """Scrive `riepilogo.md` accanto al video. Non interrompe mai la run."""
+def scrivi_riepilogo(
+    report: dict[str, object], output_path: Path, *, data: str | None = None
+) -> Path | None:
+    """Scrive `riepilogo.md` accanto al video. Non interrompe MAI la run.
+
+    Qualunque errore resta un avviso, compreso un report malformato: il file e'
+    una cortesia scritta DOPO il video, e un traceback qui rovinerebbe una run
+    gia' riuscita.
+    """
     try:
         path = output_path.parent / "riepilogo.md"
-        atomic_write_text(path, riepilogo_markdown(report, output_path.name))
+        giorno = _data_lezione(output_path) if data is None else data
+        atomic_write_text(path, riepilogo_markdown(report, output_path.name, giorno))
         log.info("   Riepilogo della lezione: %s", path)
         return path
-    except OSError as e:
-        log.debug("   Riepilogo non scritto (%s): %s", output_path.parent, e)
+    except Exception as e:  # noqa: BLE001 - cortesia: mai fatale
+        log.warning("   Riepilogo non scritto (%s): %s", output_path.parent, e)
         return None
+
+
+def rigenera(cache_dir: Path, output_path: Path) -> int:
+    """Riscrive `riepilogo.md` dal report dell'ultima run (`--solo-riepilogo`).
+
+    Esce 0 se il file e' scritto, 1 se manca il report: la pipeline non gira,
+    quindi costa un secondo invece di una trascrizione.
+    """
+    report_path = cache_dir / "sync_report.json"
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        log.error("Nessun report da leggere in %s: %s", report_path, e)
+        log.error("Lancia prima la pipeline (anche con --dry-run).")
+        return 1
+    if not isinstance(report, dict):
+        log.error("%s non contiene un report.", report_path)
+        return 1
+    return 0 if scrivi_riepilogo(report, output_path) is not None else 1

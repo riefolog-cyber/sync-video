@@ -22,9 +22,26 @@ in `test_end_to_end_minimo.py`: costa circa un minuto ed è marcata lenta, quind
 parte con `SYNC_VIDEO_RUN_SLOW=1` (job notturno). È l'unico test che si accorge
 di un collegamento rotto fra le fasi.
 
-Per la tabella delle baseline in `README.md`, la riga (data, slide, ancore,
-durata minima, fiducia, dubbi) si genera dalla run appena fatta con
-`python src/scripts/riga_baseline.py`.
+## 📌 Baseline delle run verdi
+
+Una riga per run verificata: data, slide, ancore, durata minima, fiducia
+(ALTO = ogni confine è annunciato a voce) e dubbi. Le righe non si copiano a
+mano dal riepilogo: si generano dalla run appena fatta.
+
+| Data | Slide | Ancore | Durata minima | Fiducia | Dubbi |
+|---|---|---|---|---|---|
+| 19/11 | 21 | 20/20 | 29s | ALTO | 0 |
+
+```bash
+python src/scripts/riga_baseline.py                             # la riga, da stampare
+python src/scripts/riga_baseline.py --scrivi docs/verifica.md    # la scrive in tabella
+python src/scripts/riga_baseline.py --confronta docs/verifica.md # di quanto si è mossa
+```
+
+`--scrivi` sostituisce la riga con la stessa data (o la aggiunge in fondo);
+`--confronta` è il controllo che a occhio non si fa: dice di quanto sono
+cambiate slide, ancore, durata minima e dubbi rispetto all'ultima run in
+tabella.
 
 La prima volta su un materiale nuovo il lavoro è tutto (OCR + trascrizione:
 qualche minuto); dopo, le cache rendono la prova di qualche secondo.

@@ -110,8 +110,11 @@ class TimeIndex:
     __slots__ = ("ordered", "times", "words")
 
     def __init__(self, words: Sequence[Word]) -> None:
-        self.words = words
-        self.times = [float(w["start"]) for w in words]
+        # Tupla: `times` e `words` devono restare la stessa sequenza. Con la
+        # lista del chiamante, una modifica dopo la costruzione li separerebbe
+        # e la ricerca binaria restituirebbe parole sbagliate.
+        self.words: tuple[Word, ...] = tuple(words)
+        self.times = [float(w["start"]) for w in self.words]
         self.ordered = all(
             self.times[i] <= self.times[i + 1] for i in range(len(self.times) - 1)
         )

@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_ambiente import prepara_tesseract
+from aiuti_test import prepara_tesseract
 
 # Parola grande e riconoscibile: se compare nel testo OCR, la pagina e' stata
 # letta davvero (un percorso non la contiene). Le cifre sono fragili (un "7"

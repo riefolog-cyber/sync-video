@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
-"""Stampa una riga della tabella delle baseline dalla run appena fatta.
+"""Stampa (o scrive) una riga della tabella delle baseline dalla run appena fatta.
 
-La tabella delle baseline in `README.md` (le 5 run verdi) e' scritta a mano:
-si copiano i numeri dal riepilogo finale. Questo script li prende da
-`.cache/sync_report.json` e stampa la riga gia' formattata, da incollare.
+Le baseline vivono in `docs/verifica.md`: una riga per run verde, con data,
+slide, ancore, durata minima, fiducia e dubbi. Prima si copiavano a mano dal
+riepilogo finale; qui si prendono da `.cache/sync_report.json`.
 
 Uso:
-    python src/scripts/riga_baseline.py
-    python src/scripts/riga_baseline.py --data 12/11    # data da scrivere
+    python src/scripts/riga_baseline.py                     # stampa la riga
+    python src/scripts/riga_baseline.py --scrivi docs/verifica.md
+    python src/scripts/riga_baseline.py --confronta docs/verifica.md
 
-Esce con 1 se non c'e' un report (la run non e' ancora stata fatta).
+`--scrivi` mette la riga al posto di quella con la stessa data (o in fondo alla
+tabella). `--confronta` dice di quanto l'ultima run si e' mossa rispetto
+all'ultima riga della tabella: e' il controllo che a occhio non si fa.
+
+Esce con 0 se ha fatto il suo lavoro, 1 se non c'e' un report (la run non e'
+ancora stata fatta) o se il file indicato non contiene la tabella.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
+from pathlib import Path
 from typing import Any, cast
 
 # Deve stare PRIMO: mette la radice del progetto nel sys.path.
@@ -28,9 +36,12 @@ sys.path.insert(0, str(CODICE))
 from config import CACHE_DIR
 from pipeline_report import format_time
 
+# La tabella in docs/verifica.md: le sei colonne che `riga` produce.
+INTESTAZIONE = "| data |"
+
 
 def riga(report: dict[str, Any], data: str) -> str:
-    """La riga markdown: data, slide, ancore, durata minima, fiducia, frame-check."""
+    """La riga markdown: data, slide, ancore, durata minima, fiducia, dubbi."""
     segmenti = [s for s in cast("list[dict[str, Any]]", report.get("segments") or []) if isinstance(s, dict)]
     anchors = cast("dict[str, Any]", report.get("anchors") or {})
 
@@ -46,6 +57,103 @@ def riga(report: dict[str, Any], data: str) -> str:
     return f"| {data} | {len(segmenti)} | {ancore} | {minima} | {fiducia} | {dubbi} |"
 
 
+def _sorgente(report: dict[str, Any]) -> str:
+    """Da quale lezione viene la riga: un report vecchio e' la trappola."""
+    sorgenti = report.get("sorgenti")
+    if not isinstance(sorgenti, dict) or not (sorgenti.get("pdf") or sorgenti.get("audio")):
+        return "sconosciuta (report senza 'sorgenti')"
+    return " + ".join(str(sorgenti[k]) for k in ("pdf", "audio") if sorgenti.get(k))
+
+
+def _secondi(testo: str) -> float | None:
+    """'29s' / '1m30s' / '?' -> secondi (None se non si capisce)."""
+    m = re.fullmatch(r"(?:(\d+)m)?(\d+)s", testo.strip())
+    if not m:
+        return None
+    return int(m.group(1) or 0) * 60 + int(m.group(2))
+
+
+def _celle(riga_md: str) -> list[str]:
+    return [cella.strip() for cella in riga_md.strip().strip("|").split("|")]
+
+
+def _blocco_tabella(righe: list[str]) -> tuple[int, int] | None:
+    """(prima riga del corpo, ultima riga) della tabella delle baseline."""
+    inizio = next(
+        (i for i, r in enumerate(righe) if r.strip().lower().startswith(INTESTAZIONE)),
+        None,
+    )
+    if inizio is None:
+        return None
+    fine = inizio
+    while fine + 1 < len(righe) and righe[fine + 1].lstrip().startswith("|"):
+        fine += 1
+    return inizio + 2, fine
+
+
+def aggiorna(testo: str, nuova: str, data: str) -> str:
+    """Mette `nuova` nella tabella: sostituisce la riga di quella data, o la aggiunge.
+
+    Solleva ValueError se la tabella non c'e' (file sbagliato): meglio un
+    errore chiaro che una riga appesa in mezzo a un'altra tabella.
+    """
+    a_capo = "\r\n" if "\r\n" in testo else "\n"
+    righe = testo.splitlines()
+    posto = _blocco_tabella(righe)
+    if posto is None:
+        raise ValueError(f"tabella delle baseline non trovata (cerco una riga che inizia con {INTESTAZIONE!r})")
+    prima, ultima = posto
+    for i in range(prima, ultima + 1):
+        if _celle(righe[i])[0] == data:
+            righe[i] = nuova
+            break
+    else:
+        righe.insert(ultima + 1, nuova)
+    return a_capo.join(righe) + (a_capo if testo.endswith(("\n", "\r")) else "")
+
+
+def ultima(righe: list[str]) -> list[str] | None:
+    """L'ultima riga della tabella (quella con cui confrontarsi)."""
+    posto = _blocco_tabella(righe)
+    if posto is None:
+        return None
+    prima, finita = posto
+    corpo = [righe[i] for i in range(prima, finita + 1) if righe[i].strip()]
+    return _celle(corpo[-1]) if corpo else None
+
+
+def confronto(vecchia: list[str], nuova: list[str]) -> list[str]:
+    """Le differenze fra due righe della tabella, in chiaro."""
+    etichette = ("slide", "ancore", "durata minima", "fiducia", "dubbi")
+    indici = (1, 2, 3, 4, 5)
+    differenze: list[str] = []
+    for etichetta, i in zip(etichette, indici, strict=True):
+        a, b = vecchia[i], nuova[i]
+        if a == b:
+            continue
+        extra = ""
+        if etichetta == "durata minima":
+            sa, sb = _secondi(a), _secondi(b)
+            if sa is not None and sb is not None:
+                extra = f" ({sb - sa:+.0f}s)"
+        differenze.append(f"   {etichetta}: {a} -> {b}{extra}")
+    return differenze
+
+
+def _leggi_report() -> dict[str, Any] | None:
+    path = CACHE_DIR / "sync_report.json"
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"Nessun report da leggere in {path}: {e}")
+        print("Lancia prima la pipeline (anche con --dry-run).")
+        return None
+    if not isinstance(report, dict):
+        print(f"{path} non contiene un report.")
+        return None
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -53,19 +161,56 @@ def main(argv: list[str] | None = None) -> int:
         default=time.strftime("%d/%m"),
         help="data da scrivere nella riga (default: oggi)",
     )
+    parser.add_argument(
+        "--scrivi",
+        metavar="FILE",
+        help="scrive la riga nella tabella delle baseline di questo file",
+    )
+    parser.add_argument(
+        "--confronta",
+        metavar="FILE",
+        help="dice di quanto la run si e' mossa rispetto all'ultima riga della tabella",
+    )
     args = parser.parse_args(argv)
 
-    path = CACHE_DIR / "sync_report.json"
-    try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        print(f"Nessun report da leggere in {path}: {e}")
-        print("Lancia prima la pipeline (anche con --dry-run).")
+    report = _leggi_report()
+    if report is None:
         return 1
-    if not isinstance(report, dict):
-        print(f"{path} non contiene un report.")
-        return 1
-    print(riga(report, args.data))
+    nuova = riga(report, args.data)
+
+    if args.scrivi:
+        path = Path(args.scrivi)
+        try:
+            testo = path.read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"Non riesco a leggere {path}: {e}")
+            return 1
+        try:
+            path.write_text(aggiorna(testo, nuova, args.data), encoding="utf-8", newline="")
+        except (OSError, ValueError) as e:
+            print(f"Tabella non aggiornata: {e}")
+            return 1
+        print(f"Riga scritta in {path}: {nuova}")
+
+    if args.confronta:
+        path = Path(args.confronta)
+        try:
+            righe = path.read_text(encoding="utf-8").splitlines()
+        except OSError as e:
+            print(f"Non riesco a leggere {path}: {e}")
+            return 1
+        vecchia = ultima(righe)
+        if vecchia is None:
+            print(f"{path}: tabella delle baseline non trovata.")
+            return 1
+        print(f"Confronto con l'ultima baseline ({vecchia[0]}), sorgente: {_sorgente(report)}")
+        differenze = confronto(vecchia, _celle(nuova))
+        print("\n".join(differenze) if differenze else "   Nessun cambiamento.")
+        return 0
+
+    if not args.scrivi:
+        print(f"# sorgente: {_sorgente(report)}", file=sys.stderr)
+        print(nuova)
     return 0
 
 

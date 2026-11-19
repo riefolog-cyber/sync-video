@@ -790,8 +790,16 @@ def percorso_parziale(audio_path: Path) -> Path:
     return CACHE_DIR / "parziali" / f"{firma}.json"
 
 
-def _salva_parziale(audio_path: Path, parole: list[Word]) -> None:
-    """Scrive le parole fin qui (errore ignorato: e' una rete di sicurezza)."""
+def _salva_parziale(
+    audio_path: Path, parole: list[Word], coperto_fino: float = 0.0
+) -> None:
+    """Scrive le parole fin qui (errore ignorato: e' una rete di sicurezza).
+
+    ``coperto_fino`` e' il secondo fino a cui l'audio e' stato DECODIFICATO
+    (la fine dell'ultimo segmento lavorato, non l'ultimo timestamp di parola:
+    un segmento finisce dove il parlato gira, quindi tagliare li' non perde
+    niente). Serve alla ripresa.
+    """
     from config import atomic_write_text
 
     try:
@@ -800,7 +808,12 @@ def _salva_parziale(audio_path: Path, parole: list[Word]) -> None:
         atomic_write_text(
             path,
             json.dumps(
-                {"audio": str(audio_path), "parole": len(parole), "words": parole},
+                {
+                    "audio": str(audio_path),
+                    "parole": len(parole),
+                    "coperto_fino": round(float(coperto_fino), 3),
+                    "words": parole,
+                },
                 ensure_ascii=False,
             ),
         )
@@ -808,25 +821,119 @@ def _salva_parziale(audio_path: Path, parole: list[Word]) -> None:
         log.debug("   Trascrizione parziale non salvata (%s).", e)
 
 
-def _avvisa_parziale(audio_path: Path) -> None:
-    """Se una run precedente si e' interrotta, dice quanto testo e' rimasto."""
+def _leggi_parziale(audio_path: Path) -> dict[str, Any] | None:
+    """Il parziale di quest'audio, se c'e' ed e' leggibile."""
     try:
-        path = percorso_parziale(audio_path)
-        dati = json.loads(path.read_text(encoding="utf-8"))
-        parole = int(dati.get("parole") or 0)
-    except (OSError, ValueError, TypeError):
-        return
-    if parole:
-        log.warning(
-            "   [Trascrizione] La run precedente si era interrotta: %d parole "
-            "gia' trascritte in %s. La decodifica riparte da capo (faster-whisper "
-            "non riprende a meta' audio), ma il testo non e' perduto.",
-            parole,
-            path,
+        dati = json.loads(percorso_parziale(audio_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return dati if isinstance(dati, dict) else None
+
+
+def _taglia_audio(audio_path: Path, da: float) -> Path | None:
+    """Copia la parte di audio da ``da`` in poi, per decodificare solo quella.
+
+    ``-ss`` PRIMA di ``-i``: ffmpeg salta senza decodificare (e per l'audio il
+    taglio resta accurato al campione). L'uscita e' AAC in un .m4a, che
+    Whisper legge senza altre conversioni.
+
+    None se il taglio non riesce: chi chiama ricomincia da capo.
+    """
+    parziale = percorso_parziale(audio_path)
+    resto = parziale.with_name(f"{parziale.stem}_resto.m4a")
+    with contextlib.suppress(OSError):
+        resto.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-ss",
+        f"{max(0.0, da):.3f}",
+        "-i",
+        str(audio_path),
+        "-vn",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "160k",
+        str(resto),
+    ]
+    try:
+        esito = subprocess.run(
+            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=600, check=False,
         )
+    except (OSError, subprocess.SubprocessError) as e:
+        log.debug("   Ripresa: taglio audio non riuscito (%s).", e)
+        return None
+    if esito.returncode != 0 or not resto.exists() or resto.stat().st_size == 0:
+        log.debug(
+            "   Ripresa: taglio audio non riuscito (%s).",
+            (esito.stderr or "").strip()[:200],
+        )
+        return None
+    return resto
 
 
-def _collect_words(segments: Any, audio_path: Path | None = None) -> list[Word]:
+def _prepara_ripresa(audio_path: Path) -> tuple[list[Word], Path, float]:
+    """(parole gia' fatte, file da trascrivere, secondo di partenza).
+
+    Riprendere DAVVERO significa decodificare solo la coda: le parole salvate
+    restano e i timestamp nuovi si spostano dell'offset. Se qualcosa non torna
+    (parziale vecchio formato, taglio fallito) si ricomincia da capo: meglio
+    una trascrizione intera che una trascrizione sbagliata.
+    """
+    dati = _leggi_parziale(audio_path)
+    if dati is None:
+        return [], audio_path, 0.0
+    grezze = dati.get("words")
+    parole: list[Word] = []
+    if isinstance(grezze, list):
+        for w in grezze:
+            if isinstance(w, dict) and "word" in w and "start" in w:
+                parole.append(cast("Word", w))
+    try:
+        coperto = float(dati.get("coperto_fino") or 0.0)
+    except (TypeError, ValueError):
+        coperto = 0.0
+    if not parole or coperto <= 1.0:
+        if parole:
+            log.info(
+                "   [Trascrizione] Trovate %d parole di una run interrotta, ma senza "
+                "il punto di ripresa: decodifico tutto (il testo resta in %s).",
+                len(parole),
+                percorso_parziale(audio_path),
+            )
+        return [], audio_path, 0.0
+    resto = _taglia_audio(audio_path, coperto)
+    if resto is None:
+        log.warning(
+            "   [Trascrizione] La run precedente si era interrotta: %d parole salvate "
+            "in %s. Non riesco a tagliare l'audio per riprendere, quindi decodifico "
+            "da capo (il testo resta; faster-whisper non riprende a meta' audio).",
+            len(parole),
+            percorso_parziale(audio_path),
+        )
+        return [], audio_path, 0.0
+    log.info(
+        "   [Trascrizione] Riprendo da %.0fs: %d parole gia' trascritte, decodifico "
+        "solo la coda.",
+        coperto,
+        len(parole),
+    )
+    return parole, resto, coperto
+
+
+def _collect_words(
+    segments: Any,
+    audio_path: Path | None = None,
+    *,
+    offset: float = 0.0,
+    precedenti: list[Word] | None = None,
+) -> list[Word]:
     """Consuma i segmenti di faster-whisper e ne estrae le parole con timestamp.
 
     Con ``word_timestamps=True`` ogni segmento porta le sue parole; il ramo
@@ -835,22 +942,31 @@ def _collect_words(segments: Any, audio_path: Path | None = None) -> list[Word]:
 
     ``audio_path`` (facoltativo) attiva il salvataggio a pezzi: un crash a
     meta' non butta via il testo gia' trascritto.
+
+    ``offset`` e' il secondo da cui parte l'audio passato al motore (ripresa
+    dopo un'interruzione): i timestamp vanno spostati per restare sull'audio
+    INTERO. ``precedenti`` sono le parole gia' fatte, che il parziale deve
+    continuare a contenere.
     """
     all_words: list[Word] = []
+    gia_fatte = list(precedenti or [])
     segmenti = 0
+    coperto = offset
     for seg in segments:
         segmenti += 1
+        fine = offset + float(getattr(seg, "end", 0.0) or 0.0)
+        coperto = max(coperto, fine)
         if not seg.text:
             continue
         if hasattr(seg, "words") and seg.words:
             for w in seg.words:
                 if w.word.strip():
-                    all_words.append({"word": w.word.strip(), "start": w.start})
+                    all_words.append({"word": w.word.strip(), "start": w.start + offset})
         else:
             for token in seg.text.strip().split():
-                all_words.append({"word": token, "start": seg.start})
+                all_words.append({"word": token, "start": seg.start + offset})
         if audio_path is not None and segmenti % _CHECKPOINT_OGNI_SEGMENTI == 0:
-            _salva_parziale(audio_path, all_words)
+            _salva_parziale(audio_path, gia_fatte + all_words, coperto)
     if audio_path is not None:
         # Trascrizione arrivata in fondo: il parziale non serve piu'.
         with contextlib.suppress(OSError):
@@ -866,6 +982,9 @@ def _transcribe_with_fallback(
     vad_filter: bool,
     vad_parameters: dict,
     batch_size: int,
+    checkpoint_path: Path | None = None,
+    offset: float = 0.0,
+    precedenti: list[Word] | None = None,
 ) -> tuple[list[Word], Any]:
     """Trascrive usando il decoding a batch quando è disponibile.
 
@@ -883,8 +1002,6 @@ def _transcribe_with_fallback(
     Returns:
         (parole con timestamp, info della trascrizione)
     """
-    _avvisa_parziale(audio_path)
-
     kwargs: dict[str, Any] = {
         "language": language,
         "beam_size": beam_size,
@@ -904,7 +1021,9 @@ def _transcribe_with_fallback(
                 segments, info = BatchedInferencePipeline(model=model).transcribe(
                     str(audio_path), batch_size=batch_size, **kwargs
                 )
-                return _collect_words(segments, audio_path), info
+                return _collect_words(
+                    segments, checkpoint_path, offset=offset, precedenti=precedenti
+                ), info
             except Exception as e:  # ottimizzazione di velocità: mai fatale
                 log.warning(
                     "   ⚠️  Decoding a batch non riuscito (%s): ripiego sul percorso sequenziale.",
@@ -912,7 +1031,9 @@ def _transcribe_with_fallback(
                 )
 
     segments, info = model.transcribe(str(audio_path), **kwargs)
-    return _collect_words(segments, audio_path), info
+    return _collect_words(
+        segments, checkpoint_path, offset=offset, precedenti=precedenti
+    ), info
 
 
 def _warn_cpu_transcription(model_size: str) -> None:
@@ -1094,16 +1215,38 @@ def transcribe_with_whisper(
     }
     whisper_lang = _LANG_MAP.get(language, language)
 
+    # Ripresa: se una run precedente si e' interrotta, decodifica solo la coda.
+    # Il parziale e' dell'audio INTERO (timestamp assoluti) mentre il motore
+    # lavora su un file tagliato: da qui i due aggiustamenti (offset e parole
+    # gia' fatte).
+    iniziali, sorgente, offset = _prepara_ripresa(audio_path)
+
     # Trascrizione (decoding a batch quando possibile, con ripiego sequenziale)
-    all_words, info = _transcribe_with_fallback(
-        model,
-        audio_path,
-        language=whisper_lang,
-        beam_size=beam_size,
-        vad_filter=vad_filter,
-        vad_parameters=vad_params,
-        batch_size=batch_size,
-    )
+    try:
+        all_words, info = _transcribe_with_fallback(
+            model,
+            sorgente,
+            language=whisper_lang,
+            beam_size=beam_size,
+            vad_filter=vad_filter,
+            vad_parameters=vad_params,
+            batch_size=batch_size,
+            checkpoint_path=audio_path,
+            offset=offset,
+            precedenti=iniziali,
+        )
+    finally:
+        if sorgente != audio_path:
+            with contextlib.suppress(OSError):
+                sorgente.unlink(missing_ok=True)
+
+    if iniziali:
+        all_words = iniziali + all_words
+        log.info(
+            "   Ripresa: %d parole recuperate dal parziale (primi %.0fs non rifatti).",
+            len(iniziali),
+            offset,
+        )
 
     log.info("   Rilevata lingua: %s (probabilità %.2f)", info.language, info.language_probability)
     log.info("   Parole riconosciute: %d", len(all_words))

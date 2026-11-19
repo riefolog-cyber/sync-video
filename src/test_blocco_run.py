@@ -175,5 +175,25 @@ class TestBloccoRun(unittest.TestCase):
         self.assertIn("LIBERO", self._figlio(self.base))
 
 
+class TestDueIstanzeStessoProcesso(unittest.TestCase):
+    """Due `BloccoRun` sulla stessa cartella: vince il primo, non si pestano."""
+
+    def test_la_seconda_istanza_non_libera_il_blocco_della_prima(self) -> None:
+        import blocco_run
+        from blocco_run import PRESO, BloccoRun
+
+        with tempfile.TemporaryDirectory() as tmp:
+            primo = BloccoRun(Path(tmp))
+            self.assertEqual(primo.tenta(), PRESO)
+            secondo = BloccoRun(Path(tmp))
+            self.assertEqual(secondo.tenta(), PRESO, "stesso processo: passa")
+            secondo.release()
+            # Il blocco vero e' ancora del primo: la chiave deve restare.
+            self.assertIn(primo._chiave, blocco_run._proprietari)
+            terzo = BloccoRun(Path(tmp))
+            self.assertEqual(terzo.tenta(), PRESO)
+            primo.release()
+
+
 if __name__ == "__main__":
     unittest.main()

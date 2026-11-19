@@ -145,6 +145,7 @@ python -m unittest discover -s src -p "test_*.py"
 | `--frozen-report` | — | Diagnostica i pacchetti **fermi**: per ognuno elenca chi lo vincola (tutti i vincoli dei pacchetti installati), il tetto raggiungibile in questo ambiente e a quali versioni si arriverebbe sciogliendo i vincoli **uno alla volta**. Legge PyPI, non installa nulla e non chiede conferme: stampa il referto ed esce. Stesso interruttore in `aggiornamenti.bat` |
 | `--semantic-cache-dir` | `.cache/embedding_model` | Cartella dei modelli embedding |
 | `--log-file` | — | Scrivi anche il log su file |
+| `--solo-riepilogo` | — | Riscrive `riepilogo.md` dal report dell'ultima run, senza rifare la pipeline (esce 0 se lo scrive, 1 se il report non c'è) |
 
 ## Codici di uscita
 
@@ -155,9 +156,10 @@ python -m unittest discover -s src -p "test_*.py"
 | `2` | Solo `scripts/prova_materiale_reale.py`: confronto **non verificabile** (materiale diverso da quello del riferimento, o riferimento assente). Non è un guasto del programma: su un altro PC il materiale non c'è |
 
 Una run che finisce scrive anche `riepilogo.md` accanto al video: pagine,
-ancore, sezione più corta e cosa guardare a mano. I numeri della tabella
-delle baseline si generano dalla run appena fatta con
-`python src/scripts/riga_baseline.py`.
+ancore, sezione più corta, sorgenti e cosa guardare a mano. Se hai cambiato
+solo il testo del riepilogo, `--solo-riepilogo` lo riscrive dal report in un
+secondo. I numeri della tabella delle baseline (`docs/verifica.md`) si
+generano dalla run appena fatta con `python src/scripts/riga_baseline.py`.
 
 ---
 

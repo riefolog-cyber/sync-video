@@ -2269,6 +2269,12 @@ Esempi:
     )
     parser.add_argument("--dry-run", action="store_true", help="Ferma dopo la generazione timeline, non produce video")
     parser.add_argument(
+        "--solo-riepilogo",
+        dest="solo_riepilogo",
+        action="store_true",
+        help="Rigenera solo riepilogo.md dal report dell'ultima run, senza rifare la pipeline",
+    )
+    parser.add_argument(
         "--review",
         action="store_true",
         help="Rivede i confini dubbi di una run già fatta: legge report, timeline "

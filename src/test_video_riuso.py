@@ -207,6 +207,35 @@ class TestFotogrammiSoloDeiProblemi(unittest.TestCase):
             )
 
 
+class TestRiusoNonToccaIlVideo(unittest.TestCase):
+    """Una run identica non riscrive il video, quindi non crea un backup inutile."""
+
+    def test_video_riusato_non_crea_backup(self) -> None:
+        from unittest import mock
+
+        import video
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            slide = base / "s1.png"
+            slide.write_bytes(b"png finto")
+            audio = base / "a.m4a"
+            audio.write_bytes(b"audio finto")
+            out = base / "video_finale.mp4"
+            out.write_bytes(b"vecchio video")
+
+            with (
+                mock.patch.object(video, "video_riutilizzabile", return_value=True),
+                mock.patch.object(video, "_salva_video_precedente") as salva,
+                mock.patch.object(video, "_build_video_ffmpeg") as build,
+            ):
+                video.build_video([str(slide)], [10.0], audio, out)
+
+            salva.assert_not_called()
+            build.assert_not_called()
+            self.assertEqual(out.read_bytes(), b"vecchio video")
+
+
 class TestVideoPrecedente(unittest.TestCase):
     """Il video che viene sovrascritto non va perso."""
 

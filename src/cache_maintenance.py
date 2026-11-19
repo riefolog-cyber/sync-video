@@ -17,10 +17,16 @@ from __future__ import annotations
 
 import contextlib
 import shutil
+import time
 from pathlib import Path
 
 # Cartelle con i pesi ML: cancellarle costa GB di re-download.
 MODEL_DIRS = ("embedding_model", "whisper_openvino_small", "whisper_openvino_base", "whisper_openvino_medium")
+# I parziali di una trascrizione interrotta (transcription.percorso_parziale)
+# stanno in una SOTTOCARTELLA: la pulizia degli orfani guarda i .json in radice
+# e non li vede, quindi senza questa regola resterebbero per sempre.
+PARZIALI_DIR = "parziali"
+PARZIALI_MAX_GIORNI = 7
 # Chiavi che non sono cache di contenuto: vanno conservate (stesso elenco di
 # pipeline_cache.KEEP_CACHE_STEMS: il test di equivalenza li tiene allineati).
 KEEP_STEMS = frozenset(
@@ -80,15 +86,21 @@ def clean_cache(
     clean_verify_frames: bool = True,
 ) -> dict[str, int]:
     """Pulizia sicura. Ritorna conteggi {'orphan_json': n, 'embed_npz': n,
-    'verify_frames': n, 'model_bytes': b}.
+    'verify_frames': n, 'parziali': n, 'model_bytes': b}.
 
     Non tocca mai: chiavi KEEP_STEMS, modelli pesanti (salvo
-    include_models=True).
+    include_models=True), parziali di trascrizione recenti (la ripresa li usa).
     """
     from pipeline_cache import clean_orphan_cache as _clean_orphan_cache
     from semantic_sync import _prune_embed_cache  # import locale: evita cicli
 
-    esito: dict[str, int] = {"orphan_json": 0, "embed_npz": 0, "verify_frames": 0, "model_bytes": 0}
+    esito: dict[str, int] = {
+        "orphan_json": 0,
+        "embed_npz": 0,
+        "verify_frames": 0,
+        "parziali": 0,
+        "model_bytes": 0,
+    }
     if not cache_dir.exists():
         return esito
     # 1. JSON orfani (slide/trascrizioni di run precedenti): senza chiavi
@@ -109,7 +121,18 @@ def clean_cache(
             for f in frame:
                 with contextlib.suppress(OSError):
                     f.unlink()
-    # 4. modelli pesanti SOLO su richiesta esplicita.
+    # 4. parziali di trascrizioni interrotte, vecchi: dopo una settimana non
+    #    servono piu' a nessuno (se l'audio non e' stato rifatto, la run e'
+    #    finita comunque). I recenti RESTANO: sono il punto della ripresa.
+    parziali = cache_dir / PARZIALI_DIR
+    if parziali.exists():
+        scadenza = time.time() - PARZIALI_MAX_GIORNI * 86400
+        for f in list(parziali.glob("*")):
+            with contextlib.suppress(OSError):
+                if f.is_file() and f.stat().st_mtime < scadenza:
+                    f.unlink()
+                    esito["parziali"] += 1
+    # 5. modelli pesanti SOLO su richiesta esplicita.
     if include_models:
         for nome in MODEL_DIRS:
             cartella = cache_dir / nome

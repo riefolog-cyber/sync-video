@@ -440,13 +440,15 @@ def _prune_embed_cache(cache_dir: Path | None = None) -> int:
     cosi' spesso).
     """
     base = _EMBED_CACHE_DIR if cache_dir is None else cache_dir / "embedding_cache"
-    try:
-        voci = [
-            (p, p.stat().st_mtime, p.stat().st_size)
-            for p in base.glob("emb_*.npz")
-        ]
-    except OSError:
-        return 0
+    voci: list[tuple[Path, float, int]] = []
+    for p in base.glob("emb_*.npz"):
+        try:
+            info = p.stat()
+        except OSError:
+            # Sparito nel frattempo (o symlink rotto): non e' un motivo per
+            # rinunciare a potare TUTTO il resto.
+            continue
+        voci.append((p, info.st_mtime, info.st_size))
     voci.sort(key=lambda v: v[1], reverse=True)
     totale = 0
     rimosse = 0

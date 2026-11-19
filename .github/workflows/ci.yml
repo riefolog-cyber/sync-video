@@ -210,9 +210,21 @@ jobs:
           ffmpeg -version | head -1
           tesseract --version | head -1 || echo "::warning::Tesseract non eseguibile: l'OCR non sara' esercitato."
 
+      - name: Cache modello embedding (2 GB, serve al test end-to-end)
+        # La suite notturna include la pipeline INTERA: senza questa cache il
+        # modello da 2 GB si riscarica ogni notte. SYNC_VIDEO_E2E_SCARICA=1
+        # sotto autorizza il download solo quando la cache e' fredda.
+        uses: actions/cache@v4
+        with:
+          path: .cache/embedding_model
+          key: embed-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            embed-${{ runner.os }}-
+
       - name: Suite completa (lenti inclusi)
         env:
           SYNC_VIDEO_RUN_SLOW: "1"
+          SYNC_VIDEO_E2E_SCARICA: "1"
         # I .py sono in src/: senza -s src questo comando troverebbe ZERO
         # test e uscirebbe con "OK", facendo passare la CI senza eseguire
         # nulla. E' il perche' del -s esplicito, non una formalta'.

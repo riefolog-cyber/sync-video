@@ -131,11 +131,14 @@ class BloccoRun:
 
     def release(self) -> None:
         """Rilascia il blocco (il SO lo rilascia comunque alla fine del processo)."""
-        _proprietari.discard(self._chiave)
         fh = self._file
-        self._file = None
         if fh is None:
+            # Non possiede il blocco (era gia' di un altro oggetto dello stesso
+            # processo): togliere la chiave libererebbe il posto a un terzo
+            # tentativo che poi aspetterebbe se stesso.
             return
+        self._file = None
+        _proprietari.discard(self._chiave)
         try:
             fh.seek(0)
             if fcntl is not None:

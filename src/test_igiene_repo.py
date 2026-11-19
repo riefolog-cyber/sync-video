@@ -52,21 +52,36 @@ def _percorsi_personali() -> list[re.Pattern[str]]:
 
 
 def _versionati() -> list[Path]:
-    """I file tracciati da git (git ls-files), o skip se git non c'e'."""
-    try:
-        esito = subprocess.run(
-            ["git", "ls-files"],
-            cwd=RADICE,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
-        )
-    except (OSError, subprocess.SubprocessError) as e:
-        raise unittest.SkipTest(f"git non disponibile: {e}") from e
-    if esito.returncode != 0 or not esito.stdout.strip():
-        raise unittest.SkipTest("nessun file versionato (non e' un checkout git?)")
-    return [RADICE / riga.strip() for riga in esito.stdout.splitlines() if riga.strip()]
+    """I file che finiscono nel repository: tracciati + nuovi non ignorati.
+
+    I secondi sono quelli che stai per committare: e' li' che un percorso
+    personale incollato ieri non ha ancora nessun controllo addosso. Gli
+    ignorati (`.cache/`, gli audio del progetto) restano fuori: non sono
+    pubblici e il loro contenuto non riguarda il repository.
+    """
+    comandi = (
+        ["git", "ls-files"],
+        ["git", "ls-files", "--others", "--exclude-standard"],
+    )
+    file: list[Path] = []
+    for comando in comandi:
+        try:
+            esito = subprocess.run(
+                comando,
+                cwd=RADICE,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            raise unittest.SkipTest(f"git non disponibile: {e}") from e
+        if esito.returncode != 0:
+            raise unittest.SkipTest("git non risponde (non e' un checkout git?)")
+        file += [RADICE / riga.strip() for riga in esito.stdout.splitlines() if riga.strip()]
+    if not file:
+        raise unittest.SkipTest("nessun file versionato")
+    return file
 
 
 class TestIgieneRepository(unittest.TestCase):

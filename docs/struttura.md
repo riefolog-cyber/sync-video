@@ -24,6 +24,7 @@ test_prompts.py          ← Test dei prompt e dei link del README
 test_integration.py      ← Test di integrazione
 test_end_to_end_minimo.py ← La pipeline intera su materiale vero (lento: run notturna)
 test_fixtures/           ← Materiale minimo per il test end-to-end (voce di 33s)
+aiuti_test.py            ← Helper dei test (Tesseract come lo trova il programma)
 src/scripts/             ← Script eseguibili (A/B fastembed, controllo modello, analisi)
 controlli.bat            ← Wrapper Windows di controlli.py
 prova.bat                ← Test rapido senza generare il video (dry-run)
@@ -53,7 +54,7 @@ Comandi verificati per chi modifica il codice:
 # Verifica completa in un colpo: CI + mypy 3 piattaforme + debug hardware
 python src/controlli.py
 
-# Test (suite completa, unittest - 1147 test)
+# Test (suite completa, unittest - 1161 test)
 python -m unittest discover -s src -p "test_*.py"
 
 # Type-check (mypy: codice di produzione e test, tranne la deny-list in mypy.ini)

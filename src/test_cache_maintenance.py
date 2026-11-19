@@ -94,6 +94,29 @@ class TestCleanCache(unittest.TestCase):
             finally:
                 m.CACHE_DIR = old
 
+    def test_pota_solo_i_parziali_vecchi(self) -> None:
+        # I parziali servono alla ripresa: quelli recenti RESTANO, quelli di
+        # una settimana fa non servono piu' a nessuno.
+        import os
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            parziali = base / "parziali"
+            parziali.mkdir()
+            vecchio = parziali / "vecchio.json"
+            vecchio.write_text("{}", encoding="utf-8")
+            recente = parziali / "recente.json"
+            recente.write_text("{}", encoding="utf-8")
+            otto_giorni = time.time() - 8 * 86400
+            os.utime(vecchio, (otto_giorni, otto_giorni))
+
+            esito = clean_cache(base)
+
+            self.assertEqual(esito["parziali"], 1)
+            self.assertFalse(vecchio.exists())
+            self.assertTrue(recente.exists(), "il parziale recente serve alla ripresa")
+
     def test_la_potatura_embedding_usa_la_cartella_indicata(self) -> None:
         # Prima la potatura usava la cartella globale di semantic_sync: contava
         # i file qui e ne cancellava altri. Qui si verifica che agisca sulla

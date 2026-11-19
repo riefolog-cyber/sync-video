@@ -2214,7 +2214,11 @@ _SECONDI_MINIMI_PER_PAGINA = 30.0
 
 
 def _avviso_materiale_poco_denso(n_slide: int, audio_path: Path) -> None:
-    """Avvisa se il parlato e' poco rispetto alle pagine (costo: una `stat`)."""
+    """Avvisa se il parlato e' poco rispetto alle pagine.
+
+    Apre l'audio (MoviePy/ffprobe, ~0,2s): e' comunque un ordine di grandezza
+    meno dell'OCR e tre ordini meno di Whisper, quindi arriva in tempo utile.
+    """
     try:
         with AudioFileClip(str(audio_path)) as clip:
             durata = float(clip.duration or 0.0)
@@ -2912,6 +2916,14 @@ def main(argv: list | None = None) -> None:
         print(_versione)
         return
     log.info("Sync Video %s", _versione)
+
+    # --- Solo il riepilogo: riscrive la pagina dal report, senza pipeline ---
+    # Serve dopo aver cambiato una frase del riepilogo, o per recuperare la
+    # pagina di una lezione gia' fatta: un secondo al posto di una trascrizione.
+    if getattr(args, "solo_riepilogo", False):
+        from riepilogo import rigenera
+
+        sys.exit(rigenera(CACHE_DIR, Path(args.output_video)))
 
     # --- Misura / pulizia cache e uscita (P1: policy sicura) ---
     # PRIMA di bootstrap/setup/update-check: sono comandi di ispezione che non
@@ -4220,6 +4232,9 @@ def main(argv: list | None = None) -> None:
         # I tempi per fase nell'artefatto: con la cache e i tempi in un posto
         # solo si puo' capire PERCHE' una run e' stata lenta (e se la cache ha
         # funzionato) senza rileggere i log.
+        # I file di partenza: il referto diventa leggibile anche fra sei mesi,
+        # in una cartella che non ricordi.
+        sync_notes["sorgenti"] = {"pdf": pdf_path.name, "audio": audio_path.name}
         sync_notes["tempi"] = {
             "ocr": round(t_ocr, 1),
             "trascrizione": round(t_transcribe, 1),

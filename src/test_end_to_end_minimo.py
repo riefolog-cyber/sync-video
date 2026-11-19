@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,7 +31,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_ambiente import eseguibile_tesseract
+from aiuti_test import eseguibile_tesseract
 from test_slow import slow
 
 SRC = Path(__file__).resolve().parent
@@ -80,12 +81,42 @@ def _cartella_embedding_reale() -> str:
     return DEFAULT_EMBEDDING_CACHE_DIR
 
 
+def _durata_audio(path: Path) -> float:
+    """Durata vera della fixture, letta da ffmpeg: niente numeri scritti a mano.
+
+    Si usa `ffmpeg -i` e non `ffprobe`: la CI ha solo il binario statico di
+    imageio-ffmpeg, che ffprobe non lo porta.
+    """
+    esito = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-i", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", (esito.stderr or "") + (esito.stdout or ""))
+    if not m:
+        raise AssertionError(f"ffmpeg non ha dato la durata di {path}: {esito.stderr}")
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+
+
 class TestPipelineCompleta(unittest.TestCase):
     @slow("pipeline intera su materiale vero: OCR, Whisper, embeddings, ffmpeg")
     def test_cinque_slide_con_annunci(self) -> None:
         mancanti = _strumenti_mancanti()
         if mancanti:
             self.skipTest("manca: " + ", ".join(mancanti))
+        # Il modello embedding (2 GB) NON si scarica di nascosto in un job
+        # notturno: o c'e' in cache (la CI la mantiene) o si e' detto di
+        # scaricarlo. La variabile rende la cosa una scelta, non una sorpresa.
+        if not Path(_cartella_embedding_reale()).exists() and os.environ.get(
+            "SYNC_VIDEO_E2E_SCARICA"
+        ) != "1":
+            self.skipTest(
+                "modello embedding non in cache ("
+                + _cartella_embedding_reale()
+                + "): con SYNC_VIDEO_E2E_SCARICA=1 il test lo scarica (~2 GB)"
+            )
 
         with tempfile.TemporaryDirectory(prefix="e2e_") as tmp:
             base = Path(tmp)
@@ -149,8 +180,11 @@ class TestPipelineCompleta(unittest.TestCase):
             self.assertGreater(inizi[1], 2.0, f"slide 2 a {inizi[1]}s: ancora persa")
             self.assertLess(inizi[1], 20.0, f"slide 2 a {inizi[1]}s: ancora sbagliata")
 
-            # 4. L'ultima slide copre la coda dell'audio (33.5s).
-            self.assertAlmostEqual(float(timeline[-1]["end"]), 33.5, delta=6.0)
+            # 4. L'ultima slide copre la coda dell'audio. La durata si legge
+            #    dal file: rigenerare la fixture non deve rompere il test.
+            self.assertAlmostEqual(
+                float(timeline[-1]["end"]), _durata_audio(AUDIO), delta=6.0
+            )
 
             # 5. Il riepilogo leggibile e' accanto al video.
             self.assertTrue((base / "riepilogo.md").exists(), "manca riepilogo.md")
