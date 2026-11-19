@@ -2976,6 +2976,15 @@ def main(argv: list | None = None) -> None:
                 }
         except (OSError, TypeError, ValueError, AttributeError):
             attive = set()
+        if not attive:
+            # Senza gli input non si sa quali cache siano di questa coppia: la
+            # pulizia diventa TOTALE. Va detto prima, non scoperto dopo (la run
+            # successiva rifa' OCR e Whisper: minuti).
+            log.warning(
+                "   Pulizia piena: in questa cartella non trovo la presentazione e il "
+                "podcast, quindi non posso riconoscere le cache di questi materiali. "
+                "Cancello tutte le cache di contenuto (modelli esclusi)."
+            )
         esito = clean_cache(CACHE_DIR, include_models=args.include_models, active_keys=attive)
         log.info(
             "Cache pulita: %d JSON orfani, %d embedding oltre il tetto, %d frame di verifica%s.",
