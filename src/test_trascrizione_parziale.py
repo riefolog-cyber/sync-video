@@ -116,8 +116,10 @@ class TestRipresa(unittest.TestCase):
             iniziali, sorgente, offset = _prepara_ripresa(self.audio)
         self.assertEqual([w["word"] for w in iniziali], ["ciao", "mondo"])
         self.assertEqual(sorgente, taglio)
-        self.assertEqual(offset, 120.0)
-        t.assert_called_once_with(self.audio, 120.0)
+        # Il taglio parte _SOVRAPPOSIZIONE_RIPRESA secondi PRIMA del punto
+        # salvato, per dare contesto al motore; il punto salvato resta 120s.
+        self.assertEqual(offset, 120.0 - transcription._SOVRAPPOSIZIONE_RIPRESA)
+        t.assert_called_once_with(self.audio, offset)
 
     def test_parziale_senza_punto_di_ripresa_ricomincia(self) -> None:
         # Formato vecchio (solo "words"): il testo si tiene, ma non si riprende.
@@ -165,7 +167,8 @@ class TestRipresa(unittest.TestCase):
         with mock.patch.object(transcription, "_taglia_audio", return_value=taglio):
             iniziali, sorgente, offset = _prepara_ripresa(self.audio, dict(params))
         self.assertEqual(len(iniziali), 1)
-        self.assertEqual((sorgente, offset), (taglio, 60.0))
+        self.assertEqual(sorgente, taglio)
+        self.assertEqual(offset, 60.0 - transcription._SOVRAPPOSIZIONE_RIPRESA)
 
     def test_parziale_senza_parametri_non_riprende(self) -> None:
         # Formato di una versione precedente: non si sa con che modello e'

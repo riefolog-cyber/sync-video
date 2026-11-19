@@ -861,7 +861,9 @@ def _salva_parziale(
                 ensure_ascii=False,
             ),
         )
-    except OSError as e:
+    except (OSError, TypeError, ValueError) as e:
+        # Rete di sicurezza: un parziale non scritto non deve mai fermare la
+        # decodifica (TypeError = valore non serializzabile, es. np.float64).
         log.debug("   Trascrizione parziale non salvata (%s).", e)
 
 
@@ -877,21 +879,26 @@ def _leggi_parziale(audio_path: Path) -> dict[str, Any] | None:
 def _taglia_audio(audio_path: Path, da: float) -> Path | None:
     """Copia la parte di audio da ``da`` in poi, per decodificare solo quella.
 
-    ``-ss`` PRIMA di ``-i``: ffmpeg salta senza decodificare (e per l'audio il
-    taglio resta accurato al campione). L'uscita e' AAC in un .m4a, che
-    Whisper legge senza altre conversioni.
+    ``-ss`` PRIMA di ``-i``: ffmpeg salta senza decodificare.
 
-    Ricodifica anche quando la sorgente e' gia' AAC: con ``-c copy`` il taglio
-    cadrebbe sul pacchetto piu' vicino (~21 ms prima), e Whisper riascolterebbe
-    la coda dell'ultima parola gia' trascritta. Per una trascrizione 21 ms di
-    audio in piu' non valgono una parola doppia.
+    Il taglio e' LOSSLESS (FLAC): il motore sente lo stesso segnale della
+    sorgente, campione per campione, e l'istante di partenza e' esattamente
+    ``da``. Misurato sulle tre strade possibili: ricodificando in AAC la coda
+    cambiava una parola ("è" -> "e"); con ``-c copy`` il taglio cade sul
+    pacchetto piu' vicino e i timestamp slittano di ~20 ms, abbastanza da
+    spostare il confine (parola doppia al giunto); con FLAC il testo e i tempi
+    tornano quelli della decodifica intera.
+
+    Il file e' piu' grosso dell'originale (FLAC comprime meno di AAC) ma vive
+    solo per la durata della decodifica: chi chiama lo cancella.
 
     None se il taglio non riesce: chi chiama ricomincia da capo.
     """
     parziale = percorso_parziale(audio_path)
-    resto = parziale.with_name(f"{parziale.stem}_resto.m4a")
+    resto = parziale.with_name(f"{parziale.stem}_resto.flac")
     with contextlib.suppress(OSError):
         resto.parent.mkdir(parents=True, exist_ok=True)
+    codec = ["-c:a", "flac"]
     cmd = [
         "ffmpeg",
         "-y",
@@ -904,10 +911,7 @@ def _taglia_audio(audio_path: Path, da: float) -> Path | None:
         "-i",
         str(audio_path),
         "-vn",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "160k",
+        *codec,
         str(resto),
     ]
     try:
@@ -927,6 +931,12 @@ def _taglia_audio(audio_path: Path, da: float) -> Path | None:
     return resto
 
 
+# Secondi di audio riascoltati PRIMA del punto salvato, quando si riprende.
+# Servono al contesto: il motore deve sentire l'attacco della frase al confine,
+# non partire a meta'. Misurato sul materiale di prova: senza sovrapposizione
+# la parola dopo il giunto cambiava ("è" -> "e").
+_SOVRAPPOSIZIONE_RIPRESA = 3.0
+
 # Fino a che secondo e' stata ripresa l'ultima trascrizione (0 = da capo).
 # Letta dal report: una lezione trascritta in due passate deve dirlo.
 _ULTIMA_RIPRESA = 0.0
@@ -940,12 +950,17 @@ def ultima_ripresa() -> float:
 def _prepara_ripresa(
     audio_path: Path, params: dict[str, Any] | None = None
 ) -> tuple[list[Word], Path, float]:
-    """(parole gia' fatte, file da trascrivere, secondo di partenza).
+    """(parole gia' fatte, file da trascrivere, secondo di TAGLIO).
 
     Riprendere DAVVERO significa decodificare solo la coda: le parole salvate
     restano e i timestamp nuovi si spostano dell'offset. Se qualcosa non torna
     (parziale vecchio formato, taglio fallito) si ricomincia da capo: meglio
     una trascrizione intera che una trascrizione sbagliata.
+
+    Il terzo valore e' il punto dove COMINCIA l'audio tagliato, che e' qualche
+    secondo PRIMA del punto salvato (``_SOVRAPPOSIZIONE_RIPRESA``): serve a
+    dare contesto al motore. Le parole riascoltate in quella sovrapposizione
+    le scarta ``_collect_words``, perche' sono gia' nel parziale.
     """
     global _ULTIMA_RIPRESA
     # NON si azzera qui: main chiama la trascrizione piu' di una volta (la
@@ -982,7 +997,8 @@ def _prepara_ripresa(
                 percorso_parziale(audio_path),
             )
         return [], audio_path, 0.0
-    resto = _taglia_audio(audio_path, coperto)
+    taglio = max(0.0, coperto - _SOVRAPPOSIZIONE_RIPRESA)
+    resto = _taglia_audio(audio_path, taglio)
     if resto is None:
         log.warning(
             "   [Trascrizione] La run precedente si era interrotta: %d parole salvate "
@@ -994,12 +1010,13 @@ def _prepara_ripresa(
         return [], audio_path, 0.0
     log.info(
         "   [Trascrizione] Riprendo da %.0fs: %d parole gia' trascritte, decodifico "
-        "solo la coda.",
+        "solo la coda (riascolto %.1fs per il contesto).",
         coperto,
         len(parole),
+        coperto - taglio,
     )
     _ULTIMA_RIPRESA = coperto
-    return parole, resto, coperto
+    return parole, resto, taglio
 
 
 def _collect_words(
@@ -1028,6 +1045,11 @@ def _collect_words(
     gia_fatte = list(precedenti or [])
     segmenti = 0
     coperto = offset
+    # La ripresa riascolta qualche secondo gia' trascritto per avere contesto:
+    # quelle parole sarebbero doppioni. Si scarta tutto cio' che non sta dopo
+    # l'ultima parola salvata (le parole salvate coprono l'audio fino al punto
+    # di ripresa, quindi non si perde nulla di vero).
+    limite = max((float(w["start"]) for w in gia_fatte), default=None)
     for seg in segments:
         segmenti += 1
         fine = offset + float(getattr(seg, "end", 0.0) or 0.0)
@@ -1036,11 +1058,20 @@ def _collect_words(
             continue
         if hasattr(seg, "words") and seg.words:
             for w in seg.words:
+                inizio = float(w.start) + offset
+                if limite is not None and inizio <= limite:
+                    continue
                 if w.word.strip():
-                    all_words.append({"word": w.word.strip(), "start": w.start + offset})
+                    # float(): i timestamp di faster-whisper sono np.float64, e
+                    # json.dumps non li sa scrivere (il primo checkpoint su un
+                    # file lungo sarebbe fallito).
+                    all_words.append({"word": w.word.strip(), "start": inizio})
         else:
             for token in seg.text.strip().split():
-                all_words.append({"word": token, "start": seg.start + offset})
+                inizio = float(seg.start) + offset
+                if limite is not None and inizio <= limite:
+                    continue
+                all_words.append({"word": token, "start": inizio})
         if audio_path is not None and segmenti % _CHECKPOINT_OGNI_SEGMENTI == 0:
             _salva_parziale(audio_path, gia_fatte + all_words, coperto, params)
     if audio_path is not None:
@@ -1317,6 +1348,7 @@ def transcribe_with_whisper(
     else:
         iniziali, sorgente, offset = [], audio_path, 0.0
         log.info("   [Trascrizione] --no-ripresa: decodifico da capo (il parziale resta).")
+
 
     # Trascrizione (decoding a batch quando possibile, con ripiego sequenziale)
     try:
