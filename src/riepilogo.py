@@ -168,6 +168,7 @@ def scrivi_riepilogo(
     *,
     data: str | None = None,
     dry_run: bool = False,
+    video_presente: bool = True,
 ) -> Path | None:
     """Scrive `riepilogo.md` accanto al video. Non interrompe MAI la run.
 
@@ -185,8 +186,11 @@ def scrivi_riepilogo(
                 output_path.name,
                 giorno,
                 dry_run,
-                # Il file del video: se non c'e', il riepilogo lo dice.
-                video_presente=dry_run or output_path.exists(),
+                # Chi sa se il video c'e' lo dice: la pipeline scrive il
+                # riepilogo PRIMA di renderizzare, quindi li' il file non c'e'
+                # ancora e un controllo di esistenza darebbe un falso allarme
+                # ("assente" su un video creato due minuti dopo).
+                video_presente=video_presente,
             ),
         )
         log.info("   Riepilogo della lezione: %s", path)
@@ -212,4 +216,5 @@ def rigenera(cache_dir: Path, output_path: Path) -> int:
     if not isinstance(report, dict):
         log.error("%s non contiene un report.", report_path)
         return 1
-    return 0 if scrivi_riepilogo(report, output_path) is not None else 1
+    # Qui il video dovrebbe gia' esserci: se manca, il riepilogo lo dichiara.
+    return 0 if scrivi_riepilogo(report, output_path, video_presente=output_path.exists()) is not None else 1

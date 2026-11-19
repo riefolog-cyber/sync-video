@@ -96,15 +96,18 @@ class TestRiepilogo(unittest.TestCase):
         self.assertIn("assente dalla cartella", testo)
         self.assertNotIn("assente dalla cartella", riepilogo_markdown(_report(), "video_finale.mp4"))
 
-    def test_scrivendo_dice_se_il_video_manca(self) -> None:
-        # La stessa informazione passando dal disco: scrivi_riepilogo guarda il
-        # file, non si fida del nome.
+    def test_rigenerando_dice_se_il_video_manca(self) -> None:
+        # La stessa informazione passando dal disco: la rigenerazione guarda il
+        # file, non si fida del nome. (La pipeline no: scrive il riepilogo
+        # PRIMA di renderizzare, quindi li' il video non c'e' ancora.)
         with tempfile.TemporaryDirectory() as tmp:
-            video = Path(tmp) / "video_finale.mp4"
-            path = scrivi_riepilogo(_report(), video)
-            self.assertIsNotNone(path)
-            assert path is not None
-            self.assertIn("assente dalla cartella", path.read_text(encoding="utf-8"))
+            base = Path(tmp)
+            cache = base / "cache"
+            cache.mkdir()
+            (cache / "sync_report.json").write_text(json.dumps(_report()), encoding="utf-8")
+            video = base / "video_finale.mp4"
+            self.assertEqual(rigenera(cache, video), 0)
+            self.assertIn("assente dalla cartella", (base / "riepilogo.md").read_text(encoding="utf-8"))
 
     def test_dice_da_dove_vengono_slide_e_voce(self) -> None:
         testo = riepilogo_markdown(
