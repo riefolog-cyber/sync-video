@@ -18,9 +18,12 @@ modo difficile da vedere; un errore chiaro all'avvio costa dieci secondi.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+from config import atomic_write_text
 
 
 def _numero(valore: Any, cosa: str) -> float:
@@ -31,7 +34,7 @@ def _numero(valore: Any, cosa: str) -> float:
         numero = float(valore)
     except (TypeError, ValueError):
         raise ValueError(f"{cosa}: '{valore}' non e' un numero di secondi") from None
-    if numero != numero or numero in (float("inf"), float("-inf")):
+    if not math.isfinite(numero):
         raise ValueError(f"{cosa}: '{valore}' non e' un tempo finito")
     return numero
 
@@ -66,6 +69,8 @@ def _da_dict(dati: Mapping[str, Any]) -> dict[int, float]:
             slide = int(str(chiave).strip())
         except (TypeError, ValueError):
             raise ValueError(f"chiave '{chiave}' non e' un numero di slide") from None
+        if slide in override:
+            raise ValueError(f"slide {slide}: compare piu' di una volta nel file")
         override[slide] = _numero(valore, f"slide {slide}")
     return override
 
@@ -78,6 +83,8 @@ def _da_lista(dati: list[Any]) -> dict[int, float]:
         if "slide" not in voce or "start" not in voce:
             raise ValueError(f"voce {i}: manca 'slide' o 'start'")
         slide = int(_numero(voce["slide"], f"voce {i} 'slide'"))
+        if slide in override:
+            raise ValueError(f"slide {slide}: compare piu' di una volta nel file")
         override[slide] = _numero(voce["start"], f"slide {slide}")
     return override
 
@@ -181,8 +188,9 @@ def aggiorna_file(path: Path, fissaggi: Mapping[int, float]) -> dict[int, float]
     esistenti = leggi_override(path) if path.exists() else {}
     esistenti.update(fissaggi)
     testo = json.dumps({str(s): t for s, t in sorted(esistenti.items())}, indent=2)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(testo + "\n", encoding="utf-8")
+    # Scrittura atomica: il file contiene correzioni scritte a mano, e un crash
+    # a meta' scrittura non deve lasciare un JSON troncato.
+    atomic_write_text(path, testo + "\n")
     return esistenti
 
 

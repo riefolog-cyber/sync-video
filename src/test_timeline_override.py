@@ -63,6 +63,13 @@ class TestLettura(unittest.TestCase):
             leggi_override(self._file(json.dumps({"5": "presto"})))
         self.assertIn("slide 5", str(ctx.exception))
 
+    def test_chiave_ripetuta_una_volta_normalizzata(self) -> None:
+        # "5" e "05" sono la stessa slide: l'ultima vincerebbe in silenzio.
+        path = self._file('{"5": 10.0, "05": 20.0}')
+        with self.assertRaises(ValueError) as ctx:
+            leggi_override(path)
+        self.assertIn("piu' di una volta", str(ctx.exception))
+
     def test_lista_senza_start(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             leggi_override(self._file(json.dumps([{"slide": 5}])))

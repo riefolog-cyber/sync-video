@@ -248,25 +248,19 @@ def _abort(message: str) -> NoReturn:
 def _percorso_override(indicato: str, output: Path) -> Path:
     """Dove stanno le correzioni manuali, e cosa fare se il file non c'e'.
 
-    Un percorso indicato vince; se non esiste si segnala invece di ignorarlo,
-    perche' un override ignorato in silenzio sembra applicato. Senza flag si
-    cerca ``timeline_override.json`` accanto al video (dove finiscono anche
-    .srt e capitoli) e poi nella radice del progetto.
+    Un percorso indicato vince. Senza flag si cerca ``timeline_override.json``
+    accanto al video (dove finiscono anche .srt e capitoli) e poi nella radice
+    del progetto; se non c'e' si restituisce comunque il posto accanto al
+    video, perche' e' li' che ``--fix-slide`` lo creera'.
     """
     if indicato:
         path = Path(indicato)
-        if not path.is_absolute():
-            path = BASE_DIR / path
-        if not path.exists():
-            log.warning(
-                "   Override indicato ma non trovato: %s (nessuna correzione applicata).",
-                path,
-            )
-        return path
+        return path if path.is_absolute() else BASE_DIR / path
     accanto = output.parent / "timeline_override.json"
     if accanto.exists():
         return accanto
-    return BASE_DIR / "timeline_override.json"
+    nella_radice = BASE_DIR / "timeline_override.json"
+    return nella_radice if nella_radice.exists() else accanto
 
 
 # Corpi spostati in pipeline_cache.py / pipeline_report.py (re-export shim
@@ -4242,8 +4236,10 @@ def main(argv: list | None = None) -> None:
         # stimato su una pausa, spostandolo di 0.1-0.9s. --no-snap-pauses lo
         # spegne; il getattr lascia funzionare i Namespace dei test.
         _snap = bool(getattr(args, "snap_pauses", True))
-        in_parola_prima = confini_dentro_parole(timeline, words_raw)
         if _snap and len(semantic_anchors) < total_slides - 1:
+            # Misura di leggibilita' prima/dopo: e' il numero che dice se su
+            # questo materiale l'aggancio ha servito a qualcosa.
+            in_parola_prima = confini_dentro_parole(timeline, words_raw)
             timeline, snapped = aggancia_confini(
                 timeline,
                 semantic_anchors,
@@ -4262,27 +4258,34 @@ def main(argv: list | None = None) -> None:
                     {"slide": s, "before": round(a, 3), "after": round(b, 3), "kind": k}
                     for s, a, b, k in snapped
                 ]
-        # Misura di leggibilita': confini a meta' parola prima e dopo.
-        in_parola_dopo = confini_dentro_parole(timeline, words_raw)
-        if in_parola_prima or in_parola_dopo:
-            log.info(
-                "   Confini a meta' parola: %d prima, %d dopo%s.",
-                len(in_parola_prima),
-                len(in_parola_dopo),
-                "" if _snap else " (aggancio spento)",
-            )
-            sync_notes["readability"] = {
-                "mid_word_before": in_parola_prima,
-                "mid_word_after": in_parola_dopo,
-            }
+            in_parola_dopo = confini_dentro_parole(timeline, words_raw)
+            if in_parola_prima or in_parola_dopo:
+                log.info(
+                    "   Confini a meta' parola: %d prima, %d dopo.",
+                    len(in_parola_prima),
+                    len(in_parola_dopo),
+                )
+                sync_notes["readability"] = {
+                    "mid_word_before": in_parola_prima,
+                    "mid_word_after": in_parola_dopo,
+                }
+        else:
+            # Spento (o niente da agganciare): se restano confini a meta'
+            # parola vale la pena dirlo, perche' si sentono.
+            a_meta = confini_dentro_parole(timeline, words_raw)
+            if a_meta:
+                log.warning(
+                    "   [Avviso] %d confini cadono a meta' parola%s.",
+                    len(a_meta),
+                    "" if _snap else " (aggancio spento: --snap-pauses li sposta)",
+                )
 
         # --- Correzioni manuali della timeline (timeline_override.json) ---
         # Applicate DOPO il pavimento: e' l'utente che decide, e il pavimento
         # non deve poterle spostare di nuovo. Validazione stretta: un override
         # incoerente viene rifiutato, non aggiustato.
-        _op = _percorso_override(
-            getattr(args, "timeline_override", "") or "", Path(args.output)
-        )
+        _indicato = getattr(args, "timeline_override", "") or ""
+        _op = _percorso_override(_indicato, Path(args.output))
         _fix = getattr(args, "fix_slide", None) or []
         if _fix:
             # Scritto prima di leggerlo: la correzione da riga di comando e
@@ -4303,6 +4306,12 @@ def main(argv: list | None = None) -> None:
                 "slides": sorted(fissaggi),
                 "total": len(nel_file),
             }
+        if _indicato and not _op.exists():
+            # Un override ignorato in silenzio sembra applicato.
+            log.warning(
+                "   Override indicato ma non trovato: %s (nessuna correzione applicata).",
+                _op,
+            )
         if _op.exists():
             try:
                 timeline, mosse_override = applica_override(

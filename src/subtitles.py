@@ -134,7 +134,7 @@ def costruisci_cue(
     inizio = 0.0
     ultimo = 0.0  # inizio dell'ultima parola accettata
     fine_precedente = 0.0  # fine (stimata) dell'ultima parola accettata
-    coda = 0.0  # fine dichiarata piu' lontana: la coda non deve tagliarla
+    coda = 0.0  # fine dichiarata dell'ultima parola: la coda non deve tagliarla
 
     def chiudi(fine: float) -> None:
         # Nessun allungamento della fine: il sottotitolo finisce dove comincia
@@ -158,7 +158,7 @@ def costruisci_cue(
         except (TypeError, ValueError):
             continue
         ultimo = t
-        coda = max(coda, _fine_dichiarata(w))
+        coda = _fine_dichiarata(w)  # solo l'ultima conta: le altre sono gia' chiuse
         fine_parola = _fine_parola(w, t)
         silenzio_lungo = corrente and (t - fine_precedente) >= pausa
         if not corrente or silenzio_lungo:
