@@ -71,3 +71,7 @@ SETUP_ARM.md
 # OS
 .DS_Store
 Thumbs.db
+
+# Prodotti di una run (come video_finale.mp4)
+video_finale.srt
+video_finale.capitoli.txt

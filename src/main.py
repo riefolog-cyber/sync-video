@@ -129,6 +129,7 @@ from semantic_sync import (
     verify_anchor_mapping_embedding,
     weak_signal_seen,
 )
+from subtitles import scrivi_sottotitoli
 from timeline import (
     anchor_gaps,
     announcements_off_timeline,
@@ -4229,6 +4230,13 @@ def main(argv: list | None = None) -> None:
                 "post-run non userà dati vecchi.",
                 e,
             )
+
+        # --- Sottotitoli e capitoli ---
+        # Due file che il lavoro gia' fatto permette senza analisi nuova: la
+        # trascrizione ha i tempi delle parole, la timeline sa quando entra
+        # ogni slide. Si scrivono anche in --dry-run, perche' sono il modo piu'
+        # economico di controllare i confini senza guardare il video.
+        scrivi_sottotitoli(Path(args.output), words_raw, timeline, slide_texts)
 
         # --- Avviso: slide quasi non coperte dalla narrazione ---
         thin = [slide_ids[i] for i, d in enumerate(durations) if d < 2 * args.semantic_min_duration]

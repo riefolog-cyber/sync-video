@@ -15,6 +15,8 @@
 9. **Video** — Slide ridimensionate a 1080p, assemblate con MoviePy (fps=5, buffer 3.0s anti-troncamento). L'audio viene **copiato** nel video quando la sorgente è già un MP4/AAC (niente ricodifica lossy, e 10-25 s in meno). Se slide, tempi, audio e parametri sono gli stessi di una run precedente, il **video già renderizzato viene riusato** invece di rifatto (71 s risparmiati a ogni rilancio senza modifiche).
 10. **Pulizia** — File temporanei e cache orfana rimossi automaticamente.
 
+**File prodotti accanto al video.** `video_finale.srt` (sottotitoli, dai tempi di ogni parola) e `video_finale.capitoli.txt` (un capitolo per slide, nel formato che accetta YouTube): nessuna analisi in più, usano la trascrizione e la timeline già calcolate. La fine di ogni sottotitolo è l'inizio della parola successiva, così due righe non si sovrappongono mai; i capitoli partono sempre da 0:00 e usano la prima riga di testo della slide.
+
 ### Come lavora il codice per scenario
 
 Le fasi 1-3 (OCR, trascrizione, auto-detection) sono comuni: da lì la
