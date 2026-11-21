@@ -45,6 +45,7 @@ python -m unittest discover -s src -p "test_*.py"
 | `--review` | — | Rilegge report e trascrizione dell'ultima run e ristampa i dubbi sui confini con le anteprime, dal video già esistente: nessuna pipeline, nessun download |
 | `--preview` | — | Mostra timeline e esci |
 | `--timeline-override` | `timeline_override.json` | Correzioni manuali dei confini, applicate dopo il calcolo e prima del rendering: `{"5": 252.0}` oppure `[{"slide": 5, "start": 252.0}]`. Se il file non esiste non succede niente; `--timeline-override ""` per ignorarlo. Un override che rompe l'ordine o il minimo leggibile viene **rifiutato** col motivo, invece di essere aggiustato |
+| `--snap-pauses` | — | Sposta i confini **non ancorati** sulla pausa più vicina (entro 1.5 s) o, se il taglio cade dentro una parola, sul confine di parola. Le ancore pronunciate non si toccano, e nessuno spostamento può violare il minimo di durata |
 | `--no-cache` | — | Ignora le cache **e** non riusa il video già renderizzato |
 | `--debug` | — | Log dettagliato |
 | `--transitions` | `0.0` | Dissolvenza tra slide (s) |

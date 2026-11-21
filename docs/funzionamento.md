@@ -17,7 +17,7 @@
 
 **File prodotti accanto al video.** `video_finale.srt` (sottotitoli, dai tempi di ogni parola) e `video_finale.capitoli.txt` (un capitolo per slide, nel formato che accetta YouTube): nessuna analisi in più, usano la trascrizione e la timeline già calcolate. La fine di ogni sottotitolo è l'inizio della parola successiva, così due righe non si sovrappongono mai; i capitoli partono sempre da 0:00 e usano la prima riga di testo della slide.
 
-**Correzioni a mano dei confini.** Chi guarda il video sa dove deve entrare una slide: `timeline_override.json` (o `--timeline-override FILE`) glielo fa dire. Si applica **dopo** il calcolo e prima del rendering, e solo alle slide scritte; un override che rompe l'ordine o il minimo leggibile viene rifiutato con il motivo.
+**Correzioni a mano dei confini.** Chi guarda il video sa dove deve entrare una slide: `timeline_override.json` (o `--timeline-override FILE`) glielo fa dire. Si applica **dopo** il calcolo e prima del rendering, e solo alle slide scritte; un override che rompe l'ordine o il minimo leggibile viene rifiutato con il motivo. Con `--snap-pauses` i confini **non ancorati** vengono invece spostati sulla pausa più vicina (entro 1.5 s), o sul confine di parola se il taglio cadeva dentro una parola: un confine a metà parola si sente, e il pavimento anti-flicker può produrne.
 
 ### Come lavora il codice per scenario
 

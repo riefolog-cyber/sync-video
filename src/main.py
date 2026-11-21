@@ -68,6 +68,7 @@ installa_dipendenze_se_mancano()
 
 from moviepy import AudioFileClip, VideoFileClip
 
+from boundary_snap import aggancia_confini
 from chunks import Word
 from machine_setup import machine_setup
 from ocr import (
@@ -4202,6 +4203,30 @@ def main(argv: list | None = None) -> None:
                     f"slide {s} = {d:.0f}s" for s, d in sorted(floor_unguaranteed.items())
                 ),
             )
+
+        # --- Aggancio dei confini stimati a una pausa (opzionale) ---
+        # Dopo il pavimento anti-flicker: e' lui che sposta i confini di quanto
+        # serve alla leggibilita', e cosi' puo' lasciarli a meta' parola. Le
+        # ancore pronunciate restano dove le ha misurate lo speaker.
+        if getattr(args, "snap_pauses", False) and len(semantic_anchors) < total_slides - 1:
+            timeline, snapped = aggancia_confini(
+                timeline,
+                semantic_anchors,
+                words_raw,
+                min_secondi=min_slide_seconds,
+            )
+            if snapped:
+                log.info(
+                    "   Aggancio alle pause: %d confini spostati (%s).",
+                    len(snapped),
+                    ", ".join(
+                        f"slide {s}: {a:.1f}->{b:.1f}s {k}" for s, a, b, k in snapped
+                    ),
+                )
+                sync_notes["snap_pauses"] = [
+                    {"slide": s, "before": round(a, 3), "after": round(b, 3), "kind": k}
+                    for s, a, b, k in snapped
+                ]
 
         # --- Correzioni manuali della timeline (timeline_override.json) ---
         # Applicate DOPO il pavimento: e' l'utente che decide, e il pavimento

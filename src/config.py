@@ -2328,6 +2328,13 @@ Esempi:
         "[{\"slide\": N, \"start\": secondi}]). Se il file non esiste non succede niente; "
         "stringa vuota per ignorarlo.",
     )
+    parser.add_argument(
+        "--snap-pauses",
+        dest="snap_pauses",
+        action="store_true",
+        help="Sposta i confini non ancorati sulla pausa piu' vicina (entro 1.5s) o, se "
+        "cadono dentro una parola, sul confine di parola: le ancore pronunciate non si toccano.",
+    )
     parser.add_argument("--no-cache", action="store_true", help="Ignora la cache e rifai tutto da zero")
     parser.add_argument(
         "--cache-du",
