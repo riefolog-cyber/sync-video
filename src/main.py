@@ -2624,19 +2624,25 @@ def _prefetch_models(args: Any) -> None:
         # faster-whisper usa un altro repo. Sbagliarlo qui significa
         # annunciare un download che non avviene, saltare il controllo dello
         # spazio e far credere che il prefetch abbia fallito.
-        repo = whisper_repo(args.whisper_model) or f"Systran/faster-whisper-{args.whisper_model}"
-        log.info("   ⏳ Download pesi Whisper %s...", repo)
-        # Revisione esplicita: senza, si prende il 'main' di oggi. Se chi
-        # mantiene il repo pubblica pesi nuovi, il PC di un collega scarica
-        # un modello diverso da quello su cui e' stata misurata la baseline,
-        # e non lo segnala: il caso silenzioso e' il peggiore di tutti.
-        revisione = WHISPER_REVISIONI.get(args.whisper_model)
-        if revisione is None:
-            # Senza revisione si prende il 'main' di oggi: va detto, perche' il
-            # resto del progetto dichiara che la baseline vale sui pesi fissati.
-            log.info("   · Revisione non fissata per %s: si scarica il main di oggi.", repo)
-        snapshot_download(repo, revision=revisione)
-        log.info("   ✅ Pesi Whisper pronti: %s", repo)
+        repo = whisper_repo(args.whisper_model)
+        if repo is None:
+            # Fuori elenco (percorso locale o repo esplicito): non c'e' un repo
+            # Systran da scaricare, e "Systran/faster-whisper-<percorso>"
+            # sarebbe un 404 garantito.
+            log.info("   · Pesi Whisper non da scaricare: %s", args.whisper_model)
+        else:
+            log.info("   ⏳ Download pesi Whisper %s...", repo)
+            # Revisione esplicita: senza, si prende il 'main' di oggi. Se chi
+            # mantiene il repo pubblica pesi nuovi, il PC di un collega scarica
+            # un modello diverso da quello su cui e' stata misurata la baseline,
+            # e non lo segnala: il caso silenzioso e' il peggiore di tutti.
+            revisione = WHISPER_REVISIONI.get(args.whisper_model)
+            if revisione is None:
+                # Senza revisione si prende il 'main' di oggi: va detto, perche' il
+                # resto del progetto dichiara che la baseline vale sui pesi fissati.
+                log.info("   · Revisione non fissata per %s: si scarica il main di oggi.", repo)
+            snapshot_download(repo, revision=revisione)
+            log.info("   ✅ Pesi Whisper pronti: %s", repo)
     except ImportError:
         log.warning("   ⚠️  faster-whisper/huggingface_hub non installati: pesi Whisper non scaricabili.")
     except Exception as e:  # noqa: BLE001 - rete
