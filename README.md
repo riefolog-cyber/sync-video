@@ -103,6 +103,7 @@ Da quel momento `genera_video.bat`, `aggiornamenti.bat`, `prova.bat`, `controlli
 | `crea_venv.bat` | Crea `.venv` (o completa i pacchetti mancanti se esiste) |
 | `crea_venv.bat --ricrea` | Cancella `.venv` e la ricrea da zero |
 | `set SYNC_VIDEO_NO_VENV=1` | Usa il Python di sistema, ignorando `.venv` (Windows) |
+| `pulisci.bat` | Cancella cache, `temp_slides` e i prodotti rigenerabili della run; non tocca `.venv`, `tessdata` né gli input |
 
 La venv **riusa i modelli già scaricati** (cartella `.cache` e cache di HuggingFace): non riscarica nulla, e la prima run resta veloce. Dentro `.venv` `pip check` non segnala conflitti; nel Python globale ne convivono diversi (pacchetti di altri progetti).
 
