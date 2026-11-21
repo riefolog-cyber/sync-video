@@ -144,6 +144,7 @@ from timeline import (
     repetition_loops,
     tail_recovery_zone,
 )
+from timeline_override import applica_override, leggi_override, override_su_ancore
 from transcription import (
     _write_raw_transcript,
     correct_transcript_names,
@@ -4201,6 +4202,52 @@ def main(argv: list | None = None) -> None:
                     f"slide {s} = {d:.0f}s" for s, d in sorted(floor_unguaranteed.items())
                 ),
             )
+
+        # --- Correzioni manuali della timeline (timeline_override.json) ---
+        # Applicate DOPO il pavimento: e' l'utente che decide, e il pavimento
+        # non deve poterle spostare di nuovo. Validazione stretta: un override
+        # incoerente viene rifiutato, non aggiustato.
+        _override_path = getattr(args, "timeline_override", "")
+        if _override_path:
+            _op = Path(_override_path)
+            if not _op.is_absolute():
+                _op = BASE_DIR / _op
+            if _op.exists():
+                try:
+                    timeline, mosse_override = applica_override(
+                        timeline,
+                        leggi_override(_op),
+                        total_duration,
+                        min_slide_seconds,
+                    )
+                except ValueError as e:
+                    _abort(f"Timeline override non valido ({_op.name}): {e}")
+                if mosse_override:
+                    su_ancore = override_su_ancore(mosse_override, semantic_anchors)
+                    log.info(
+                        "   Timeline override (%s): %d confini spostati a mano (%s).",
+                        _op.name,
+                        len(mosse_override),
+                        ", ".join(
+                            f"slide {s}: {a:.1f}->{b:.1f}s" for s, a, b in mosse_override
+                        ),
+                    )
+                    if su_ancore:
+                        # Permesso, ma non silenzioso: il video non seguira' piu'
+                        # il timestamp che lo speaker ha annunciato.
+                        log.warning(
+                            "\n   [Avviso] Override su slide con un'ancora pronunciata "
+                            "(%s): il video non seguira' quel timestamp.\n",
+                            ", ".join(str(s) for s in su_ancore),
+                        )
+                    sync_notes["timeline_override"] = {
+                        "file": _op.name,
+                        "moved": [
+                            {"slide": s, "before": round(a, 3), "after": round(b, 3)}
+                            for s, a, b in mosse_override
+                        ],
+                        "over_anchors": su_ancore,
+                    }
 
         t_sync = time.time() - t_phase_start
 

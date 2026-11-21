@@ -2320,6 +2320,14 @@ Esempi:
     parser.add_argument(
         "--preview", action="store_true", help="Mostra la timeline in formato visuale e esci (non genera il video)"
     )
+    parser.add_argument(
+        "--timeline-override",
+        dest="timeline_override",
+        default="timeline_override.json",
+        help="File JSON con correzioni manuali dei confini ({\"slide\": secondi} oppure "
+        "[{\"slide\": N, \"start\": secondi}]). Se il file non esiste non succede niente; "
+        "stringa vuota per ignorarlo.",
+    )
     parser.add_argument("--no-cache", action="store_true", help="Ignora la cache e rifai tutto da zero")
     parser.add_argument(
         "--cache-du",

@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Test delle correzioni manuali della timeline.
+
+Il valore di questo modulo e' il RIFIUTO: un override sbagliato deve fermare la
+run con un messaggio che dice cosa fare, non produrre un video con due slide
+insieme. Meta' dei test qui sotto riguarda gli errori.
+
+Esegui con: python -m unittest test_timeline_override -v
+"""
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from typing import ClassVar
+
+from timeline_override import (
+    applica_override,
+    leggi_override,
+    override_su_ancore,
+)
+
+
+class TestLettura(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+
+    def _file(self, contenuto: str) -> Path:
+        path = self.base / "timeline_override.json"
+        path.write_text(contenuto, encoding="utf-8")
+        return path
+
+    def test_oggetto_con_chiavi_stringa(self) -> None:
+        path = self._file(json.dumps({"5": 252.0, "9": 431.5}))
+        self.assertEqual(leggi_override(path), {5: 252.0, 9: 431.5})
+
+    def test_lista_copiata_da_timeline_finale(self) -> None:
+        path = self._file(json.dumps([{"slide": 5, "start": 252}, {"slide": 9, "start": 431.5}]))
+        self.assertEqual(leggi_override(path), {5: 252.0, 9: 431.5})
+
+    def test_file_vuoto_e_un_errore_dichiarato(self) -> None:
+        with self.assertRaises(ValueError):
+            leggi_override(self._file("{}"))
+        with self.assertRaises(ValueError):
+            leggi_override(self._file("[]"))
+
+    def test_json_rotto_dice_dove(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            leggi_override(self._file("{5: 252"))
+        self.assertIn("riga", str(ctx.exception))
+
+    def test_chiave_non_numerica(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            leggi_override(self._file(json.dumps({"cinque": 252})))
+        self.assertIn("cinque", str(ctx.exception))
+
+    def test_valore_non_numerico(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            leggi_override(self._file(json.dumps({"5": "presto"})))
+        self.assertIn("slide 5", str(ctx.exception))
+
+    def test_lista_senza_start(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            leggi_override(self._file(json.dumps([{"slide": 5}])))
+        self.assertIn("manca", str(ctx.exception))
+
+    def test_tipo_sbagliato_in_cima(self) -> None:
+        with self.assertRaises(ValueError):
+            leggi_override(self._file('"slide 5"'))
+
+
+class TestApplicazione(unittest.TestCase):
+    TIMELINE: ClassVar[dict[int, float]] = {1: 0.0, 2: 76.0, 3: 132.0, 4: 220.0}
+
+    def test_override_sposta_solo_la_slide_indicata(self) -> None:
+        nuova, mosse = applica_override(self.TIMELINE, {3: 140.0}, 921.0, 3.0)
+        self.assertEqual(nuova[3], 140.0)
+        self.assertEqual(nuova[2], 76.0)
+        self.assertEqual(nuova[4], 220.0)
+        self.assertEqual(mosse, [(3, 132.0, 140.0)])
+
+    def test_la_timeline_originale_non_viene_toccata(self) -> None:
+        originale = dict(self.TIMELINE)
+        applica_override(self.TIMELINE, {3: 140.0}, 921.0, 3.0)
+        self.assertEqual(self.TIMELINE, originale)
+
+    def test_senza_override_resta_com_e(self) -> None:
+        nuova, mosse = applica_override(self.TIMELINE, {}, 921.0, 3.0)
+        self.assertEqual(nuova, self.TIMELINE)
+        self.assertEqual(mosse, [])
+
+    def test_valore_uguale_non_e_uno_spostamento(self) -> None:
+        _, mosse = applica_override(self.TIMELINE, {3: 132.0}, 921.0, 3.0)
+        self.assertEqual(mosse, [])
+
+    def test_la_slide_1_non_si_sposta(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            applica_override(self.TIMELINE, {1: 5.0}, 921.0, 3.0)
+        self.assertIn("slide 1", str(ctx.exception))
+
+    def test_slide_inesistente(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            applica_override(self.TIMELINE, {9: 100.0}, 921.0, 3.0)
+        self.assertIn("non esiste", str(ctx.exception))
+
+    def test_tempo_fuori_dall_audio(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            applica_override(self.TIMELINE, {2: 1000.0}, 921.0, 3.0)
+        self.assertIn("fuori dall'audio", str(ctx.exception))
+
+    def test_ordine_invertito_viene_rifiutato(self) -> None:
+        # 200s metterebbe la slide 2 dopo la 3 (132s): il video andrebbe indietro.
+        with self.assertRaises(ValueError) as ctx:
+            applica_override(self.TIMELINE, {2: 200.0}, 921.0, 3.0)
+        self.assertIn("finirebbe dopo", str(ctx.exception))
+
+    def test_durata_sotto_il_minimo_viene_rifiutata(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            applica_override(self.TIMELINE, {3: 219.0}, 921.0, 3.0)
+        self.assertIn("sotto il minimo", str(ctx.exception))
+
+    def test_le_ancore_pronunciate_vengono_segnalate(self) -> None:
+        _, mosse = applica_override(self.TIMELINE, {3: 140.0}, 921.0, 3.0)
+        self.assertEqual(mosse, [(3, 132.0, 140.0)])
+        self.assertEqual(override_su_ancore([(2, 76.0, 80.0)], {2: 76.0}), [2])
+        self.assertEqual(override_su_ancore([(3, 132.0, 140.0)], {2: 76.0}), [])
+        self.assertEqual(override_su_ancore([(3, 132.0, 140.0)], None), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
