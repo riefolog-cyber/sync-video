@@ -167,6 +167,32 @@ class TestFile(unittest.TestCase):
         self.assertEqual(righe[2], "Ciao mondo")
         self.assertEqual(righe[3], "")
 
+    def test_la_coda_non_supera_la_durata_dell_audio(self) -> None:
+        # L'ultimo cue ha una coda di 0.8s, ma se l'audio e' finito prima il
+        # sottotitolo non deve restare a schermo dopo la fine del video.
+        testo = build_srt(_parole([("Ultima", 0.5)]), durata=1.0)
+        self.assertIn("00:00:00,500 --> 00:00:01,000", testo)
+
+    def test_un_cue_denso_non_viene_spezzato_invano(self) -> None:
+        # Parlato veloce: spezzare in proporzione lascerebbe 22 c/s in due cue
+        # piu' corti, cioe' nessun miglioramento. Meglio un cue, onesto.
+        parole = _parole(
+            [("parolalunga", 0.0), ("parolalunga", 0.25), ("parolalunga", 0.5), ("parolalunga", 0.75)]
+        )
+        blocchi = [b for b in build_srt(parole).strip().split("\n\n") if b.strip()]
+        self.assertEqual(len(blocchi), 1)
+
+    def test_cue_lampo_si_unisce_al_successivo(self) -> None:
+        # Primo cue da 0.9s (sotto il secondo): si legge male, quindi si unisce
+        # al successivo invece di lampeggiare.
+        parole: list[dict[str, object]] = [
+            {"word": "ciao", "start": 0.0, "end": 0.1},
+            {"word": "a", "start": 0.9, "end": 1.2},
+        ]
+        blocchi = [b for b in build_srt(parole).strip().split("\n\n") if b.strip()]
+        self.assertEqual(len(blocchi), 1)
+        self.assertIn("ciao a", blocchi[0])
+
     def test_il_srt_scrive_le_parole_che_riceve(self) -> None:
         # main assegna words_raw = correct_transcript_names(...) PRIMA di
         # chiamare qui: il modulo non deve rimetterci mano. Se qualcuno sposta
@@ -186,6 +212,21 @@ class TestFile(unittest.TestCase):
     def test_capitoli_partono_da_zero_e_usano_il_testo_della_slide(self) -> None:
         capitoli = build_capitoli({1: 0.0, 2: 76.0}, ["Prima slide", "Seconda slide"])
         self.assertEqual(capitoli.split("\n"), ["0:00 Prima slide", "1:16 Seconda slide"])
+
+    def test_una_riga_di_simboli_non_diventa_titolo(self) -> None:
+        # Caso reale da una slide infografica: senza il filtro questo diventava
+        # il titolo del capitolo.
+        capitoli = build_capitoli(
+            {1: 0.0}, ["+ \u2014\u2014\u2014-__ 87% 7 >90% Raffinazione globale x (Gallio, Litio"]
+        )
+        self.assertEqual(capitoli, "0:00 Slide 1")
+
+    def test_sceglie_la_riga_di_testo_e_non_la_prima(self) -> None:
+        # Sulla slide il grafico sta in cima e il titolo sotto: conta il titolo.
+        capitoli = build_capitoli(
+            {1: 0.0}, ["+ \u2014\u2014\u2014-__ 87% 7 >90% Raffinazione\nIl Fisiologico 10%"]
+        )
+        self.assertEqual(capitoli, "0:00 Il Fisiologico 10%")
 
     def test_slide_senza_testo_ha_un_titolo_utile(self) -> None:
         capitoli = build_capitoli({1: 0.0}, ["   "])

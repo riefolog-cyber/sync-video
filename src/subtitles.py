@@ -16,6 +16,7 @@ sottotitolo che resta mentre nessuno parla si legge come un errore.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -34,8 +35,15 @@ PAUSA_TAGLIO = 0.4
 DURATA_PAROLA_STIMATA = 0.30
 # Oltre ~7s un sottotitolo resta a schermo mentre il parlato e' andato avanti.
 MAX_SECONDI_CUE = 7.0
+# Velocita' di lettura e durata minima: oltre ~20 caratteri al secondo il
+# sottotitolo si legge solo fermando il video, e sotto il secondo lampeggia.
+CPS_MAX = 20.0
+MIN_SECONDI_CUE = 1.0
 # Coda dell'ultima riga: senza, l'ultimo sottotitolo dura zero e sparisce.
 CODA_ULTIMA_PAROLA = 0.8
+# Quanto una riga deve sembrare testo per diventare un titolo di capitolo:
+# l'OCR delle slide infografiche restituisce anche righe di soli trattini.
+QUALITA_MINIMA_TITOLO = 0.6
 # Titolo di capitolo: oltre ~60 caratteri YouTube lo tronca da solo, e peggio.
 MAX_CARATTERI_CAPITOLO = 60
 
@@ -187,10 +195,58 @@ def costruisci_cue(
     return cue
 
 
-def build_srt(words: Sequence[Mapping[str, Any]]) -> str:
-    """Contenuto di un file .srt. Stringa vuota se non ci sono parole."""
+def _testo_piatto(testo: str) -> str:
+    """Testo su una riga sola: per misurare la lettura il \\n non conta."""
+    return " ".join(testo.split())
+
+
+def _adegua_lettura(
+    cue: Sequence[tuple[float, float, str]],
+    *,
+    cps_max: float = CPS_MAX,
+    min_secondi: float = MIN_SECONDI_CUE,
+    max_caratteri: int = MAX_CARATTERI_CUE,
+    max_secondi: float = MAX_SECONDI_CUE,
+) -> list[tuple[float, float, str]]:
+    """Unisce i cue che restano a schermo troppo poco per essere letti.
+
+    La densita' (caratteri al secondo) non si puo' correggere qui: dipende da
+    quanto parla il relatore, e spezzare un cue in proporzione lascia il
+    rapporto identico (meta' testo per meta' tempo). Quello che si puo' fare e'
+    togliere i lampi: un cue sotto il secondo si unisce al successivo, ma solo
+    se il testo unito resta in un cue e non supera ``cps_max``.
+    """
+    uniti: list[tuple[float, float, str]] = []
+    for inizio, fine, testo in cue:
+        if uniti:
+            p_inizio, p_fine, p_testo = uniti[-1]
+            unito = _testo_piatto(p_testo) + " " + _testo_piatto(testo)
+            durata = fine - p_inizio
+            if (
+                p_fine - p_inizio < min_secondi
+                and len(unito) <= max_caratteri
+                and durata <= max_secondi
+                and len(unito) / max(durata, 1e-9) <= cps_max
+            ):
+                uniti[-1] = (p_inizio, fine, _due_righe(unito, max(1, max_caratteri // 2)))
+                continue
+        uniti.append((inizio, fine, testo))
+    return uniti
+
+
+def build_srt(
+    words: Sequence[Mapping[str, Any]], durata: float | None = None
+) -> str:
+    """Contenuto di un file .srt. Stringa vuota se non ci sono parole.
+
+    ``durata`` e' quella dell'audio: nessun sottotitolo deve restare a schermo
+    dopo la fine del video.
+    """
+    cue = _adegua_lettura(costruisci_cue(words))
     righe: list[str] = []
-    for i, (inizio, fine, testo) in enumerate(costruisci_cue(words), start=1):
+    for i, (inizio, fine, testo) in enumerate(cue, start=1):
+        if durata is not None:
+            fine = min(fine, durata)
         righe.append(str(i))
         righe.append(f"{timestamp_srt(inizio)} --> {timestamp_srt(fine)}")
         righe.append(testo)
@@ -204,6 +260,43 @@ def build_srt(words: Sequence[Mapping[str, Any]]) -> str:
 _SEPARATORI_TITOLO = (". ", " - ", " \u2014 ", " \u2013 ", " | ", ": ", "; ", "?", "!")
 
 
+def _qualita_titolo(riga: str) -> float:
+    """Quanto una riga dell'OCR sembra testo vero, da 0 a 1.
+
+    L'OCR di una slide infografica restituisce anche le righe del grafico
+    (``+ ———-__ 87% 7 >90%``). Il rapporto fra lettere e simboli le distingue,
+    e un gruppo di tre o piu' trattini e' quasi sempre un asse o una tabella.
+    """
+    visibili = [c for c in riga if not c.isspace()]
+    if not visibili:
+        return 0.0
+    lettere = sum(c.isalpha() for c in visibili)
+    cifre = sum(c.isdigit() for c in visibili)
+    punteggio = (lettere + 0.6 * cifre) / len(visibili)
+    if re.search(r"[^\w\s]{3,}", riga):
+        punteggio *= 0.5
+    parole = riga.split()
+    if parole:
+        isolate = sum(len(p) == 1 for p in parole) / len(parole)
+        punteggio *= 1.0 - 0.6 * isolate
+    return punteggio
+
+
+def _miglior_riga(testo: str) -> str:
+    """La riga della slide che somiglia di piu' a un titolo.
+
+    Il titolo non e' sempre la prima riga: su una slide con un grafico in cima
+    lo e' quella sotto. Se l'OCR ha restituito tutto su una riga, si prova
+    anche a spezzarla sui separatori tipici dei titoli.
+    """
+    righe = [r.strip() for r in testo.splitlines() if r.strip()]
+    if len(righe) <= 1:
+        unico = righe[0] if righe else ""
+        parti = [p.strip() for p in re.split(r" [\u2014\u2013|] ", unico) if p.strip()]
+        righe = parti or [unico]
+    return max(righe, key=_qualita_titolo)
+
+
 def _titolo_capitolo(testo: str, numero: int) -> str:
     """Titolo breve e leggibile per un capitolo.
 
@@ -213,7 +306,7 @@ def _titolo_capitolo(testo: str, numero: int) -> str:
     tiene la prima frase, si tolgono le briciole ai due estremi e, se non
     resta testo vero, si ripiega sul numero della slide.
     """
-    compatto = " ".join(str(testo or "").split())
+    compatto = " ".join(_miglior_riga(str(testo or "")).split())
     if not compatto:
         return f"Slide {numero}"
 
@@ -242,7 +335,7 @@ def _titolo_capitolo(testo: str, numero: int) -> str:
         parole.pop()
     compatto = " ".join(parole).strip(" -\u2014\u2013|:;,")
 
-    if sum(c.isalpha() for c in compatto) < 5:
+    if sum(c.isalpha() for c in compatto) < 5 or _qualita_titolo(compatto) < QUALITA_MINIMA_TITOLO:
         return f"Slide {numero}"
     if len(compatto) <= MAX_CARATTERI_CAPITOLO:
         return compatto
@@ -274,6 +367,7 @@ def scrivi_sottotitoli(
     words: Sequence[Mapping[str, Any]],
     timeline: Mapping[int, float],
     slide_texts: Sequence[str],
+    durata: float | None = None,
 ) -> tuple[Path | None, Path | None]:
     """Scrive ``<video>.srt`` e ``<video>.capitoli.txt`` accanto al video.
 
@@ -285,7 +379,7 @@ def scrivi_sottotitoli(
     srt: Path | None = None
     capitoli: Path | None = None
     try:
-        contenuto = build_srt(words)
+        contenuto = build_srt(words, durata=durata)
         if contenuto:
             srt = base.with_suffix(".srt")
             atomic_write_text(srt, contenuto)
