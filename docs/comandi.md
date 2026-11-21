@@ -44,8 +44,10 @@ python -m unittest discover -s src -p "test_*.py"
 | `--dry-run` | — | Solo timeline, niente video |
 | `--review` | — | Rilegge report e trascrizione dell'ultima run e ristampa i dubbi sui confini con le anteprime, dal video già esistente: nessuna pipeline, nessun download |
 | `--preview` | — | Mostra timeline e esci |
-| `--timeline-override` | `timeline_override.json` | Correzioni manuali dei confini, applicate dopo il calcolo e prima del rendering: `{"5": 252.0}` oppure `[{"slide": 5, "start": 252.0}]`. Se il file non esiste non succede niente; `--timeline-override ""` per ignorarlo. Un override che rompe l'ordine o il minimo leggibile viene **rifiutato** col motivo, invece di essere aggiustato |
-| `--snap-pauses` | — | Sposta i confini **non ancorati** sulla pausa più vicina (entro 1.5 s) o, se il taglio cade dentro una parola, sul confine di parola. Le ancore pronunciate non si toccano, e nessuno spostamento può violare il minimo di durata |
+| `--timeline-override` | auto (accanto al video, poi radice del progetto) | Correzioni manuali dei confini, applicate dopo il calcolo e prima del rendering: `{"5": 252.0}` oppure `[{"slide": 5, "start": 252.0}]`. Senza il flag si usa `timeline_override.json` nella cartella del video, poi nella radice: se non c'è, nessuna correzione. Un percorso indicato ma **mancante viene segnalato**; una slide ripetuta o un override che rompe l'ordine o il minimo leggibile vengono **rifiutati** col motivo, invece di essere aggiustati |
+| `--fix-slide` | — | Scrive una correzione nel file di override senza aprirlo a mano: `--fix-slide 5=252.0`, ripetibile (`--fix-slide 5=252.0 --fix-slide 9=431.25`). Le correzioni già nel file restano: è lo stesso file che si scriverebbe a mano |
+| `--snap-pauses` | True | Sposta i confini **non ancorati** sulla pausa più vicina (entro 1.5 s) o, se il taglio cade dentro una parola, sul confine di parola. Le ancore pronunciate non si toccano, e nessuno spostamento può violare il minimo di durata. Attivo di default: sul materiale di prova ha portato **12 confini su 12** su una pausa, con spostamenti di 0,1–0,9 s |
+| `--no-snap-pauses` | — | Lascia i confini stimati dove li mette il pavimento anti-flicker, anche se cadono a metà parola. Utile per confrontare una run con il riferimento |
 | `--no-cache` | — | Ignora le cache **e** non riusa il video già renderizzato |
 | `--debug` | — | Log dettagliato |
 | `--transitions` | `0.0` | Dissolvenza tra slide (s) |
