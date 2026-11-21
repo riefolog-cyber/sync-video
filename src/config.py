@@ -819,7 +819,7 @@ def whisper_repo(model: str) -> str | None:
     """
     if not model or "/" in model or "\\" in model:
         return None
-    risolto: object = None
+    risolto: str | None = None
     try:
         # Mappa privata ma stabile: e' la stessa che faster-whisper usa per
         # risolvere ``WhisperModel("turbo")``. Importata qui, non in cima, per
@@ -829,9 +829,8 @@ def whisper_repo(model: str) -> str | None:
         risolto = _MODELS.get(model)
     except Exception:  # senza la mappa vale il default Systran
         risolto = None
-    if isinstance(risolto, str) and risolto:
-        return risolto
-    return f"Systran/faster-whisper-{model}"
+    # Una mappa parziale o una entry vuota non devono togliere il default.
+    return risolto or f"Systran/faster-whisper-{model}"
 
 
 def _cache_whisper_faster(model: str) -> Path | None:

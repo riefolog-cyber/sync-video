@@ -609,6 +609,16 @@ def _lingue_disponibili() -> set[str]:
         return set()
 
 
+def _normalizza(testo: str) -> str:
+    """Spazi compattati e bordi tolti: la forma con cui un testo entra nel resto.
+
+    La usano l'OCR e il testo nativo del PDF. Se le due strade normalizzassero
+    in modo diverso, la stessa slide produrrebbe vettori diversi a seconda di
+    come e' arrivato il testo.
+    """
+    return re.sub(r"\s+", " ", testo).strip()
+
+
 def _ocr_single_slide(image_path: Path, lang: str | None, max_retries: int = 3) -> str:
     """Esegue OCR su una singola immagine con retry e backoff.
 
@@ -646,7 +656,7 @@ def _ocr_single_slide(image_path: Path, lang: str | None, max_retries: int = 3) 
                     raw = pt.image_to_string(str(image_path))
                 except (pt.TesseractError, OSError):
                     raw = ""
-    clean = re.sub(r"\s+", " ", raw).strip()
+    clean = _normalizza(raw)
     return clean if clean else _TESTO_NESSUN_TESTO
 
 
@@ -657,7 +667,7 @@ def _ocr_single_slide(image_path: Path, lang: str | None, max_retries: int = 3) 
 MIN_CARATTERI_TESTO_NATIVO = 20
 
 
-def _testo_nativo(doc: Any, total_pages: int) -> list[str]:
+def _testo_nativo(doc: Any) -> list[str]:
     """Testo digitale pagina per pagina, normalizzato come l'output dell'OCR.
 
     Restituisce stringhe vuote dove la pagina non ha testo: e' il caso del
@@ -666,13 +676,13 @@ def _testo_nativo(doc: Any, total_pages: int) -> list[str]:
     sempre, invece di fermare la run per un'ottimizzazione.
     """
     testi: list[str] = []
-    for i in range(total_pages):
+    for i in range(len(doc)):
         try:
             grezzo = doc.load_page(i).get_text("text")
         except Exception as e:  # un PDF strano non ferma la run
             log.debug("   Testo nativo non leggibile a pagina %d: %s", i + 1, e)
             return []
-        testi.append(re.sub(r"\s+", " ", grezzo).strip())
+        testi.append(_normalizza(grezzo))
     return testi
 
 
@@ -691,10 +701,10 @@ def extract_slides_text_ocr(
         doc.close()
         raise RuntimeError(f"Il PDF è protetto da password: {pdf_path}")
     total_pages = len(doc)
-    testi_nativi = _testo_nativo(doc, total_pages) if total_pages else []
     if total_pages == 0:
         doc.close()
         raise RuntimeError(f"Il PDF non contiene pagine: {pdf_path}")
+    testi_nativi = _testo_nativo(doc)
     doc.close()
 
     # Pagine con testo digitale sufficiente: li' l'OCR e' solo lavoro in piu'

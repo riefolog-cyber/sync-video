@@ -394,8 +394,14 @@ class TestTestoNativoDelPdf(unittest.TestCase):
                 "Seconda pagina: regole e sanzioni",
             ]
         )
-        with mock.patch("ocr._tesseract", side_effect=AssertionError("OCR non doveva partire")):
+        # Sia il lavoro (OCR) sia il preflight delle lingue devono restare
+        # spenti: su un deck tutto digitale Tesseract non c'entra.
+        with (
+            mock.patch("ocr._ocr_single_slide", side_effect=AssertionError("OCR non doveva partire")),
+            mock.patch("ocr._tesseract", side_effect=AssertionError("Tesseract non doveva partire")) as tess,
+        ):
             _files, testi = extract_slides_text_ocr(pdf, self.out, lang="ita", dpi=72, workers=1)
+        tess.assert_not_called()
         self.assertEqual(len(testi), 2)
         self.assertIn("monopolio delle piattaforme", testi[0])
         self.assertIn("regole e sanzioni", testi[1])
@@ -415,13 +421,6 @@ class TestTestoNativoDelPdf(unittest.TestCase):
             _files, testi = extract_slides_text_ocr(pdf, self.out, lang="ita", dpi=72, workers=1)
         self.assertEqual(testi, ["dal OCR", "dal OCR"])
         self.assertEqual(ocr.call_count, 2)
-
-    def test_il_nativo_non_e_un_segnaposto(self):
-        # La guardia "nessun testo" non deve scattare su un deck digitale.
-        pdf = self._pdf(["Contenuto digitale della prima pagina", "Contenuto digitale della seconda"])
-        with mock.patch("ocr._tesseract", side_effect=AssertionError("OCR non doveva partire")):
-            _files, testi = extract_slides_text_ocr(pdf, self.out, lang="ita", dpi=72, workers=1)
-        self.assertTrue(all("Contenuto digitale" in t for t in testi))
 
 
 if __name__ == "__main__":

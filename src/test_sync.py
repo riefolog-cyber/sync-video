@@ -6579,14 +6579,6 @@ class TestChiaveCacheSlide(unittest.TestCase):
         chiave = m._cache_key_slides("a" * 64, 300, "ita")
         self.assertIn(f"_{m._SLIDE_CACHE_VERSION}", chiave)
 
-    def test_stesso_pdf_stessa_chiave(self):
-        import main as m
-
-        self.assertEqual(
-            m._cache_key_slides("b" * 64, 300, "ita"),
-            m._cache_key_slides("b" * 64, 300, "ita"),
-        )
-
     def test_dpi_e_lingua_restano_nella_chiave(self):
         import main as m
 

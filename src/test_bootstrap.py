@@ -810,8 +810,10 @@ class TestRepoWhisperNonSystran(unittest.TestCase):
         with mock.patch("config._cache_hub_huggingface") as hub:
             hub.return_value = Path("/hub")
             d = config._cache_whisper_faster("turbo")
-        repo = config.whisper_repo("turbo") or ""
-        self.assertEqual(d, Path("/hub") / f"models--{repo.replace('/', '--')}")
+        # La cartella che il controllo dello spazio guarda dev'essere quella che
+        # faster-whisper scrive davvero, non quella del repo Systran.
+        self.assertIn("mobiuslabsgmbh", str(d))
+        self.assertNotIn("Systran", str(d))
 
     def test_repo_esplicito_e_percorso_locale_restano_None(self):
         self.assertIsNone(config.whisper_repo("deepdml/faster-whisper-large-v3"))
