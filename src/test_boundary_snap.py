@@ -29,6 +29,18 @@ class TestConfiniDisponibili(unittest.TestCase):
         pause, _ = confini_disponibili(_parole([("a", 0.0), ("b", 0.4), ("c", 0.8)]))
         self.assertEqual(pause, [])
 
+    def test_parola_senza_tempo_non_crea_una_pausa_fantasma(self) -> None:
+        # Una voce senza "start" (trascrizione malformata) non e' una parola a
+        # zero: se contasse, fra lei e la prima parola vera comparirebbe un
+        # silenzio inesistente, e un confine potrebbe essere attirato li'.
+        parole: list[dict[str, object]] = [
+            {"word": "fantasma"},
+            {"word": "a", "start": 10.0},
+            {"word": "b", "start": 10.4},
+        ]
+        pause, _ = confini_disponibili(parole)
+        self.assertEqual(pause, [])
+
     def test_gli_estremi_comprendono_la_fine_dell_ultima_parola(self) -> None:
         _, estremi = confini_disponibili(_parole([("a", 0.0), ("b", 0.4)]))
         self.assertEqual(estremi[0], 0.0)

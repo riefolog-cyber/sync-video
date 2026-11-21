@@ -40,8 +40,10 @@ def _starts(words: Sequence[Mapping[str, Any]]) -> list[float]:
     """Tempi di inizio ordinati, scartando le voci illeggibili."""
     tempi: list[float] = []
     for w in words:
+        if "start" not in w:
+            continue  # senza tempo non e' una parola databile
         try:
-            tempi.append(float(w.get("start", 0.0)))
+            tempi.append(float(w["start"]))
         except (TypeError, ValueError):
             continue
     tempi.sort()
