@@ -650,6 +650,32 @@ def _ocr_single_slide(image_path: Path, lang: str | None, max_retries: int = 3) 
     return clean if clean else _TESTO_NESSUN_TESTO
 
 
+# Sotto questo numero di caratteri il testo digitale di una pagina non e' una
+# slide ma un residuo (il numero di pagina, un'etichetta dell'editor). Sopra,
+# l'OCR non puo' fare meglio di cio' che il PDF contiene gia': Tesseract
+# ricostruisce i caratteri da un'immagine, il testo digitale *e'* il carattere.
+MIN_CARATTERI_TESTO_NATIVO = 20
+
+
+def _testo_nativo(doc: Any, total_pages: int) -> list[str]:
+    """Testo digitale pagina per pagina, normalizzato come l'output dell'OCR.
+
+    Restituisce stringhe vuote dove la pagina non ha testo: e' il caso del
+    deck esportato come immagini (NotebookLM), dove serve l'OCR. Non solleva:
+    se l'estrazione fallisce si torna all'OCR, che e' il comportamento di
+    sempre, invece di fermare la run per un'ottimizzazione.
+    """
+    testi: list[str] = []
+    for i in range(total_pages):
+        try:
+            grezzo = doc.load_page(i).get_text("text")
+        except Exception as e:  # un PDF strano non ferma la run
+            log.debug("   Testo nativo non leggibile a pagina %d: %s", i + 1, e)
+            return []
+        testi.append(re.sub(r"\s+", " ", grezzo).strip())
+    return testi
+
+
 def extract_slides_text_ocr(
     pdf_path: Path,
     output_dir: Path,
@@ -665,10 +691,28 @@ def extract_slides_text_ocr(
         doc.close()
         raise RuntimeError(f"Il PDF è protetto da password: {pdf_path}")
     total_pages = len(doc)
+    testi_nativi = _testo_nativo(doc, total_pages) if total_pages else []
     if total_pages == 0:
         doc.close()
         raise RuntimeError(f"Il PDF non contiene pagine: {pdf_path}")
     doc.close()
+
+    # Pagine con testo digitale sufficiente: li' l'OCR e' solo lavoro in piu'
+    # (e una fonte di errori). Sul deck esportato come immagini non se ne usa
+    # nessuna e il percorso resta quello di sempre.
+    nativi = {
+        i: t for i, t in enumerate(testi_nativi) if len(t) >= MIN_CARATTERI_TESTO_NATIVO
+    }
+    # Gli indici da OCR servono gia' al preflight delle lingue, che sta prima
+    # del ciclo: senza, una pagina senza OCR chiederebbe comunque a Tesseract
+    # quali lingue ha, e su un deck tutto digitale l'OCR non serve affatto.
+    indici_da_ocr = [i for i in range(total_pages) if i not in nativi]
+    if nativi:
+        log.info(
+            "   Testo nativo del PDF su %d/%d pagine: OCR solo sulle altre.",
+            len(nativi),
+            total_pages,
+        )
 
     slide_files: list[str] = []
     pages_to_render: list[tuple[str, int, str, int]] = []
@@ -731,7 +775,7 @@ def extract_slides_text_ocr(
     # un avviso chiaro e un solo giro di OCR.
     lang_ocr: str | None = lang
     lingua_mancante = False
-    lingue = _lingue_disponibili()
+    lingue = _lingue_disponibili() if indici_da_ocr else set()
     if lingue and lang not in lingue:
         lingua_mancante = True
         lang_ocr = None
@@ -744,13 +788,17 @@ def extract_slides_text_ocr(
         )
 
     slide_texts: list[str] = [""] * total_pages
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(_ocr_single_slide, Path(sf), lang_ocr): idx for idx, sf in enumerate(slide_files)
-        }
-        for future in as_completed(futures):
-            idx = futures[future]
-            slide_texts[idx] = future.result()
+    for idx, testo in nativi.items():
+        slide_texts[idx] = testo
+    da_ocr = [(idx, slide_files[idx]) for idx in indici_da_ocr]
+    if da_ocr:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_ocr_single_slide, Path(sf), lang_ocr): idx for idx, sf in da_ocr
+            }
+            for future in as_completed(futures):
+                idx = futures[future]
+                slide_texts[idx] = future.result()
 
     # Tesseract assente = ogni slide prende il segnaposto e la run va a buon
     # fine: il video esce con le slide vuote e nessun errore, che è la cosa più
@@ -794,5 +842,10 @@ def extract_slides_text_ocr(
         preview = txt[:80] + "..." if len(txt) > 80 else txt
         log.debug("   Slide %d: %s", i + 1, preview)
 
-    log.info("   -> OCR completato su %d slide.", total_pages)
+    log.info(
+        "   -> Testi pronti su %d slide (%d da testo nativo, %d da OCR).",
+        total_pages,
+        len(nativi),
+        len(da_ocr),
+    )
     return slide_files, slide_texts

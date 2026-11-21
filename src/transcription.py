@@ -663,6 +663,28 @@ def decide_transcriber(
     return "openvino", None
 
 
+def _avvisa_modello_ignorato(model_size: str, model_dir: Path) -> None:
+    """Dice che ``--whisper-model`` non si applica al motore OpenVINO.
+
+    Il percorso OpenVINO usa un modello IR gia' convertito (default
+    ``whisper-small-fp16-ov``): la taglia chiesta con ``--whisper-model`` non
+    entra in nessun calcolo. Accettare il flag e non usarlo, senza dirlo, e'
+    peggio di rifiutarlo: chi chiede ``medium`` crede di aver alzato la
+    qualita' e non e' cambiato niente.
+    """
+    if model_size.strip().lower() == "small":
+        return
+    log.warning(
+        "   \u26a0\ufe0f  [Trascrizione] --whisper-model %s NON si applica al motore "
+        "OpenVINO: usa il modello IR fisso in %s (%s). Per cambiare modello "
+        "usa --transcriber whisper (faster-whisper), oppure un altro IR con "
+        "--openvino-model-dir / OPENVINO_MODEL_ID.",
+        model_size,
+        model_dir,
+        DEFAULT_OPENVINO_MODEL_ID,
+    )
+
+
 def transcribe_audio(
     audio_path: Path,
     language: str = "ita",
@@ -719,6 +741,7 @@ def transcribe_audio(
                     device_explicit=whisper_device_explicit,
                     riprendi=not no_ripresa,
                 )
+            _avvisa_modello_ignorato(model_size, model_dir)
             _write_attempt(audio_path)
             try:
                 return transcribe_with_openvino(
@@ -732,6 +755,7 @@ def transcribe_audio(
                 # OOM-killer, chiusura forzata): su successo o eccezione Python
                 # si cancella, e la prossima run rivaluta da zero.
                 _clear_attempt()
+        _avvisa_modello_ignorato(model_size, model_dir)
         return transcribe_with_openvino(
             audio_path,
             model_dir=model_dir,

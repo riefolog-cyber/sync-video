@@ -1407,5 +1407,50 @@ class TestContrattoAv(unittest.TestCase):
             pass  # qualsiasi altro errore (file mancante, ecc.) va bene
 
 
+class TestModelloNonApplicabileAOpenVino(unittest.TestCase):
+    """`--whisper-model` non cambia il modello IR di OpenVINO: va detto.
+
+    Il percorso OpenVINO usa un IR gia' convertito (default small). Accettare
+    la taglia e non applicarla, in silenzio, fa credere di aver alzato la
+    qualita' quando non e' cambiato niente.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.radice = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.audio = self.radice / "podcast.m4a"
+        self.audio.write_bytes(b"finto-audio")
+        self.modelli = self.radice / "ir"
+        self.modelli.mkdir()
+
+    def _chiama(self, model_size: str) -> tuple[str, list[dict[str, object]]]:
+        with (
+            mock.patch.object(transcription, "resolved_transcriber", return_value="openvino"),
+            mock.patch.object(
+                transcription, "transcribe_with_openvino", return_value=("testo gpu", [])
+            ) as gpu,
+        ):
+            uscita = transcription.transcribe_audio(
+                self.audio,
+                transcriber="openvino",
+                model_size=model_size,
+                openvino_model_dir=self.modelli,
+            )
+        gpu.assert_called_once()
+        return uscita
+
+    def test_taglia_diversa_da_small_avvisa(self) -> None:
+        with self.assertLogs("slide2video", level="WARNING") as catturati:
+            self._chiama("medium")
+        testo = "\n".join(catturati.output)
+        self.assertIn("--whisper-model medium", testo)
+        self.assertIn("NON si applica", testo)
+
+    def test_small_non_avvisa(self) -> None:
+        with self.assertNoLogs("slide2video", level="WARNING"):
+            self._chiama("small")
+
+
 if __name__ == "__main__":
     unittest.main()

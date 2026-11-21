@@ -6564,3 +6564,33 @@ class TestPagineMaiDiscusse(unittest.TestCase):
         # Con --skip-slides la pagina non arriva a schermo: inutile avvisare.
         self.assertEqual(_never_discussed_note(self.SLIDES, parlato, "2"), [])
 
+
+class TestChiaveCacheSlide(unittest.TestCase):
+    """La chiave della cache testi slide cambia quando cambia CIO' che contiene.
+
+    Dalla v2 le pagine con testo digitale usano quello e non l'OCR: con la
+    chiave vecchia una cache gia' scritta avrebbe continuato a restituire i
+    testi OCR, e l'innovazione non si sarebbe mai vista.
+    """
+
+    def test_la_versione_fa_parte_della_chiave(self):
+        import main as m
+
+        chiave = m._cache_key_slides("a" * 64, 300, "ita")
+        self.assertIn(f"_{m._SLIDE_CACHE_VERSION}", chiave)
+
+    def test_stesso_pdf_stessa_chiave(self):
+        import main as m
+
+        self.assertEqual(
+            m._cache_key_slides("b" * 64, 300, "ita"),
+            m._cache_key_slides("b" * 64, 300, "ita"),
+        )
+
+    def test_dpi_e_lingua_restano_nella_chiave(self):
+        import main as m
+
+        base = m._cache_key_slides("b" * 64, 300, "ita")
+        self.assertNotEqual(base, m._cache_key_slides("b" * 64, 200, "ita"))
+        self.assertNotEqual(base, m._cache_key_slides("b" * 64, 300, "eng"))
+

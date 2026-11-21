@@ -785,3 +785,35 @@ class TestParitaPacchetti(unittest.TestCase):
             set(updates._PACKAGES),
             self._requirements() - {"audioop-lts"},
         )
+
+
+class TestRepoWhisperNonSystran(unittest.TestCase):
+    """`turbo` non sta su Systran: il repo va risolto come fa faster-whisper.
+
+    Il prefetch costruiva sempre `Systran/faster-whisper-<taglia>`: per `turbo`
+    quel repo non esiste, e il risultato era un avviso di download fallito,
+    il controllo dello spazio saltato e un prefetch inutile.
+    """
+
+    def test_taglia_standard_resta_systran(self):
+        self.assertEqual(config.whisper_repo("base"), "Systran/faster-whisper-base")
+
+    def test_turbo_ha_il_suo_repo(self):
+        # Il valore esatto e' di faster-whisper (mappa upstream): qui interessa
+        # che non sia il repo Systran inesistente.
+        repo = config.whisper_repo("turbo")
+        self.assertIsNotNone(repo)
+        self.assertNotEqual(repo, "Systran/faster-whisper-turbo")
+        self.assertIn("turbo", repo)
+
+    def test_la_cache_del_turbo_usa_il_repo_giusto(self):
+        with mock.patch("config._cache_hub_huggingface") as hub:
+            hub.return_value = Path("/hub")
+            d = config._cache_whisper_faster("turbo")
+        repo = config.whisper_repo("turbo") or ""
+        self.assertEqual(d, Path("/hub") / f"models--{repo.replace('/', '--')}")
+
+    def test_repo_esplicito_e_percorso_locale_restano_None(self):
+        self.assertIsNone(config.whisper_repo("deepdml/faster-whisper-large-v3"))
+        self.assertIsNone(config.whisper_repo(r"C:\modelli\mio"))
+        self.assertIsNone(config.whisper_repo(""))

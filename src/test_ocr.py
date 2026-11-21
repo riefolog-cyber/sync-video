@@ -14,7 +14,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ocr import _lingue_disponibili, _ocr_single_slide, convert_presentation_to_pdf
+from ocr import (
+    _lingue_disponibili,
+    _ocr_single_slide,
+    convert_presentation_to_pdf,
+    extract_slides_text_ocr,
+)
 
 
 class TestOcrTuttoVuoto(unittest.TestCase):
@@ -350,6 +355,73 @@ class TestNessunaGraficaNonPassaSilenziosamente(unittest.TestCase):
         self.assertIn("LibreOffice", testo)
         self.assertIn("--fallback-senza-grafica", testo)
         self.assertIn("PDF", testo)
+
+
+class TestTestoNativoDelPdf(unittest.TestCase):
+    """Il testo che il PDF contiene gia' non va ricostruito con l'OCR.
+
+    Tesseract ricostruisce i caratteri da un'immagine: il testo digitale e'
+    migliore per costruzione, e sui PDF prodotti da LibreOffice/PowerPoint
+    esiste. Sul deck esportato come immagini (NotebookLM) le pagine sono vuote
+    e si torna all'OCR, che e' il comportamento di sempre.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.radice = Path(self.tmp.name)
+        self.out = self.radice / "slide"
+        self.out.mkdir()
+
+    def _pdf(self, testi: list[str]) -> Path:
+        """PDF vero: una pagina per testo, vuota quella con stringa vuota."""
+        import pymupdf as fitz
+
+        doc = fitz.open()
+        for testo in testi:
+            page = doc.new_page(width=1280, height=720)
+            if testo:
+                page.insert_text((72, 120), testo, fontsize=24)
+        path = self.radice / "presentazione.pdf"
+        doc.save(str(path))
+        doc.close()
+        return path
+
+    def test_pagine_con_testo_digitale_non_passano_da_tesseract(self):
+        pdf = self._pdf(
+            [
+                "Il monopolio delle piattaforme e le economie di rete",
+                "Seconda pagina: regole e sanzioni",
+            ]
+        )
+        with mock.patch("ocr._tesseract", side_effect=AssertionError("OCR non doveva partire")):
+            _files, testi = extract_slides_text_ocr(pdf, self.out, lang="ita", dpi=72, workers=1)
+        self.assertEqual(len(testi), 2)
+        self.assertIn("monopolio delle piattaforme", testi[0])
+        self.assertIn("regole e sanzioni", testi[1])
+
+    def test_pagina_senza_testo_va_ancora_da_ocr(self):
+        pdf = self._pdf(["Pagina con testo digitale sufficiente per il deck", ""])
+        with mock.patch("ocr._ocr_single_slide", return_value="testo letto dall'immagine") as ocr:
+            _files, testi = extract_slides_text_ocr(pdf, self.out, lang="ita", dpi=72, workers=1)
+        self.assertIn("testo digitale sufficiente", testi[0])
+        self.assertEqual(testi[1], "testo letto dall'immagine")
+        self.assertEqual(ocr.call_count, 1)
+
+    def test_deck_di_solo_immagini_usa_l_ocr_come_prima(self):
+        # Il caso del materiale reale: PDF senza testo, nessuna pagina nativa.
+        pdf = self._pdf(["", ""])
+        with mock.patch("ocr._ocr_single_slide", return_value="dal OCR") as ocr:
+            _files, testi = extract_slides_text_ocr(pdf, self.out, lang="ita", dpi=72, workers=1)
+        self.assertEqual(testi, ["dal OCR", "dal OCR"])
+        self.assertEqual(ocr.call_count, 2)
+
+    def test_il_nativo_non_e_un_segnaposto(self):
+        # La guardia "nessun testo" non deve scattare su un deck digitale.
+        pdf = self._pdf(["Contenuto digitale della prima pagina", "Contenuto digitale della seconda"])
+        with mock.patch("ocr._tesseract", side_effect=AssertionError("OCR non doveva partire")):
+            _files, testi = extract_slides_text_ocr(pdf, self.out, lang="ita", dpi=72, workers=1)
+        self.assertTrue(all("Contenuto digitale" in t for t in testi))
 
 
 if __name__ == "__main__":

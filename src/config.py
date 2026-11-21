@@ -804,6 +804,36 @@ def _cache_hub_huggingface() -> Path:
     return Path.home() / ".cache" / "huggingface" / "hub"
 
 
+def whisper_repo(model: str) -> str | None:
+    """Repo HuggingFace dei pesi faster-whisper per ``model``, o None.
+
+    Le taglie standard stanno su ``Systran/faster-whisper-<taglia>``, ma non
+    tutte: ``turbo`` (e ``large-v3-turbo``) vivono su un altro repo, e cercare
+    il primo significherebbe annunciare un download che non avviene e saltare
+    il controllo dello spazio. La mappa autorevole e' quella di
+    faster-whisper: ricopiarla a mano resta indietro appena upstream ne
+    aggiunge una.
+
+    ``None`` per un percorso locale o un repo esplicito (contengono ``/``):
+    li' non c'e' una cartella di cache prevedibile.
+    """
+    if not model or "/" in model or "\\" in model:
+        return None
+    risolto: object = None
+    try:
+        # Mappa privata ma stabile: e' la stessa che faster-whisper usa per
+        # risolvere ``WhisperModel("turbo")``. Importata qui, non in cima, per
+        # non rendere config ostaggio di una dipendenza opzionale.
+        from faster_whisper.utils import _MODELS
+
+        risolto = _MODELS.get(model)
+    except Exception:  # senza la mappa vale il default Systran
+        risolto = None
+    if isinstance(risolto, str) and risolto:
+        return risolto
+    return f"Systran/faster-whisper-{model}"
+
+
 def _cache_whisper_faster(model: str) -> Path | None:
     """Cartella del modello whisper CPU, o None se il percorso non e' deducibile.
 
@@ -816,9 +846,10 @@ def _cache_whisper_faster(model: str) -> Path | None:
     cartella da controllare, e il caso peggiore sarebbe controllare una cartella
     che non verra' mai scritta e quindi annunciare il download ogni run.
     """
-    if not model or "/" in model or "\\" in model:
+    repo = whisper_repo(model)
+    if repo is None:
         return None
-    return _cache_hub_huggingface() / f"models--Systran--faster-whisper-{model}"
+    return _cache_hub_huggingface() / f"models--{repo.replace('/', '--')}"
 
 
 def _modelli_mancanti_dettagliati(

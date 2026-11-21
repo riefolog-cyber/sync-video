@@ -44,6 +44,7 @@ from config import (
     log,
     parse_args,
     versione_programma,
+    whisper_repo,
 )
 
 # =====================================================================
@@ -2619,13 +2620,21 @@ def _prefetch_models(args: Any) -> None:
     try:
         from huggingface_hub import snapshot_download
 
-        repo = f"Systran/faster-whisper-{args.whisper_model}"
+        # Il repo non e' sempre Systran/faster-whisper-<taglia>: per 'turbo'
+        # faster-whisper usa un altro repo. Sbagliarlo qui significa
+        # annunciare un download che non avviene, saltare il controllo dello
+        # spazio e far credere che il prefetch abbia fallito.
+        repo = whisper_repo(args.whisper_model) or f"Systran/faster-whisper-{args.whisper_model}"
         log.info("   ⏳ Download pesi Whisper %s...", repo)
         # Revisione esplicita: senza, si prende il 'main' di oggi. Se chi
         # mantiene il repo pubblica pesi nuovi, il PC di un collega scarica
         # un modello diverso da quello su cui e' stata misurata la baseline,
         # e non lo segnala: il caso silenzioso e' il peggiore di tutti.
         revisione = WHISPER_REVISIONI.get(args.whisper_model)
+        if revisione is None:
+            # Senza revisione si prende il 'main' di oggi: va detto, perche' il
+            # resto del progetto dichiara che la baseline vale sui pesi fissati.
+            log.info("   · Revisione non fissata per %s: si scarica il main di oggi.", repo)
         snapshot_download(repo, revision=revisione)
         log.info("   ✅ Pesi Whisper pronti: %s", repo)
     except ImportError:
@@ -2906,6 +2915,20 @@ def _never_discussed_note(
     return fuori
 
 
+# Versione della cache dei testi slide. Cambia quando cambia CIO' che i testi
+# contengono, non solo come si chiamano: dalla v2 le pagine con testo digitale
+# usano quello e non l'OCR. Senza questo, una cache gia' scritta continuerebbe
+# a restituire i testi OCR e l'innovazione non si vedrebbe mai (il caso
+# silenzioso che il progetto evita). Costo del cambio: un giro di OCR in piu',
+# una volta sola.
+_SLIDE_CACHE_VERSION = "v2"
+
+
+def _cache_key_slides(pdf_hash: str, dpi: int, lang: str) -> str:
+    """Chiave della cache testi+immagini slide (stessa nei due punti d'uso)."""
+    return f"slides_{pdf_hash[:12]}_{dpi}_{lang}_{_SLIDE_CACHE_VERSION}"
+
+
 def main(argv: list | None = None) -> None:
     args = parse_args(argv)
 
@@ -2966,7 +2989,7 @@ def main(argv: list | None = None) -> None:
             elif not audio_qui.is_absolute():
                 audio_qui = BASE_DIR / audio_qui
             if pdf_qui.exists() and audio_qui is not None and audio_qui.exists():
-                chiave_slide = f"slides_{_file_hash(pdf_qui)[:12]}_{args.dpi}_{args.lang}"
+                chiave_slide = _cache_key_slides(_file_hash(pdf_qui), args.dpi, args.lang)
                 hash_audio = _file_hash(audio_qui)
                 attive = {
                     chiave_slide,
@@ -3162,7 +3185,7 @@ def main(argv: list | None = None) -> None:
     # dalla pulizia orfana (che guarda solo i .json).
     set_embed_cache_enabled(not args.no_cache)
 
-    cache_key_slides = f"slides_{pdf_hash[:12]}_{args.dpi}_{args.lang}"
+    cache_key_slides = _cache_key_slides(pdf_hash, args.dpi, args.lang)
     # Il modello E il motore fanno parte della chiave: cambiando motore o
     # --whisper-model non deve riusarsi la cache di un altro, che produce
     # timestamp/token diversi.
