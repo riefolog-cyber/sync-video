@@ -67,7 +67,10 @@ def confini_disponibili(
     pause: list[float] = []
     estremi = list(starts)
     for i in range(1, len(starts)):
-        silenzio = starts[i] - starts[i - 1] - DURATA_PAROLA_DEFAULT
+        # Una parola "occupa" DURATA_PAROLA_DEFAULT: quello che avanza fino
+        # alla successiva e' il silenzio vero (le due definizioni di fine
+        # parola in questo modulo sono questa sola).
+        silenzio = starts[i] - (starts[i - 1] + DURATA_PAROLA_DEFAULT)
         if silenzio >= GAP_PAUSA:
             pause.append(starts[i] - DURATA_PAROLA_DEFAULT / 2.0)
     estremi.append(starts[-1] + DURATA_PAROLA_DEFAULT)
@@ -75,12 +78,29 @@ def confini_disponibili(
 
 
 def _dentro_una_parola(t: float, starts: Sequence[float]) -> bool:
-    """True se ``t`` cade fra l'inizio di una parola e il suo (stimato) finire."""
-    for i, inizio in enumerate(starts):
-        fine = starts[i + 1] if i + 1 < len(starts) else inizio + DURATA_PAROLA_DEFAULT
-        if inizio + 1e-6 < t < fine - 1e-6:
-            return True
-    return False
+    """True se ``t`` cade dentro lo spazio (stimato) di una parola.
+
+    Lo spazio e' ``start + DURATA_PAROLA_DEFAULT``, la stessa fine stimata che
+    usa ``confini_disponibili``: due definizioni diverse nella stessa funzione
+    facevano divergere il calcolo del silenzio e quello del taglio.
+    """
+    return any(inizio + 1e-6 < t < inizio + DURATA_PAROLA_DEFAULT - 1e-6 for inizio in starts)
+
+
+def confini_dentro_parole(
+    timeline: Mapping[int, float],
+    words: Sequence[Mapping[str, Any]],
+) -> list[int]:
+    """Slide il cui confine cade DENTRO una parola: verrebbe troncata a meta'.
+
+    E' la misura della leggibilita' prima e dopo lo snap, non una regola: nel
+    referto dice se l'aggancio su questo materiale ha servito a qualcosa.
+    """
+    starts = _starts(words)
+    if not starts:
+        return []
+    ordinate = sorted(timeline)
+    return [s for s in ordinate[1:] if _dentro_una_parola(float(timeline[s]), starts)]
 
 
 def _piu_vicino(valore: float, candidati: Sequence[float], tolleranza: float) -> float | None:
@@ -99,7 +119,7 @@ def aggancia_confini(
     words: Sequence[Mapping[str, Any]],
     *,
     tolleranza: float = TOLLERANZA,
-    min_secondi: float = 3.0,
+    min_secondi: float,  # obbligatorio: il default vive in --semantic-min-duration
 ) -> tuple[dict[int, float], list[tuple[int, float, float, str]]]:
     """Restituisce (timeline agganciata, mosse) con ``mosse`` = (slide, prima, dopo, tipo).
 

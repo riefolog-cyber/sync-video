@@ -7,10 +7,11 @@ quando entra ogni slide. Qui c'e' solo la formattazione, e sta fuori da
 ``video.py`` perche' il video non li usa: chi scrive un .srt non deve
 importare moviepy.
 
-Un limite da dichiarare: le parole hanno lo ``start`` ma non la fine (il
-formato della trascrizione). La fine di un sottotitolo e' quindi l'inizio
-della parola successiva, che e' anche il punto in cui il parlato riprende:
-meglio una pausa a schermo che due righe sovrapposte.
+La fine di un sottotitolo e' l'inizio della parola successiva, che e' anche
+il punto in cui il parlato riprende: meglio una pausa a schermo che due righe
+sovrapposte. Quando la trascrizione porta anche la ``end`` della parola la si
+usa per misurare il silenzio, e un silenzio lungo chiude la riga: un
+sottotitolo che resta mentre nessuno parla si legge come un errore.
 """
 
 from __future__ import annotations
@@ -21,9 +22,16 @@ from typing import Any
 
 from config import atomic_write_text, log
 
-# Una riga da 42 caratteri sta in un sottotitolo a due righe su schermo normale
-# senza costringere l'occhio a rincorrerla.
-MAX_CARATTERI_CUE = 42
+# Una riga da 42 caratteri sta in un sottotitolo su schermo normale senza
+# costringere l'occhio a rincorrerla; due righe sono il massimo leggibile, e
+# sono quelle che stanno in un cue.
+MAX_CARATTERI_RIGA = 42
+MAX_CARATTERI_CUE = MAX_CARATTERI_RIGA * 2
+# Un silenzio piu' lungo di cosi' chiude la riga: e' la punteggiatura che la
+# trascrizione non ha.
+PAUSA_TAGLIO = 0.4
+# Durata da assumere per una parola quando la trascrizione non dice la fine.
+DURATA_PAROLA_STIMATA = 0.30
 # Oltre ~7s un sottotitolo resta a schermo mentre il parlato e' andato avanti.
 MAX_SECONDI_CUE = 7.0
 # Coda dell'ultima riga: senza, l'ultimo sottotitolo dura zero e sparisce.
@@ -60,6 +68,47 @@ def timestamp_capitolo(secondi: float) -> str:
     return f"{minuti}:{sec:02d}"
 
 
+def _fine_dichiarata(w: Mapping[str, Any]) -> float:
+    """La ``end`` della parola se la trascrizione la porta, altrimenti 0."""
+    try:
+        return max(0.0, float(w["end"]))
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+
+
+def _fine_parola(w: Mapping[str, Any], inizio: float) -> float:
+    """Fine della parola: la ``end`` dichiarata, o una stima ragionevole."""
+    fine = _fine_dichiarata(w)
+    return fine if fine > inizio else inizio + DURATA_PAROLA_STIMATA
+
+
+def _due_righe(testo: str, max_riga: int) -> str:
+    """Testo su al massimo due righe bilanciate (nel SRT separate da ``\\n``).
+
+    Si cerca il taglio che lascia le due righe piu' vicine in lunghezza: un
+    taglio a meta' esatto del testo puo' lasciare una riga di tre parole e una
+    di otto, che si legge peggio di due righe pari.
+    """
+    if len(testo) <= max_riga:
+        return testo
+    parole = testo.split()
+    migliore: tuple[int, int] | None = None
+    for i in range(1, len(parole)):
+        sinistra = " ".join(parole[:i])
+        destra = " ".join(parole[i:])
+        if len(sinistra) > max_riga or len(destra) > max_riga:
+            continue
+        sbilancio = abs(len(sinistra) - len(destra))
+        if migliore is None or sbilancio < migliore[0]:
+            migliore = (sbilancio, i)
+    if migliore is None:
+        # Nessun taglio sta nelle due righe (parola lunghissima): una riga
+        # sola lunga si legge meglio di uno spezzamento inventato.
+        return testo
+    i = migliore[1]
+    return " ".join(parole[:i]) + "\n" + " ".join(parole[i:])
+
+
 def _fine_frase(parola: str) -> bool:
     """True se chiude una frase: la riga va chiusa qui, non a meta' periodo."""
     return parola.endswith((".", "!", "?", ":", ";"))
@@ -70,18 +119,22 @@ def costruisci_cue(
     *,
     max_caratteri: int = MAX_CARATTERI_CUE,
     max_secondi: float = MAX_SECONDI_CUE,
+    pausa: float = PAUSA_TAGLIO,
 ) -> list[tuple[float, float, str]]:
     """Raggruppa le parole in sottotitoli leggibili: (inizio, fine, testo).
 
-    Le regole sono tre, in ordine di forza: non superare ``max_caratteri``,
-    non restare a schermo oltre ``max_secondi``, e chiudere a fine frase
-    quando la riga e' gia' abbastanza piena (chiudere ogni punto produrrebbe
-    sottotitoli di tre parole).
+    Le regole sono quattro, in ordine di forza: non superare ``max_caratteri``,
+    non restare a schermo oltre ``max_secondi``, chiudere dove c'e' un
+    silenzio lungo ``pausa``, e chiudere a fine frase quando la riga e' gia'
+    abbastanza piena (chiudere ogni punto produrrebbe sottotitoli di tre
+    parole).
     """
     cue: list[tuple[float, float, str]] = []
     corrente: list[str] = []
     inizio = 0.0
     ultimo = 0.0  # inizio dell'ultima parola accettata
+    fine_precedente = 0.0  # fine (stimata) dell'ultima parola accettata
+    coda = 0.0  # fine dichiarata piu' lontana: la coda non deve tagliarla
 
     def chiudi(fine: float) -> None:
         # Nessun allungamento della fine: il sottotitolo finisce dove comincia
@@ -92,7 +145,8 @@ def costruisci_cue(
             return
         # Mai oltre ``max_secondi``: con le parole rade il sottotitolo
         # precedente resterebbe a schermo mentre il parlato e' gia' avanti.
-        cue.append((inizio, min(fine, inizio + max_secondi), " ".join(corrente)))
+        testo = _due_righe(" ".join(corrente), max(1, max_caratteri // 2))
+        cue.append((inizio, min(fine, inizio + max_secondi), testo))
         corrente = []
 
     for w in words:
@@ -104,9 +158,15 @@ def costruisci_cue(
         except (TypeError, ValueError):
             continue
         ultimo = t
-        if not corrente:
+        coda = max(coda, _fine_dichiarata(w))
+        fine_parola = _fine_parola(w, t)
+        silenzio_lungo = corrente and (t - fine_precedente) >= pausa
+        if not corrente or silenzio_lungo:
+            if corrente:
+                chiudi(t)
             inizio = t
             corrente = [testo]
+            fine_precedente = fine_parola
             continue
         proposta = " ".join([*corrente, testo])
         troppo_lunga = len(proposta) > max_caratteri
@@ -118,11 +178,12 @@ def costruisci_cue(
             corrente = [testo]
         else:
             corrente.append(testo)
+        fine_precedente = fine_parola
 
     if corrente:
         # L'ultima riga non ha una parola dopo da cui prendere la fine: le si
         # dà una coda, altrimenti durerebbe zero e sparirebbe subito.
-        chiudi(ultimo + CODA_ULTIMA_PAROLA)
+        chiudi(max(ultimo + CODA_ULTIMA_PAROLA, coda))
     return cue
 
 

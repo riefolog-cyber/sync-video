@@ -68,7 +68,7 @@ installa_dipendenze_se_mancano()
 
 from moviepy import AudioFileClip, VideoFileClip
 
-from boundary_snap import aggancia_confini
+from boundary_snap import aggancia_confini, confini_dentro_parole
 from chunks import Word
 from machine_setup import machine_setup
 from ocr import (
@@ -145,7 +145,13 @@ from timeline import (
     repetition_loops,
     tail_recovery_zone,
 )
-from timeline_override import applica_override, leggi_override, override_su_ancore
+from timeline_override import (
+    aggiorna_file,
+    applica_override,
+    fissaggi_da_voci,
+    leggi_override,
+    override_su_ancore,
+)
 from transcription import (
     _write_raw_transcript,
     correct_transcript_names,
@@ -237,6 +243,30 @@ def _abort(message: str) -> NoReturn:
     log.error(" %s", message)
     log.error("=" * 70 + "\n")
     sys.exit(1)
+
+
+def _percorso_override(indicato: str, output: Path) -> Path:
+    """Dove stanno le correzioni manuali, e cosa fare se il file non c'e'.
+
+    Un percorso indicato vince; se non esiste si segnala invece di ignorarlo,
+    perche' un override ignorato in silenzio sembra applicato. Senza flag si
+    cerca ``timeline_override.json`` accanto al video (dove finiscono anche
+    .srt e capitoli) e poi nella radice del progetto.
+    """
+    if indicato:
+        path = Path(indicato)
+        if not path.is_absolute():
+            path = BASE_DIR / path
+        if not path.exists():
+            log.warning(
+                "   Override indicato ma non trovato: %s (nessuna correzione applicata).",
+                path,
+            )
+        return path
+    accanto = output.parent / "timeline_override.json"
+    if accanto.exists():
+        return accanto
+    return BASE_DIR / "timeline_override.json"
 
 
 # Corpi spostati in pipeline_cache.py / pipeline_report.py (re-export shim
@@ -4204,11 +4234,16 @@ def main(argv: list | None = None) -> None:
                 ),
             )
 
-        # --- Aggancio dei confini stimati a una pausa (opzionale) ---
+        # --- Aggancio dei confini stimati a una pausa ---
         # Dopo il pavimento anti-flicker: e' lui che sposta i confini di quanto
         # serve alla leggibilita', e cosi' puo' lasciarli a meta' parola. Le
         # ancore pronunciate restano dove le ha misurate lo speaker.
-        if getattr(args, "snap_pauses", False) and len(semantic_anchors) < total_slides - 1:
+        # Attivo di default: sul materiale di prova ha portato ogni confine
+        # stimato su una pausa, spostandolo di 0.1-0.9s. --no-snap-pauses lo
+        # spegne; il getattr lascia funzionare i Namespace dei test.
+        _snap = bool(getattr(args, "snap_pauses", True))
+        in_parola_prima = confini_dentro_parole(timeline, words_raw)
+        if _snap and len(semantic_anchors) < total_slides - 1:
             timeline, snapped = aggancia_confini(
                 timeline,
                 semantic_anchors,
@@ -4227,52 +4262,83 @@ def main(argv: list | None = None) -> None:
                     {"slide": s, "before": round(a, 3), "after": round(b, 3), "kind": k}
                     for s, a, b, k in snapped
                 ]
+        # Misura di leggibilita': confini a meta' parola prima e dopo.
+        in_parola_dopo = confini_dentro_parole(timeline, words_raw)
+        if in_parola_prima or in_parola_dopo:
+            log.info(
+                "   Confini a meta' parola: %d prima, %d dopo%s.",
+                len(in_parola_prima),
+                len(in_parola_dopo),
+                "" if _snap else " (aggancio spento)",
+            )
+            sync_notes["readability"] = {
+                "mid_word_before": in_parola_prima,
+                "mid_word_after": in_parola_dopo,
+            }
 
         # --- Correzioni manuali della timeline (timeline_override.json) ---
         # Applicate DOPO il pavimento: e' l'utente che decide, e il pavimento
         # non deve poterle spostare di nuovo. Validazione stretta: un override
         # incoerente viene rifiutato, non aggiustato.
-        _override_path = getattr(args, "timeline_override", "")
-        if _override_path:
-            _op = Path(_override_path)
-            if not _op.is_absolute():
-                _op = BASE_DIR / _op
-            if _op.exists():
-                try:
-                    timeline, mosse_override = applica_override(
-                        timeline,
-                        leggi_override(_op),
-                        total_duration,
-                        min_slide_seconds,
+        _op = _percorso_override(
+            getattr(args, "timeline_override", "") or "", Path(args.output)
+        )
+        _fix = getattr(args, "fix_slide", None) or []
+        if _fix:
+            # Scritto prima di leggerlo: la correzione da riga di comando e
+            # quella scritta a mano sono lo stesso file, una non cancella l'altra.
+            try:
+                fissaggi = fissaggi_da_voci(_fix)
+            except ValueError as e:
+                _abort(f"--fix-slide non valido: {e}")
+            nel_file = aggiorna_file(_op, fissaggi)
+            log.info(
+                "   --fix-slide: %d correzioni scritte in %s (%d nel file).",
+                len(fissaggi),
+                _op.name,
+                len(nel_file),
+            )
+            sync_notes["fix_slide"] = {
+                "file": _op.name,
+                "slides": sorted(fissaggi),
+                "total": len(nel_file),
+            }
+        if _op.exists():
+            try:
+                timeline, mosse_override = applica_override(
+                    timeline,
+                    leggi_override(_op),
+                    total_duration,
+                    min_slide_seconds,
+                )
+            except ValueError as e:
+                _abort(f"Timeline override non valido ({_op.name}): {e}")
+            if mosse_override:
+                su_ancore = override_su_ancore(mosse_override, semantic_anchors)
+                log.info(
+                    "   Timeline override (%s): %d confini spostati a mano (%s).",
+                    _op.name,
+                    len(mosse_override),
+                    ", ".join(
+                        f"slide {s}: {a:.1f}->{b:.1f}s" for s, a, b in mosse_override
+                    ),
+                )
+                if su_ancore:
+                    # Permesso, ma non silenzioso: il video non seguira' piu'
+                    # il timestamp che lo speaker ha annunciato.
+                    log.warning(
+                        "\n   [Avviso] Override su slide con un'ancora pronunciata "
+                        "(%s): il video non seguira' quel timestamp.\n",
+                        ", ".join(str(s) for s in su_ancore),
                     )
-                except ValueError as e:
-                    _abort(f"Timeline override non valido ({_op.name}): {e}")
-                if mosse_override:
-                    su_ancore = override_su_ancore(mosse_override, semantic_anchors)
-                    log.info(
-                        "   Timeline override (%s): %d confini spostati a mano (%s).",
-                        _op.name,
-                        len(mosse_override),
-                        ", ".join(
-                            f"slide {s}: {a:.1f}->{b:.1f}s" for s, a, b in mosse_override
-                        ),
-                    )
-                    if su_ancore:
-                        # Permesso, ma non silenzioso: il video non seguira' piu'
-                        # il timestamp che lo speaker ha annunciato.
-                        log.warning(
-                            "\n   [Avviso] Override su slide con un'ancora pronunciata "
-                            "(%s): il video non seguira' quel timestamp.\n",
-                            ", ".join(str(s) for s in su_ancore),
-                        )
-                    sync_notes["timeline_override"] = {
-                        "file": _op.name,
-                        "moved": [
-                            {"slide": s, "before": round(a, 3), "after": round(b, 3)}
-                            for s, a, b in mosse_override
-                        ],
-                        "over_anchors": su_ancore,
-                    }
+                sync_notes["timeline_override"] = {
+                    "file": _op.name,
+                    "moved": [
+                        {"slide": s, "before": round(a, 3), "after": round(b, 3)}
+                        for s, a, b in mosse_override
+                    ],
+                    "over_anchors": su_ancore,
+                }
 
         t_sync = time.time() - t_phase_start
 

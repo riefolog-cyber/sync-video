@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import ClassVar
 
 from timeline_override import (
+    aggiorna_file,
     applica_override,
+    fissaggi_da_voci,
     leggi_override,
     override_su_ancore,
 )
@@ -69,6 +71,49 @@ class TestLettura(unittest.TestCase):
     def test_tipo_sbagliato_in_cima(self) -> None:
         with self.assertRaises(ValueError):
             leggi_override(self._file('"slide 5"'))
+
+
+class TestFissaggi(unittest.TestCase):
+    """Il formato di --fix-slide: un errore qui deve dire cosa scrivere."""
+
+    def test_voci_valide_con_spazi(self) -> None:
+        self.assertEqual(fissaggi_da_voci(["5=252.0", " 9 = 431.25 "]), {5: 252.0, 9: 431.25})
+
+    def test_voce_senza_uguale(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            fissaggi_da_voci(["5-252"])
+        self.assertIn("slide=secondi", str(ctx.exception))
+
+    def test_slide_non_numerica(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            fissaggi_da_voci(["cinque=252"])
+        self.assertIn("numero di slide", str(ctx.exception))
+
+    def test_slide_indicata_due_volte(self) -> None:
+        with self.assertRaises(ValueError):
+            fissaggi_da_voci(["5=10", "5=20"])
+
+
+class TestAggiornamentoFile(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "timeline_override.json"
+
+    def test_crea_il_file_e_poi_aggiunge(self) -> None:
+        aggiorna_file(self.path, {5: 252.0})
+        aggiorna_file(self.path, {9: 431.25})
+        # Aggiungere non cancella: le due correzioni convivono.
+        self.assertEqual(leggi_override(self.path), {5: 252.0, 9: 431.25})
+
+    def test_la_stessa_slide_viene_sovrascritta(self) -> None:
+        aggiorna_file(self.path, {5: 252.0})
+        aggiorna_file(self.path, {5: 260.0})
+        self.assertEqual(leggi_override(self.path), {5: 260.0})
+
+    def test_il_file_prodotto_e_rileggibile(self) -> None:
+        aggiorna_file(self.path, {5: 252.0, 9: 431.25})
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), {"5": 252.0, "9": 431.25})
 
 
 class TestApplicazione(unittest.TestCase):

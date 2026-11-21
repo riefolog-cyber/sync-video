@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test dei sottotitoli SRT/VTT e dei capitoli.
+"""Test dei sottotitoli SRT e dei capitoli.
 
 Sono file di testo: un errore di formato non fa fallire niente, produce un .srt
 che il player ignora o dei capitoli che YouTube rifiuta. Qui si guarda il
@@ -105,6 +105,44 @@ class TestCue(unittest.TestCase):
         cue = costruisci_cue(parole)
         self.assertGreater(cue[-1][1] - cue[-1][0], 0.5)
 
+    def test_un_silenzio_lungo_chiude_la_riga(self) -> None:
+        # "end" dichiarata: dopo "prima" c'e' quasi un secondo di silenzio, e un
+        # sottotitolo che resta a schermo mentre nessuno parla si legge come un
+        # errore. La fine del cue resta l'inizio del parlato (1.5), mai oltre.
+        parole: list[dict[str, object]] = [
+            {"word": "prima", "start": 0.0, "end": 0.4},
+            {"word": "dopo", "start": 1.5, "end": 1.8},
+        ]
+        cue = costruisci_cue(parole)
+        self.assertEqual([testo for _, _, testo in cue], ["prima", "dopo"])
+        self.assertAlmostEqual(cue[0][1], 1.5)
+
+    def test_parole_ravvicinate_non_si_speziano_per_il_silenzio(self) -> None:
+        cue = costruisci_cue(_parole([("a", 0.0), ("b", 0.2), ("c", 0.4)]))
+        self.assertEqual(len(cue), 1)
+
+    def test_riga_lunga_va_su_due_righe_bilanciate(self) -> None:
+        parole = _parole(
+            [
+                ("Questa", 0.0),
+                ("frase", 0.3),
+                ("va", 0.5),
+                ("spezzata", 0.7),
+                ("in", 1.0),
+                ("due", 1.2),
+                ("righe", 1.4),
+                ("pari", 1.6),
+                ("davvero", 1.8),
+            ]
+        )
+        cue = costruisci_cue(parole)
+        righe = cue[0][2].split("\n")
+        self.assertEqual(len(righe), 2)
+        for riga in righe:
+            self.assertLessEqual(len(riga), subtitles.MAX_CARATTERI_RIGA, riga)
+        # Bilanciate: nessuna riga meno della meta' dell'altra.
+        self.assertGreater(min(len(r) for r in righe), max(len(r) for r in righe) // 2)
+
     def test_parole_senza_tempo_o_vuote_si_scartano(self) -> None:
         parole: list[dict[str, object]] = [
             {"word": "  ", "start": 0.0},
@@ -128,6 +166,22 @@ class TestFile(unittest.TestCase):
         self.assertEqual(righe[1], "00:00:00,000 --> 00:00:01,300")
         self.assertEqual(righe[2], "Ciao mondo")
         self.assertEqual(righe[3], "")
+
+    def test_il_srt_scrive_le_parole_che_riceve(self) -> None:
+        # main assegna words_raw = correct_transcript_names(...) PRIMA di
+        # chiamare qui: il modulo non deve rimetterci mano. Se qualcuno sposta
+        # la correzione dopo la scrittura, i nomi sbagliati finiscono nel .srt.
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "video_finale.mp4"
+            srt, _ = scrivi_sottotitoli(
+                output,
+                _parole([("Sigmund", 0.0), ("Freud", 0.4)]),
+                {1: 0.0},
+                ["Slide"],
+            )
+            self.assertIsNotNone(srt)
+            assert srt is not None
+            self.assertIn("Sigmund Freud", srt.read_text(encoding="utf-8"))
 
     def test_capitoli_partono_da_zero_e_usano_il_testo_della_slide(self) -> None:
         capitoli = build_capitoli({1: 0.0, 2: 76.0}, ["Prima slide", "Seconda slide"])

@@ -85,6 +85,9 @@ def _pipeline() -> None:
     main.main(
         [
             "--dry-run",
+            # Il riferimento e' la timeline senza aggancio: il confronto deve
+            # essere fra cose uguali, lo snap ha una sua prova dedicata.
+            "--no-snap-pauses",
             "--no-update-check",
             "--no-auto-setup",
             "--no-confirm",

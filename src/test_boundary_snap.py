@@ -11,7 +11,7 @@ Esegui con: python -m unittest test_boundary_snap -v
 import unittest
 
 import boundary_snap
-from boundary_snap import aggancia_confini, confini_disponibili
+from boundary_snap import aggancia_confini, confini_dentro_parole, confini_disponibili
 
 
 def _parole(coppie: list[tuple[str, float]]) -> list[dict[str, object]]:
@@ -19,7 +19,7 @@ def _parole(coppie: list[tuple[str, float]]) -> list[dict[str, object]]:
 
 
 class TestConfiniDisponibili(unittest.TestCase):
-    def test_la_pausa_e_il_centro_del_silenzio(self) -> None:
+    def test_la_pausa_sta_poco_prima_della_parola_successiva(self) -> None:
         pause, _ = confini_disponibili(_parole([("a", 0.0), ("b", 10.0)]))
         self.assertEqual(len(pause), 1)
         atteso = (10.0 - boundary_snap.DURATA_PAROLA_DEFAULT + 10.0) / 2
@@ -99,9 +99,28 @@ class TestAggancio(unittest.TestCase):
         self.assertEqual(mosse, [])
 
     def test_una_sola_slide_non_ha_confini(self) -> None:
-        nuova, mosse = aggancia_confini({1: 0.0}, {}, _parole([("a", 0.0)]))
+        nuova, mosse = aggancia_confini({1: 0.0}, {}, _parole([("a", 0.0)]), min_secondi=3.0)
         self.assertEqual(nuova, {1: 0.0})
         self.assertEqual(mosse, [])
+
+
+class TestLeggibilita(unittest.TestCase):
+    """Il numero che finisce nel referto: confini a meta' parola prima/dopo."""
+
+    def test_confine_dentro_una_parola_viene_contato(self) -> None:
+        parole = _parole([("a", 5.0), ("b", 5.3), ("c", 20.0)])
+        self.assertEqual(confini_dentro_parole({1: 0.0, 2: 5.15, 3: 20.0}, parole), [2])
+
+    def test_confine_sull_inizio_di_una_parola_non_e_dentro(self) -> None:
+        parole = _parole([("a", 5.0), ("b", 5.3), ("c", 20.0)])
+        self.assertEqual(confini_dentro_parole({1: 0.0, 2: 5.3, 3: 20.0}, parole), [])
+
+    def test_la_slide_1_non_si_controlla(self) -> None:
+        # Parte sempre da 0: il suo confine non e' una scelta da misurare.
+        self.assertEqual(confini_dentro_parole({1: 0.1}, _parole([("a", 0.0)])), [])
+
+    def test_senza_parole_nessuna_misura(self) -> None:
+        self.assertEqual(confini_dentro_parole({1: 0.0, 2: 5.0}, []), [])
 
 
 if __name__ == "__main__":

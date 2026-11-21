@@ -2323,17 +2323,36 @@ Esempi:
     parser.add_argument(
         "--timeline-override",
         dest="timeline_override",
-        default="timeline_override.json",
+        default="",
         help="File JSON con correzioni manuali dei confini ({\"slide\": secondi} oppure "
-        "[{\"slide\": N, \"start\": secondi}]). Se il file non esiste non succede niente; "
-        "stringa vuota per ignorarlo.",
+        "[{\"slide\": N, \"start\": secondi}]). Senza questo flag si cerca "
+        "timeline_override.json accanto al video e poi nella radice del progetto; un "
+        "percorso indicato e mancante viene segnalato.",
+    )
+    parser.add_argument(
+        "--fix-slide",
+        dest="fix_slide",
+        action="append",
+        metavar="N=SECONDI",
+        help="Scrive una correzione nel file di override senza aprirlo a mano "
+        "(es. --fix-slide 5=252.0, ripetibile). Le correzioni gia' nel file restano.",
     )
     parser.add_argument(
         "--snap-pauses",
         dest="snap_pauses",
         action="store_true",
+        default=True,
         help="Sposta i confini non ancorati sulla pausa piu' vicina (entro 1.5s) o, se "
-        "cadono dentro una parola, sul confine di parola: le ancore pronunciate non si toccano.",
+        "cadono dentro una parola, sul confine di parola: le ancore pronunciate non si "
+        "toccano. Attivo di default (misurato: sul materiale di prova 12 confini su 12 "
+        "finiscono su una pausa); --no-snap-pauses per spegnerlo.",
+    )
+    parser.add_argument(
+        "--no-snap-pauses",
+        dest="snap_pauses",
+        action="store_false",
+        help="Lascia i confini stimati dove li mette il pavimento anti-flicker, anche se "
+        "cadono a meta' parola.",
     )
     parser.add_argument("--no-cache", action="store_true", help="Ignora la cache e rifai tutto da zero")
     parser.add_argument(

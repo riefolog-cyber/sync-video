@@ -18,7 +18,7 @@ modo difficile da vedere; un errore chiaro all'avvio costa dieci secondi.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,29 @@ def _numero(valore: Any, cosa: str) -> float:
     if numero != numero or numero in (float("inf"), float("-inf")):
         raise ValueError(f"{cosa}: '{valore}' non e' un tempo finito")
     return numero
+
+
+def fissaggi_da_voci(voci: Sequence[str]) -> dict[int, float]:
+    """``["5=252.0", "9=431.25"]`` -> ``{5: 252.0, 9: 431.25}``.
+
+    E' il formato di ``--fix-slide``: chi corregge un confine non deve sapere
+    come e' fatto il JSON.
+    """
+    fissaggi: dict[int, float] = {}
+    for voce in voci:
+        slide_txt, sep, tempo_txt = voce.partition("=")
+        if not sep:
+            raise ValueError(f"'{voce}': atteso slide=secondi (esempio: 5=252.0)")
+        try:
+            slide = int(slide_txt.strip())
+        except ValueError:
+            raise ValueError(
+                f"'{voce}': '{slide_txt.strip()}' non e' un numero di slide"
+            ) from None
+        if slide in fissaggi:
+            raise ValueError(f"slide {slide}: indicata piu' di una volta")
+        fissaggi[slide] = _numero(tempo_txt.strip(), f"slide {slide}")
+    return fissaggi
 
 
 def _da_dict(dati: Mapping[str, Any]) -> dict[int, float]:
@@ -147,6 +170,20 @@ def applica_override(
     # esplicita che contraddice una misura, e il video la rispetta. Chi chiama
     # la segnala a voce (vedi `override_su_ancore`).
     return nuove, mosse
+
+
+def aggiorna_file(path: Path, fissaggi: Mapping[int, float]) -> dict[int, float]:
+    """Unisce ``fissaggi`` al file di override (creandolo) e lo riscrive.
+
+    Serve a ``--fix-slide``: le correzioni da riga di comando e quelle scritte
+    a mano finiscono nello stesso file, e una non cancella l'altra.
+    """
+    esistenti = leggi_override(path) if path.exists() else {}
+    esistenti.update(fissaggi)
+    testo = json.dumps({str(s): t for s, t in sorted(esistenti.items())}, indent=2)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(testo + "\n", encoding="utf-8")
+    return esistenti
 
 
 def override_su_ancore(
