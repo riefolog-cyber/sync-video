@@ -32,34 +32,18 @@ CODA_ULTIMA_PAROLA = 0.8
 MAX_CARATTERI_CAPITOLO = 60
 
 
-def _hhmmss(secondi: float, separatore: str) -> str:
-    """``HH:MM:SS<sep>mmm`` con i millesimi: il formato che vogliono SRT e VTT."""
-    if secondi < 0:
-        secondi = 0.0
-    interi = int(secondi)
-    ore, resto = divmod(interi, 3600)
-    minuti, sec = divmod(resto, 60)
-    millesimi = round((secondi - interi) * 1000)
-    if millesimi >= 1000:  # arrotondamento a 1.000: porta l'arrotondamento avanti
-        millesimi -= 1000
-        sec += 1
-        if sec >= 60:
-            sec -= 60
-            minuti += 1
-            if minuti >= 60:
-                minuti -= 60
-                ore += 1
-    return f"{ore:02d}:{minuti:02d}:{sec:02d}{separatore}{millesimi:03d}"
-
-
 def timestamp_srt(secondi: float) -> str:
-    """Timestamp SRT (virgola prima dei millesimi)."""
-    return _hhmmss(secondi, ",")
+    """``HH:MM:SS,mmm``: l'unico formato che serve (SRT).
 
-
-def timestamp_vtt(secondi: float) -> str:
-    """Timestamp WebVTT (punto prima dei millesimi)."""
-    return _hhmmss(secondi, ".")
+    Si arrotonda ai millisecondi UNA volta sola e poi si divide: contare i
+    millesimi a parte costringeva a gestire a mano il riporto a 1.000, e un
+    ``59.9996`` diventava ``00:00:59,1000``.
+    """
+    ms = max(0, round(secondi * 1000))
+    ore, resto = divmod(ms, 3_600_000)
+    minuti, resto = divmod(resto, 60_000)
+    sec, millesimi = divmod(resto, 1000)
+    return f"{ore:02d}:{minuti:02d}:{sec:02d},{millesimi:03d}"
 
 
 def timestamp_capitolo(secondi: float) -> str:
@@ -97,6 +81,7 @@ def costruisci_cue(
     cue: list[tuple[float, float, str]] = []
     corrente: list[str] = []
     inizio = 0.0
+    ultimo = 0.0  # inizio dell'ultima parola accettata
 
     def chiudi(fine: float) -> None:
         # Nessun allungamento della fine: il sottotitolo finisce dove comincia
@@ -118,6 +103,7 @@ def costruisci_cue(
             t = float(w["start"])
         except (TypeError, ValueError):
             continue
+        ultimo = t
         if not corrente:
             inizio = t
             corrente = [testo]
@@ -136,8 +122,7 @@ def costruisci_cue(
     if corrente:
         # L'ultima riga non ha una parola dopo da cui prendere la fine: le si
         # dà una coda, altrimenti durerebbe zero e sparirebbe subito.
-        ultimo = float(words[-1].get("start", inizio)) if words else inizio
-        chiudi(max(ultimo + CODA_ULTIMA_PAROLA, inizio + CODA_ULTIMA_PAROLA))
+        chiudi(ultimo + CODA_ULTIMA_PAROLA)
     return cue
 
 
@@ -147,16 +132,6 @@ def build_srt(words: Sequence[Mapping[str, Any]]) -> str:
     for i, (inizio, fine, testo) in enumerate(costruisci_cue(words), start=1):
         righe.append(str(i))
         righe.append(f"{timestamp_srt(inizio)} --> {timestamp_srt(fine)}")
-        righe.append(testo)
-        righe.append("")
-    return "\n".join(righe)
-
-
-def build_vtt(words: Sequence[Mapping[str, Any]]) -> str:
-    """Contenuto di un file .vtt (stesse righe, timestamp col punto)."""
-    righe: list[str] = ["WEBVTT", ""]
-    for inizio, fine, testo in costruisci_cue(words):
-        righe.append(f"{timestamp_vtt(inizio)} --> {timestamp_vtt(fine)}")
         righe.append(testo)
         righe.append("")
     return "\n".join(righe)

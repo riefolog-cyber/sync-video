@@ -17,12 +17,10 @@ import subtitles
 from subtitles import (
     build_capitoli,
     build_srt,
-    build_vtt,
     costruisci_cue,
     scrivi_sottotitoli,
     timestamp_capitolo,
     timestamp_srt,
-    timestamp_vtt,
 )
 
 
@@ -34,9 +32,6 @@ class TestTimestamp(unittest.TestCase):
     def test_srt_sempre_con_ore_e_millisecondi(self) -> None:
         self.assertEqual(timestamp_srt(0), "00:00:00,000")
         self.assertEqual(timestamp_srt(3661.5), "01:01:01,500")
-
-    def test_vtt_usa_il_punto_dei_millesimi(self) -> None:
-        self.assertEqual(timestamp_vtt(2.25), "00:00:02.250")
 
     def test_arrotondamento_non_produce_1000_millesimi(self) -> None:
         # 59.9999 e' 1:00, non 00:00:59,1000: il formato deve reggere il riporto.
@@ -133,9 +128,6 @@ class TestFile(unittest.TestCase):
         self.assertEqual(righe[1], "00:00:00,000 --> 00:00:01,300")
         self.assertEqual(righe[2], "Ciao mondo")
         self.assertEqual(righe[3], "")
-
-    def test_vtt_comincia_con_webvtt(self) -> None:
-        self.assertTrue(build_vtt(_parole([("Ciao", 0.0)])).startswith("WEBVTT\n"))
 
     def test_capitoli_partono_da_zero_e_usano_il_testo_della_slide(self) -> None:
         capitoli = build_capitoli({1: 0.0, 2: 76.0}, ["Prima slide", "Seconda slide"])

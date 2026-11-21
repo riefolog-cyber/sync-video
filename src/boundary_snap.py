@@ -55,9 +55,11 @@ def confini_disponibili(
 ) -> tuple[list[float], list[float]]:
     """(pause, estremi di parola) fra cui un confine puo' essere spostato.
 
-    Le pause sono il CENTRO del silenzio: il punto piu' lontano da entrambe le
-    parole, cioe' quello in cui un taglio non tronca niente. Gli estremi di
-    parola sono gli inizi, piu' la fine stimata dell'ultima.
+    Le pause stanno poco PRIMA della parola successiva, dentro il silenzio:
+    la slide nuova entra quando il relatore riattacca, non a meta' della
+    pausa (anticiparla di secondi e' peggio che arrivare al limite del
+    silenzio). Gli estremi di parola sono gli inizi, piu' la fine stimata
+    dell'ultima.
     """
     starts = _starts(words)
     if not starts:
@@ -65,9 +67,9 @@ def confini_disponibili(
     pause: list[float] = []
     estremi = list(starts)
     for i in range(1, len(starts)):
-        if starts[i] - starts[i - 1] >= GAP_PAUSA + DURATA_PAROLA_DEFAULT:
-            fine_precedente = starts[i] - DURATA_PAROLA_DEFAULT
-            pause.append((fine_precedente + starts[i]) / 2.0)
+        silenzio = starts[i] - starts[i - 1] - DURATA_PAROLA_DEFAULT
+        if silenzio >= GAP_PAUSA:
+            pause.append(starts[i] - DURATA_PAROLA_DEFAULT / 2.0)
     estremi.append(starts[-1] + DURATA_PAROLA_DEFAULT)
     return pause, estremi
 

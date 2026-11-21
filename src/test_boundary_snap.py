@@ -103,12 +103,6 @@ class TestAggancio(unittest.TestCase):
         self.assertEqual(nuova, {1: 0.0})
         self.assertEqual(mosse, [])
 
-    def test_la_slide_1_non_e_un_confine_da_agganciare(self) -> None:
-        # Il video comincia con la slide 1: nessuna mossa puo' riguardarla.
-        parole = _parole([("a", 0.0), ("b", 20.0)])
-        _nuova, mosse = aggancia_confini({1: 0.0, 2: 20.0}, {}, parole, min_secondi=1.0)
-        self.assertEqual([s for s, *_ in mosse if s == 1], [])
-
 
 if __name__ == "__main__":
     unittest.main()

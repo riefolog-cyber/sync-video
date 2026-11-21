@@ -22,8 +22,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-NOME_FILE_DEFAULT = "timeline_override.json"
-
 
 def _numero(valore: Any, cosa: str) -> float:
     """Numero finito da un valore JSON, o ValueError con il nome del campo."""
