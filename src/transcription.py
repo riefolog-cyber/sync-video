@@ -40,6 +40,28 @@ from config import (
 )
 from hardware import ram_available_bytes
 
+# Mappa codici lingua Tesseract/OCR -> ISO 639-1 per Whisper. Condivisa tra la
+# trascrizione principale e la ritrascrizione delle zone cieche: duplicarla
+# faceva si' che la recovery passasse codici a tre lettere ("eng", "deu",
+# "fra") a faster-whisper, che ne vuole due.
+_LANG_MAP = {
+    "ita": "it",
+    "eng": "en",
+    "deu": "de",
+    "fra": "fr",
+    "spa": "es",
+    "por": "pt",
+    "rus": "ru",
+    "chi_sim": "zh",
+    "jpn": "ja",
+    "kor": "ko",
+}
+
+
+def _whisper_lang(language: str) -> str:
+    """Codice lingua per Whisper partendo dal codice OCR (Tesseract)."""
+    return _LANG_MAP.get(language, language)
+
 
 # =====================================================================
 # COMPRESSIONE TRASCRIZIONE
@@ -322,16 +344,24 @@ def download_openvino_model(model_dir: Path, model_id: str = DEFAULT_OPENVINO_MO
 def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
     """Carica l'audio come float32 mono 16kHz (formato richiesto da Whisper).
 
-    Decodifica in streaming via ffmpeg (f32le) per non caricare in RAM tutto il
-    PCM originale: pydub teneva ~2-3 GB di picco su audio lunghi, proprio dove
-    ``decide_transcriber`` misura la memoria libera. Il risultato è identico
+    Decodifica in streaming via ffmpeg (f32le) in blocchi da 64 KB, accumulati
+    peró in un ``bytearray`` e poi convertiti con ``np.frombuffer``: il PCM a
+    16 kHz resta quindi tutto in memoria fino alla fine. Il vantaggio è evitare
+    il PCM ORIGINALE (pydub teneva ~2-3 GB di picco su audio lunghi, proprio
+    dove ``decide_transcriber`` misura la memoria libera) e la doppia copia
+    (``bytes(buf)`` + ``.copy()``) del vecchio percorso. Il risultato è identico
     (float32 in [-1, 1], 16 kHz, mono). Se ffmpeg non è disponibile si ripiega
     su pydub (che carica tutto, ma è il caso raro).
+
+    Nota: il buffer accumulato pesa ~64 KB/s (circa 77 MB per 20 minuti, 460 MB
+    per due ore). Non è il PCM sorgente, ma su audio molto lunghi resta un picco
+    di memoria rilevante: lo streaming evita la copia, non l'accumulo.
 
     Returns:
         (campioni float32 in [-1, 1], sample rate)
     """
     import shutil
+    import threading
 
     import numpy as np
 
@@ -355,6 +385,22 @@ def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
         assert proc.stdout is not None
         buf = bytearray()
         stderr_bytes = b""
+
+        def _leggi_stderr() -> None:
+            """Drena stderr in parallelo: se riempie il pipe (64 KB), ffmpeg si blocca."""
+            nonlocal stderr_bytes
+            if proc.stderr is None:
+                return
+            try:
+                stderr_bytes = proc.stderr.read()
+            finally:
+                proc.stderr.close()
+
+        # stderr va letto MENTRE scorre stdout, non solo nel finally: un ffmpeg
+        # che scrive molto su stderr (errori ripetuti) riempie il pipe e si
+        # ferma, e la lettura di stdout resta appesa per sempre.
+        t_stderr = threading.Thread(target=_leggi_stderr, daemon=True)
+        t_stderr.start()
         try:
             try:
                 while True:
@@ -363,17 +409,16 @@ def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
                         break
                     buf.extend(block)
             finally:
-                # stdout e stderr vanno chiusi SEMPRE: se la lettura del PCM
-                # solleva, il processo e i suoi pipe restano aperti.
+                # stdout va chiuso SEMPRE: se la lettura del PCM solleva, il
+                # processo e il pipe restano aperti.
                 proc.stdout.close()
-                if proc.stderr is not None:
-                    try:
-                        stderr_bytes = proc.stderr.read()
-                    finally:
-                        proc.stderr.close()
         finally:
             if proc.poll() is None:
                 proc.kill()
+            # Join dopo la kill e prima di wait()/ritorno: se la lettura PCM
+            # solleva, il processo può ancora scrivere e il thread resterebbe
+            # in attesa di EOF. Cosi' stderr_bytes e' completo quando serve.
+            t_stderr.join()
         returncode = proc.wait()
         if returncode != 0:
             raise RuntimeError(
@@ -398,20 +443,12 @@ def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
 
 
 def _ov_lang_token(language: str) -> str:
-    """Mappa codice lingua Tesseract/OCR (es. 'ita') al token OpenVINO ('<|it|>')."""
-    _MAP = {
-        "ita": "it",
-        "eng": "en",
-        "deu": "de",
-        "fra": "fr",
-        "spa": "es",
-        "por": "pt",
-        "rus": "ru",
-        "chi_sim": "zh",
-        "jpn": "ja",
-        "kor": "ko",
-    }
-    return f"<|{_MAP.get(language, language)}|>"
+    """Token OpenVINO (es. '<|it|>') dal codice lingua Tesseract/OCR (es. 'ita').
+
+    Usa la stessa mappa di ``_whisper_lang``: aggiungere una lingua a
+    ``_LANG_MAP`` la fa funzionare anche con ``--transcriber openvino``.
+    """
+    return f"<|{_whisper_lang(language)}|>"
 
 
 def transcribe_with_openvino(
@@ -1337,20 +1374,8 @@ def transcribe_with_whisper(
         "speech_pad_ms": 200,
     }
 
-    # Mappa codici lingua Tesseract -> ISO 639-1 per Whisper
-    _LANG_MAP = {
-        "ita": "it",
-        "eng": "en",
-        "deu": "de",
-        "fra": "fr",
-        "spa": "es",
-        "por": "pt",
-        "rus": "ru",
-        "chi_sim": "zh",
-        "jpn": "ja",
-        "kor": "ko",
-    }
-    whisper_lang = _LANG_MAP.get(language, language)
+    # Codice OCR -> ISO 639-1 per Whisper (mappa condivisa con le zone cieche)
+    whisper_lang = _whisper_lang(language)
 
     # Ripresa: se una run precedente si e' interrotta, decodifica solo la coda.
     # Il parziale e' dell'audio INTERO (timestamp assoluti) mentre il motore
@@ -1513,7 +1538,7 @@ def retranscribe_zone(
                 return None
             n_threads = cpu_threads if cpu_threads else DEFAULT_WHISPER_THREADS
             model = _zone_model(model_size, device, compute_type, n_threads)
-            whisper_lang = {"ita": "it"}.get(language, language)
+            whisper_lang = _whisper_lang(language)
             segments, _ = model.transcribe(
                 str(clip),
                 language=whisper_lang,

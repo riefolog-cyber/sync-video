@@ -766,9 +766,12 @@ class TestRunUpdateCheck(_TempCacheMixin, unittest.TestCase):
         )
         with mock.patch("builtins.input", return_value="s"), mock.patch("updates._pip_upgrade") as upg, mock.patch(
             "updates._run_pinned_ab_test", return_value="EQUIVALENTE"
-        ):
+        ), mock.patch("updates._aggiorna_pin") as pin:
             updates.run_update_check(ttl_hours=6, ask_to_update=True)
         upg.assert_called_once_with(["fastembed"])
+        # Il pin va persistito, ma i test non devono mai scrivere davvero
+        # requirements.txt né il file di override nella cache.
+        pin.assert_called_once_with({"fastembed": "2"})
 
     def test_pinned_divergent_stays_pinned(self):
         self.cache_path.write_text(

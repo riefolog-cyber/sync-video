@@ -1326,8 +1326,13 @@ def semantic_timeline_from_texts(
     # un testo senza senso dà 0.75 contro una slide e il parlato reale non scende
     # mai sotto 0.75, quindi una soglia a 0.10 non può mai scattare. Decide lo
     # z-score, che è libero da scala.
+    # L'ultimo segmento conta quanto gli altri: ``starts`` ha solo N elementi
+    # (indici 0..N-1), quindi per s == total_slides il confine finale e' la fine
+    # dei blocchi, non ``starts[s]`` (che non esiste).
     pairs = [
-        (blk, s - 1) for s in range(1, total_slides) for blk in range(starts[s - 1], starts[s])
+        (blk, s - 1)
+        for s in range(1, total_slides + 1)
+        for blk in range(starts[s - 1], len(blocks) if s == total_slides else starts[s])
     ]
     avg_sim, avg_z = _mean_pair_scores(sim, sim_norm, pairs)
     _LAST_QUALITY.clear()
@@ -1539,8 +1544,13 @@ def alignment_quality_from_words(
     if starts is None:
         return None
 
+    # L'ultimo segmento conta quanto gli altri: ``starts`` ha solo N elementi
+    # (indici 0..N-1), quindi per s == total_slides il confine finale e' la fine
+    # dei blocchi, non ``starts[s]`` (che non esiste).
     pairs = [
-        (blk, s - 1) for s in range(1, total_slides) for blk in range(starts[s - 1], starts[s])
+        (blk, s - 1)
+        for s in range(1, total_slides + 1)
+        for blk in range(starts[s - 1], len(blocks) if s == total_slides else starts[s])
     ]
     avg_sim, avg_z = _mean_pair_scores(sim, sim_norm, pairs)
     return {
@@ -2030,16 +2040,26 @@ REFINE_STABILITY_SIGMA = 2.0
 # candidato vincente deve vincere anche guardando più parlato ai due lati.
 REFINE_PERTURBATION_SCALE = 1.5
 
-# Diagnostica dell'ultimo raffinamento, per slide: quello che il punteggio ha
-# saputo dire su ogni confine (margine, rumore, decisione). Accumula fra le
-# chiamate della stessa run tenendo l'ULTIMA decisione per slide, che è quella
-# applicata: la riparazione guidata dai frame, se interviene, sostituisce la
-# voce della slide che ha corretto.
+# Diagnostica dell'ultimo raffinamento: quello che il punteggio ha saputo dire
+# su ogni confine (margine, rumore, decisione). La chiave del dizionario è la
+# CHIAVE DI LAVORO: il numero della slide nel caso normale, l'indice del
+# segmento con ``by_index`` (riparazione guidata dai frame), dove la stessa
+# slide puo' comparire due volte con ``--skip-slides`` e le due occorrenze non
+# devono sovrascriversi. Il numero di slide da mostrare resta nel campo
+# ``slide`` della voce, quindi la diagnostica visiva e' invariata nel caso
+# normale. Accumula fra le chiamate della stessa run tenendo l'ULTIMA decisione
+# per chiave, che e' quella applicata.
 _REFINE_DIAGNOSTICS: dict[int, dict[str, object]] = {}
 
 
 def refine_diagnostics() -> list[dict[str, object]]:
-    """Decisioni del raffinamento confini, una per slide (elenco ordinato).
+    """Decisioni del raffinamento confini, una per chiave di lavoro (elenco ordinato).
+
+    Il campo ``slide`` di ogni voce e' SEMPRE il numero della slide (quello del
+    segmento indicizzato quando la chiave e' un indice): e' la conversione da
+    chiave interna a numero slide, fatta al momento della registrazione perche'
+    qui i segmenti non sono disponibili. Il caso normale (``by_index=False``)
+    restituisce quindi esattamente le voci di prima.
 
     Risponde a una domanda che prima non aveva risposta: *quali* confini la
     misura sostiene e quali no. Il riepilogo finale la usa per non presentare
@@ -2054,9 +2074,16 @@ def reset_refine_diagnostics() -> None:
     _REFINE_DIAGNOSTICS.clear()
 
 
-def _record_refine(slide: int, **fields: object) -> None:
-    """Registra la decisione su un confine (l'ultima per slide vince)."""
-    _REFINE_DIAGNOSTICS[slide] = {"slide": slide, **fields}
+def _record_refine(key: int, slide: int, **fields: object) -> None:
+    """Registra la decisione su un confine nella voce indicizzata da `key`.
+
+    `key` e' la chiave di lavoro (numero della slide, o indice del segmento con
+    ``by_index``): con slide ripetute due occorrenze hanno lo stesso numero ma
+    confini diversi e restano voci distinte. `slide` e' il numero della slide
+    da mostrare in ``refine_diagnostics()``, che non cambia rispetto al caso
+    normale.
+    """
+    _REFINE_DIAGNOSTICS[key] = {"slide": slide, **fields}
 
 
 def _refine_wins_under_perturbation(
@@ -2118,6 +2145,7 @@ def refine_segment_boundaries(
     anchors: dict[int, float] | None = None,
     max_candidates: int = 48,
     search_window: Mapping[int, tuple[float, float]] | None = None,
+    by_index: bool = False,
 ) -> list[dict[str, Any]]:
     """Rifinisce i confini dei segmenti a granularità di parola.
 
@@ -2160,6 +2188,12 @@ def refine_segment_boundaries(
     ancora esplicita possono muoversi. Di default (None) tutti i confini sono
     candidati (nessuna ancora).
 
+    ``by_index`` (opzionale) fa leggere ``refine_slides`` e ``search_window``
+    come INDICI di segmento invece che come numeri di slide: serve alla
+    riparazione guidata dai frame, dove una slide puo' comparire piu' volte
+    nella sequenza mostrata (``--skip-slides``) e la finestra va applicata
+    all'OCCORRENZA giusta, non a tutte le slide con lo stesso numero.
+
     Vincoli rispettati: monotonicità, durata minima ``min_segment_seconds``
     per i segmenti adiacenti e confini mai fuori dai limiti del segmento.
 
@@ -2192,7 +2226,10 @@ def refine_segment_boundaries(
             continue
         # Flusso ordinato: i confini delle slide con ancora esplicita sono
         # vincoli esatti (timestamp reali del parlato) e non vanno toccati.
-        if refine_slides is not None and int(out[i]["slide"]) not in refine_slides:
+        # `key` e' il numero della slide (default) o l'indice del segmento
+        # (riparazione guidata: con slide ripetute conta la posizione).
+        key = i if by_index else int(out[i]["slide"])
+        if refine_slides is not None and key not in refine_slides:
             continue
         if not (0 <= prev_slide < slide_emb.shape[0]) or not (0 <= next_slide < slide_emb.shape[0]):
             continue
@@ -2206,9 +2243,7 @@ def refine_segment_boundaries(
         # DOVE metterlo dentro la finestra che l'evidenza consente. Le due prove
         # di robustezza valgono quindi per il raffinamento libero (dove è il
         # punteggio a decidere se e dove muovere), non per la riparazione.
-        window = (
-            search_window.get(int(out[i]["slide"])) if search_window is not None else None
-        )
+        window = search_window.get(key) if search_window is not None else None
         guided = window is not None
         if window is not None:
             # Finestra imposta dall'esterno (verifica del video): il confine
@@ -2220,7 +2255,7 @@ def refine_segment_boundaries(
             hi = min(float(out[i]["end"]) - min_segment_seconds, max(float(whi), t_current))
         if hi <= lo:
             _record_refine(
-                int(out[i]["slide"]),
+                key, int(out[i]["slide"]),
                 from_slide=prev_slide + 1,
                 current=round(t_current, 2),
                 decision="non valutabile: nessun punto dove spostare il confine",
@@ -2237,7 +2272,7 @@ def refine_segment_boundaries(
             candidates = sorted(sampled)
         if len(candidates) < 2:
             _record_refine(
-                int(out[i]["slide"]),
+                key, int(out[i]["slide"]),
                 from_slide=prev_slide + 1,
                 current=round(t_current, 2),
                 decision="non valutabile: un solo timestamp candidato",
@@ -2258,7 +2293,7 @@ def refine_segment_boundaries(
             cand_pairs.append((t, before, after))
         if len(cand_pairs) < 2:
             _record_refine(
-                int(out[i]["slide"]),
+                key, int(out[i]["slide"]),
                 from_slide=prev_slide + 1,
                 current=round(t_current, 2),
                 decision="non valutabile: finestre di parlato vuote (silenzi)",
@@ -2268,7 +2303,7 @@ def refine_segment_boundaries(
         if cur_pair is None:
             # finestre vuote anche sul confine attuale: niente confronto equo
             _record_refine(
-                int(out[i]["slide"]),
+                key, int(out[i]["slide"]),
                 from_slide=prev_slide + 1,
                 current=round(t_current, 2),
                 decision="non valutabile: nessun confronto equo col confine attuale",
@@ -2295,7 +2330,7 @@ def refine_segment_boundaries(
             embs = np.asarray(_embed_list(embed_fn, texts, "Refine finestre"), dtype=np.float32)
             if embs.ndim != 2 or embs.shape[0] != len(texts):
                 _record_refine(
-                    int(out[i]["slide"]),
+                    key, int(out[i]["slide"]),
                     from_slide=prev_slide + 1,
                     current=round(t_current, 2),
                     decision="non valutabile: embedding delle finestre con forma inattesa",
@@ -2305,7 +2340,7 @@ def refine_segment_boundaries(
         except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
             log.warning("   [Refine] Embedding finestre non disponibile: confini invariati (%s).", e)
             _record_refine(
-                int(out[i]["slide"]),
+                key, int(out[i]["slide"]),
                 from_slide=prev_slide + 1,
                 current=round(t_current, 2),
                 decision="non valutabile: embedding delle finestre fallito",
@@ -2338,13 +2373,13 @@ def refine_segment_boundaries(
         }
         if best_idx == cur_idx:
             _record_refine(
-                int(out[i]["slide"]), **record, decision="tenuto: nessun candidato migliore"
+                key, int(out[i]["slide"]), **record, decision="tenuto: nessun candidato migliore"
             )
             continue
         record["guided"] = guided
         if not guided and delta < needed:
             _record_refine(
-                int(out[i]["slide"]), **record, decision="tenuto: margine dentro il rumore"
+                key, int(out[i]["slide"]), **record, decision="tenuto: margine dentro il rumore"
             )
             log.info(
                 "   [Refine] Confine TENUTO a %.1fs: il candidato migliore (%.1fs) "
@@ -2377,7 +2412,7 @@ def refine_segment_boundaries(
                     break
             if violates:
                 _record_refine(
-                    int(out[i]["slide"]), **record, decision="tenuto: violerebbe un'ancora"
+                    key, int(out[i]["slide"]), **record, decision="tenuto: violerebbe un'ancora"
                 )
                 continue
         # Prova di stabilità: il vincitore deve vincere anche guardando più
@@ -2395,7 +2430,7 @@ def refine_segment_boundaries(
             context_seconds,
         ):
             _record_refine(
-                int(out[i]["slide"]), **record, decision="tenuto: vince solo a finestra stretta"
+                key, int(out[i]["slide"]), **record, decision="tenuto: vince solo a finestra stretta"
             )
             log.info(
                 "   [Refine] Confine TENUTO a %.1fs: il candidato %.1fs vince con la "
@@ -2411,7 +2446,7 @@ def refine_segment_boundaries(
         out[i - 1]["end"] = best_t
         moved += 1
         _record_refine(
-            int(out[i]["slide"]),
+            key, int(out[i]["slide"]),
             **record,
             decision="spostato (guidato dall'evidenza)" if guided else "spostato",
         )
@@ -2592,6 +2627,9 @@ def repair_segments_from_frame_mismatches(
     if len(out) < 2 or not words or not mismatches:
         return [dict(s) for s in segments], []
 
+    # Chiavi = INDICI dei segmenti il cui inizio va spostato (`target`), non
+    # numeri di slide: con --skip-slides la stessa slide puo' comparire piu'
+    # volte e due mismatch distinti non devono confluire nella stessa finestra.
     ranges: dict[int, tuple[float, float]] = {}
     evidence: dict[int, dict[str, Any]] = {}
     for m in mismatches:
@@ -2645,13 +2683,12 @@ def repair_segments_from_frame_mismatches(
             # stare a `time` o dopo.
             lo = max(time, current)
             hi = min(float(out[idx]["end"]) - min_segment_seconds, current + max_shift_seconds)
-        slide_key = int(out[target]["slide"])
-        if slide_key in ranges:
-            rlo, rhi = ranges[slide_key]
-            ranges[slide_key] = (min(rlo, lo), max(rhi, hi))
+        if target in ranges:
+            rlo, rhi = ranges[target]
+            ranges[target] = (min(rlo, lo), max(rhi, hi))
         else:
-            ranges[slide_key] = (lo, hi)
-            evidence[slide_key] = {"shown": shown, "frame_time": round(time, 1)}
+            ranges[target] = (lo, hi)
+            evidence[target] = {"shown": shown, "frame_time": round(time, 1)}
 
     if not ranges:
         return [dict(s) for s in segments], []
@@ -2666,12 +2703,12 @@ def repair_segments_from_frame_mismatches(
         context_seconds=context_seconds,
         refine_slides=set(ranges),
         search_window=ranges,
+        by_index=True,
     )
 
     applied: list[dict[str, Any]] = []
     for i, seg in enumerate(refined):
-        slide = int(seg["slide"])
-        if i >= len(out) or slide not in ranges:
+        if i >= len(out) or i not in ranges:
             continue
         old = float(out[i]["start"])
         new = float(seg["start"])
@@ -2679,9 +2716,9 @@ def repair_segments_from_frame_mismatches(
             continue
         applied.append(
             {
-                "slide": slide,
-                "shown": evidence.get(slide, {}).get("shown"),
-                "frame_time": evidence.get(slide, {}).get("frame_time"),
+                "slide": int(seg["slide"]),
+                "shown": evidence.get(i, {}).get("shown"),
+                "frame_time": evidence.get(i, {}).get("frame_time"),
                 "old_start": round(old, 3),
                 "new_start": round(new, 3),
             }

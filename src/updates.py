@@ -609,6 +609,44 @@ def _pip_upgrade(packages: list[str]) -> bool:
     return True
 
 
+def _aggiorna_pin(versioni: dict[str, str]) -> None:
+    """Allinea requirements.txt e pin_overrides.json dopo un upgrade A/B riuscito.
+
+    Senza questo passo il prossimo avvio di `config._ensure_pip_packages`
+    rilegge il pin vecchio e reinstalla la versione appena scartata dal test:
+    l'upgrade durerebbe una sola run. In requirements.txt si cambia solo il
+    numero dopo ``==`` (markers e commenti restano intatti); il file nella cache
+    e' letto da config con le chiavi ``{"nome": "versione"}``.
+    """
+    req_path = BASE_DIR / "requirements.txt"
+    if req_path.exists():
+        try:
+            testo = req_path.read_text(encoding="utf-8")
+        except OSError as e:
+            log.warning("   ⚠️ Pin non letto da requirements.txt: %s", e)
+        else:
+            righe = testo.splitlines()
+            finale = testo.endswith("\n")
+            aggiornati: list[str] = []
+            for i, riga in enumerate(righe):
+                for nome, versione in versioni.items():
+                    trovato = re.match(rf"^({re.escape(nome)}\s*==\s*)([^\s;#]+)", riga, re.IGNORECASE)
+                    if trovato and trovato.group(2) != versione:
+                        righe[i] = trovato.group(1) + versione + riga[trovato.end(2) :]
+                        aggiornati.append(f"{nome}=={versione}")
+            if aggiornati:
+                try:
+                    atomic_write_text(req_path, "\n".join(righe) + ("\n" if finale else ""))
+                except OSError as e:
+                    log.warning("   ⚠️ Pin non scritto in requirements.txt: %s", e)
+                else:
+                    log.info("   📌 Pin aggiornato in requirements.txt: %s", ", ".join(aggiornati))
+    try:
+        atomic_write_text(CACHE_DIR / "pin_overrides.json", json.dumps(versioni, ensure_ascii=False, indent=2))
+    except OSError as e:
+        log.warning("   ⚠️ Override pin non scritto in pin_overrides.json: %s", e)
+
+
 def _ask_yes_no(prompt: str) -> bool:
     """Chiede conferma all'utente (S/N). True se risponde sì.
 
@@ -661,6 +699,7 @@ def run_update_check(
     # Il test crea una venv temporanea e installa la candidata: e' lento,
     # quindi prima si chiede il permesso esplicito (S/N). Senza permesso
     # (o senza terminale: EOF) i pinnati restano come ora, senza verifiche.
+    pin_accettati: dict[str, str] = {}
     if pinned_upd:
         nomi = ", ".join(f"{d['name']} ({d['installed']} -> {d['latest']})" for d in pinned_upd)
         if _ask_yes_no(
@@ -671,6 +710,7 @@ def run_update_check(
                 if verdict == "EQUIVALENTE":
                     log.info("   ✅ %s: equivalente -> SI, procedi (incluso nell'aggiornamento).", d["name"])
                     names.append(d["name"])
+                    pin_accettati[d["name"]] = d["latest"]
                 elif verdict == "DIVERGENTE":
                     log.info("   🔒 %s: divergente -> NO, lascia come ora (resta pinnato).", d["name"])
                 else:
@@ -683,7 +723,12 @@ def run_update_check(
         return
 
     if _ask_yes_no(f"Aggiornare {len(names)} pacchetto/i ({', '.join(names)})?"):
-        _pip_upgrade(names)
+        esito = _pip_upgrade(names)
+        # I pinnati A/B vanno "sbloccati" anche su disco: altrimenti il
+        # prossimo bootstrap rimetterebbe la versione vecchia. Solo se pip ha
+        # davvero installato: un upgrade fallito non deve cambiare i pin.
+        if esito and pin_accettati:
+            _aggiorna_pin(pin_accettati)
         # Invalida la cache così al prossimo avvio riverifica da zero
         UPDATES_CACHE.unlink(missing_ok=True)
     else:

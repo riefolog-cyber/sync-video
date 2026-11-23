@@ -20,8 +20,12 @@ import shutil
 import time
 from pathlib import Path
 
-# Cartelle con i pesi ML: cancellarle costa GB di re-download.
-MODEL_DIRS = ("embedding_model", "whisper_openvino_small", "whisper_openvino_base", "whisper_openvino_medium")
+# Cartelle con i pesi ML: cancellarle costa GB di re-download. Si scoprono
+# nella cache invece di stare in un elenco fisso: con l'elenco fisso un modello
+# aggiunto dopo (es. whisper_openvino_tiny) non veniva mai rimosso, nemmeno con
+# --clean-cache --include-models.
+EMBEDDING_MODEL_DIR = "embedding_model"
+OPENVINO_MODEL_PREFIX = "whisper_openvino_"
 # I parziali di una trascrizione interrotta (transcription.percorso_parziale)
 # stanno in una SOTTOCARTELLA: la pulizia degli orfani guarda i .json in radice
 # e non li vede, quindi senza questa regola resterebbero per sempre.
@@ -40,6 +44,23 @@ KEEP_STEMS = frozenset(
         "openvino_attempt",
     }
 )
+
+
+def _model_dirs(cache_dir: Path) -> list[str]:
+    """Cartelle dei modelli pesanti presenti in ``cache_dir``.
+
+    ``embedding_model`` resta prima (ordine storico dei messaggi), poi le
+    ``whisper_openvino_*`` in ordine alfabetico. La scoperta dinamica copre
+    anche i modelli non ancora noti al momento della scrittura di questo modulo.
+    """
+    trovati: list[str] = []
+    if (cache_dir / EMBEDDING_MODEL_DIR).is_dir():
+        trovati.append(EMBEDDING_MODEL_DIR)
+    with contextlib.suppress(OSError):
+        trovati.extend(
+            sorted(p.name for p in cache_dir.iterdir() if p.is_dir() and p.name.startswith(OPENVINO_MODEL_PREFIX))
+        )
+    return trovati
 
 
 def _dir_size(cartella: Path) -> int:
@@ -139,7 +160,7 @@ def clean_cache(
                     esito["parziali"] += 1
     # 5. modelli pesanti SOLO su richiesta esplicita.
     if include_models:
-        for nome in MODEL_DIRS:
+        for nome in _model_dirs(cache_dir):
             cartella = cache_dir / nome
             if cartella.exists():
                 try:

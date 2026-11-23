@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import pymupdf as fitz
+
 import ocr as ocr_module
 from ocr import (
     _find_genoffice,
@@ -33,6 +35,20 @@ from ocr import (
     _office_converter_script,
     convert_presentation_to_pdf,
 )
+
+
+def _pdf_minimo() -> bytes:
+    """PDF valido di una pagina: i converter finti devono produrlo davvero.
+
+    La produzione valida il PDF con PyMuPDF, quindi un file finto verrebbe
+    scartato come danneggiato (ed e' il difetto che la validazione cerca).
+    """
+    doc = fitz.open()
+    try:
+        doc.new_page()
+        return bytes(doc.tobytes())
+    finally:
+        doc.close()
 
 
 def _winreg_importabile() -> bool:
@@ -238,7 +254,7 @@ class _ConverterCommune(unittest.TestCase):
 
     def _converter_finto(self) -> Any:
         def _run(*_a: object, **_k: object) -> mock.Mock:
-            self.pdf.write_bytes(b"pdf nuovo")
+            self.pdf.write_bytes(_pdf_minimo())
             return mock.Mock(returncode=0, stderr="", stdout="")
 
         return mock.patch("ocr.subprocess.run", side_effect=_run)

@@ -295,8 +295,8 @@ rem    per arrivare all'interprete appena installato. Vince la versione piu'
 rem    alta come prima, ma solo se passa la sonda (i 'goto scelto' diretti
 rem    dopo ogni riga la scavalcavano). Piatto con goto, senza blocchi.
 set "PY_CMD="
-if not exist "%LOCALAPPDATA%\Programs\Python\Python314\python.exe" goto pp313
-"%LOCALAPPDATA%\Programs\Python\Python314\python.exe" -c "%_SONDA%" >NUL 2>&1 && set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python314\python.exe"" && goto scelto
+rem La 3.14 non si cerca: la sonda accetta solo 3.10 - 3.13 (hardware.py),
+rem quindi verrebbe scartata comunque. Si comincia dalla 3.13.
 :pp313
 if not exist "%LOCALAPPDATA%\Programs\Python\Python313\python.exe" goto pp312
 "%LOCALAPPDATA%\Programs\Python\Python313\python.exe" -c "%_SONDA%" >NUL 2>&1 && set "PY_CMD="%LOCALAPPDATA%\Programs\Python\Python313\python.exe"" && goto scelto

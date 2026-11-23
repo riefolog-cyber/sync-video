@@ -14,12 +14,29 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pymupdf as fitz
+
 from ocr import (
     _lingue_disponibili,
     _ocr_single_slide,
     convert_presentation_to_pdf,
     extract_slides_text_ocr,
 )
+
+
+def _pdf_minimo() -> bytes:
+    """PDF valido di una pagina: i converter finti devono produrlo davvero.
+
+    La validazione in produzione apre il PDF con PyMuPDF, quindi un semplice
+    `b"pdf nuovo"` verrebbe scartato come troncato (ed e' proprio il difetto
+    che la validazione deve intercettare).
+    """
+    doc = fitz.open()
+    try:
+        doc.new_page()
+        return doc.tobytes()
+    finally:
+        doc.close()
 
 
 class TestOcrTuttoVuoto(unittest.TestCase):
@@ -104,7 +121,9 @@ class TestConvertPresentationToPdf(unittest.TestCase):
             run.assert_not_called()
         self.assertEqual(result, self.pdf)
 
-    def _mock_converter(self, content=b"pdf nuovo", returncode=0):
+    def _mock_converter(self, content=None, returncode=0):
+        if content is None:
+            content = _pdf_minimo()
         """Converter finto che SCRIVE davvero il PDF, come fa soffice/x2t.
 
         Necessario da quando il bootstrap rimuove il PDF stantio prima di
@@ -123,7 +142,8 @@ class TestConvertPresentationToPdf(unittest.TestCase):
         self.pdf.write_bytes(b"pdf stantio")
         marker = self.out_dir / "presentazione.src_md5"
         marker.write_text("hash_obsoleto", encoding="ascii")
-        with mock.patch("ocr._find_soffice", return_value="soffice"), self._mock_converter():
+        atteso = _pdf_minimo()
+        with mock.patch("ocr._find_soffice", return_value="soffice"), self._mock_converter(content=atteso):
             result = convert_presentation_to_pdf(self.ppt, self.out_dir)
         self.assertEqual(result, self.pdf)
         # dopo la riconversione, il marker è aggiornato all'hash corrente
@@ -131,7 +151,7 @@ class TestConvertPresentationToPdf(unittest.TestCase):
 
         self.assertEqual(marker.read_text(encoding="ascii").strip(), _file_md5(self.ppt))
         # e il PDF è quello NUOVO, non quello lasciato dalla run precedente
-        self.assertEqual(self.pdf.read_bytes(), b"pdf nuovo")
+        self.assertEqual(self.pdf.read_bytes(), atteso)
 
     def test_no_marker_forces_reconvert(self):
         self.pdf.write_bytes(b"pdf senza marker")

@@ -1,5 +1,3 @@
-<!-- Estratto da README.md (righe 877-955). Torna al [README](../README.md). -->
-
 ## 📁 Struttura progetto
 
 ```
@@ -54,7 +52,7 @@ Comandi verificati per chi modifica il codice:
 # Verifica completa in un colpo: CI + mypy 3 piattaforme + debug hardware
 python src/controlli.py
 
-# Test (suite completa, unittest - 1262 test)
+# Test (suite completa, unittest - 1297 test)
 python -m unittest discover -s src -p "test_*.py"
 
 # Type-check (mypy: codice di produzione e test, tranne la deny-list in mypy.ini)

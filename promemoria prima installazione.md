@@ -16,8 +16,9 @@ ffmpeg, i pacchetti e i modelli, poi genera il video.
 
 Restano due cose che il programma non può fare al posto tuo:
 
-- **~9 GB di spazio libero** (modelli al primo avvio, una tantum). Se lo
-  spazio non basta te lo dice prima di scaricare, con la cifra.
+- **~2,6 GB di spazio libero** per i modelli al primo avvio, una tantum
+  (embedding ~2,1 GB + Whisper ~0,5 GB; il controllo usa 6,4 GB, caso peggiore
+  storico). Se lo spazio non basta te lo dice prima di scaricare, con la cifra.
 - **I tuoi due file**: la presentazione e l'audio.
 
 Su **Linux e macOS il programma non è supportato** (vedi l'avviso in cima al

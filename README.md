@@ -234,7 +234,7 @@ Questo README copre avvio rapido e uso quotidiano. Il resto e' in [`docs/`](docs
 | [`docs/struttura.md`](docs/struttura.md) | Struttura progetto |
 | [`docs/funzionamento.md`](docs/funzionamento.md) | Come funziona |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Troubleshooting |
-| [`docs/PIANO_OTTIMIZZAZIONI.md`](docs/PIANO_OTTIMIZZAZIONI.md) | Registro delle ottimizzazioni (batch 1→10: cosa è stato fatto e misurato) |
+| [`docs/PIANO_OTTIMIZZAZIONI.md`](docs/PIANO_OTTIMIZZAZIONI.md) | Registro delle ottimizzazioni (batch 1→11: cosa è stato fatto e misurato) |
 
 | [`docs/sync-video-architecture.html`](docs/sync-video-architecture.html) | Diagramma architettura |
 

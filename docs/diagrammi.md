@@ -1,5 +1,3 @@
-<!-- Estratto da README.md (righe 819-839). Torna al [README](../README.md). -->
-
 ## 📊 Diagrammi (archify)
 
 Lo schema interattivo dell'architettura di questa app è generato con

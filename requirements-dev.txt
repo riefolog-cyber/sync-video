@@ -9,3 +9,6 @@
 -r requirements.txt
 mypy>=1.10.0
 ruff>=0.16.0
+# Usato direttamente da src/test_controlli.py: prima arrivava solo come
+# dipendenza transitiva, meglio dichiararlo esplicitamente.
+PyYAML>=6.0

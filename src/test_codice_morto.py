@@ -12,7 +12,7 @@ togli l'unico confronto che poteva accorgersi di una regressione
 nell'ottimizzazione. Un codice morto che, se rimosso, rompe la rete di
 sicurezza.
 
-`test_cerca_il_codice_morto.py` elenca questi nomi; se uno sparisce o
+`test_codice_morto.py` elenca questi nomi; se uno sparisce o
 perde la spiegazione, questo test fallisce.
 
 Esegui con: python -m unittest test_codice_morto -v
@@ -111,10 +111,13 @@ class TestCodiceCheSembraMorto(unittest.TestCase):
         for nome, (_, _, atteso) in ORACOLI.items():
             with self.subTest(nome=nome):
                 citati = _citati_dai_test(nome)
-                self.assertTrue(
+                # Il nome del test non serve solo a corredare il messaggio di
+                # errore: e' la prova che il riferimento viene usato DAVVERO
+                # nel confronto atteso, non in un qualunque test a caso.
+                self.assertIn(
+                    atteso,
                     citati,
-                    f"{nome} non e' chiamato da nessun test: e' codice morto, "
-                    f"non un riferimento (atteso: {atteso})",
+                    f"{nome}: atteso in {atteso}, citato invece da {citati}",
                 )
 
     def test_main_non_le_chiama(self) -> None:

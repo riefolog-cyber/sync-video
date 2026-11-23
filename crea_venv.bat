@@ -91,12 +91,26 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo Verifica degli import...
-"%VENV_PY%" -c "import fastembed, faster_whisper, moviepy, pymupdf, pytesseract"
+rem Su ARM64 requirements.txt esclude faster_whisper (CTranslate2 non ha
+rem wheel win_arm64): importarlo qui farebbe fallire la verifica sempre.
+rem _python.bat imposta SYNC_VIDEO_ARCH ma lo pulisce in uscita, quindi si
+rem interroga anche l'interprete, con lo stesso marcatore di requirements.txt.
+set "_SKIP_FASTER_WHISPER=0"
+if defined SYNC_VIDEO_ARCH if /i "%SYNC_VIDEO_ARCH%"=="ARM64" set "_SKIP_FASTER_WHISPER=1"
+"%VENV_PY%" -c "import platform,sys;sys.exit(0 if platform.machine() in ('ARM64','aarch64') else 1)"
+if not errorlevel 1 set "_SKIP_FASTER_WHISPER=1"
+if "%_SKIP_FASTER_WHISPER%"=="1" (
+    echo faster_whisper escluso da requirements.txt su ARM64: import saltato.
+    "%VENV_PY%" -c "import fastembed, moviepy, pymupdf, pytesseract"
+) else (
+    "%VENV_PY%" -c "import fastembed, faster_whisper, moviepy, pymupdf, pytesseract"
+)
 if %ERRORLEVEL% NEQ 0 (
     echo [ERRORE] Qualche pacchetto non si importa: lancia aggiornamenti.bat.
     set "EXIT=1"
     goto fine
 )
+set "_SKIP_FASTER_WHISPER="
 
 echo.
 echo ========================================

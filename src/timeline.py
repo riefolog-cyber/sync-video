@@ -1981,7 +1981,15 @@ def enforce_min_durations(
                 prev = ordered[i - 1]
                 candidate = min(work[s], end - min_seconds)
                 candidate = max(candidate, work[prev] + min_seconds)
-                if work[s] - candidate > _MIN_BOUNDARY_MOVE_SECONDS:
+                # Il `max` puo' spingere lo start oltre `end - min_seconds`: in
+                # quel caso la slide resterebbe corta. Non applicare (ne'
+                # dichiarare come "garantito") uno spostamento che non raggiunge
+                # la durata minima: il confine resta fermo qui e si prova l'altro
+                # ramo; se nessuno allunga, e' il chiamante a segnalare la slide.
+                if (
+                    end - candidate >= min_seconds - 1e-3
+                    and work[s] - candidate > _MIN_BOUNDARY_MOVE_SECONDS
+                ):
                     moved.append((s, work[s], candidate))
                     work[s] = candidate
                     changed = True

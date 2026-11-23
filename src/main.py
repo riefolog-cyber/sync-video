@@ -29,13 +29,13 @@ from config import (
     CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
     DEFAULT_FALLBACK_FLOW,
+    DEFAULT_OPENVINO_MODEL_ID,
     DEFAULT_PDF,
     DEFAULT_RECOVERY_MAX_ZONE_SHARE,
     DEFAULT_VIDEO_BUFFER_SEC,
     DEFAULT_VIDEO_FPS,
     DEFAULT_VIDEO_THREADS,
     DEFAULT_WHISPER_BEAM_ACCURATE,
-    DEFAULT_WHISPER_DEVICE,
     DEFAULT_WHISPER_THREADS,
     STOPWORDS_ITA,
     WHISPER_REVISIONI,
@@ -1669,6 +1669,18 @@ def _build_sync_report(
 # =====================================================================
 # CACHE SYSTEM (primitive in pipeline_cache.py, re-esportate sopra)
 # =====================================================================
+def _openvino_model_fingerprint(args: Any) -> str:
+    """Impronta corta del modello IR che PRODUCE la trascrizione OpenVINO.
+
+    La cartella e' un percorso (su Windows contiene ':' e '\\', e spesso '_'
+    nel nome): non puo' entrare tale e quale in un nome di file, ne' nella
+    chiave separata da '_' che `_spiega_trascrizione_rifatta` sa leggere.
+    L'hash identifica comunque in modo univoco cartella + ID del modello.
+    """
+    identita = f"{args.openvino_model_dir}|{DEFAULT_OPENVINO_MODEL_ID}"
+    return hashlib.sha1(identita.encode("utf-8")).hexdigest()[:12]
+
+
 def _transcript_params(audio_hash: str, args: Any, beam: int | None = None) -> dict[str, str]:
     """Parametri che determinano il TESTO prodotto da una trascrizione.
 
@@ -1679,7 +1691,15 @@ def _transcript_params(audio_hash: str, args: Any, beam: int | None = None) -> d
     """
     engine = resolved_transcriber(args.transcriber, Path(args.openvino_model_dir))
     if engine == "openvino":
-        engine_params = [args.openvino_device, "decode-ffmpeg-f32le"]
+        # Il testo dipende dal modello IR, non solo dal device: due modelli
+        # diversi nella stessa cartella (o due OPENVINO_MODEL_ID) producono
+        # parole e timestamp diversi. L'impronta di entrambi entra nei params,
+        # altrimenti cambiare modello riusa in silenzio la trascrizione vecchia.
+        engine_params = [
+            args.openvino_device,
+            "decode-ffmpeg-f32le",
+            _openvino_model_fingerprint(args),
+        ]
     else:
         engine_params = [
             args.whisper_device,
@@ -1729,7 +1749,8 @@ def _transcript_cache_key(audio_hash: str, args: Any, beam: int | None = None) -
     Deve descrivere TUTTE le scelte che cambiano il testo prodotto: il motore
     RISOLTO ('auto' non dice nulla: può essere OpenVINO o faster-whisper),
     modello, e i parametri del motore effettivamente usato (device, compute
-    type, beam, batch per faster-whisper; device per OpenVINO).
+    type, beam, batch per faster-whisper; device, cartella e ID del modello IR
+    per OpenVINO).
 
     Senza questo, cambiare `--whisper-beam`/`--whisper-batch`, il compute type
     o il device riusava in silenzio la trascrizione prodotta con altre
@@ -1743,7 +1764,15 @@ def _transcript_cache_key(audio_hash: str, args: Any, beam: int | None = None) -
     """
     engine = resolved_transcriber(args.transcriber, Path(args.openvino_model_dir))
     if engine == "openvino":
-        engine_params = [args.openvino_device, "decode-ffmpeg-f32le"]
+        # Stessi parametri di `_transcript_params`: la chiave e i `params` che
+        # identificano una trascrizione devono cambiare insieme, altrimenti
+        # `_trascrizione_equivalente` puo' far riusare il testo del modello
+        # precedente con la chiave nuova.
+        engine_params = [
+            args.openvino_device,
+            "decode-ffmpeg-f32le",
+            _openvino_model_fingerprint(args),
+        ]
     else:
         engine_params = [
             args.whisper_device,
@@ -1757,6 +1786,9 @@ def _transcript_cache_key(audio_hash: str, args: Any, beam: int | None = None) -
 
 # I campi che `_transcript_cache_key` unisce, nell'ordine in cui li unisce: qui
 # servono a dare un NOME alla differenza quando la cache non si può riusare.
+# I due motori non hanno gli stessi parametri (faster-whisper ha beam e batch,
+# OpenVINO ha il tag di decodifica e l'impronta del modello IR), quindi servono
+# due mappe: la scelta si legge dal campo 'motore', all'indice 4.
 _CAMPI_CHIAVE_TRASCRIZIONE = (
     "chiave",
     "audio",
@@ -1767,6 +1799,16 @@ _CAMPI_CHIAVE_TRASCRIZIONE = (
     "compute",
     "beam",
     "batch",
+)
+_CAMPI_CHIAVE_OPENVINO = (
+    "chiave",
+    "audio",
+    "lingua",
+    "modello",
+    "motore",
+    "device",
+    "decodifica",
+    "ovino_modello",
 )
 
 
@@ -1793,13 +1835,15 @@ def _spiega_trascrizione_rifatta(cache_key: str, audio_hash: str) -> str:
         # I nomi dei campi valgono solo se le tre sequenze hanno la stessa
         # lunghezza: un formato di chiave diverso si dichiara, non si indovina
         # (la mappa mentirebbe sui nomi, ed è peggio di un messaggio generico).
-        if len(campi) != len(attuale) or len(attuale) != len(_CAMPI_CHIAVE_TRASCRIZIONE):
+        motore = attuale[4] if len(attuale) > 4 else ""
+        nomi = (
+            _CAMPI_CHIAVE_OPENVINO if motore == "openvino" else _CAMPI_CHIAVE_TRASCRIZIONE
+        )
+        if len(campi) != len(attuale) or len(attuale) != len(nomi):
             return "stesso audio, ma i parametri sono cambiati (formato di chiave diverso)"
         diversi = [
             f"{nome}: {vecchio} -> {nuovo}"
-            for nome, vecchio, nuovo in zip(
-                _CAMPI_CHIAVE_TRASCRIZIONE, campi, attuale, strict=True
-            )
+            for nome, vecchio, nuovo in zip(nomi, campi, attuale, strict=True)
             if vecchio != nuovo
         ]
         if diversi:
@@ -2962,6 +3006,40 @@ def _cache_key_slides(pdf_hash: str, dpi: int, lang: str) -> str:
     return f"slides_{pdf_hash[:12]}_{dpi}_{lang}_{_SLIDE_CACHE_VERSION}"
 
 
+def _scrivi_sottotitoli_mostrati(
+    output_path: Path,
+    words_raw: Sequence[Word],
+    durations: Sequence[float],
+    slide_ids: Sequence[int],
+    slide_texts: Sequence[str],
+    total_duration: float,
+) -> None:
+    """Scrive sottotitoli e capitoli sulla sequenza che il video MOSTRA.
+
+    Timeline e testi vengono ricalcati sulle POSIZIONI del video (una slide puo'
+    comparire piu' volte con --skip-slides, quindi il numero di slide non basta
+    come chiave). Richiamabile due volte: la seconda dopo un'auto-riparazione
+    che ha spostato i confini, per non lasciare capitoli con gli orari vecchi.
+    """
+    _timeline_mostrata: dict[int, float] = {}
+    _testi_mostrati: list[str] = []
+    _inizio_mostrato = 0.0
+    for _pos, (_slide_mostrato, _dur_mostrata) in enumerate(
+        zip(slide_ids, durations, strict=True), start=1
+    ):
+        _timeline_mostrata[_pos] = _inizio_mostrato
+        _testi_mostrati.append(slide_texts[int(_slide_mostrato) - 1])
+        _inizio_mostrato += float(_dur_mostrata)
+    scrivi_sottotitoli(
+        output_path,
+        words_raw,
+        _timeline_mostrata,
+        _testi_mostrati,
+        durata=total_duration,
+        numeri_slide=[int(s) for s in slide_ids],
+    )
+
+
 def main(argv: list | None = None) -> None:
     args = parse_args(argv)
 
@@ -2982,19 +3060,77 @@ def main(argv: list | None = None) -> None:
 
         sys.exit(rigenera(CACHE_DIR, Path(args.output_video)))
 
-    # --- Misura / pulizia cache e uscita (P1: policy sicura) ---
-    # PRIMA di bootstrap/setup/update-check: sono comandi di ispezione che non
-    # devono scaricare nulla né chiedere conferme di aggiornamento.
-    if args.cache_du or args.clean_cache:
-        from cache_maintenance import cache_disk_usage, clean_cache, format_bytes
+    # --- Misura cache e uscita (P1: policy sicura) ---
+    # PRIMA di bootstrap/setup/update-check: e' un comando di ispezione che non
+    # deve scaricare nulla né chiedere conferme di aggiornamento. Anche
+    # --frozen-report e --review (piu' giu') sono di sola lettura e restano
+    # fuori dal blocco run. --clean-cache, che CANCELLA, sta dopo il blocco.
+    if args.cache_du:
+        from cache_maintenance import cache_disk_usage, format_bytes
 
-        if args.cache_du:
-            righe = cache_disk_usage(CACHE_DIR)
-            totale = sum(peso for _, peso in righe)
-            log.info("Peso della cache (%s): %s", CACHE_DIR, format_bytes(totale))
-            for nome, peso in righe:
-                log.info("   %-42s %10s", nome, format_bytes(peso))
-            return
+        righe = cache_disk_usage(CACHE_DIR)
+        totale = sum(peso for _, peso in righe)
+        log.info("Peso della cache (%s): %s", CACHE_DIR, format_bytes(totale))
+        for nome, peso in righe:
+            log.info("   %-42s %10s", nome, format_bytes(peso))
+        return
+
+    # --- Diagnostica dei pacchetti fermi e uscita ---
+    # Anche questo prima di bootstrap/setup/update-check, per lo stesso motivo: è un
+    # referto. Legge la metadata installata e l'API di PyPI (nessun download, nessuna
+    # installazione, nessuna domanda) e spiega perché certi pacchetti non si muovono.
+    if args.frozen_report:
+        run_frozen_report()
+        return
+
+    # --- Revisione di una run già fatta e uscita ---
+    # Stesso criterio dei comandi sopra: solo lettura dal disco (report,
+    # trascrizione, video), nessun download, nessuna domanda. Rivedere un
+    # confine non deve costare una pipeline intera né far ricaricare il modello
+    # di embedding: il report e i tempi di quella run sono già in .cache/.
+    if args.review:
+        _review_boundary_doubts(Path(args.output_video))
+        return
+
+    # --- Blocco: una run per volta sulla stessa cartella ---
+    # Due run insieme si pestano a vicenda (le slide, la cache, i frame di
+    # verifica): il risultato e' un video a meta' costruito con i pezzi
+    # dell'altro, senza errori in console. Il blocco e' del sistema operativo,
+    # quindi se la run muore il blocco muore con lei: nessun file da pulire a
+    # mano.
+    #
+    # Se l'altra run e' ancora al lavoro, questa ASPETTA (un quarto d'ora):
+    # di solito e' un rilancio mentre la prima finisce, non due run in
+    # competizione.
+    _blocco = BloccoRun(CACHE_DIR)
+    # Tre esiti, non due. `NON_DISPONIBILE` (file di blocco non creabile:
+    # cartella in sola lettura, ACL, disco pieno) NON e' una ragione per
+    # fermarsi: prima questo caso era indistinguibile da "occupato" e faceva
+    # aspettare un quarto d'ora per poi abortire, contro il commento di
+    # blocco_run ("meglio una run che puo' pestarsi che una run che non
+    # parte").
+    _esito_blocco = _blocco.tenta(attesa_secondi=_BLOCCO_ATTESA_SECONDI)
+    if _esito_blocco == OCCUPATO:
+        _abort(
+            "Un'altra run è già in corso su questa cartella (blocco "
+            f"{_blocco.path}). Due run insieme si pestano le slide e le cache: "
+            "aspetta che l'altra finisca e rilancia."
+        )
+    if _esito_blocco == NON_DISPONIBILE:
+        log.warning(
+            "   File di blocco non creabile (%s): proseguo senza blocco delle run concorrenti.",
+            _blocco.path,
+        )
+
+    # --- Pulizia cache (OPERAZIONE DISTRUTTIVA) ---
+    # Dopo il blocco run: `--clean-cache --include-models --yes` cancella
+    # modelli, embedding e frame di verifica. Fuori dal blocco poteva girare
+    # insieme a una pipeline attiva e cancellarle sotto i piedi. Restano prima
+    # del blocco solo i comandi di sola lettura (--cache-du, --frozen-report,
+    # --review), che non toccano nulla.
+    if args.clean_cache:
+        from cache_maintenance import clean_cache, format_bytes
+
         # --clean-cache: i modelli pesanti solo con --include-models + conferma.
         if args.include_models and not args.yes and sys.stdin.isatty():
             try:
@@ -3053,53 +3189,6 @@ def main(argv: list | None = None) -> None:
             log.info("   Cache dei materiali in questa cartella conservata (%d chiavi).", len(attive))
         return
 
-    # --- Diagnostica dei pacchetti fermi e uscita ---
-    # Anche questo prima di bootstrap/setup/update-check, per lo stesso motivo: è un
-    # referto. Legge la metadata installata e l'API di PyPI (nessun download, nessuna
-    # installazione, nessuna domanda) e spiega perché certi pacchetti non si muovono.
-    if args.frozen_report:
-        run_frozen_report()
-        return
-
-    # --- Revisione di una run già fatta e uscita ---
-    # Stesso criterio dei comandi sopra: solo lettura dal disco (report,
-    # trascrizione, video), nessun download, nessuna domanda. Rivedere un
-    # confine non deve costare una pipeline intera né far ricaricare il modello
-    # di embedding: il report e i tempi di quella run sono già in .cache/.
-    if args.review:
-        _review_boundary_doubts(Path(args.output_video))
-        return
-
-    # --- Blocco: una run per volta sulla stessa cartella ---
-    # Due run insieme si pestano a vicenda (le slide, la cache, i frame di
-    # verifica): il risultato e' un video a meta' costruito con i pezzi
-    # dell'altro, senza errori in console. Il blocco e' del sistema operativo,
-    # quindi se la run muore il blocco muore con lei: nessun file da pulire a
-    # mano.
-    #
-    # Se l'altra run e' ancora al lavoro, questa ASPETTA (un quarto d'ora):
-    # di solito e' un rilancio mentre la prima finisce, non due run in
-    # competizione.
-    _blocco = BloccoRun(CACHE_DIR)
-    # Tre esiti, non due. `NON_DISPONIBILE` (file di blocco non creabile:
-    # cartella in sola lettura, ACL, disco pieno) NON e' una ragione per
-    # fermarsi: prima questo caso era indistinguibile da "occupato" e faceva
-    # aspettare un quarto d'ora per poi abortire, contro il commento di
-    # blocco_run ("meglio una run che puo' pestarsi che una run che non
-    # parte").
-    _esito_blocco = _blocco.tenta(attesa_secondi=_BLOCCO_ATTESA_SECONDI)
-    if _esito_blocco == OCCUPATO:
-        _abort(
-            "Un'altra run è già in corso su questa cartella (blocco "
-            f"{_blocco.path}). Due run insieme si pestano le slide e le cache: "
-            "aspetta che l'altra finisca e rilancia."
-        )
-    if _esito_blocco == NON_DISPONIBILE:
-        log.warning(
-            "   File di blocco non creabile (%s): proseguo senza blocco delle run concorrenti.",
-            _blocco.path,
-        )
-
     # Bootstrap esplicito: verifica dipendenze prima di tutto
     # `ignora_spazio`: di default, se lo spazio non basta per i modelli il
     # bootstrap FERMA il download invece di avvisare e proseguire. Un download
@@ -3110,7 +3199,14 @@ def main(argv: list | None = None) -> None:
     # viene nascosto da un ripiego silenzioso su CPU. Va segnalato PRIMA che
     # machine_setup riscriva il device in modalita' auto: da quel momento non si
     # saprebbe piu' cosa aveva scelto l'utente. Stesso criterio di `_apply`.
-    args.whisper_device_explicit = args.whisper_device != DEFAULT_WHISPER_DEVICE
+    # `DEFAULT_WHISPER_DEVICE` viene da WHISPER_DEVICE (anche dal .env): usarlo
+    # come termine di confronto faceva coincidere sempre i due valori, perche'
+    # e' anche il default di argparse. Confronta con il ripiego reale ('cpu')
+    # e considera esplicita la presenza della variabile d'ambiente: un
+    # `WHISPER_DEVICE=cuda` nel .env deve far avvisare se CUDA non si puo' usare.
+    args.whisper_device_explicit = (
+        args.whisper_device != "cpu" or "WHISPER_DEVICE" in os.environ
+    )
 
     # --- Rilevamento hardware automatico al primo avvio ---
     # Sceglie il motore migliore per il PC (NVIDIA->CUDA, iGPU Intel->OpenVINO,
@@ -4285,15 +4381,31 @@ def main(argv: list | None = None) -> None:
         # non deve poterle spostare di nuovo. Validazione stretta: un override
         # incoerente viene rifiutato, non aggiustato.
         _indicato = getattr(args, "timeline_override", "") or ""
-        _op = _percorso_override(_indicato, Path(args.output))
+        _op = _percorso_override(_indicato, Path(args.output_video))
         _fix = getattr(args, "fix_slide", None) or []
         if _fix:
-            # Scritto prima di leggerlo: la correzione da riga di comando e
-            # quella scritta a mano sono lo stesso file, una non cancella l'altra.
+            # La correzione da riga di comando e quella scritta a mano sono lo
+            # stesso file, una non cancella l'altra. MA il file va scritto solo
+            # DOPO la validazione: un override invalido salvato qui verrebbe
+            # riletto a ogni avvio successivo, bloccando tutte le run future.
             try:
                 fissaggi = fissaggi_da_voci(_fix)
             except ValueError as e:
                 _abort(f"--fix-slide non valido: {e}")
+            try:
+                esistenti = leggi_override(_op) if _op.exists() else {}
+                da_validare = dict(esistenti)
+                da_validare.update(fissaggi)
+                # Stessa validazione che si fa piu' giu' sul file letto: la
+                # timeline passata e' una copia, applica_override non la tocca.
+                applica_override(
+                    timeline, da_validare, total_duration, min_slide_seconds
+                )
+            except ValueError as e:
+                _abort(
+                    f"--fix-slide non applicabile ({_op.name}): {e}. "
+                    "Il file di override non e' stato modificato."
+                )
             nel_file = aggiorna_file(_op, fissaggi)
             log.info(
                 "   --fix-slide: %d correzioni scritte in %s (%d nel file).",
@@ -4377,15 +4489,6 @@ def main(argv: list | None = None) -> None:
                 "post-run non userà dati vecchi.",
                 e,
             )
-
-        # --- Sottotitoli e capitoli ---
-        # Due file che il lavoro gia' fatto permette senza analisi nuova: la
-        # trascrizione ha i tempi delle parole, la timeline sa quando entra
-        # ogni slide. Si scrivono anche in --dry-run, perche' sono il modo piu'
-        # economico di controllare i confini senza guardare il video.
-        scrivi_sottotitoli(
-            Path(args.output), words_raw, timeline, slide_texts, durata=total_duration
-        )
 
         # --- Avviso: slide quasi non coperte dalla narrazione ---
         thin = [slide_ids[i] for i, d in enumerate(durations) if d < 2 * args.semantic_min_duration]
@@ -4573,9 +4676,18 @@ def main(argv: list | None = None) -> None:
         # loro segmenti il video mostra la slide precedente valida: l'audio
         # resta sincronizzato e il video mostra solo le slide coperte.
         if args.skip_slides:
-            skip_set = {
-                int(x) for x in args.skip_slides.split(",") if x.strip().isdigit()
-            }
+            token_slide = [x.strip() for x in args.skip_slides.split(",")]
+            non_validi = [x for x in token_slide if not x.isdigit()]
+            if non_validi:
+                # Prima venivano ignorati in silenzio: `--skip-slides 4,abc,9`
+                # applicava 4 e 9 senza dire niente, e chi aveva sbagliato a
+                # scrivere il numero credeva di aver saltato anche quell'altro.
+                log.warning(
+                    "   [Skip] Token non validi ignorati in --skip-slides: %s "
+                    "(attesi numeri di slide separati da virgole).",
+                    ", ".join(repr(x) for x in non_validi),
+                )
+            skip_set = {int(x) for x in token_slide if x.isdigit()}
             skip_set &= set(range(1, total_slides + 1))
             if skip_set:
                 replaced: dict[int, int] = {}
@@ -4613,6 +4725,23 @@ def main(argv: list | None = None) -> None:
                     sync_report["segments"] = _build_sync_report(
                         durations, slide_ids, total_duration, verdicts
                     )["segments"]
+
+        # --- Sottotitoli e capitoli ---
+        # Due file che il lavoro gia' fatto permette senza analisi nuova: la
+        # trascrizione ha i tempi delle parole, la timeline sa quando entra
+        # ogni slide. Si scrivono anche in --dry-run, perche' sono il modo piu'
+        # economico di controllare i confini senza guardare il video.
+        #
+        # Vanno scritti QUI, dopo --skip-slides: prima di quel blocco la
+        # sequenza mostrata non e' ancora quella definitiva, e i capitoli
+        # descrivevano slide che nel video non compaiono. Timeline e testi
+        # vengono ricalcati sulla sequenza EFFETTIVAMENTE mostrata dall'helper.
+        # Se in seguito l'auto-riparazione sposta i confini, la stessa helper
+        # viene richiamata per riscrivere capitoli con gli orari nuovi.
+        _scrivi_sottotitoli_mostrati(
+            Path(args.output_video), words_raw, durations, slide_ids, slide_texts, total_duration
+        )
+        durations_prima_riparazione = list(durations)
 
         # --- Anteprima timeline (--preview) ---
         if args.preview:
@@ -4848,6 +4977,22 @@ def main(argv: list | None = None) -> None:
                     "È stato generato ma non è affidabile: controlla "
                     ".cache/sync_report.json e i frame in .cache/verify_frames/."
                 )
+
+        # L'auto-riparazione ha spostato i confini e rigenerato il video: i
+        # capitoli e il riepilogo scritti prima descrivevano la timeline
+        # vecchia. Riscriverli solo se le durate sono cambiate davvero, cosi'
+        # quando la riparazione non tocca niente i file restano scritti una
+        # volta sola (e il report appena salvato e' gia' quello nuovo).
+        if repairs and durations != durations_prima_riparazione:
+            _scrivi_sottotitoli_mostrati(
+                Path(args.output_video),
+                words_raw,
+                durations,
+                slide_ids,
+                slide_texts,
+                total_duration,
+            )
+            scrivi_riepilogo(sync_report, Path(args.output_video), dry_run=args.dry_run)
 
         # --- Riepilogo finale ---
         t_total = time.time() - t_total_start

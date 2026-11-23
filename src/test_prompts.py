@@ -37,21 +37,39 @@ def _normale(testo: str) -> str:
     return " ".join(testo.split())
 
 
-def _blocchi(path: Path) -> list[str]:
-    """I blocchi da incollare in NotebookLM, delimitati dalle cancellette.
-
-    Le cancellette sono il confine: dentro ci finisce solo quello che l'utente
-    incolla, e cio' che si puo' controllare (niente indentazione, niente
-    grafica markdown, niente simboli che si degradino in console).
-    """
-    parti = re.findall(r"```\n(.*?)\n```", path.read_text(encoding="utf-8"), re.S)
-    if not parti:
-        raise AssertionError(f"{path.name}: nessun blocco da incollare")
-    return parti
-
-
 def _testo_da_incollare(path: Path) -> str:
-    return _normale(" ".join(_blocchi(path)))
+    """Tutto il file, normalizzato.
+
+    Il prompt e' testo continuo: non ci sono piu' blocchi delimitati da
+    cancellette. Le due fasi sono intestazioni dentro lo stesso file, quindi
+    cio' che va controllato e' l'intero contenuto, non un estratto.
+    """
+    return _normale(path.read_text(encoding="utf-8"))
+
+
+def _link_locali_rotti(path: Path, base: Path) -> list[str]:
+    """Link locali rotti in un file markdown, risolti relativamente a `base`.
+
+    Il README usa percorsi relativi alla radice, i file in docs/ usano
+    percorsi relativi alla propria cartella (es. `../README.md`), quindi la
+    base di risoluzione va passata dal chiamante.
+    """
+    testo = path.read_text(encoding="utf-8")
+    # [etichetta](<percorso>) e [etichetta](percorso)
+    candidati = re.findall(r"\]\((?:<([^>]+)>|([^)\s]+))\)", testo)
+    rotti = []
+    for con_cani, senza_cani in candidati:
+        target = con_cani or senza_cani
+        if target.startswith(("http://", "https://", "mailto:", "#")):
+            continue
+        # Via#sezione e' un link valido: il file e' 'via', il resto e'
+        # l'ancora dentro il file. Controllare l'intera stringa come
+        # percorso segnalerebbe come rotto un link che funziona, e
+        # renderebbe vietato linkare una sezione.
+        percorso = target.split("#", 1)[0]
+        if not (base / percorso).exists():
+            rotti.append(target)
+    return rotti
 
 
 # Ogni voce: (espressione attesa, nome della regola). Le espressioni sono
@@ -71,56 +89,22 @@ REGOLE: list[tuple[str, str]] = [
     ("senza salti e senza ripetizioni", "annunci in ordine"),
     ("l'ultima pagina si annuncia come le altre", "annuncio anche dell'ultima"),
     ("richiamare una pagina già", "no richiami"),
-    # La formulazione del motivo e' cambiata: il prompt diceva "un riferimento
-    # fuori ordine che il programma deve scartare", ma il modello non ha un
-    # programma e non lo vedra' mai. Ora il motivo e' solo la conseguenza che il
-    # modello puo' evitare ("fuori ordine e fa perdere la transizione vera"), che
-    # e' anche tutto quello che serve a capire la regola. La regola in se' e'
-    # gia' protetta due volte, dalle due voci sopra e sotto.
-    ("il richiamo è fuori ordine e fa perdere la transizione vera", "perche' dei richiami"),
-    ("guarda sempre slide 3", "esempio di richiamo"),
     ("un numero solo nella frase che apre la sezione", "numeri isolati"),
     ('mai "slide 1" in apertura', "no slide 1"),
     ("mai il numero totale di pagine", "no totale pagine"),
     ("sezioni di lunghezza simile", "sezioni equilibrate"),
-    ("dagli comunque una sezione di almeno 60 secondi", "sempre una sezione"),
-    # --- regole nate dai run del 05/10, quando il podcast ha coperto 6 e poi 4
-    # sezioni su 14 pagine. Il sintomo era sempre uno solo: gli annunci
-    # sparivano dalla metà in giù, non la numerazione. Da qui le tre regole
-    # sotto: la corrispondenza è dichiarata senza condizionali, la brevità è
-    # qualitativa (il numero di pagine lo sceglie NotebookLM), e quando il tempo
-    # stringe si dice cosa sacrificare. ---
+    # --- corrispondenza pagina/sezione: dopo la riscrittura del 2026-11 resta
+    # la forma qualitativa, senza i dettagli quantificati che sono in
+    # REGOLE_RIMOSSE. ---
     ("una sezione per pagina, tutte le pagine dalla prima all'ultima", "tutte le pagine"),
-    ("restando breve: un solo esempio, niente divagazioni", "sezioni brevi"),
-    ("accorcia l'esempio e non la sezione", "priorita' all'annuncio"),
     ("ogni pagina deve poter diventare una sezione breve del podcast", "deck leggero"),
-    ("ogni sezione dura 60-180 secondi", "durate quantificate"),
-    ("detta sempre dallo stesso conduttore", "ancora stesso conduttore"),
     ("non elencare mai i numeri già annunciati", "no recap numerato"),
-    ("non saltarla mai, un salto sposta tutti i numeri dopo", "no salti di pagina"),
-    # --- fonte unica: una seconda fonte sposta minutaggio e attenzione fuori
-    # dal deck (run con libro + presentazione: 3 slide mai discusse, ancore
-    # 2-12 su un deck da 15). Il podcast usa solo la presentazione. ---
-    ("nelle fonti tieni solo la presentazione", "fonte unica"),
     # --- numero pagina unico: il tema di Slide Deck ristampa il numero in
     # calce oltre a quello nel contenuto (doppio numero su ogni slide).
     # Non rompe la sync (il controllo legge la posizione) ma sporca il video.
     # La posizione "in basso a sinistra" è un desiderio, non un vincolo che
     # il tema rispetti sempre: l'unica cosa che conta è "una sola volta". ---
     ("il numero compare una sola volta per pagina", "numero unico"),
-    # --- grafica ricca: il divieto di infografiche/scritte decorative era gia'
-    # caduto il 04/10 (regola preventiva mai validata; la prova decisiva e' la
-    # fiducia del motore sui run); il 15/10 e' caduta anche la richiesta
-    # dell'elemento visivo. La voce sta ora in REGOLE_RIMOSSE. ---
-    # --- il conduttore non annuncia le pause. Il prompt chiedeva una "pausa
-    # prima dell'esempio" e NotebookLM la eseguiva alla lettera: nella trascrizione
-    # del run del 09/10 la parola "Pausa." compare 6 volte in 19m47s, come
-    # segmento isolato (maiuscola e punto: era un'indicazione di scena scritta,
-    # letta ad alta voce dalla TTS) e quasi sempre esattamente su un cambio di
-    # sezione, cioe' dove la si era chiesta. Rumore per l'ascoltatore, e rumore
-    # per il motore: un blocco fatto di una parola di riempimento non ha
-    # contenuto semantico, quindi diluisce il segnale che separa le sezioni. ---
-    ("niente parole di riempimento e niente indicazioni di scena", "no pause"),
     # --- due pagine senza sezione (run del 04/10) hanno rotto il video peggio
     # di qualunque altro difetto: la 13 si e' presa quattro minuti di materiale
     # delle altre. La numerazione non vietava la copertina (vedi commit 02926a7). ---
@@ -129,10 +113,11 @@ REGOLE: list[tuple[str, str]] = [
     ("tono e stile del dibattito", "blocco tono"),
 ]
 
-# Scelte deliberate del 04/10 e del 15/10, non dimenticanze. Queste regole sono
-# state tolte dal prompt e NON sono piu' richieste; il fatto resta scritto
-# perche' `test_nessuna_regola_rimossa_torna_indietro` verifica che non
-# rientrino di soppiatto in una riscrittura del prompt.
+# Scelte deliberate del 04/10, del 15/10 e della semplificazione del 2026-11,
+# non dimenticanze. Queste regole sono state tolte dal prompt e NON sono piu'
+# richieste; il fatto resta scritto perche'
+# `test_nessuna_regola_rimossa_torna_indietro` verifica che non rientrino di
+# soppiatto in una riscrittura del prompt.
 REGOLE_RIMOSSE = [
     ("titoli non generici", 'mai "Introduzione", "Conclusioni", "Argomento 2"'),
     ("parole distinctive", "evitando termini generici ripetuti sulle altre pagine"),
@@ -150,6 +135,20 @@ REGOLE_RIMOSSE = [
     # aiuta la sincronizzazione (le ancore sono le frasi pronunciate, non le
     # figure) e la scelta visiva resta a NotebookLM.
     ("grafica ricca", "arricchisci ogni pagina con un elemento visivo pertinente"),
+    # --- 2026-11: riscrittura a mano del prompt, convalidata dall'utente nel
+    # suo test reale. Le dieci frasi sotto sono sparite di proposito insieme ai
+    # blocchi ```: non devono rientrare di soppiatto in una futura "pulizia".
+    # Il prompt piu' corto funziona, quindi la regola e' che resti cosi'. ---
+    ("perche' dei richiami", "il richiamo è fuori ordine e fa perdere la transizione vera"),
+    ("esempio di richiamo", "guarda sempre slide 3"),
+    ("sempre una sezione", "dagli comunque una sezione di almeno 60 secondi"),
+    ("sezioni brevi", "restando breve: un solo esempio, niente divagazioni"),
+    ("priorita' all'annuncio", "accorcia l'esempio e non la sezione"),
+    ("durate quantificate", "ogni sezione dura 60-180 secondi"),
+    ("ancora stesso conduttore", "detta sempre dallo stesso conduttore"),
+    ("no salti di pagina", "non saltarla mai, un salto sposta tutti i numeri dopo"),
+    ("fonte unica", "nelle fonti tieni solo la presentazione"),
+    ("no pause", "niente parole di riempimento e niente indicazioni di scena"),
 ]
 
 
@@ -189,67 +188,61 @@ class TestBloccoTono(unittest.TestCase):
 
 
 class TestBlocchiIncollabili(unittest.TestCase):
-    """Cosa finisce nel campo di testo di NotebookLM deve essere pulito.
+    """Cio' che finisce nel campo di testo di NotebookLM deve essere pulito.
 
     Non sono pedanterie: 4 spazi iniziali diventano un blocco di codice se
     l'input viene interpretato come markdown, e i simboli non-ASCII si degradano
-    in console Windows (e in copia-incolla). Le frecce dei titoli sono fuori dai
-    blocchi e non sono un problema: non raggiungono mai NotebookLM.
+    in console Windows (e in copia-incolla). Ora che il prompt e' un unico testo
+    continuo, controlliamo l'intero file: non ci sono piu' blocchi "protetti"
+    dentro le cancellette. Le due frecce (— e →) e le lettere accentate sono
+    ammesse: fanno parte del testo che l'utente ha convalidato.
     """
+
+    def setUp(self) -> None:
+        self.testo = PROMPT.read_text(encoding="utf-8")
 
     def test_nessuna_riga_con_quattro_spazi(self) -> None:
         offending = [
             f"{PROMPT.name}: {riga!r}"
-            for blocco in _blocchi(PROMPT)
-            for riga in blocco.splitlines()
+            for riga in self.testo.splitlines()
             if riga.startswith("    ")
         ]
         self.assertEqual(offending, [], "righe che diventerebbero blocco di codice")
 
-    def test_nessuna_grafica_markdown_dentro_ai_blocchi(self) -> None:
+    def test_nessuna_grafica_markdown(self) -> None:
         # #, **, ═, ▸ non hanno senso in un campo di testo: arrivano al
         # modello come spazzatura.
         grafica = re.compile(r"^#|\*\*|═|▸", re.M)
         offending = [
             f"{PROMPT.name}: {riga.strip()[:40]!r}"
-            for blocco in _blocchi(PROMPT)
-            for riga in blocco.splitlines()
+            for riga in self.testo.splitlines()
             if grafica.search(riga)
         ]
-        self.assertEqual(offending, [], "grafica markdown dentro un blocco")
+        self.assertEqual(offending, [], "grafica markdown nel prompt")
 
     def test_nessun_simbolo_fuori_dal_testo_italiano(self) -> None:
-        # Solo lettere accentate e punteggiatura ASCII: tutto il resto e' un
-        # rischio di codifica, e non aggiunge istruzione.
+        # Lettere accentate, piu' le sole frecce usate nelle intestazioni.
+        # Tutto il resto e' un rischio di codifica e non aggiunge istruzione.
+        ammessi = {"—", "→"}
         vietati = {
             c
-            for blocco in _blocchi(PROMPT)
-            for c in blocco
-            if ord(c) > 127 and not c.isalpha()
+            for c in self.testo
+            if ord(c) > 127 and not c.isalpha() and c not in ammessi
         }
         self.assertEqual(
-            sorted(vietati), [], "simboli non-italiani dentro i blocchi da incollare"
+            sorted(vietati), [], "simboli non-italiani nel testo da incollare"
         )
 
     def test_nessun_passo_oltre_una_pagina_di_istruzioni(self) -> None:
         # NotebookLM non ha un limite dichiarato, ma un prompt oltre qualche
-        # migliaio di caratteri compete con i sorgenti. Si sta larghi.
-        #
-        # Il tetto e' per BLOCCO, non per file. I due blocchi del file non
-        # vengono mai incollati insieme: Fase 1 va nel generatore di slide,
-        # Fase 2 nelle istruzioni dell'audio, e sono due sessioni NotebookLM
-        # diverse. Il confronto con i sorgenti avviene mentre ne e' vivo uno solo,
-        # quindi sommarli penalizzava un prompt di 700 caratteri per colpa di un
-        # altro blocco dello stesso file. Il margine che ne risultava era cosi'
-        # stretto da costringere a scegliere fra allentare il tetto e tagliare
-        # regole utili.
-        for i, blocco in enumerate(_blocchi(PROMPT), start=1):
-            caratteri = len(blocco.strip())
-            self.assertLess(
-                caratteri,
-                4000,
-                f"{PROMPT.name}: blocco {i} da {caratteri} caratteri",
-            )
+        # migliaio di caratteri compete con i sorgenti. Si sta larghi: il file
+        # riscritto e' poco sopra i 2.700 caratteri.
+        caratteri = len(self.testo)
+        self.assertLess(
+            caratteri,
+            4000,
+            f"{PROMPT.name}: {caratteri} caratteri in tutto il file",
+        )
 
 
 class TestRiferimentiReadme(unittest.TestCase):
@@ -261,22 +254,22 @@ class TestRiferimentiReadme(unittest.TestCase):
     """
 
     def test_i_link_locali_esistono(self) -> None:
-        testo = README.read_text(encoding="utf-8")
-        # [etichetta](<percorso>) e [etichetta](percorso)
-        candidati = re.findall(r"\]\((?:<([^>]+)>|([^)\s]+))\)", testo)
-        rotti = []
-        for con_cani, senza_cani in candidati:
-            target = con_cani or senza_cani
-            if target.startswith(("http://", "https://", "mailto:", "#")):
-                continue
-            # Via#sezione e' un link valido: il file e' 'via', il resto e'
-            # l'ancora dentro il file. Controllare l'intera stringa come
-            # percorso segnalerebbe come rotto un link che funziona, e
-            # renderebbe vietato linkare una sezione.
-            percorso = target.split("#", 1)[0]
-            if not (RADICE / percorso).exists():
-                rotti.append(target)
-        self.assertEqual(rotti, [], "link del README a file inesistenti")
+        self.assertEqual(
+            _link_locali_rotti(README, RADICE), [], "link del README a file inesistenti"
+        )
+
+    def test_i_link_locali_nei_docs_esistono(self) -> None:
+        # I docs non sono come il README: i loro percorsi partono dalla
+        # cartella del documento, non dalla radice del progetto.
+        docs = sorted((RADICE / "docs").glob("*.md"))
+        self.assertTrue(docs, "nessun file .md trovato in docs/")
+        for doc in docs:
+            with self.subTest(doc=doc.name):
+                self.assertEqual(
+                    _link_locali_rotti(doc, doc.parent),
+                    [],
+                    f"link rotti in docs/{doc.name}",
+                )
 
     def test_il_readme_cita_il_prompt_che_esiste(self) -> None:
         testo = README.read_text(encoding="utf-8")
@@ -286,36 +279,30 @@ class TestRiferimentiReadme(unittest.TestCase):
 class TestStrutturaDelFile(unittest.TestCase):
     """La FORMA del file, non le frasi: e' cio' che si rompe riformattando.
 
-    Le cancellette devono essere esattamente "```" (niente spazi finali) e
-    pari: un blocco che non si apre o non si chiude bene non viene
-    riconosciuto, e una prosa finita dentro un blocco viene incollata in
-    NotebookLM insieme al prompt. E' successo davvero: le frasi c'erano
-    tutte, la forma no, e i test delle frasi non potevano accorgersene.
+    Ora le due fasi sono intestazioni di testo continuo, senza cancellette.
+    Se una intestazione sparisce o un'istruzione "Scarica ..." viene a mancare,
+    il prompt non e' piu' quello convalidato dall'utente. Gli spazi finali
+    invece sono voluti: servono da interruzioni di riga markdown, quindi non
+    vengono vietati.
     """
 
-    def test_cancellette_pulite_e_pari(self) -> None:
-        righe = PROMPT.read_text(encoding="utf-8").splitlines()
-        cancellette = [i for i, riga in enumerate(righe, 1) if "```" in riga]
-        self.assertTrue(cancellette, "nessuna cancellata nel prompt")
-        self.assertEqual(len(cancellette) % 2, 0, f"cancellette spaiate: righe {cancellette}")
-        for numero in cancellette:
-            self.assertEqual(
-                righe[numero - 1],
-                "```",
-                f"riga {numero}: la cancellata deve essere esattamente ``` "
-                f"(trovato {righe[numero - 1]!r})",
-            )
+    def setUp(self) -> None:
+        self.testo = PROMPT.read_text(encoding="utf-8")
 
-    def test_nessuna_prosa_dentro_i_blocchi(self) -> None:
-        for blocco in _blocchi(PROMPT):
-            for riga in blocco.splitlines():
-                self.assertFalse(
-                    riga.startswith("**"), f"titolo markdown dentro un blocco: {riga!r}"
-                )
-                self.assertFalse(
-                    riga.strip().startswith("Scarica"),
-                    f"istruzione per l'utente dentro un blocco: {riga!r}",
-                )
+    def test_le_due_fasi_ci_sono(self) -> None:
+        for intestazione in ("Fase 1", "Fase 2"):
+            with self.subTest(intestazione=intestazione):
+                self.assertIn(intestazione, self.testo, f"manca {intestazione}")
+
+    def test_le_istruzioni_di_download_ci_sono(self) -> None:
+        for istruzione in ("Scarica la presentazione", "Scarica l'audio"):
+            with self.subTest(istruzione=istruzione):
+                self.assertIn(istruzione, self.testo, f"manca {istruzione!r}")
+
+    def test_nessun_nbsp(self) -> None:
+        # L'NBSP non e' uno spazio normale: copiato in NotebookLM non si
+        # comporta come separatore e non si vede a occhio nudo.
+        self.assertNotIn("\u00a0", self.testo, "NBSP (U+00A0) nel prompt")
 
 
 if __name__ == "__main__":

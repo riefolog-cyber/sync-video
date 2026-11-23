@@ -123,10 +123,14 @@ class TestEnsurePipPackages(unittest.TestCase):
         dichiarato, cosi' l'helper resta valido se i vincoli cambiano.
         """
         soglie: dict[str, int] = {}
+        pinnati: dict[str, str] = {}
         for spec in config._REQUIRED_PACKAGES.values():
             # La chiave del dizionario e' il nome d'import ("PIL"), ma
             # _installed_version riceve il nome pip ("pillow").
             nome_pip = re.split(r"[<>=!~]", spec, maxsplit=1)[0].strip()
+            esatto = re.search(r"==\s*([0-9][0-9A-Za-z.+-]*)", spec)
+            if esatto:
+                pinnati[nome_pip] = esatto.group(1)
             for tetto in re.findall(r"<\s*(\d+)", spec):
                 soglie[nome_pip] = int(tetto)
 
@@ -135,6 +139,11 @@ class TestEnsurePipPackages(unittest.TestCase):
                 return "1.24.3"
             if pip_name == assente:
                 return None
+            # Un pin esatto (fastembed==0.5.1) non e' soddisfatto da 99.0.0:
+            # restituire la versione pinnata evita reinstallazioni finte nei
+            # test che verificano SOLTANTO un altro pacchetto.
+            if pip_name in pinnati:
+                return pinnati[pip_name]
             tetto = soglie.get(pip_name)
             if tetto is not None:
                 # Appena sotto il tetto e sopra ogni pavimento dichiarato
@@ -293,6 +302,19 @@ class TestLoadEnvFile(unittest.TestCase):
             with mock.patch.dict(os.environ, {"S2VTEST_I": "gia_impostata"}):
                 config._load_env_file(p)
                 self.assertEqual(os.environ["S2VTEST_I"], "gia_impostata")
+
+
+class TestEnvPath(unittest.TestCase):
+    """Il .env si legge dalla radice del progetto, non da accanto a config.py."""
+
+    def test_env_letto_dalla_radice(self) -> None:
+        from hardware import project_root
+
+        self.assertEqual(config._env_path(), project_root() / ".env")
+        # La radice e' riconoscibile da requirements.txt: se config.py si
+        # spostasse in src/, il vecchio Path(__file__).parent/.env puntava
+        # a una cartella senza il file, senza dirlo a nessuno.
+        self.assertTrue((config._env_path().parent / "requirements.txt").is_file())
 
 
 class TestAnnunciaPrimoAvvio(unittest.TestCase):

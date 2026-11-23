@@ -1,5 +1,3 @@
-<!-- Estratto da README.md (righe 615-728). Torna al [README](../README.md). -->
-
 ## 🎮 Comandi
 
 ```bash
@@ -110,6 +108,9 @@ python -m unittest discover -s src -p "test_*.py"
 > Misura tempo e qualità (`--whisper-beam 1` veloce vs `5` accurato): il beam
 > influenza la timeline, i thread no. Tieni il valore che misuri migliore in
 > `.env`.
+
+| Opzione | Default | Descrizione |
+|---|---|---|
 | `--openvino-device` | `GPU` | Device OpenVINO (`GPU` iGPU o `CPU`) |
 | `--openvino-download` | — | Scarica modello OpenVINO IR (una tantum) |
 | `--prefetch-models` | — | Scarica **tutti** i modelli ML (embedding, pesi Whisper, OpenVINO IR) e esce, senza toccare PDF o audio. Utile dopo un clone o un cambio di macchina: tiene i download fuori dalla prima run reale |
@@ -158,7 +159,7 @@ python -m unittest discover -s src -p "test_*.py"
 |---|---|
 | `0` | Run completata (video scritto, oppure `--dry-run` arrivato in fondo) |
 | `1` | Esecuzione interrotta: un errore, oppure un gate di qualità (`--require-flow`, `--require-full-anchors`, copertura delle ancore sotto soglia) |
-| `2` | Solo `scripts/prova_materiale_reale.py`: confronto **non verificabile** (materiale diverso da quello del riferimento, o riferimento assente). Non è un guasto del programma: su un altro PC il materiale non c'è |
+| `2` | Solo `src/scripts/prova_materiale_reale.py`: confronto **non verificabile** (materiale diverso da quello del riferimento, o riferimento assente). Non è un guasto del programma: su un altro PC il materiale non c'è |
 
 Una run che finisce scrive anche `riepilogo.md` accanto al video: pagine,
 ancore, sezione più corta, sorgenti e cosa guardare a mano. Se una run

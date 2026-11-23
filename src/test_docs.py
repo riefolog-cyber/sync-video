@@ -37,10 +37,12 @@ esegue lo strumento, non questo file.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import unittest
 from collections.abc import Generator
 from pathlib import Path
+from unittest import mock
 
 import config
 from hardware import project_root
@@ -117,7 +119,22 @@ def _conta_test(argomenti: str) -> int | None:
 
 class TestDefaultDocumentati(unittest.TestCase):
     def _default_reali(self) -> dict[str, int | float | str | bool]:
-        args = config.parse_args([])
+        # Il .env della macchina e' gitignored e puo' cambiare i default presi
+        # da os.environ: le tabelle documentano i default DEL CODICE, non le
+        # preferenze locali di chi esegue i test. Confrontiamo quindi i
+        # valori letterali dichiarati in config.py.
+        default_da_env = {
+            "DEFAULT_TRANSCRIBER": "auto",
+            "DEFAULT_OPENVINO_DEVICE": "GPU",
+            "DEFAULT_WHISPER_MODEL": "small",
+            "DEFAULT_WHISPER_DEVICE": "cpu",
+            "DEFAULT_WHISPER_COMPUTE_TYPE": "int8",
+            "DEFAULT_OCR_LANG": "ita",
+        }
+        with contextlib.ExitStack() as stack:
+            for nome, valore in default_da_env.items():
+                stack.enter_context(mock.patch.object(config, nome, valore))
+            args = config.parse_args([])
         default: dict[str, int | float | str | bool] = {}
         for nome, valore in vars(args).items():
             if isinstance(valore, (bool, int, float, str)):
@@ -231,19 +248,33 @@ class TestConteggiDocumentati(unittest.TestCase):
 
 
 class TestProseNonVerificabile(unittest.TestCase):
-    """Non un test vero: rende esplicito il limite dello strumento.
+    """Qui si verifica la parte controllabile: le opzioni chiave nelle doc.
 
-    Le frasi in prosa non sono verificabili da uno script. Questo test puo'
-    solo segnalare che il limite esiste, non che sia stato risolto.
+    Le frasi in prosa restano a controllo umano, ma l'elenco delle opzioni
+    essenziali no: se `--pdf` o `--dry-run` spariscono dalle doc, chi legge
+    non sa piu' usare il programma e nessun confronto di default se ne accorge
+    (una riga di tabella mancante viene semplicemente saltata).
     """
 
-    def test_le_frasi_in_prosa_restano_a_controllo_umano(self) -> None:
-        # Se un giorno qualcuno vuole coprire anche le frasi, questo e' il
-        # posto dove dirlo. Per ora e' una constatazione, non una promessa.
-        self.assertTrue(
-            hasattr(config, "parse_args"),
-            "argparse resta la fonte di verita' dei default",
-        )
+    # Opzioni senza le quali il comando d'uso non e' completo. La fonte di
+    # verita' resta argparse: prima di pretendere che siano documentate si
+    # controlla che esistano davvero.
+    FLAGS_CHIAVE = ("--pdf", "--audio", "--output", "--dry-run", "--no-cache", "--debug")
+
+    def test_le_opzioni_chiave_sono_documentate(self) -> None:
+        reali = {"--" + nome.replace("_", "-") for nome in vars(config.parse_args([]))}
+        sparite = [flag for flag in self.FLAGS_CHIAVE if flag not in reali]
+        self.assertEqual(sparite, [], "opzioni chiave sparite da argparse")
+
+        testi = [
+            doc.read_text(encoding="utf-8", errors="replace")
+            for doc in DOCUMENTI
+            if doc.exists()
+        ]
+        non_documentate = [
+            flag for flag in self.FLAGS_CHIAVE if not any(flag in testo for testo in testi)
+        ]
+        self.assertEqual(non_documentate, [], "opzioni chiave non citate in nessuna doc")
 
 
 if __name__ == "__main__":

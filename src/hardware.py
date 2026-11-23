@@ -64,10 +64,12 @@ def project_root() -> Path:
     return qui
 
 
-# Stessa posizione di config.CACHE_DIR: entrambe derivano da project_root(),
-# quindi restano allineate per costruzione e non per abitudine.
+# Stessa espressione di config.CACHE_DIR, senza importare config (che importa
+# hardware: un import inverso creerebbe un ciclo). Rispettare
+# SYNC_VIDEO_CACHE_DIR evita che hardware.json finisca nella cache di progetto
+# mentre il resto della run lavora nella cartella temporanea scelta dal test.
 BASE_DIR = project_root()
-CACHE_DIR = BASE_DIR / ".cache"
+CACHE_DIR = Path(os.environ.get("SYNC_VIDEO_CACHE_DIR") or (BASE_DIR / ".cache"))
 HARDWARE_CACHE = CACHE_DIR / "hardware.json"
 
 # Finestra di versioni di Python che il progetto garantisce. Sta qui e non in

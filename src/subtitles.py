@@ -345,12 +345,20 @@ def _titolo_capitolo(testo: str, numero: int) -> str:
     return tagliato + "…"
 
 
-def build_capitoli(timeline: Mapping[int, float], slide_texts: Sequence[str]) -> str:
+def build_capitoli(
+    timeline: Mapping[int, float],
+    slide_texts: Sequence[str],
+    numeri_slide: Sequence[int] | None = None,
+) -> str:
     """Capitoli in formato YouTube: ``0:00 Titolo``, uno per slide, in ordine.
 
     Il primo capitolo deve stare a 0:00 (lo pretende YouTube) e la timeline
     mette sempre la slide 1 a zero: se cosi' non fosse, il primo viene
     comunque ancorato a zero invece di produrre un file che il sito rifiuta.
+
+    ``numeri_slide`` serve quando la sequenza mostrata non e' 1..N (per esempio
+    dopo ``--skip-slides``): le chiavi della timeline sono le POSIZIONI, quindi
+    il fallback "Slide N" deve usare il numero vero della slide li' mostrata.
     """
     righe: list[str] = []
     for pos, slide in enumerate(sorted(timeline)):
@@ -358,7 +366,8 @@ def build_capitoli(timeline: Mapping[int, float], slide_texts: Sequence[str]) ->
         if pos == 0:
             inizio = 0.0
         testo = slide_texts[slide - 1] if 0 <= slide - 1 < len(slide_texts) else ""
-        righe.append(f"{timestamp_capitolo(inizio)} {_titolo_capitolo(testo, slide)}")
+        numero = int(numeri_slide[pos]) if numeri_slide is not None and pos < len(numeri_slide) else slide
+        righe.append(f"{timestamp_capitolo(inizio)} {_titolo_capitolo(testo, numero)}")
     return "\n".join(righe)
 
 
@@ -368,6 +377,7 @@ def scrivi_sottotitoli(
     timeline: Mapping[int, float],
     slide_texts: Sequence[str],
     durata: float | None = None,
+    numeri_slide: Sequence[int] | None = None,
 ) -> tuple[Path | None, Path | None]:
     """Scrive ``<video>.srt`` e ``<video>.capitoli.txt`` accanto al video.
 
@@ -385,7 +395,9 @@ def scrivi_sottotitoli(
             atomic_write_text(srt, contenuto)
         if timeline:
             capitoli = Path(f"{base}.capitoli.txt")
-            atomic_write_text(capitoli, build_capitoli(timeline, slide_texts) + "\n")
+            atomic_write_text(
+                capitoli, build_capitoli(timeline, slide_texts, numeri_slide) + "\n"
+            )
     except OSError as e:
         log.warning("   Sottotitoli/capitoli non scritti (%s).", e)
         return srt if srt and srt.exists() else None, capitoli if capitoli and capitoli.exists() else None

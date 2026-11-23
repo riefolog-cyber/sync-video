@@ -283,6 +283,26 @@ def _pptx_fallback_to_pdf(ppt_path: Path, pdf_path: Path) -> bool:
         return False
 
 
+def _pdf_valido(pdf_path: Path) -> bool:
+    """True se il PDF si apre con PyMuPDF e contiene almeno una pagina.
+
+    La semplice presenza del file (con dimensione non nulla) non basta: un
+    converter puo' lasciare un PDF troncato a meta', che non si apre oppure non
+    ha pagine, e verrebbe riusato come se fosse valido.
+    """
+    doc: Any = None
+    try:
+        doc = fitz.open(str(pdf_path))
+        return int(doc.page_count) >= 1
+    except Exception as e:  # fitz solleva eccezioni diverse per file danneggiati
+        log.debug("   PDF non valido (%s): %s", pdf_path, e)
+        return False
+    finally:
+        if doc is not None:
+            with contextlib.suppress(Exception):
+                doc.close()
+
+
 def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza_grafica: bool = False) -> Path:
     """Converte una presentazione PPT/PPTX in PDF usando un converter nativo.
 
@@ -336,7 +356,7 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza
 
     ext_upper = ppt_path.suffix.upper().lstrip(".")
     # Rimuovi il PDF (e il marker) del tentativo precedente PRIMA di convertire.
-    # Il successo qui si valuta dalla presenza del file, quindi lasciare il
+    # Il successo si valuta dal PDF aperto e con pagine, quindi lasciare il
     # vecchio in posto significa che un converter fallito "riusa" il PDF
     # stantio, aggiorna il marker con l'MD5 del sorgente NUOVO e da quel momento
     # ogni run successiva riusa quel PDF per sempre: slide vecchie nel video,
@@ -437,7 +457,9 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza
                 continue
             if proc is not None and pdf_path.exists() and pdf_path.stat().st_size > 0:
                 # x2t ritorna exit !=0 anche quando produce il PDF con warning:
-                # il successo si valuta dalla presenza del file, non dall'exit code.
+                # l'exit code resta ignorato, ma il successo si valuta aprendo
+                # il PDF con PyMuPDF (un file parziale ma non vuoto NON e' un
+                # successo) e verificando che abbia almeno una pagina.
                 if proc.returncode != 0:
                     log.debug(
                         "   %s warning (exit=%d): %s",
@@ -445,9 +467,26 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza
                         proc.returncode,
                         (proc.stderr or proc.stdout)[:500],
                     )
-                marker_path.write_text(_file_md5(ppt_path), encoding="ascii")
-                log.info("   -> PDF convertito: %s", pdf_path)
-                return pdf_path
+                pdf_valido = False
+                try:
+                    pdf_valido = _pdf_valido(pdf_path)
+                finally:
+                    if not pdf_valido:
+                        # Non lasciare il PDF difettoso in cache: il marker non
+                        # viene scritto, quindi il prossimo converter puo'
+                        # riprovare (e una run successiva non riusa un file
+                        # guasto per sempre).
+                        with contextlib.suppress(OSError):
+                            pdf_path.unlink()
+                if pdf_valido:
+                    marker_path.write_text(_file_md5(ppt_path), encoding="ascii")
+                    log.info("   -> PDF convertito: %s", pdf_path)
+                    return pdf_path
+                log.warning(
+                    "   %s ha prodotto un PDF non valido, provo il prossimo converter...",
+                    converter,
+                )
+                continue
             log.warning(
                 "   %s fallito (exit=%d): %s",
                 converter,

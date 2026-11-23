@@ -10,11 +10,12 @@ pipeline_cache / pipeline_report).
 
 from __future__ import annotations
 
+import contextlib
 import re
 from pathlib import Path
 
 from chunks import Word
-from config import AUDIO_SEARCH_SUFFIXES, PRESENTATION_ACCEPTED_SUFFIXES
+from config import AUDIO_SEARCH_SUFFIXES, PRESENTATION_ACCEPTED_SUFFIXES, log
 
 
 def find_audio_file(directory: Path) -> Path | None:
@@ -69,13 +70,22 @@ def _parse_transcript_raw(raw_path: Path) -> list[Word] | None:
 
 def _clean_directory(directory: Path, pattern: str = "*.png") -> int:
     """Rimuove tutti i file che corrispondono al pattern nella directory.
-    Restituisce il numero di file rimossi."""
+    Restituisce il numero di file effettivamente rimossi: un file aperto da
+    un altro processo (tipico su Windows) non fa fallire la pulizia, ma non
+    viene nemmeno conteggiato nel messaggio finale."""
     if not directory.exists():
         return 0
     removed = 0
     for f in directory.glob(pattern):
-        f.unlink()
-        removed += 1
+        rimosso = False
+        with contextlib.suppress(OSError):
+            f.unlink()
+            rimosso = True
+        if rimosso:
+            removed += 1
+            log.debug("   🧹 Rimosso file temporaneo: %s", f)
+        else:
+            log.debug("   🧹 File non rimosso (aperto da un altro processo?): %s", f)
     return removed
 
 

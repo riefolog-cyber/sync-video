@@ -1,4 +1,3 @@
-<!-- Estratto da README.md (righe 1076-1091). Torna al [README](../README.md). -->
 
 ## 🐛 Troubleshooting
 

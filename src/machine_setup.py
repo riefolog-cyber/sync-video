@@ -468,12 +468,33 @@ def _apply(args: _TranscriberArgs, rec: dict) -> None:
     Se l'utente ha scelto esplicitamente un motore (``--transcriber`` diverso
     da ``auto``) non tocca nulla: rispetta la scelta manuale. In modalità
     ``auto`` imposta anche device e compute type coerenti con il motore.
+
+    Il device scelto a mano (CLI, ``.env`` o variabile d'ambiente — main.py lo
+    segnala con ``whisper_device_explicit``) NON viene riscritto: se non regge
+    lo si dice e si lascia la scelta, così la trascrizione segnala l'errore
+    invece di ripiegare in silenzio su CPU (stesso criterio di transcription.py).
     """
     if getattr(args, "transcriber", "auto") != "auto":
         return
+    corrente = getattr(args, "whisper_device", "cpu")
+    esplicito = bool(getattr(args, "whisper_device_explicit", corrente != "cpu"))
+    scelto = corrente if esplicito else None
+    raccomandato = rec.get("whisper_device", "cpu")
+
     args.transcriber = rec["transcriber"]
-    args.whisper_device = rec.get("whisper_device", "cpu")
-    args.whisper_compute_type = rec.get("whisper_compute_type", "int8")
+    if scelto == "cuda" and raccomandato != "cuda":
+        log.warning(
+            "   ⚠️ Hai scelto esplicitamente --whisper-device cuda (o WHISPER_DEVICE "
+            "da .env), ma qui non e' utilizzabile: mantengo CUDA invece di ripiegare "
+            "in silenzio su CPU. Per proseguire usa --whisper-device cpu."
+        )
+    args.whisper_device = scelto or raccomandato
+    # Scelta esplicita di CPU su una macchina CUDA: il float16 del recommendation
+    # non c'entra, il default CPU resta int8.
+    if scelto == "cpu" and raccomandato == "cuda":
+        args.whisper_compute_type = "int8"
+    else:
+        args.whisper_compute_type = rec.get("whisper_compute_type", "int8")
     if rec.get("openvino_device"):
         args.openvino_device = rec["openvino_device"]
 

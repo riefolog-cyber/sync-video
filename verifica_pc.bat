@@ -8,8 +8,9 @@ rem  collega non dice nulla; questo risponde a una domanda sola:
 rem  "su questo computer Sync Video riuscira' a fare un video?",
 rem  riga per riga, con cosa fare quando la risposta e' no.
 rem
-rem  Non installa e non modifica nulla: si puo' lanciare anche su un
-rem  PC che non ha ancora ricevuto i file.
+rem  Non installa e non modifica nulla: disattiva l'installazione
+rem  automatica di Python prima di chiamare l'helper condiviso. Si puo'
+rem  lanciare anche su un PC che non ha ancora ricevuto i file.
 rem
 rem  Uso:
 rem    verifica_pc.bat                 mostra il referto e si ferma
@@ -38,8 +39,9 @@ echo    Questo PC e' in grado di fare un video?
 echo ========================================
 
 rem --- Scelta Python: helper condiviso (vedi _python.bat) ---
-rem Se non c'e' nessun Python il helper prova a installarlo con winget ed
-rem esce con 1 se non riesce: ha gia' spiegato cosa fare.
+rem Qui non si installa nulla: l'opt-out dice all'helper di limitarsi ad
+rem avvisare se Python manca (vedi _python.bat), poi si esce con 1.
+set "SYNC_VIDEO_NO_PYTHON_INSTALL=1"
 call "%~dp0_python.bat"
 if errorlevel 1 (
     echo.

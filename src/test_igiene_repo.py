@@ -44,8 +44,12 @@ def _percorsi_personali() -> list[re.Pattern[str]]:
     utente = Path.home().name
     return [
         re.compile(re.escape(progetto), re.IGNORECASE),
+        # [\\/]+: su Windows il percorso vero ha backslash singoli, ma nei
+        # file di test/doc comparisono anche doppi (stringhe Python) o slash
+        # (percorsi normalizzati). Con `\\\\` in raw string il regex trovava
+        # solo il backslash DOPPIO e lasciava passare quello normale.
         re.compile(
-            rf"[A-Za-z]:\\\\Users\\\\{re.escape(utente)}(?![A-Za-z0-9_-])",
+            rf"[A-Za-z]:[\\/]+Users[\\/]+{re.escape(utente)}(?![A-Za-z0-9_-])",
             re.IGNORECASE,
         ),
     ]
@@ -119,6 +123,23 @@ class TestIgieneRepository(unittest.TestCase):
                     if pattern.search(riga):
                         trovati.append(f"{nome}:{riga_numero} (percorso di questa macchina)")
         self.assertEqual(trovati, [], "dati personali nel repository:\n" + "\n".join(trovati))
+
+    def test_percorso_personale_singolo_doppio_e_con_slash(self) -> None:
+        """Il controllo deve vedere il percorso vero, in tutte le sue forme."""
+        utente = Path.home().name
+        pattern = _percorsi_personali()[1]  # quello del nome utente
+        for percorso in (
+            rf"C:\Users\{utente}\x",
+            rf"C:\\Users\\{utente}\\x",
+            f"C:/Users/{utente}/x",
+        ):
+            with self.subTest(percorso=percorso):
+                self.assertRegex(percorso, pattern)
+
+        # Un altro utente non e' un dato personale di QUESTA macchina. Il
+        # suffisso '_altro' verifica anche che il nome non sia solo un prefisso.
+        self.assertNotRegex(rf"C:\Users\{utente}_altro\x", pattern)
+        self.assertNotRegex(r"C:\Users\qualcun_altro\x", pattern)
 
 
 if __name__ == "__main__":

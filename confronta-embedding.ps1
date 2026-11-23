@@ -5,6 +5,12 @@
 #
 # Uso:  pwsh .\confronta-embedding.ps1
 #       pwsh .\confronta-embedding.ps1 -Models "e5-large" -AnomalyThresholdSec 20
+#       pwsh .\confronta-embedding.ps1 -KeepEnv
+#
+# Con -KeepEnv al termine resta impostato il modello dell'ultima prova: la
+# variabile NON viene ripristinata al valore iniziale. Senza -KeepEnv, invece,
+# si torna al valore iniziale di EMBEDDING_MODEL (o la si rimuove se non era
+# impostata).
 #
 # I modelli supportati (nome breve -> nome fastembed):
 #   e5-large, mpnet, minilm
@@ -51,7 +57,16 @@ function Get-Time([string]$Output, [string]$Label) {
 
 Push-Location $PSScriptRoot
 
-# Preserva l'ambiente dell'utente se richiesto (default: ripristino a fine run)
+# Usa l'ambiente dedicato del progetto quando c'e': e' li' che vivono le
+# dipendenze pinnate. Senza .venv si ripiega sul python del PATH.
+$PYTHON = "python"
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot ".venv\Scripts\python.exe")) {
+    $PYTHON = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+}
+
+# Salva il valore iniziale: di default a fine run si torna a questo (o si
+# rimuove la variabile se non era impostata). Con -KeepEnv, invece, resta il
+# modello dell'ultima prova e il backup non viene ripristinato.
 $envBackup = $env:EMBEDDING_MODEL
 
 $results = @()
@@ -68,7 +83,7 @@ foreach ($short in $Models) {
 
     $env:EMBEDDING_MODEL = $modelName
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $raw = & python main.py --dry-run --debug --flow $Flow 2>&1 | Out-String
+    $raw = & $PYTHON src\main.py --dry-run --debug --flow $Flow 2>&1 | Out-String
     $sw.Stop()
 
     if ($LASTEXITCODE -ne 0) {
@@ -119,8 +134,14 @@ foreach ($short in $Models) {
     }
 }
 
-# Ripristina l'ambiente
-if ($KeepEnv) { $env:EMBEDDING_MODEL = $envBackup } else { Remove-Item Env:EMBEDDING_MODEL -ErrorAction SilentlyContinue }
+# Ripristina l'ambiente solo se non è stato chiesto di tenere l'ultimo modello.
+if (-not $KeepEnv) {
+    if ($null -ne $envBackup) {
+        $env:EMBEDDING_MODEL = $envBackup
+    } else {
+        Remove-Item Env:EMBEDDING_MODEL -ErrorAction SilentlyContinue
+    }
+}
 
 Pop-Location
 

@@ -7,7 +7,8 @@ rem  numeri dell'ultima run. NON contiene audio, slide, video, trascrizioni
 rem  o .env: solo nomi di file e numeri.
 rem
 rem  Non installa e non modifica il progetto (scrive solo il proprio zip):
-rem  si puo' lanciare anche su un PC rotto.
+rem  disattiva l'installazione automatica di Python prima di chiamare
+rem  l'helper condiviso. Si puo' lanciare anche su un PC rotto.
 rem
 rem  Uso:
 rem    diagnostica.bat                 crea diagnostica-<data>.zip qui
@@ -36,6 +37,9 @@ echo    Prepara il file da inviare a chi ti assiste
 echo ========================================
 
 rem --- Scelta Python: helper condiviso (vedi _python.bat) ---
+rem Qui non si installa nulla: l'opt-out dice all'helper di limitarsi ad
+rem avvisare se Python manca (vedi _python.bat), poi si esce con 1.
+set "SYNC_VIDEO_NO_PYTHON_INSTALL=1"
 call "%~dp0_python.bat"
 if errorlevel 1 (
     echo.

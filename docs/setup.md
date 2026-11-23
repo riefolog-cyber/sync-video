@@ -1,18 +1,16 @@
-<!-- Estratto da README.md (righe 249-540). Torna al [README](../README.md). -->
-
 ## 🖥️ Setup su un altro PC
 
 **Su Windows, se hai scaricato lo ZIP: non devi installare niente a mano.**
 Prendi lo ZIP dalla pagina Releases (ogni pacchetto ha data e versione:
 niente piu' "quale copia hai?"). Metti `presentazione.pdf` e `podcast.m4a`
 nella cartella e fai doppio clic su `genera_video.bat`: il programma installa
-Python 3.11 (via winget), Tesseract,
+Python 3.12 su x86-64 (3.11 su ARM64, via winget), Tesseract,
 ffmpeg e i modelli, e poi genera il video. Vedi
 [Primo avvio automatico](#primo-avvio-automatico).
 
 Git serve solo se vuoi clonare il repository; dallo ZIP non ti serve.
 
-1. **Installa Python 3.10+** da [python.org](https://python.org) — spunta **"Add Python to PATH"**. *(Solo se non usi l'avvio automatico, o se `winget` non è disponibile.)*
+1. **Installa Python 3.12** (3.11 su ARM64) da [python.org](https://python.org) — spunta **"Add Python to PATH"**. La finestra supportata è 3.10–3.13. *(Solo se non usi l'avvio automatico, o se `winget` non è disponibile.)*
 2. **Installa Git** da [git-scm.com](https://git-scm.com) (se non presente, e solo se vuoi clonare).
 3. **Clona il repository**:
    ```bash
@@ -103,8 +101,9 @@ Windows **non devi installare niente a mano**. Il programma, in ordine:
    Se sul PC c'è già un Python con i pacchetti del progetto, viene usato
    quello e non si installa niente.
 2. **Tesseract OCR** e **ffmpeg** — con `winget` / `apt-get` / `brew`, se mancano.
-3. **I modelli** (~6.4 GB di embedding + ~490 MB di Whisper), annunciati
-   prima di essere scaricati.
+3. **I modelli** (~2,1 GB di embedding + ~460 MB di Whisper; 6,4 GB è il
+   caso peggiore storico usato dal controllo spazio), annunciati prima di
+   essere scaricati.
 4. **L'ambiente** `.venv`, con i pacchetti del progetto isolati dagli altri
    programmi del PC.
 
@@ -146,8 +145,9 @@ installazione: **non** fallisce con un errore incomprensibile.
 > `.cache/embedding_model/` pesa 2,10 GB, e il Whisper `small` nella cache
 > HuggingFace 464 MB.
 >
-> Una versione precedente di questa pagina riportava 6,4 GB per l'embedding,
-> scomposti in due copie (2,1 + 4,3 GB). **Quella scomposizione non si
+> Il 6,4 GB riportato dalle versioni precedenti di questa pagina è il
+> **caso peggiore storico**: due copie del modello (2,1 + 4,3 GB). Con le
+> versioni pinnate di oggi (`fastembed==0.5.1`) quella scomposizione **non si
 > riproduce**: sulla macchina in cui è stata rimisurata c'è una sola copia,
 > da 2,10 GB. Non è chiaro se dipenda da una versione diversa di fastembed o
 > da una misura fatta su una macchina che aveva scaricato di più.
@@ -177,8 +177,10 @@ installazione: **non** fallisce con un errore incomprensibile.
 > sola — «su questo computer Sync Video riuscirà a fare un video?» — riga per
 > riga, e dice cosa fare quando la risposta è no.
 >
-> Non installa e non modifica nulla, quindi si può lanciare anche su un PC che non
-> ha ancora ricevuto i file. Esce con codice 1 se manca qualcosa di essenziale.
+> Non installa nulla (nemmeno Python: imposta `SYNC_VIDEO_NO_PYTHON_INSTALL=1`
+> prima di chiamare l'helper) e non modifica nulla, quindi si può lanciare
+> anche su un PC che non ha ancora ricevuto i file. Esce con codice 1 se manca
+> qualcosa di essenziale.
 >
 > Diverso da `controlli.bat`, che è lo strumento di chi sviluppa il codice e a
 > un collega non dice nulla.
@@ -406,14 +408,15 @@ installazione: **non** fallisce con un errore incomprensibile.
 > Controlla con `--force-setup` (rileva di nuovo) o disabilita con
 > `--no-auto-setup`.
 >
-> **Su un PC nuovo, scarica i modelli prima.** Al primo avvio i modelli (~3 GB:
-> embedding e5-large 2.2 GB, pesi Whisper, modello OpenVINO IR 930 MB) vengono
+> **Su un PC nuovo, scarica i modelli prima.** Al primo avvio i modelli (~2,6 GB
+> senza l'OpenVINO IR facoltativo: embedding e5-large 2,1 GB, pesi Whisper;
+> 6,4 GB resta il tetto storico del controllo spazio) vengono
 > scaricati *dentro* la run reale, mescolati al lavoro: un timeout di rete tronca
 > tutto a metà e il log non distingue "modello mancante" da "download fallito".
 > Meglio tenerli separati:
 >
 > ```bash
-> python src/main.py --prefetch-models   # scarica tutto e esce (~3 GB, una tantum)
+> python src/main.py --prefetch-models   # scarica tutto e esce (~2,6 GB, una tantum)
 > python src/main.py                     # ora la prima run non scarica nulla
 > ```
 >
@@ -470,11 +473,11 @@ installazione: **non** fallisce con un errore incomprensibile.
 > - **DIVERGENTE** → resta pinnato e si aggiornano solo gli altri pacchetti.
 >
 > Il report è salvato in `.cache/fastembed_ab.json`. Esegui manualmente con
-> `python check_fastembed_upgrade.py`.
+> `python src/scripts/check_fastembed_upgrade.py`.
 >
 > **Aggiornamento manuale dedicato.** Per fare il check + aggiornamento dei
 > pacchetti senza lanciare l'intera pipeline, usa lo script standalone
-> `aggiornamenti.bat` (o `python aggiornamenti.py`): esegue bootstrap +
+> `aggiornamenti.bat` (o `python src/aggiornamenti.py`): esegue bootstrap +
 > controllo aggiornamenti con richiesta S/N, come all'avvio di `main.py`.
 > `genera_video.bat` di default salta il controllo (flag `--no-update-check`)
 > per non rallentare la generazione; per riattivarlo al volo aggiungi

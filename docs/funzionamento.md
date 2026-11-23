@@ -1,4 +1,3 @@
-<!-- Estratto da README.md (righe 956-1075). Torna al [README](../README.md). -->
 
 ## 🔧 Come funziona
 
@@ -119,7 +118,7 @@ precisa di dove cambia la slide. Senza ancore la run non si ferma — il flusso
 viene assunto e i confini sono stimati dal contenuto — ma la stima è meno
 affidabile e il log lo dichiara.
 
-Il prompt [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](../<PROMPT_PRESENTAZIONE (PREDEFINITO).md>)
+Il prompt [`PROMPT_PRESENTAZIONE (PREDEFINITO).md`](<../PROMPT_PRESENTAZIONE (PREDEFINITO).md>)
 guida sia la generazione della presentazione (Studio → Slide Deck, dalle tue
 fonti) sia il podcast che la segue nell'ordine, con la presentazione come
 UNICA fonte. Ancore strette: cifre, "slide" chiara, mai "la slide successiva",

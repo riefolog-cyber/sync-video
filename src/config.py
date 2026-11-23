@@ -7,6 +7,7 @@ Costanti, argparse, logging e setup automatico dipendenze.
 import argparse
 import contextlib
 import importlib.metadata
+import json
 import logging
 import os
 import platform
@@ -15,7 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -81,8 +82,18 @@ def _load_env_file(path: Path) -> None:
             os.environ[key] = value
 
 
+def _env_path() -> Path:
+    """Percorso del .env del progetto: la radice, non la cartella di config.py.
+
+    Il file sta accanto a requirements.txt. Cercarlo vicino a questo modulo
+    (che puo' stare in `src/`, o dentro lo ZIP) lo rendeva invisibile: le
+    impostazioni scritte li' non venivano mai lette, senza alcun avviso.
+    """
+    return project_root() / ".env"
+
+
 # Carica .env se presente (prima di argparse)
-_load_env_file(Path(__file__).parent / ".env")
+_load_env_file(_env_path())
 
 
 def _env_int(name: str, default: int) -> int:
@@ -95,6 +106,22 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         log.warning("   Variabile %s non numerica ('%s'), uso default %d.", name, value, default)
         return default
+
+
+def _env_int_positivo(name: str, default: int) -> int:
+    """Come `_env_int`, ma scarta zero e negativi con un messaggio azionabile."""
+    valore = _env_int(name, default)
+    if valore <= 0:
+        log.warning(
+            "   Variabile %s non valida ('%s'): deve essere un intero positivo "
+            "(es. %s=300); uso default %d.",
+            name,
+            os.environ.get(name),
+            name,
+            default,
+        )
+        return default
+    return valore
 
 
 # Classe di memoria della macchina: 'basso' (< 6 GB), 'medio' (< 12 GB),
@@ -409,6 +436,19 @@ logging.basicConfig(
 log = logging.getLogger("slide2video")
 
 
+def _log_file_una_volta(record: logging.LogRecord) -> bool:
+    """Filtro anti-duplicati per l'handler su file.
+
+    L'handler viene attaccato sia a `log` sia al root: poiche' `log` propaga
+    i record al root, senza questo filtro ogni sua riga finirebbe nel file
+    due volte (una per ogni passaggio dello stesso record).
+    """
+    if getattr(record, "_s2v_log_file_visto", False):
+        return False
+    record._s2v_log_file_visto = True
+    return True
+
+
 def setup_debug_logging() -> None:
     """Attiva il livello DEBUG per diagnostica dettagliata."""
     log.setLevel(logging.DEBUG)
@@ -469,7 +509,11 @@ _REQUIRED_PACKAGES = {
     # numpy to >= 1.26.0" dentro pandas, che sembra un guasto di pytesseract.
     "numpy": "numpy>=1.26.0",
     "tqdm": "tqdm",
-    "fastembed": "fastembed",
+    # Pinned come in requirements.txt: dalla 0.6 il pooling passa da CLS a mean
+    # e invalida la baseline degli embedding (vedi check_fastembed_upgrade.py).
+    # Il bootstrap legge QUESTA tabella, non requirements.txt: senza il pin
+    # installerebbe/aggiornerebbe l'ultima versione e romperebbe la baseline.
+    "fastembed": "fastembed==0.5.1",
     "faster_whisper": "faster-whisper>=1.2.1",
     # Finestra per PyAV, usato da faster-whisper per decodificare l'audio:
     # - sotto, faster-whisper chiama av.open(..., metadata_errors="ignore"),
@@ -505,6 +549,36 @@ _REQUIRED_PACKAGES = {
 # IMPORT (`audioop`) perche' e' verifica_pc a fare `__import__(chiave)`.
 if sys.version_info >= (3, 13):
     _REQUIRED_PACKAGES["audioop"] = "audioop-lts"
+
+
+def _pin_overrides() -> dict[str, str]:
+    """Pin aggiornati da `updates.py` in `.cache/pin_overrides.json`.
+
+    Il file e' opzionale e ha la forma ``{"fastembed": "0.6.0"}``: dopo una
+    verifica A/B chi aggiorna il pin lo scrive qui, e il bootstrap lo legge
+    al riavvio senza toccare il codice. File assente, JSON rotto o forma
+    inattesa: nessun override e nessun rumore (e' un file opzionale).
+    """
+    try:
+        dati = json.loads((CACHE_DIR / "pin_overrides.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(dati, dict):
+        return {}
+    return {str(chiave): valore for chiave, valore in dati.items() if isinstance(valore, str)}
+
+
+# Applica gli override solo a pacchetti gia' dichiarati: un nome nuovo non deve
+# diventare una dipendenza silenziosa del primo avvio. La chiave del file puo'
+# essere il nome pip, quella del dizionario e' il nome d'import.
+for _nome_pin, _versione_override in _pin_overrides().items():
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+\-_]*", _versione_override):
+        continue
+    for _chiave_pkg, _req_pkg in _REQUIRED_PACKAGES.items():
+        _nome_pip = re.split(r"[<>=!~]", _req_pkg, maxsplit=1)[0].strip().lower()
+        if _chiave_pkg.lower() == _nome_pin.lower() or _nome_pip == _nome_pin.lower():
+            _REQUIRED_PACKAGES[_chiave_pkg] = f"{_nome_pip}=={_versione_override}"
+            break
 
 # =====================================================================
 # ARCHITETTURA: pacchetti senza build nativa ARM
@@ -1428,6 +1502,48 @@ def _rifiuta_python_troppo_recente() -> None:
     sys.exit(1)
 
 
+# Guardia GROSSOLANA sulla dimensione di ita.traineddata (tessdata_fast e'
+# ~1.1 MB): serve solo a scartare un file vuoto, troncato o una pagina HTML
+# di errore, non a validarne il contenuto. Un valore esatto renderebbe il
+# download fragile se upstream aggiorna il modello.
+_TRAINEDDATA_MIN_BYTES = 100_000
+_TRAINEDDATA_MAX_BYTES = 50_000_000
+
+
+def _download_traineddata(url: str, dest: Path) -> None:
+    """Scarica `url` in `dest` in modo atomico (temporaneo `.part` + os.replace).
+
+    Il temporaneo ha un nome univoco e sta nella stessa cartella di `dest`,
+    cosi' `os.replace` e' atomico e due run concurrenti non si pestano (lo
+    stesso motivo di `atomic_write_text`). Prima di promuoverlo si verifica
+    che non sia vuoto e che la dimensione sia plausibile: una rete interrotta
+    lascia un `.part` troncato, che non deve mai diventare il file finale.
+    In caso di errore il temporaneo viene rimosso e l'eccezione e' rilanciata
+    a chi decide come avvisare (bootstrap): il file finale resta intatto.
+    Il download ha un timeout di 30 secondi: con `urlretrieve` una rete ferma
+    bloccava il bootstrap per sempre, senza distinguerlo da un file enorme.
+    """
+    import urllib.request
+
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=dest.name + ".", suffix=".part")
+    os.close(fd)  # il file viene riaperto in 'wb': su Windows un fd aperto bloccherebbe
+    tmp = Path(tmp_name)
+    try:
+        with urllib.request.urlopen(url, timeout=30) as risposta, tmp.open("wb") as out:
+            shutil.copyfileobj(risposta, out, length=65536)
+        size = tmp.stat().st_size
+        if not _TRAINEDDATA_MIN_BYTES <= size <= _TRAINEDDATA_MAX_BYTES:
+            raise OSError(
+                f"dimensione inaspettata ({size} byte) per ita.traineddata: "
+                "file vuoto/troncato oppure pagina di errore"
+            )
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
 def bootstrap(*, ignora_spazio: bool = False) -> None:
     """
     Verifica e installa automaticamente tutte le dipendenze.
@@ -1549,10 +1665,10 @@ def bootstrap(*, ignora_spazio: bool = False) -> None:
         if not ita_path.exists():
             log.info("🔧 Lingua italiana Tesseract mancante: scarico ita.traineddata (una tantum)...")
             try:
-                import urllib.request
-
-                # URL fisso del repo ufficiale tessdata_fast (nessun input utente)
-                urllib.request.urlretrieve(
+                # URL fisso del repo ufficiale tessdata_fast (nessun input utente).
+                # Il download e' atomico: un file troncato non diventa mai il
+                # definitivo, quindi le run successive lo ritentano.
+                _download_traineddata(
                     "https://github.com/tesseract-ocr/tessdata_fast/raw/main/ita.traineddata",
                     ita_path,
                 )
@@ -1791,16 +1907,30 @@ DEFAULT_MIN_WORD_LENGTH = 2  # ignora parole più corte
 DEFAULT_VIDEO_FPS = _env_int("VIDEO_FPS", 5)  # fps > 1 evita che l'ultimo frame tagli l'audio finale
 DEFAULT_VIDEO_BUFFER_SEC = _env_float("VIDEO_BUFFER_SEC", 3.0)  # secondi extra sul video per proteggere l'audio finale
 # Risoluzione massima video (larghezza, altezza) — sovrascrivibile con VIDEO_RES="WxH"
-_VIDEO_RES_ENV = os.environ.get("VIDEO_RES")
-if _VIDEO_RES_ENV and "x" in _VIDEO_RES_ENV:
-    try:
-        _w, _h = _VIDEO_RES_ENV.lower().split("x")[:2]
-        DEFAULT_VIDEO_RES = (int(_w), int(_h))
-    except ValueError:
-        log.warning("   VIDEO_RES non valido ('%s'), uso default 1920x1080.", _VIDEO_RES_ENV)
-        DEFAULT_VIDEO_RES = (1920, 1080)
-else:
-    DEFAULT_VIDEO_RES = (1920, 1080)
+def _video_res_da_env(valore: str) -> tuple[int, int]:
+    """Analizza VIDEO_RES='LARGHEZZAxALTEZZA' con due numeri interi positivi.
+
+    Prima `split('x')[:2]` buttava via le parti in eccesso: '1280x720x99'
+    passava in silenzio e '1280x0' produceva un video invalido. Il messaggio
+    dice il formato atteso e un esempio, cosi' l'utente sa cosa correggere.
+    """
+    default = (1920, 1080)
+    if not valore:
+        return default
+    parti = valore.strip().lower().split("x")
+    if len(parti) == 2 and all(parte.isdigit() for parte in parti):
+        larghezza, altezza = int(parti[0]), int(parti[1])
+        if larghezza > 0 and altezza > 0:
+            return (larghezza, altezza)
+    log.warning(
+        "   VIDEO_RES non valido ('%s'): atteso il formato LARGHEZZAxALTEZZA con due "
+        "numeri interi positivi (es. VIDEO_RES=1280x720); uso default 1920x1080.",
+        valore,
+    )
+    return default
+
+
+DEFAULT_VIDEO_RES = _video_res_da_env(os.environ.get("VIDEO_RES", ""))
 # Thread di encoding del video. Default adattivo (auto_thread_budget):
 # fisici fino a 12; su CPU con piu' core il tetto evita la saturazione di
 # banda misurata oltre. Override con VIDEO_THREADS (ha sempre precedenza).
@@ -1814,7 +1944,7 @@ else:
     if _VIDEO_ENGINE_ENV:
         log.warning("   VIDEO_ENGINE non valido ('%s'), uso 'ffmpeg'.", _VIDEO_ENGINE_ENV)
     DEFAULT_VIDEO_ENGINE = "ffmpeg"
-DEFAULT_OCR_DPI = _env_int("OCR_DPI", 300)
+DEFAULT_OCR_DPI = _env_int_positivo("OCR_DPI", 300)
 DEFAULT_OCR_LANG = os.environ.get("OCR_LANG", "ita")
 DEFAULT_OCR_WORKERS = auto_thread_budget("ocr")
 DEFAULT_TRANSITION_DURATION = 0.0  # secondi (0 = nessuna transizione)
@@ -2069,6 +2199,69 @@ def get_stopwords(lang: str = "ita") -> frozenset:
     return frozenset()
 
 
+class _WhisperModelChoices:
+    """Valori ammessi da --whisper-model, oltre alle taglie standard.
+
+    faster-whisper accetta anche repo HuggingFace e percorsi locali: una
+    `choices` fissa di soli cinque nomi rifiuterebbe modelli che il codice sa
+    usare (`large-v3`, `turbo`, repo custom). Il controllo resta utile per
+    bloccare i refusi (`smal`) che fallirebbero solo al download.
+    """
+
+    TAGLIE = (
+        "tiny",
+        "base",
+        "small",
+        "medium",
+        "large",
+        "large-v1",
+        "large-v2",
+        "large-v3",
+        "large-v3-turbo",
+        "turbo",
+    )
+
+    def __contains__(self, valore: object) -> bool:
+        if not isinstance(valore, str):
+            return False
+        nome = valore.strip().lower()
+        if not nome:
+            return False
+        if nome in self.TAGLIE:
+            return True
+        # repo HuggingFace ('org/modello') o percorso locale ('C:\modelli\mio')
+        if "/" in nome or "\\" in nome:
+            return True
+        # La mappa di faster-whisper e' autorevole: se cambia, questa choices
+        # segue senza dover aggiornare una lista duplicata qui.
+        try:
+            from faster_whisper.utils import _MODELS
+
+            return nome in _MODELS
+        except Exception:  # dipendenza opzionale o mappa non disponibile
+            return False
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.TAGLIE)
+
+
+def _frazione_anchor_coverage(valore: str) -> float:
+    """Type di argparse per --min-anchor-coverage: frazione in [0, 1]."""
+    try:
+        frazione = float(valore)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--min-anchor-coverage vuole un numero tra 0 e 1 (es. 0.8 = 80 per cento "
+            f"di ancore), ricevuto {valore!r}"
+        ) from None
+    if not 0.0 <= frazione <= 1.0:
+        raise argparse.ArgumentTypeError(
+            f"--min-anchor-coverage deve stare tra 0 e 1 (0 = disattivato, "
+            f"1 = tutte le ancore), ricevuto {valore!r}"
+        )
+    return frazione
+
+
 # =====================================================================
 # ARGPARSE
 # =====================================================================
@@ -2111,7 +2304,9 @@ Esempi:
     parser.add_argument(
         "--whisper-model",
         default=DEFAULT_WHISPER_MODEL,
-        help=f"Dimensione modello faster-whisper (tiny/base/small/medium/large). "
+        choices=_WhisperModelChoices(),
+        help="Dimensione modello faster-whisper (tiny/base/small/medium/large, "
+        "oppure large-v3/turbo, un repo HuggingFace o un percorso locale). "
         f"tiny/base = più veloce, medium/large = più preciso (default: {DEFAULT_WHISPER_MODEL})",
     )
     parser.add_argument(
@@ -2237,7 +2432,7 @@ Esempi:
     )
     parser.add_argument(
         "--min-anchor-coverage",
-        type=float,
+        type=_frazione_anchor_coverage,
         default=DEFAULT_MIN_ANCHOR_COVERAGE,
         help="Nel flusso slide -> podcast, interrompi se la frazione di "
         "transizioni con ancora 'slide N' e' sotto la soglia (default: "
@@ -2513,10 +2708,44 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
 
     # Logging su file se richiesto
     if args.log_file:
-        file_handler = logging.FileHandler(args.log_file, encoding="utf-8")
-        file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-5s | %(message)s"))
+        log_path = Path(args.log_file)
+        if not log_path.is_absolute():
+            # Coerente con pdf/output/slides: un percorso relativo e' sempre
+            # rispetto alla radice del progetto, non alla cartella corrente.
+            log_path = BASE_DIR / log_path
+        try:
+            # FileHandler non crea la cartella padre: senza questo, un percorso
+            # nuovo o non scrivibile esplodeva in un traceback grezzo prima
+            # ancora del bootstrap.
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.FileHandler(log_path, encoding="utf-8")
+            file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-5s | %(message)s"))
+            file_handler.addFilter(_log_file_una_volta)
+            # parse_args puo' essere chiamata piu' volte nello stesso processo:
+            # sostituisci l'handler precedente sullo stesso file, altrimenti
+            # ogni riga verrebbe scritta due volte.
+            for logger in (log, logging.getLogger()):
+                for vecchio in list(logger.handlers):
+                    if (
+                        isinstance(vecchio, logging.FileHandler)
+                        and vecchio.baseFilename == os.path.abspath(log_path)
+                    ):
+                        logger.removeHandler(vecchio)
+                        vecchio.close()
+        except OSError as e:
+            log.error(
+                "\n❌ Non posso scrivere il file di log '%s': %s\n"
+                "   Controlla che la cartella esista e sia scrivibile, oppure passa "
+                "un altro percorso a --log-file (es. --log-file log.txt).",
+                log_path,
+                e,
+            )
+            sys.exit(1)
+        # Il root riceve anche i log dei moduli che non usano `log`: senza di
+        # lui, nel file mancavano tutti i messaggi del bootstrap.
         log.addHandler(file_handler)
-        log.info("   Log salvato anche in: %s", args.log_file)
+        logging.getLogger().addHandler(file_handler)
+        log.info("   Log salvato anche in: %s", log_path)
 
     # Risolvi percorsi relativi a BASE_DIR
     args.pdf_path = BASE_DIR / args.pdf

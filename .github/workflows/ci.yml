@@ -55,7 +55,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-${{ hashFiles('requirements.txt', 'config.py') }}
+          key: hf-${{ runner.os }}-${{ hashFiles('requirements.txt', 'src/config.py') }}
           restore-keys: |
             hf-${{ runner.os }}-
 
@@ -63,8 +63,8 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Strumenti di sistema (ffmpeg, Tesseract)
-        # ubuntu-latest e' passata a Ubuntu 26.04 (immagine ubuntu-26.04) e
-        # non porta piu' ffmpeg ne' Tesseract preinstallati. Prima ci pensava
+        # L'immagine dietro ubuntu-latest cambia nel tempo e non porta
+        # sempre ffmpeg e Tesseract preinstallati. Prima ci pensava
         # il bootstrap dentro la suite, ma ogni installazione ha un timeout di
         # 600s: su un mirror lento scade, e il fallimento arriva poi dai test
         # del PC sano come se il codice fosse rotto (run 39921954759). Qui
@@ -155,7 +155,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-${{ hashFiles('requirements.txt', 'config.py') }}
+          key: hf-${{ runner.os }}-${{ hashFiles('requirements.txt', 'src/config.py') }}
           restore-keys: |
             hf-${{ runner.os }}-
 
@@ -163,8 +163,8 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Strumenti di sistema (ffmpeg, Tesseract)
-        # ubuntu-latest e' passata a Ubuntu 26.04 (immagine ubuntu-26.04) e
-        # non porta piu' ffmpeg ne' Tesseract preinstallati. Prima ci pensava
+        # L'immagine dietro ubuntu-latest cambia nel tempo e non porta
+        # sempre ffmpeg e Tesseract preinstallati. Prima ci pensava
         # il bootstrap dentro la suite, ma ogni installazione ha un timeout di
         # 600s: su un mirror lento scade, e il fallimento arriva poi dai test
         # del PC sano come se il codice fosse rotto (run 39921954759). Qui
@@ -223,7 +223,10 @@ jobs:
 
       - name: Suite completa (lenti inclusi)
         env:
-          SYNC_VIDEO_RUN_SLOW: "1"
+          # Sempre accesi col cron notturno; col lancio manuale comanda
+          # l'input del workflow_dispatch (default: true). Le parentesi
+          # servono per avere sempre la stringa "1"/"0", non un booleano.
+          SYNC_VIDEO_RUN_SLOW: ${{ (github.event_name == 'schedule' || inputs.run-slow) && '1' || '0' }}
           # Solo la 3.12 puo' SCARICARE il modello embedding (2 GB): una volta
           # in cache, tutte le versioni lo leggono e il test gira ovunque.
           SYNC_VIDEO_E2E_SCARICA: ${{ matrix.python-version == '3.12' && '1' || '0' }}
@@ -304,10 +307,11 @@ jobs:
   pacchetto:
     # ZIP datato per i colleghi: niente piu' "quale copia hai?". Gira solo sui
     # push su main (mai sulle PR: niente release dai rami) e solo se i test
-    # veloci sono verdi (needs). La release resta pubblica e scaricabile senza
-    # login; una per push, con data+sha nel nome (niente tag mobili).
+    # veloci sono verdi su Linux e Windows (needs). La release resta pubblica e
+    # scaricabile senza login; una per push, con data+sha nel nome (niente tag
+    # mobili).
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: lint-typecheck-test
+    needs: [lint-typecheck-test, windows-rapido]
     runs-on: ubuntu-latest
     permissions:
       contents: write

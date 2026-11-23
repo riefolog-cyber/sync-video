@@ -1,5 +1,3 @@
-<!-- Estratto da README.md (righe 729-818). Torna al [README](../README.md). -->
-
 ## 🧪 Prova sul materiale reale (prova_materiale_reale.py)
 
 I test della suite sono **tutti finti** (un PDF finto, un audio finto): le
