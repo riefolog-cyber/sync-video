@@ -1,44 +1,37 @@
-Prompt NotebookLM — presentazione → podcast  
-   
-    
- Fase 1 — La presentazione (incolla in "Studio → Slide Deck")  
-    
-   
- Crea una presentazione: una slide per argomento, senza dividere un argomento in due slide né accorparne due in una. Ogni pagina deve poter diventare una sezione breve del podcast. Testo rigorosamente solo in italiano. Numera ogni slide con il numero della sua posizione, dalla 1: niente copertina senza numero. Il numero compare una sola volta per pagina, in basso a sinistra. Il video sincronizza sul numero stampato sulla pagina: se quel numero non è quello annunciato, il video mostra un numero che il podcast non sta dicendo.   
-   
-     
- Scarica la presentazione e ricaricala nelle fonti  
-    
-   
- Fase 2 — Il podcast (incolla in "Personalizza" → "Istruzioni")  
-   
-    
- La presentazione è la spina dorsale: segui le sue pagine in ordine, una sezione per pagina, TUTTE le pagine dalla prima all'ultima. Non introdurre argomenti di altre pagine. Non rileggere il testo delle slide: sintetizzalo e arricchiscilo con esempi concreti.   
-   
-     
-   
- Ogni sezione:   
-   
- si apre con la frase isolata "Passiamo alla slide N.", dove N è il numero vero della pagina (mai un segnaposto), dalla seconda in poi; sviluppa il contenuto con esempi concreti, senza limitarti a elencare i punti della slide.  
- ANCORE: valgono più della fluidità del testo. Il video si sincronizza sulle frasi in cui dichiari il numero di pagina.   
- In ordine, una volta sola: se le pagine sono N, gli annunci sono N-1 dal 2 al N, senza salti e senza ripetizioni. L'ultima pagina si annuncia come le altre: non è una conclusione, è una sezione.   
- MAI RICHIAMARE una pagina già trattata  
- Un numero solo nella frase che apre la sezione, mai altrove, almeno una frase di distanza da "slide". Mai "slide 1" in apertura (la prima pagina parte già all'inizio), mai il numero totale di pagine. Nel finale non elencare mai i numeri già annunciati: per verificare il conteggio, conta senza scriverli.   
- Sezioni di lunghezza simile.   
-   
-     
- TONO E STILE DEL DIBATTITO   
-   
- TARGET: classe di scuola secondaria di secondo grado (14-19 anni), lezione di IRC.   
- TONO: frasi corte, linguaggio fresco e immediato, esempi dalla quotidianità dei ragazzi (scuola, amicizia, famiglia, social); niente tecnicismi, niente termini stranieri non spiegati.   
- DINAMICA: due conduttori in scambio rapido, senza monologhi; uno solleva dubbi da studente, l'altro chiarisce senza giudicare. Rivolgiti sempre direttamente agli studenti.   
- FOCUS: concetti con ricaduta etica o esistenziale; niente tono moralistico: proponi i concetti come domande, non come verità.   
- CHIUSA: chiudi ogni sezione con una domanda aperta e una frase riassuntiva (senza "in sintesi" a ogni giro); l'ultima sezione si conclude con un saluto finale breve.   
-   
-     
-   
-    
-   
-    
-   
-    
+Prompt NotebookLM — presentazione → podcast
+
+Fase 1 — La presentazione (incolla in "Studio → Slide Deck")
+
+Crea una presentazione: una slide per argomento, senza dividere un argomento in due slide né accorparne due in una. Ogni pagina deve poter diventare una sezione breve del podcast. Testo rigorosamente solo in italiano. Numera ogni slide con il numero della sua posizione, dalla 1: niente copertina senza numero. Il numero compare una sola volta per pagina, in basso a sinistra. Il video sincronizza sul numero stampato sulla pagina: se quel numero non è quello annunciato, il video mostra un numero che il podcast non sta dicendo.
+
+Scarica la presentazione e ricaricala nelle fonti
+
+Fase 2 — Il podcast (incolla in "Personalizza" → "Istruzioni")
+
+La presentazione è la spina dorsale: segui le sue pagine in ordine, una sezione per pagina, TUTTE le pagine dalla prima all'ultima. Non introdurre argomenti di altre pagine. Non rileggere il testo delle slide: sintetizzalo e arricchiscilo con esempi concreti.
+
+Ogni sezione: si apre con la frase isolata "Passiamo alla slide N.", dove N è il numero vero della pagina (mai un segnaposto), dalla seconda in poi; sviluppa il contenuto con esempi concreti, senza limitarti a elencare i punti della slide.
+
+ANCORE: valgono più della fluidità del testo. Il video si sincronizza sulle frasi in cui dichiari il numero di pagina.
+
+In ordine, una volta sola: se le pagine sono N, gli annunci sono N-1 dal 2 al N, senza salti e senza ripetizioni. L'ultima pagina si annuncia come le altre: non è una conclusione, è una sezione.
+
+MAI RICHIAMARE una pagina già trattata
+
+Un numero solo nella frase che apre la sezione, mai altrove, almeno una frase di distanza da "slide". Mai "slide 1" in apertura (la prima pagina parte già all'inizio), mai il numero totale di pagine. Nel finale non elencare mai i numeri già annunciati: per verificare il conteggio, conta senza scriverli.
+
+Sezioni di lunghezza simile.
+
+TONO E STILE DEL DIBATTITO
+
+TARGET: classe di scuola secondaria di secondo grado (14-19 anni), lezione di IRC.
+
+TONO: frasi corte, linguaggio fresco e immediato, esempi dalla quotidianità dei ragazzi (scuola, amicizia, famiglia, social); niente tecnicismi, niente termini stranieri non spiegati.
+
+DINAMICA: due conduttori in scambio rapido, senza monologhi; uno solleva dubbi da studente, l'altro chiarisce senza giudicare. Rivolgiti sempre direttamente agli studenti.
+
+FOCUS: concetti con ricaduta etica o esistenziale; niente tono moralistico: proponi i concetti come domande, non come verità.
+
+CHIUSA: chiudi ogni sezione con una domanda aperta e una frase riassuntiva (senza "in sintesi" a ogni giro); l'ultima sezione si conclude con un saluto finale breve.
+
+Scarica l'audio
