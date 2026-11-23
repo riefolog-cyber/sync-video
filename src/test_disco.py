@@ -11,12 +11,14 @@ che non nomina la causa.
 
 from __future__ import annotations
 
+import os
 import re
+import sys
 import tempfile
 import unittest
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import config
 import hardware
@@ -301,7 +303,7 @@ class TestAvvisoSpazio(unittest.TestCase):
         """Un blocco senza via d'uscita e' un vicolo cieco."""
         testo = "\n".join(self._ferma(3 * GB))
         self.assertIn("--ignora-spazio", testo)
-        self.assertIn("--embedding-cache-dir", testo)
+        self.assertIn("--semantic-cache-dir", testo)
 
     def test_con_ignora_avvisa_e_prosegue(self) -> None:
         """Il comportamento di prima resta disponibile per chi lo chiede."""
@@ -419,6 +421,43 @@ class TestBootstrapUsaLaTagliaScelta(unittest.TestCase):
             ):
                 config.bootstrap()
         self.assertEqual(annuncio.call_args.kwargs["whisper_model"], config.DEFAULT_WHISPER_MODEL)
+
+
+class TestPathDaRegistro(unittest.TestCase):
+    """REG_EXPAND_SZ: il registro puo' restituire %VAR% / $VAR letterali.
+
+    Senza expandvars il PATH del processo finisce con cartelle inesistenti e
+    l'ffmpeg appena installato resta invisibile: il bootstrap lo dichiara
+    mancante anche se e' stato installato.
+    """
+
+    def test_variabili_ambiente_vengono_espanse(self) -> None:
+        variabile = "SYNCVIDEO_TEST_REG_PATH"
+        if os.name == "nt":
+            sentinella = r"C:\sentinella-registro"
+            frammento = f"%{variabile}%{os.pathsep}C:\\fissa"
+            path_iniziale = r"C:\preesistente"
+        else:
+            sentinella = "/sentinella-registro"
+            frammento = f"${variabile}{os.pathsep}/fissa"
+            path_iniziale = "/preesistente"
+
+        winreg_finto = MagicMock()
+        winreg_finto.HKEY_CURRENT_USER = 1
+        winreg_finto.HKEY_LOCAL_MACHINE = 2
+        winreg_finto.QueryValueEx.return_value = (frammento, 2)  # REG_EXPAND_SZ
+
+        with (
+            patch.dict(sys.modules, {"winreg": winreg_finto}),
+            patch.object(sys, "platform", "win32"),
+            patch.dict(os.environ, {variabile: sentinella, "PATH": path_iniziale}),
+        ):
+            config._aggiorna_path_da_registro()
+            path_finale = os.environ["PATH"]
+
+        self.assertIn(sentinella, path_finale)
+        self.assertNotIn(variabile, path_finale)
+        self.assertIn(path_iniziale, path_finale)
 
 
 if __name__ == "__main__":

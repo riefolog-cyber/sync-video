@@ -758,6 +758,24 @@ class TestSlideAudioFlow(unittest.TestCase):
         anchors = extract_slide_anchors(words, total_slides=13, flow="slide-audio")
         self.assertEqual(anchors, {2: 93.5, 3: 161.7, 4: 250.6})
 
+    def test_count_phrase_in_opening_with_one_real_transition(self):
+        # Con UNA sola transizione vera le due catene di ancore valgono 1 a 1:
+        # il confronto "strettamente maggiore" lasciava vincere il conteggio in
+        # apertura e spostava il confine di minuti (slide 2 ancorata a 6.6s
+        # invece che a 93.5s). In pareggio vince la catena con piu' ancore reali.
+        from timeline import extract_slide_anchors
+
+        words = _words(
+            [
+                ("questa", 5.0), ("puntata", 5.3), ("copre", 5.6),
+                ("le", 5.8), ("13", 6.0), ("slide", 6.3),
+                ("del", 6.6), ("documento", 6.9),
+                ("passiamo", 93.0), ("alla", 93.2), ("slide", 93.3), ("2", 93.5),
+            ]
+        )
+        anchors = extract_slide_anchors(words, total_slides=13, flow="slide-audio")
+        self.assertEqual(anchors, {2: 93.5})
+
     def test_order_filter_still_wins_when_it_finds_more_anchors(self):
         # L'inverso: qui le menzioni in ordine sono tutte transizioni vere e il
         # LIS classico (last-wins) ne trova meno, perché una citazione ruberebbe

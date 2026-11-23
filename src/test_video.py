@@ -23,6 +23,7 @@ from video import (
     _extract_frame,
     _extract_frames_batch,
     _fitted_size,
+    _frame_tmp,
     _letterbox,
     _letterbox_references,
     _open_slide_retry,
@@ -160,13 +161,29 @@ class TestPrepareSlides(unittest.TestCase):
                     self.assertEqual(a.size, b.size)
 
     def test_letterbox_references_survive_unreadable_slide(self):
-        from PIL import Image
+        """Una slide rotta non azzera la verifica delle altre.
 
+        Prestava un reference nero (vettore nullo -> similarita' 0.0) e
+        segnalava l'indice: il chiamante controlla il resto del deck e dichiara
+        il controllo incompleto invece di dire "checked=0" per tutto.
+        """
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             good = td_path / "good.png"
-            Image.new("RGB", (320, 200), (0, 0, 0)).save(good)
-            self.assertIsNone(_letterbox_references([str(good), str(td_path / "no.png")], td_path / "ref"))
+            img = _half_image(320, 200, vertical=True).convert("RGB")
+            img.save(good)
+            non_letta: list[int] = []
+            with patch("video.time.sleep"):  # retry senza 4.5s di attesa
+                refs = _letterbox_references(
+                    [str(good), str(td_path / "no.png")],
+                    td_path / "ref",
+                    unreadable_out=non_letta,
+                )
+            self.assertEqual(len(refs), 2)
+            self.assertEqual(non_letta, [1])
+            sims = _similarities(refs[0], _reference_matrix(refs))
+            self.assertGreater(float(sims[0]), 0.99)
+            self.assertAlmostEqual(float(sims[1]), 0.0, places=6)
 
 
 class TestExtractFrame(unittest.TestCase):
@@ -193,6 +210,37 @@ class TestExtractFrame(unittest.TestCase):
             finto = MagicMock(returncode=0, stderr=b"")
             with patch("video.subprocess.run", return_value=finto):
                 self.assertFalse(_extract_frame(tmp / "video.mp4", 1.0, tmp / "frame.png"))
+            self.assertFalse(_frame_tmp(tmp / "frame.png").exists())
+
+    def test_timeout_non_lascia_frame_parziale(self):
+        # Il vecchio codice faceva l'unlink solo nel ramo returncode != 0:
+        # timeout e OSError lasciavano un PNG troncato che la verifica
+        # accettava come frame vero.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            out = tmp / "frame.png"
+
+            def scade(cmd, *args, **kwargs):
+                Path(cmd[-1]).write_bytes(b"parziale")
+                raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=60)
+
+            with patch("video.subprocess.run", side_effect=scade):
+                self.assertFalse(_extract_frame(tmp / "video.mp4", 1.0, out))
+            self.assertFalse(out.exists())
+            self.assertFalse(_frame_tmp(out).exists())
+
+    def test_oserror_non_lascia_frame_parziale(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            out = tmp / "frame.png"
+
+            def fallisce(*args, **kwargs):
+                raise OSError("ffmpeg non eseguibile")
+
+            with patch("video.subprocess.run", side_effect=fallisce):
+                self.assertFalse(_extract_frame(tmp / "video.mp4", 1.0, out))
+            self.assertFalse(out.exists())
+            self.assertFalse(_frame_tmp(out).exists())
 
 
 class TestRunFfmpeg(unittest.TestCase):
@@ -271,6 +319,8 @@ class TestBuildVideoFfmpeg(unittest.TestCase):
                 # leggerne il contenuto qui dentro (dopo viene cancellata).
                 concat_arg = cmd[cmd.index("-i") + 1]
                 captured["concat_text"] = Path(concat_arg).read_text(encoding="utf-8")
+                # ffmpeg scrive sul temporaneo: il codice lo rinomina a successo.
+                Path(cmd[-1]).write_bytes(b"video finto")
 
             with patch("video._run_ffmpeg", side_effect=fake_run):
                 _build_video_ffmpeg([str(slide)], [3.5], audio, out, 5, 4)
@@ -279,13 +329,94 @@ class TestBuildVideoFfmpeg(unittest.TestCase):
             self.assertEqual(cmd[0], "ffmpeg")
             self.assertIn("concat", cmd)
             self.assertIn(str(audio), cmd)
-            self.assertEqual(cmd[-1], str(out))
+            self.assertEqual(cmd[-1], str(out.with_suffix(".tmp.mp4")))
+            self.assertTrue(out.exists())
+            self.assertFalse(out.with_suffix(".tmp.mp4").exists())
             self.assertEqual(captured["total"], 3.5)
             # Il file ffconcat contiene l'ultima slide ripetuta senza duration
             lines = captured["concat_text"].splitlines()
             self.assertEqual(lines[0], "ffconcat version 1.0")
             self.assertIn("duration 3.500000", lines)
             self.assertNotIn("duration", lines[-1])
+
+    def test_encoding_fallito_non_lascia_mp4_parziale(self):
+        """Se tutti i tentativi falliscono, il nome buono resta pulito.
+
+        ffmpeg scriveva direttamente in output_path: un errore a meta' lasciava
+        un MP4 corrotto col nome finale, che il riuso della run successiva
+        poteva considerare valido.
+        """
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            slide = td_path / "slide.png"
+            Image.new("RGB", (64, 32), (10, 20, 30)).save(slide)
+            audio = td_path / "audio.m4a"
+            audio.write_bytes(b"\x00" * 16)
+            out = td_path / "video_finale.mp4"
+            out.write_bytes(b"video buono della run precedente")
+            tentativi: list[str] = []
+
+            def fake_run(cmd, total):
+                tentativi.append(cmd[-1])
+                Path(cmd[-1]).write_bytes(b"parziale")  # ffmpeg interrotto
+                raise RuntimeError("Encoding interrotto")
+
+            with patch("video._run_ffmpeg", side_effect=fake_run), self.assertRaises(RuntimeError):
+                _build_video_ffmpeg([str(slide)], [1.0], audio, out, 5, 4)
+
+            self.assertFalse(out.with_suffix(".tmp.mp4").exists())
+            self.assertEqual(out.read_bytes(), b"video buono della run precedente")
+            self.assertGreaterEqual(len(tentativi), 2)
+
+    def test_encoder_out_riporta_il_ripiego_effettivo(self):
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            slide = td_path / "slide.png"
+            Image.new("RGB", (64, 32), (10, 20, 30)).save(slide)
+            audio = td_path / "audio.m4a"
+            audio.write_bytes(b"\x00" * 16)
+            out = td_path / "video.mp4"
+            sequenza = iter([RuntimeError("no"), RuntimeError("no"), RuntimeError("no"), None])
+
+            def fake_run(cmd, total):
+                esito = next(sequenza)
+                if isinstance(esito, Exception):
+                    raise esito
+                Path(cmd[-1]).write_bytes(b"video finto")
+
+            encoder_out: list[str] = []
+            with patch("video._run_ffmpeg", side_effect=fake_run):
+                _build_video_ffmpeg(
+                    [str(slide)], [1.0], audio, out, 5, 4,
+                    encoder="h264_nvenc", encoder_out=encoder_out,
+                )
+            self.assertEqual(encoder_out[-1], "libx264")
+            self.assertIn("h264_nvenc", encoder_out)
+
+    def test_ripristina_backup_se_output_scomparso(self):
+        """Dopo un fallimento il video buono torna al suo nome, se serve."""
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            slide = td_path / "slide.png"
+            Image.new("RGB", (64, 32), (10, 20, 30)).save(slide)
+            audio = td_path / "audio.m4a"
+            audio.write_bytes(b"\x00" * 16)
+            out = td_path / "video.mp4"
+            backup = out.with_name("video (precedente).mp4")
+            backup.write_bytes(b"video buono")
+
+            def fake_run(cmd, total):
+                raise RuntimeError("Encoding interrotto")
+
+            with patch("video._run_ffmpeg", side_effect=fake_run), self.assertRaises(RuntimeError):
+                _build_video_ffmpeg([str(slide)], [1.0], audio, out, 5, 4)
+            self.assertEqual(out.read_bytes(), b"video buono")
 
 
 class TestBuildVideoDispatch(unittest.TestCase):
@@ -332,6 +463,14 @@ class TestBuildVideoDispatch(unittest.TestCase):
         self.assertEqual(args[0], self.SLIDES)
         self.assertAlmostEqual(args[1][-1], 10.0 + 3.0, places=6)
 
+    def test_encoder_auto_normalizzato_a_libx264(self):
+        # Con --no-auto-setup nessuno risolve "auto": se arrival qui come GPU
+        # si omettevano -threads e la chiave di riuso cambiava a ogni run.
+        with patch("video._build_video_ffmpeg") as ffm:
+            build_video(self.SLIDES, self.DURATIONS, "audio.m4a", Path("out.mp4"), encoder="auto")
+        ffm.assert_called_once()
+        self.assertEqual(ffm.call_args.kwargs["encoder"], "libx264")
+
     def test_audio_clip_without_filename_falls_back_to_moviepy(self):
         clip = MagicMock(spec=[])  # nessun attributo filename
         with patch("video._build_video_moviepy") as mov, patch("video._build_video_ffmpeg") as ffm:
@@ -374,6 +513,64 @@ class TestFrameConsistencyCheck(unittest.TestCase):
             a.write_bytes(b"non e' un'immagine")
             _half_image(40, 30, vertical=True).save(b)
             self.assertEqual(image_similarity(a, b), 0.0)
+
+    def test_slide_identiche_non_sono_un_mismatch(self):
+        """np.argmax sceglie l'indice piu' basso: due slide uguali devono andare bene.
+
+        Se la slide dichiarata e' pixel-identica a una precedente, la sua
+        similarita' e' uguale al massimo ma l'argmax punta alla prima: il
+        segmento veniva segnalato come sbagliato (e l'auto-riparazione spostava
+        il confine su niente).
+        """
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            slide1 = tmp / "s1.png"
+            slide2 = tmp / "s2.png"
+            img = _half_image(80, 60, vertical=True)
+            img.save(slide1)
+            img.save(slide2)
+            files = [str(slide1), str(slide2)]
+            refs = _letterbox_references(files, tmp / "ref")
+
+            def fake_batch(video, times, outs):
+                for out, ref in zip(outs, refs, strict=True):
+                    shutil.copy2(ref, out)
+                return True
+
+            with patch("video._extract_frames_batch", side_effect=fake_batch):
+                check = frame_consistency_check(
+                    tmp / "v.mp4", [(1, 0.0, 10.0), (2, 10.0, 20.0)],
+                    files, tmp / "frames", min_similarity=0.9,
+                )
+            self.assertEqual(check["mismatches"], [])
+            self.assertEqual(check["checked"], 2)
+            self.assertEqual(check["coherent"], 2)
+
+    def test_slide_illeggibile_salta_solo_quei_segmenti(self):
+        """Una slide rotta non disattiva tutta la verifica."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            good = tmp / "s1.png"
+            _half_image(80, 60, vertical=True).convert("RGB").save(good)
+            broken = tmp / "s2.png"
+            broken.write_bytes(b"non un'immagine")
+            files = [str(good), str(broken)]
+
+            def fake_batch(video, times, outs):
+                # Viene chiesto SOLO il frame della slide leggibile.
+                shutil.copy2(files[0], outs[0])
+                return True
+
+            with patch("video.time.sleep"), patch("video._extract_frames_batch", side_effect=fake_batch):
+                check = frame_consistency_check(
+                    tmp / "v.mp4", [(1, 0.0, 10.0), (2, 10.0, 20.0)],
+                    files, tmp / "frames", min_similarity=0.9,
+                )
+            self.assertEqual(check["checked"], 1)
+            self.assertEqual(check["coherent"], 1)
+            self.assertEqual(check["unreadable"], [2])
+            self.assertEqual(check["skipped"], [1])
+            self.assertTrue(check["incomplete"])
 
     def test_missing_video_does_not_crash(self):
         # Video inesistente (o ffmpeg che fallisce): i segmenti vengono saltati
@@ -512,12 +709,22 @@ class TestExtractFramesBatch(unittest.TestCase):
             out2 = tmp / "b.png"
             out1.write_bytes(b"x" * 10)
             out2.write_bytes(b"x" * 10)
-            with patch("video.subprocess.run", return_value=finto) as run:
+
+            def fake_run(cmd, *args, **kwargs):
+                # ffmpeg scrive sui temporanei; il codice li rinomina a successo.
+                for arg in cmd:
+                    if str(arg).endswith(".tmp.png"):
+                        Path(arg).write_bytes(b"x" * 10)
+                return finto
+
+            with patch("video.subprocess.run", side_effect=fake_run) as run:
                 ok = _extract_frames_batch(tmp / "v.mp4", [1.0, 2.0], [out1, out2])
             self.assertTrue(ok)
             cmd = run.call_args[0][0]
             self.assertEqual(cmd.count("-i"), 2, "un input per frame")
             self.assertEqual(cmd.count("-frames:v"), 2, "un output per frame")
+            self.assertTrue(out1.exists())
+            self.assertTrue(out2.exists())
 
     def test_ritorno_di_errore_non_inganna(self):
         finto = MagicMock(returncode=1, stderr=b"Invalid data found")
@@ -527,6 +734,24 @@ class TestExtractFramesBatch(unittest.TestCase):
             out.write_bytes(b"x" * 10)
             with patch("video.subprocess.run", return_value=finto):
                 self.assertFalse(_extract_frames_batch(tmp / "v.mp4", [1.0], [out]))
+            self.assertFalse(out.exists(), "il batch parziale non deve ingannare il ripiego")
+
+    def test_batch_parziale_non_lascia_uscite(self):
+        # returncode 0 ma solo uno dei due temporanei scritti: il ripiego uno
+        # per uno deve girare, non trovare un file a meta' gia' li'.
+        finto = MagicMock(returncode=0, stderr=b"")
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            outs = [tmp / "a.png", tmp / "b.png"]
+
+            def fake_run(cmd, *args, **kwargs):
+                temporanei = [a for a in cmd if str(a).endswith(".tmp.png")]
+                Path(temporanei[0]).write_bytes(b"x" * 10)
+                return finto
+
+            with patch("video.subprocess.run", side_effect=fake_run):
+                self.assertFalse(_extract_frames_batch(tmp / "v.mp4", [1.0, 2.0], outs))
+            self.assertTrue(all(not p.exists() for p in outs))
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg non disponibile")
     def test_i_frame_in_blocco_sono_identici_a_quelli_singoli(self):

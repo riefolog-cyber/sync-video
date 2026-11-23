@@ -111,6 +111,26 @@ def _has_transition_verb(words: list[Word], index: int, lookback: int = 6) -> bo
     )
 
 
+def _conta_ancore_reali(
+    anchors: dict[int, float],
+    kinds: dict[int, list[tuple[float, bool]]],
+) -> int:
+    """Quante ancore poggiano su una TRANSIZIONE e non su un conteggio.
+
+    I tempi delle ancore sono gli stessi ``float`` delle menzioni qualificate
+    (``_first_transition_per_slide`` li riusa cosi' come sono), quindi basta il
+    confronto per valore. Serve a rompere il pareggio fra due catene con lo
+    stesso numero di ancore: quella con piu' transizioni vere e' l'attendibile.
+    """
+    tempi_reali = {
+        t
+        for items in kinds.values()
+        for t, is_count in items
+        if not is_count
+    }
+    return sum(1 for t in anchors.values() if t in tempi_reali)
+
+
 # =====================================================================
 # ESTRAZIONE DETERMINISTICA TIMELINE
 # =====================================================================
@@ -202,14 +222,22 @@ def extract_slide_anchors(
     # perché la loro finestra è chiusa dal conteggio. In quel caso la catena del
     # LIS classico, che scarta il conteggio, è più lunga: è la prova che il set
     # "in ordine" poggia su una menzione che non è una transizione.
+    # A PARITA' di numero di ancore il vecchio confronto "strettamente maggiore"
+    # lasciava vincere il conteggio: con una sola transizione vera le due catene
+    # valgono 1 a 1 e il confine restava spostato di minuti. In caso di pareggio
+    # vince quindi la catena con PIU' ancore reali (transizioni, non conteggi).
     classic = _lis_anchors(_first_transition_per_slide(dict(mention_kinds)))
-    if len(classic) > len(anchors):
+    punteggio_classico = (len(classic), _conta_ancore_reali(classic, mention_kinds))
+    punteggio_ordine = (len(anchors), _conta_ancore_reali(anchors, mention_kinds))
+    if punteggio_classico > punteggio_ordine:
         log.info(
             "   [Ancore] Il set di menzioni in ordine poggia su un numero che non è "
-            "una transizione (conteggio in apertura?): uso la catena più lunga "
-            "(%d ancore invece di %d).",
+            "una transizione (conteggio in apertura?): uso la catena con più "
+            "ancore reali (%d ancore, %d transizioni, contro %d e %d).",
             len(classic),
+            punteggio_classico[1],
             len(anchors),
+            punteggio_ordine[1],
         )
         anchors = classic
     if mention_kinds:

@@ -142,14 +142,17 @@ def _installable_releases(data: dict[str, Any]) -> list[tuple[Any, str]]:
     - le pre-release sono escluse (senza ``--pre`` pip non le installa: annunciarle
       darebbe un falso aggiornamento, il report direbbe "X -> Y" e pip non farebbe
       nulla);
-    - quelle il cui ``requires_python`` esclude il Python in esecuzione sono escluse.
+    - deve esserci almeno una WHEEL non yanked con ``requires_python`` compatibile.
 
-    ``requires_python`` è dichiarato per-file: basta che UN file non yanked lo
-    dichiari compatibile (oppure non lo dichiari affatto) perché la release sia
-    installabile. Guardare solo il primo file utile sbaglierebbe in entrambi i
-    versi: un file con un vincolo troppo stretto può far scartare una release che
-    ha anche una wheel perfettamente installabile, e un primo file senza vincolo
-    può far accettare una release i cui altri file sono tutti incompatibili.
+    Un sdist senza metadata non dimostra che la release sia installabile: PyPI
+    pubblica il file, ma pip potrebbe non riuscire a costruirlo e, senza
+    ``requires_python``, non si puo' nemmeno sapere se il Python corrente e'
+    ammesso. Quindi un file senza vincolo, da solo, NON basta: serve una wheel non
+    yanked che dichiari esplicitamente un vincolo compatibile. Guardare solo il
+    primo file utile sbaglierebbe in entrambi i versi: un file con un vincolo
+    troppo stretto puo' far scartare una release che ha anche una wheel perfettamente
+    installabile, e un primo file senza vincolo puo' far accettare una release i cui
+    altri file sono tutti incompatibili.
 
     Il confronto usa la versione COMPLETA del Python (3.10.5, non 3.10): con
     ``>=3.10.3`` un 3.10.5 va ammesso, e ``major.minor`` lo escluderebbe a torto.
@@ -170,20 +173,21 @@ def _installable_releases(data: dict[str, Any]) -> list[tuple[Any, str]]:
             continue
         if version.is_prerelease:
             continue
-        # ALMENO UN file non yanked deve essere installabile: senza vincolo e'
-        # compatibile di default, con vincolo va verificato sul Python completo.
+        # ALMENO UNA wheel non yanked deve dichiarare un vincolo compatibile:
+        # un file senza requires_python (tipico sdist) non basta da solo.
         compatibile = False
         for file in files_validi:
+            if not str(file.get("filename", "")).lower().endswith(".whl"):
+                continue  # sdist/archivio: senza metadata non ne dimostro l'installabilita'
             requires_python = file.get("requires_python")
             if not requires_python:
-                compatibile = True
-                break
+                continue  # senza vincolo non si puo' affermare che la wheel sia installabile
             try:
                 if SpecifierSet(requires_python).contains(python):
                     compatibile = True
                     break
             except InvalidSpecifier:
-                continue  # dichiarazione invalida: quel file non e' utilizzabile
+                continue  # dichiarazione invalida: quella wheel non e' utilizzabile
         if not compatibile:
             continue
         out.append((version, version_str))
@@ -432,13 +436,21 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
         # quando X non e' piu' quello che c'e' nell'ambiente.
         cached = list(cache.get("outdated", []))
         valide = [d for d in cached if _installed_version(d.get("name", "")) == d.get("installed")]
-        if len(valide) != len(cached):
-            log.debug(
-                "   Check aggiornamenti: %d voce/i di cache scartate (installata cambiata).",
-                len(cached) - len(valide),
-            )
-            _write_cache({"ts": now, "outdated": valide})
-        return valide
+        if len(valide) == len(cached):
+            return valide
+        # Non rinnovare il timestamp con una cache vuota (o piu' corta): e' il
+        # bug del health-check fallito. pip ha installato, il controllo e' andato
+        # male e la cache e' stata mantenuta: al prossimo avvio la voce sembrerebbe
+        # stale e il vecchio codice scriveva ts=now con outdated=[], certificando
+        # "tutti aggiornati" per 6 ore senza aver controllato niente. Si invalida
+        # la cache e si rifa' il controllo subito, sotto.
+        log.debug(
+            "   Check aggiornamenti: %d voce/i di cache scartate (installata cambiata): "
+            "cache invalidata, controllo ripetuto.",
+            len(cached) - len(valide),
+        )
+        UPDATES_CACHE.unlink(missing_ok=True)
+        cache = {}
 
     outdated: list[dict] = []
     # Due contatori DISTINTI: `unreachable` conta solo i `latest is None` (PyPI
@@ -484,19 +496,33 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
                 }
             )
 
-    if unreachable >= len(_PACKAGES) and _PACKAGES:
+    # Il denominatore e' il numero di pacchetti INSTALLATI: su ARM alcuni pacchetti
+    # opzionali non sono presenti, e con la rete down `unreachable` non arrivava mai
+    # a len(_PACKAGES): la cache vuota veniva scritta e diceva "tutti aggiornati".
+    installati = len(_PACKAGES) - non_installati
+    if installati and unreachable >= installati:
         log.warning(
-            "   ⚠️ PyPI non raggiungibile (%d/%d pacchetti senza risposta): "
+            "   ⚠️ PyPI non raggiungibile (%d/%d pacchetti installati senza risposta): "
             "impossibile verificare gli aggiornamenti. Niente viene messo in cache, "
             "così il controllo verrà ritentato.",
             unreachable,
-            len(_PACKAGES),
+            installati,
         )
         return list(cache.get("outdated", []))
 
     outdated.sort(key=lambda d: d["name"].lower())
     if unreachable:
-        log.debug("   %d pacchetti senza risposta su %d.", unreachable, len(_PACKAGES))
+        log.debug("   %d pacchetti installati senza risposta su %d.", unreachable, installati)
+    # Un controllo parziale non puo' diventare un "tutti aggiornati" certificato:
+    # se un pacchetto installato non ha risposto e nessun altro ha segnalato un
+    # aggiornamento, NON si scrive la cache e il controllo verra' ripetuto.
+    if unreachable and not outdated:
+        log.debug(
+            "   Check aggiornamenti: %d pacchetto/i senza risposta e nessun aggiornamento "
+            "trovato: cache non scritta per non certificare un controllo incompleto.",
+            unreachable,
+        )
+        return list(cache.get("outdated", []))
     if non_installati:
         log.debug("   %d pacchetti non installati: saltati (non e' un errore di rete).", non_installati)
     _write_cache({"ts": now, "outdated": outdated})
@@ -767,20 +793,51 @@ def _upgrade_requirement(pkg: dict) -> str:
 
 
 def _health_check(packages: list[str]) -> bool:
-    """Controllo dopo l'install: importa i moduli chiave e lancia `pip check`.
+    """Controllo dopo l'install: importa i moduli chiave in un interprete pulito.
 
     Un exit 0 di pip non basta: puo' aver installato una versione che rompe
-    un'import (o le dipendenze di un altro pacchetto). Se il controllo fallisce
-    l'upgrade va considerato non riuscito, così la cache resta valida e il pin
-    A/B non viene scritto.
+    un'import. L'import VA fatto in un subprocess con ``python -I -c``:
+    ``importlib.import_module`` nel processo corrente restituisce il modulo gia'
+    presente in ``sys.modules`` (il test A/B l'ha gia' importato), quindi
+    verificava il codice VECCHIO e il controllo non serviva a niente. ``-I``
+    isola l'interprete (niente PYTHONPATH/user site), cosi' restano fuori anche
+    import inquinati dall'ambiente che ha lanciato il tool. Se il controllo
+    fallisce l'upgrade va considerato non riuscito: la cache resta valida e il
+    pin A/B non viene scritto.
+
+    ``pip check`` e' GLOBALE: puo' segnalare conflitti preesistenti, colpa di
+    pacchetti che non abbiamo toccato. E' quindi uno smoke test informativo: fa
+    fallire solo se la dipendenza rotta e' dichiarata da uno dei pacchetti appena
+    aggiornati (la riga comincia col suo nome); altrimenti il conflitto viene
+    solo segnalato in debug.
     """
+    moduli: list[str] = []
     for req in packages:
         nome = re.split(r"[<>=!~]", req, maxsplit=1)[0].strip().lower()
-        modulo = _IMPORT_NAMES.get(nome, nome.replace("-", "_"))
+        moduli.append(_IMPORT_NAMES.get(nome, nome.replace("-", "_")))
+    if moduli:
+        codice = "import importlib; " + "; ".join(
+            f"importlib.import_module({modulo!r})" for modulo in moduli
+        )
         try:
-            importlib.import_module(modulo)
-        except Exception as e:
-            log.warning("   ❌ Health check fallito: import di %s (%s) non riuscito: %s", req, modulo, e)
+            res = subprocess.run(
+                [sys.executable, "-I", "-c", codice],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=120,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            log.warning("   ❌ Health check fallito (import in interprete pulito): %s", e)
+            return False
+        if res.returncode != 0:
+            log.warning(
+                "   ❌ Health check fallito: import di %s in interprete pulito non riuscito:",
+                ", ".join(moduli),
+            )
+            for riga in _tail_lines(res.stderr or res.stdout):
+                log.warning("      %s", riga)
             return False
     try:
         res = subprocess.run(
@@ -792,14 +849,31 @@ def _health_check(packages: list[str]) -> bool:
             check=False,
         )
     except (subprocess.TimeoutExpired, OSError) as e:
-        log.warning("   ❌ Health check fallito (pip check): %s", e)
-        return False
+        # pip check e' uno smoke test: se non e' disponibile non si annulla un
+        # upgrade i cui import sono gia' stati verificati in interprete pulito.
+        log.debug("   ⚠️ pip check non disponibile (conflitti non verificati): %s", e)
+        return True
     if res.returncode != 0:
-        log.warning("   ❌ Health check fallito (pip check exit %d):", res.returncode)
-        for riga in _tail_lines(res.stderr or res.stdout):
-            log.warning("      %s", riga)
-        return False
-    log.debug("   ✅ Health check superato (%d pacchetti importati, pip check ok).", len(packages))
+        righe = _tail_lines(res.stderr or res.stdout)
+        nomi = {re.split(r"[<>=!~]", req, maxsplit=1)[0].strip().lower() for req in packages}
+        colpevoli = [
+            riga
+            for riga in righe
+            if any(re.match(rf"{re.escape(nome)}(?:\s|$)", riga.lower()) for nome in nomi)
+        ]
+        if colpevoli:
+            log.warning("   ❌ Health check fallito (pip check): dipendenze rotte dei pacchetti aggiornati:")
+            for riga in colpevoli:
+                log.warning("      %s", riga)
+            return False
+        log.debug(
+            "   ⚠️ pip check segnala conflitti preesistenti, non dei pacchetti aggiornati: %s",
+            " | ".join(righe),
+        )
+    log.debug(
+        "   ✅ Health check superato (%d moduli importati in interprete pulito).",
+        len(moduli),
+    )
     return True
 
 
@@ -814,10 +888,16 @@ def _pip_upgrade(packages: list[str]) -> bool:
     e ``--upgrade-strategy only-if-needed`` evitano che pip scelga una versione
     diversa da quella annunciata o aggiorni di nuovo le dipendenze.
     """
-    log.info("   ⏳ pip install -U %s ...", " ".join(packages))
+    # La riga stampata e' la STESSA lista di argomenti passata a subprocess.run:
+    # scrivere a mano "pip install -U <pkg>" ometteva la strategia e i requisiti
+    # nome==versione, quindi il comando visibile non era quello davvero eseguito.
+    comando = [
+        sys.executable, "-m", "pip", "install", "-U", "--upgrade-strategy", "only-if-needed", *packages
+    ]
+    log.info("   ⏳ %s ...", " ".join(comando))
     try:
         res = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-U", "--upgrade-strategy", "only-if-needed", *packages],
+            comando,
             capture_output=True,
             text=True,
             errors="replace",

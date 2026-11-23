@@ -4,6 +4,7 @@ FASE 4 — Assemblaggio video con MoviePy.
 Include riconciliazione timeline e supporto per transizioni.
 """
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -172,14 +173,20 @@ def _prepare_slides_for_concat(slide_files: Sequence[str], workdir: Path) -> lis
     return prepared
 
 
-def _letterbox_references(slide_files: Sequence[str], workdir: Path) -> list[Path] | None:
+def _letterbox_references(
+    slide_files: Sequence[str], workdir: Path, *, unreadable_out: list[int] | None = None
+) -> list[Path]:
     """Ricostruisce le slide come l'encoder le mette nel video.
 
     Serve al confronto frame-vs-slide: il frame estratto dal video ha il
     letterbox, il PNG originale no, quindi vanno normalizzati allo stesso modo
-    prima di misurare la similarita'. Restituisce None se una slide non e'
-    leggibile, cosi' il chiamante puo' saltare la verifica invece di produrre
-    un referto inventato.
+    prima di misurare la similarita'.
+
+    Una slide non leggibile NON annulla piu' tutta la verifica: prende un
+    reference nero (vettore nullo -> similarita' 0.0) e il suo indice (0-based)
+    finisce in ``unreadable_out``, cosi' il chiamante verifica le altre e segnala
+    quante sono state saltate. Prima bastava un file rotto per dire "checked=0"
+    e dichiarare il video controllato senza aver guardato niente.
 
     Due passate come ``_prepare_slides_for_concat``: la prima legge solo gli
     header per il canvas, la seconda apre/adatta/salva UNA slide alla volta.
@@ -187,20 +194,39 @@ def _letterbox_references(slide_files: Sequence[str], workdir: Path) -> list[Pat
     dpi (oltre 4 GB su un deck da 150 pagine) per dei PNG che finiscono subito
     su disco.
     """
-    try:
-        fitted = [_fitted_size_from_size(_slide_header_size(str(sf))) for sf in slide_files]
-    except RuntimeError:
-        return None
-    canvas_w, canvas_h = _canvas_size(fitted)
+    if unreadable_out is not None:
+        unreadable_out.clear()
+    # L'header mancante non puo' contribuire al canvas: lo si esclude dal
+    # calcolo, altrimenti un valore inventato cambierebbe il letterbox delle
+    # slide buone e il confronto con l'encoder (che ha usato il canvas vero)
+    # sbaglierebbe.
+    fitted: list[tuple[int, int] | None] = []
+    for sf in slide_files:
+        try:
+            fitted.append(_fitted_size_from_size(_slide_header_size(str(sf))))
+        except RuntimeError:
+            fitted.append(None)
+    validi = [f for f in fitted if f is not None]
+    canvas_w, canvas_h = _canvas_size(validi) if validi else DEFAULT_VIDEO_RES
     workdir.mkdir(parents=True, exist_ok=True)
     refs: list[Path] = []
     for i, sf in enumerate(slide_files):
+        out_png = workdir / f"ref_{i:04d}.png"
+        if fitted[i] is None:
+            if unreadable_out is not None:
+                unreadable_out.append(i)
+            Image.new("RGB", (canvas_w, canvas_h), (0, 0, 0)).save(out_png, format="PNG")
+            refs.append(out_png)
+            continue
         try:
             img = _open_slide_retry(str(sf))
         except RuntimeError:
-            return None
+            if unreadable_out is not None:
+                unreadable_out.append(i)
+            Image.new("RGB", (canvas_w, canvas_h), (0, 0, 0)).save(out_png, format="PNG")
+            refs.append(out_png)
+            continue
         try:
-            out_png = workdir / f"ref_{i:04d}.png"
             _letterbox(img, canvas_w, canvas_h).save(out_png, format="PNG")
             refs.append(out_png)
         finally:
@@ -347,6 +373,11 @@ def _audio_copy_args(audio_path: Path, *, copy: bool | None = None) -> list[str]
     return ["-c:a", "aac", "-b:a", "160k"]
 
 
+def _percorso_backup(output_path: Path) -> Path:
+    """Dove sta la copia del video della run precedente."""
+    return output_path.with_name(f"{output_path.stem} (precedente){output_path.suffix}")
+
+
 def _salva_video_precedente(output_path: Path) -> None:
     """Conserva il video gia' presente prima di sovrascriverlo.
 
@@ -357,10 +388,30 @@ def _salva_video_precedente(output_path: Path) -> None:
     """
     if not output_path.exists():
         return
-    copia = output_path.with_name(f"{output_path.stem} (precedente){output_path.suffix}")
+    copia = _percorso_backup(output_path)
     with suppress(OSError):
         shutil.copy2(output_path, copia)
         log.info("   Video precedente conservato in: %s", copia.name)
+
+
+def _ripristina_video_precedente(output_path: Path) -> None:
+    """Riporta il video buono accanto all'output se l'encoding e' fallito.
+
+    L'encoding scrive su un temporaneo, quindi in condizioni normali
+    ``output_path`` non e' mai toccato: qui si interviene solo se il file
+    finale e' sparito o e' rimasto vuoto (interruzione, antivirus, disco
+    pieno), per non rimontare un backup stale di una run molto piu' vecchia.
+    """
+    backup = _percorso_backup(output_path)
+    try:
+        if not backup.exists():
+            return
+        if output_path.exists() and output_path.stat().st_size > 0:
+            return
+        shutil.copy2(backup, output_path)
+    except OSError:
+        return
+    log.info("   Video precedente ripristinato dopo encoding fallito: %s", backup.name)
 
 
 def _tentativi_encoding(
@@ -370,15 +421,20 @@ def _tentativi_encoding(
 
     Due reti di sicurezza indipendenti: un encoder accelerato puo' esistere
     in ffmpeg ma non funzionare (driver vecchio, device non supportato), e un
-    audio copiato puo' non essere ammesso in un MP4. Si prova a scendere: se
-    l'encoder accelerato fallisce si usa libx264; se anche la copia fallisce
-    si ricodifica in AAC (che accetta qualsiasi sorgente).
+    audio copiato puo' non essere ammesso in un MP4.
+
+    L'ordine conta: si cambia PRIMA l'audio e solo dopo l'encoder. Riprovare la
+    copia con libx264 quando l'errore e' chiaramente dell'audio (codec non
+    ammesso in MP4) costava un encoding intero inutile prima di arrivare ad AAC.
+    Con ``accelerato=False`` i tentativi con libx264 sono duplicati e il dedup
+    li elimina, lasciando al piu' (encoder, copia) e (encoder, AAC).
     """
-    tentativi: list[tuple[str, bool]] = [(encoder, copia_audio)]
-    if accelerato:
-        tentativi.append(("libx264", copia_audio))
-    if copia_audio:
-        tentativi.append(("libx264", False))
+    tentativi: list[tuple[str, bool]] = [
+        (encoder, copia_audio),
+        (encoder, False),
+        ("libx264", copia_audio),
+        ("libx264", False),
+    ]
     unici: list[tuple[str, bool]] = []
     for tentativo in tentativi:
         if tentativo not in unici:
@@ -394,6 +450,7 @@ def _build_video_ffmpeg(
     fps: int,
     threads: int,
     encoder: str = "libx264",
+    encoder_out: list[str] | None = None,
 ) -> None:
     """Assembla il video con il concat demuxer di ffmpeg.
 
@@ -404,13 +461,24 @@ def _build_video_ffmpeg(
     `encoder`: encoder H.264 scelto dal rilevamento hardware
     (``hardware.choose_video_encoder``). Se quello accelerato fallisce a
     runtime (driver, device non supportato, filtro mancante) si ritenta
-    una volta con libx264: un video lento è sempre meglio di nessun video.
+    con un'altra combinazione: un video lento è sempre meglio di nessun video.
+
+    `encoder_out`: parametro out con l'encoder EFFETTIVO di ogni tentativo;
+    l'ultimo valore e' quello che ha prodotto il file. Serve al riepilogo per
+    non dire "GPU" quando il ripiego ha usato libx264.
+
+    ffmpeg scrive su ``.tmp.mp4`` nella STESSA cartella e il file buono
+    sostituisce quello vecchio solo a successo: un encoding interrotto non
+    lascia piu' un MP4 corrotto col nome finale.
     """
     audio = Path(audio_path)
     if not audio.exists():
         raise FileNotFoundError(f"File audio non trovato: {audio}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_out = output_path.with_suffix(".tmp.mp4")
+    if encoder_out is not None:
+        encoder_out.clear()
     total_duration = sum(durations)
     accelerato = encoder != "libx264"
     log.info(
@@ -449,24 +517,38 @@ def _build_video_ffmpeg(
                 # l'ultimo segmento con quirk di metadati (durata sovrastimata);
                 # conosciamo la durata esatta (somma durate + buffer) e la imponiamo.
                 "-t", f"{total_duration:.6f}",
-                str(output_path),
+                str(tmp_out),
             ]
 
         copia_audio = _audio_si_puo_copiare(audio)
         errore: RuntimeError | None = None
         for enc, copia in _tentativi_encoding(encoder, accelerato, copia_audio):
+            # Ogni tentativo riparte da un temporaneo pulito: un file parziale
+            # della combinazione precedente non puo' passare per riuscito.
+            with suppress(OSError):
+                tmp_out.unlink()
+            if encoder_out is not None:
+                encoder_out.append(enc)
             try:
                 _run_ffmpeg(_comando(enc, copia), total_duration)
+                if not tmp_out.exists() or tmp_out.stat().st_size == 0:
+                    raise RuntimeError("ffmpeg e' uscito senza scrivere il video.")
+                os.replace(tmp_out, output_path)
                 return
-            except RuntimeError as e:
+            except (RuntimeError, OSError) as e:
                 # L'ultimo errore e' quello che esce: contiene il log di ffmpeg
                 # della combinazione piu' "sicura" provata.
-                errore = e
+                errore = e if isinstance(e, RuntimeError) else RuntimeError(str(e))
+                with suppress(OSError):
+                    tmp_out.unlink()
                 log.warning(
                     "   ⚠️  Encoding %s (audio %s) fallito: provo la combinazione successiva.",
                     enc,
                     "copiato" if copia else "AAC",
                 )
+        with suppress(OSError):
+            tmp_out.unlink()
+        _ripristina_video_precedente(output_path)
         assert errore is not None
         raise errore
 
@@ -482,6 +564,7 @@ def build_video(
     engine: str = DEFAULT_VIDEO_ENGINE,
     encoder: str = "libx264",
     reuse: bool = True,
+    encoder_out: list[str] | None = None,
 ) -> None:
     """
     Assembla il video finale:
@@ -502,12 +585,23 @@ def build_video(
             > 0 forza il motore moviepy
         engine: 'ffmpeg' (default, veloce) o 'moviepy' (legacy)
         encoder: encoder H.264 scelto dal rilevamento hardware; se quello
-            accelerato fallisce si ripiega automaticamente su libx264
+            accelerato fallisce si ripiega automaticamente su libx264. "auto"
+            viene normalizzato a libx264: senza rilevamento (--no-auto-setup)
+            non si puo' sapere se la GPU c'e', e trattarlo come GPU ometteva
+            -threads e cambiava la chiave di riuso a ogni run.
         reuse: riusa il video gia' renderizzato se slide, tempi, audio e
             parametri sono gli stessi (71s risparmiati a ogni rilancio senza
             modifiche). False per non riusarlo (--no-cache).
+        encoder_out: parametro out: riceve l'encoder EFFETTIVO usato (ultimo
+            tentativo riuscito), per il riepilogo "GPU/CPU" veritiero.
     """
     log.info("\n4. Generazione rapida del flusso video definitivo...")
+
+    # "auto" e' risolto dal chiamante (main) quando puo' interrogare l'hardware.
+    # Qui, da solo, non si puo' provare una GPU a caso: si resta sul software.
+    encoder = "libx264" if (encoder or "").strip().lower() == "auto" else encoder
+    if encoder_out is not None:
+        encoder_out[:] = [encoder]
 
     # Validazione: slide_files e durations devono avere la stessa lunghezza
     if not slide_files or not durations:
@@ -590,10 +684,17 @@ def build_video(
             )
         elif audio_path is None:
             log.info("   Nessun percorso audio disponibile: uso MoviePy sulla clip esistente.")
+        # MoviePy scrive sempre con libx264/aac, a prescindere dall'encoder
+        # richiesto: il riepilogo deve dire quello che e' successo davvero.
+        if encoder_out is not None:
+            encoder_out[:] = ["libx264"]
         _build_video_moviepy(slide_files, durations, audio_source, output_path, fps, threads, transition_duration)
     else:
         assert audio_path is not None  # garantito dal ramo use_moviepy
-        _build_video_ffmpeg(slide_files, durations, audio_path, output_path, fps, threads, encoder=encoder)
+        _build_video_ffmpeg(
+            slide_files, durations, audio_path, output_path, fps, threads,
+            encoder=encoder, encoder_out=encoder_out,
+        )
 
     log.info("\n[COMPLETATO] File sincronizzato salvato in: %s", output_path)
     segna_video(output_path, _chiave)
@@ -742,6 +843,23 @@ def _similarities(frame: Path, ref_matrix: np.ndarray) -> np.ndarray:
     return cast(np.ndarray, ref_matrix @ (v / n))
 
 
+def _frame_tmp(out: Path) -> Path:
+    """Il temporaneo usato da ffmpeg prima di rinominare il frame buono.
+
+    Il nome finisce pero' con l'estensione originale: ffmpeg sceglie il
+    formato d'uscita dall'estensione, e un `.tmp` finale non riconosciuto
+    fallirebbe prima ancora di scrivere il fotogramma.
+    """
+    return out.with_name(out.stem + ".tmp" + out.suffix)
+
+
+def _pulisci_frame(*paths: Path) -> None:
+    """Rimuove frame parziali (e i loro temporanei) in OGNI ramo di errore."""
+    for path in paths:
+        with suppress(OSError):
+            path.unlink()
+
+
 def _extract_frame(video_path: Path, t: float, out: Path) -> bool:
     """Estrae un frame al tempo ``t``. True se il file è stato scritto.
 
@@ -750,7 +868,13 @@ def _extract_frame(video_path: Path, t: float, out: Path) -> bool:
     di uscita di ffmpeg va controllato: senza, un file parziale scritto prima di
     un errore passava il test "esiste ed è non vuoto" e veniva confrontato come
     se fosse il frame giusto.
+
+    ffmpeg scrive su un temporaneo e solo a successo il frame prende il nome
+    finale: timeout e OSError, oltre al returncode != 0, non lasciano PNG
+    troncati che ``frame_consistency_check`` accetterebbe come veri.
     """
+    tmp = _frame_tmp(out)
+    _pulisci_frame(out, tmp)  # niente resti di tentativi/ run precedenti
     try:
         res = subprocess.run(
             [
@@ -766,7 +890,7 @@ def _extract_frame(video_path: Path, t: float, out: Path) -> bool:
                 "1",
                 "-q:v",
                 "2",
-                str(out),
+                str(tmp),
             ],
             check=False,
             capture_output=True,
@@ -778,22 +902,31 @@ def _extract_frame(video_path: Path, t: float, out: Path) -> bool:
             timeout=60,
         )
     except subprocess.TimeoutExpired:
+        _pulisci_frame(out, tmp)
         log.warning("   [Verifica] Estrazione frame a %.1fs: timeout dopo 60s.", t)
         return False
     except OSError as e:  # ffmpeg non installato
+        _pulisci_frame(out, tmp)
         log.debug("   [Verifica] ffmpeg non eseguibile: %s", e)
         return False
     if res.returncode != 0:
+        _pulisci_frame(out, tmp)
         log.debug(
             "   [Verifica] Estrazione frame a %.1fs fallita (ffmpeg %d): %s",
             t,
             res.returncode,
             (res.stderr or b"").decode("utf-8", "replace").strip()[:200],
         )
-        with suppress(OSError):
-            out.unlink()
         return False
-    return out.exists() and out.stat().st_size > 0
+    try:
+        if not tmp.exists() or tmp.stat().st_size == 0:
+            _pulisci_frame(out, tmp)
+            return False
+        os.replace(tmp, out)
+    except OSError:
+        _pulisci_frame(out, tmp)
+        return False
+    return True
 
 
 def _extract_frames_batch(
@@ -808,15 +941,26 @@ def _extract_frames_batch(
     risultano identici bit per bit (verificato sul video di prova).
 
     False se qualcosa non torna (frame mancanti, errore di ffmpeg): il
-    chiamante ripiega sul percorso uno per uno, che resta la reference.
+    chiamante ripiega sul percorso uno per uno, che resta la reference. In
+    caso di fallimento cancella TUTTE le uscite, anche quelle scritte prima
+    dell'errore: un batch parziale non deve convincere il chiamante che i
+    frame ci siano (e fargli saltare il ripiego uno per uno).
+
+    Come ``_extract_frame``, ffmpeg scrive su temporanei e rinomina solo a
+    successo: timeout e OSError non lasciano PNG troncati.
     """
     if not times or len(times) != len(out_files):
         return False
+    tmp_files = [_frame_tmp(out) for out in out_files]
+    tutti = [*out_files, *tmp_files]
+    for path in tutti:
+        with suppress(OSError):
+            path.unlink()
     cmd = ["ffmpeg", "-y", "-loglevel", "error"]
     for t in times:
         cmd += ["-ss", f"{float(t):.3f}", "-i", str(video_path)]
-    for i, out in enumerate(out_files):
-        cmd += ["-map", f"{i}:v:0", "-frames:v", "1", "-q:v", "2", str(out)]
+    for i, tmp in enumerate(tmp_files):
+        cmd += ["-map", f"{i}:v:0", "-frames:v", "1", "-q:v", "2", str(tmp)]
     try:
         res = subprocess.run(
             cmd,
@@ -827,15 +971,26 @@ def _extract_frames_batch(
             timeout=max(60, 20 * len(times)),
         )
     except (OSError, subprocess.TimeoutExpired):
+        _pulisci_frame(*tutti)
         return False
     if res.returncode != 0:
+        _pulisci_frame(*tutti)
         log.debug(
             "   [Verifica] Estrazione in blocco fallita (ffmpeg %d): %s",
             res.returncode,
             (res.stderr or b"").decode("utf-8", "replace").strip()[:200],
         )
         return False
-    return all(p.exists() and p.stat().st_size > 0 for p in out_files)
+    if not all(p.exists() and p.stat().st_size > 0 for p in tmp_files):
+        _pulisci_frame(*tutti)
+        return False
+    for tmp, out in zip(tmp_files, out_files, strict=True):
+        try:
+            os.replace(tmp, out)
+        except OSError:
+            _pulisci_frame(*tutti)
+            return False
+    return True
 
 
 def frame_consistency_check(
@@ -867,7 +1022,12 @@ def frame_consistency_check(
         min_similarity: soglia sotto cui il match non è considerato affidabile.
 
     Returns:
-        ``{"checked": n, "coherent": k, "mismatches": [...]}``.
+        ``{"checked": n, "coherent": k, "mismatches": [...],
+        "unreadable": [...], "skipped": [...], "incomplete": bool}``.
+        ``unreadable`` sono le slide (1-based) di cui non si e' potuto
+        ricostruire il reference, ``skipped`` gli indici dei segmenti non
+        verificati per quel motivo: con ``incomplete=True`` il controllo
+        sull'artefatto non e' completo e --strict-sync deve segnalarlo.
     """
     video = Path(video_path)
     frames_dir.mkdir(parents=True, exist_ok=True)
@@ -882,6 +1042,7 @@ def frame_consistency_check(
     checked = 0
     coherent = 0
     mismatches: list[dict[str, object]] = []
+    skipped: list[int] = []
     # I confronti vanno fatti contro le slide COSI' COME SONO NEL VIDEO, cioe'
     # con il letterbox dell'encoder. Confrontare il frame (che ha le barre
     # nere) con il PNG originale (che non le ha) produceva similarita' negative
@@ -893,10 +1054,14 @@ def frame_consistency_check(
     with tempfile.TemporaryDirectory(prefix="syncvideo_ref_") as refdir, tempfile.TemporaryDirectory(
         prefix="syncvideo_fr_"
     ) as framedir:
-        slide_paths = _letterbox_references(slide_files, Path(refdir))
-        if slide_paths is None:
-            log.warning("   [Verifica] Slide non leggibili: confronto frame-vs-slide saltato.")
-            return {"checked": 0, "coherent": 0, "mismatches": []}
+        unreadable_idx: list[int] = []
+        slide_paths = _letterbox_references(slide_files, Path(refdir), unreadable_out=unreadable_idx)
+        unreadable = [i + 1 for i in unreadable_idx]
+        if unreadable:
+            log.warning(
+                "   [Verifica] Slide non leggibili (%s): verifico le altre e salto i loro segmenti.",
+                ", ".join(str(s) for s in unreadable),
+            )
         # I reference si embeddano UNA volta: da qui in poi ogni frame si
         # confronta con la matrice (prodotto matriciale), senza più riaprire
         # le PNG delle slide a ogni segmento.
@@ -912,6 +1077,10 @@ def frame_consistency_check(
         candidati: list[tuple[int, int, float, Path]] = []
         for i, (slide, start, end) in enumerate(segments):
             if not 1 <= int(slide) <= len(slide_paths):
+                continue
+            if int(slide) in unreadable:
+                log.debug("   [Verifica] Segmento %d: slide %d non leggibile, saltato.", i, int(slide))
+                skipped.append(i)
                 continue
             t = (float(start) + float(end)) / 2
             candidati.append(
@@ -937,9 +1106,16 @@ def frame_consistency_check(
                 continue
             checked += 1
             sims = _similarities(frame, ref_matrix)
-            shown = int(np.argmax(sims)) + 1
+            shown = int(np.argmax(sims)) + 1 if sims.size else 0
             best = float(max(sims)) if sims.size else 0.0
-            if shown == int(slide) and best >= min_similarity:
+            idx_dichiarata = int(slide) - 1
+            sim_dichiarata = float(sims[idx_dichiarata]) if 0 <= idx_dichiarata < sims.size else 0.0
+            # Due slide pixel-identiche hanno la stessa similarita': np.argmax
+            # restituisce sempre l'indice piu' basso, e la slide
+            # dichiarata (identica a una precedente) sembrerebbe sbagliata. E'
+            # coerente se supera la soglia E eguaglia il migliore (tolleranza
+            # 1e-3 per l'arrotondamento float32).
+            if sim_dichiarata >= min_similarity and sim_dichiarata >= best - 1e-3:
                 coherent += 1
             else:
                 mismatches.append(
@@ -956,7 +1132,14 @@ def frame_consistency_check(
                 # verifica risparmiati).
                 with suppress(OSError):
                     shutil.copy2(frame, frames_dir / frame.name)
-    return {"checked": checked, "coherent": coherent, "mismatches": mismatches}
+    return {
+        "checked": checked,
+        "coherent": coherent,
+        "mismatches": mismatches,
+        "unreadable": unreadable,
+        "skipped": skipped,
+        "incomplete": bool(unreadable or skipped),
+    }
 
 
 # =====================================================================

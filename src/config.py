@@ -1227,7 +1227,7 @@ def _avvisa_spazio_insufficiente(
 
     log.error(
         "\n❌ Fermo il download: non partirebbe e lascerebbe il PC a meta'.\n"
-        "   Libera spazio, oppure indica un'altra cartella con --embedding-cache-dir,\n"
+        "   Libera spazio, oppure indica un'altra cartella con --semantic-cache-dir,\n"
         "   oppure HF_HUB_CACHE, oppure rilancia con --ignora-spazio se sei\n"
         "   sicuro che lo spazio si liberi da solo durante il download."
     )
@@ -1331,7 +1331,13 @@ def _aggiorna_path_da_registro() -> None:
                 # utente e' quello che conta per winget senza admin.
                 continue
             if isinstance(valore, str):
-                nuove.extend(part for part in valore.split(os.pathsep) if part)
+                # REG_EXPAND_SZ: il registro conserva %SystemRoot% / %LOCALAPPDATA%
+                # letterali. Senza expandvars il PATH risultante conterrebbe
+                # cartelle inesistenti e l'ffmpeg appena installato resterebbe
+                # invisibile al controllo seguente.
+                nuove.extend(
+                    os.path.expandvars(part) for part in valore.split(os.pathsep) if part
+                )
         if nuove:
             # Il PATH corrente va tenuto: puo' contenere cartelle della venv o
             # aggiunte a mano che non sono nel registro.
@@ -2636,7 +2642,28 @@ Esempi:
         "automaticamente su libx264. Forzarlo a mano e' sconsigliato: 'auto' e' "
         "quello che misura cosa funziona davvero su questa macchina.",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Ferma dopo la generazione timeline, non produce video")
+    # Queste tre modalita' in main si escludono a vicenda: il controllo su
+    # --preview arriva prima di --dry-run e della verifica video, quindi
+    # combinarle faceva vincere il primo in silenzio. Il gruppo lo dichiara
+    # subito, con l'errore argparse che nomina i flag in conflitto.
+    uscite_esclusive = parser.add_mutually_exclusive_group()
+    uscite_esclusive.add_argument(
+        "--dry-run", action="store_true", help="Ferma dopo la generazione timeline, non produce video"
+    )
+    uscite_esclusive.add_argument(
+        "--preview", action="store_true", help="Mostra la timeline in formato visuale e esci (non genera il video)"
+    )
+    uscite_esclusive.add_argument(
+        "--verify-video",
+        action="store_true",
+        help="Dopo la generazione estrae un frame a metà di ogni segmento e "
+        "lo confronta con la slide attesa, per certificare cosa è davvero a "
+        "schermo (non solo che la timeline sia coerente). Vengono conservati "
+        "solo i frame dei segmenti SBAGLIATI in .cache/verify_frames/: se la "
+        "cartella e' vuota la verifica e' andata bene. L'esito finisce in "
+        "sync_report.json. Attivata automaticamente da --strict-sync. "
+        "Costo: una decina di secondi su un video di 15 minuti.",
+    )
     parser.add_argument(
         "--no-ripresa",
         dest="no_ripresa",
@@ -2657,9 +2684,6 @@ Esempi:
         "Non tocca PDF, audio né modelli, e non rigenera nulla.",
     )
     parser.add_argument(
-        "--preview", action="store_true", help="Mostra la timeline in formato visuale e esci (non genera il video)"
-    )
-    parser.add_argument(
         "--timeline-override",
         dest="timeline_override",
         default="",
@@ -2674,7 +2698,9 @@ Esempi:
         action="append",
         metavar="N=SECONDI",
         help="Scrive una correzione nel file di override senza aprirlo a mano "
-        "(es. --fix-slide 5=252.0, ripetibile). Le correzioni gia' nel file restano.",
+        "(es. --fix-slide 5=252.0, ripetibile). Le correzioni gia' nel file restano. "
+        "La run normale continua fino al rendering: per scrivere SOLO l'override "
+        "e fermarsi prima del video aggiungi --dry-run.",
     )
     parser.add_argument(
         "--snap-pauses",
@@ -2715,7 +2741,9 @@ Esempi:
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="Con --clean-cache --include-models, salta la conferma interattiva.",
+        help="Con --clean-cache --include-models, salta la conferma interattiva. "
+        "Obbligatorio senza terminale (batch, CI o pipe): in quel caso la "
+        "conferma non si puo' porre e la pulizia dei modelli viene rifiutata.",
     )
     parser.add_argument("--debug", action="store_true", help="Logging DEBUG dettagliato")
     parser.add_argument(
@@ -2758,16 +2786,6 @@ Esempi:
         "segmenti che mostrano una slide diversa. Il report completo dei "
         "segmenti è sempre salvato in .cache/sync_report.json. "
         "Default: disattivato (avviso soltanto).",
-    )
-    parser.add_argument(
-        "--verify-video",
-        action="store_true",
-        help="Dopo la generazione estrae un frame a metà di ogni segmento e "
-        "lo confronta con la slide attesa, per certificare cosa è davvero a "
-        "schermo (non solo che la timeline sia coerente). I frame estratti "
-        "restano in .cache/verify_frames/ e l'esito finisce in "
-        "sync_report.json. Attivata automaticamente da --strict-sync. "
-        "Costo: una decina di secondi su un video di 15 minuti.",
     )
     parser.add_argument(
         "--slide-offset",
@@ -2841,6 +2859,18 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
     """Parsa gli argomenti e applica il post-processing (percorsi, log, clamp)."""
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # --clean-cache --include-models cancella i modelli (GB di re-download):
+    # senza terminale la conferma di main non puo' essere posta, e prima
+    # veniva saltata cancellando comunque. Regola esplicita e sicura: in
+    # batch/CI/pipe serve --yes, altrimenti si rifiuta con exit code 2.
+    if args.clean_cache and args.include_models and not args.yes and not sys.stdin.isatty():
+        log.error(
+            "\n❌ --clean-cache --include-models richiede --yes quando non c'e' un terminale:\n"
+            "   la conferma interattiva non e' disponibile (batch, CI o pipe).\n"
+            "   Rilancia con --yes solo se vuoi davvero rimuovere i modelli ML."
+        )
+        sys.exit(2)
 
     # Post-processing
     # --strict-sync è la modalità "non consegnare un video sospetto": attiva

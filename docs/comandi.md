@@ -43,14 +43,14 @@ python -m unittest discover -s src -p "test_*.py"
 | `--review` | — | Rilegge report e trascrizione dell'ultima run e ristampa i dubbi sui confini con le anteprime, dal video già esistente: nessuna pipeline, nessun download |
 | `--preview` | — | Mostra timeline e esci |
 | `--timeline-override` | auto (accanto al video, poi radice del progetto) | Correzioni manuali dei confini, applicate dopo il calcolo e prima del rendering: `{"5": 252.0}` oppure `[{"slide": 5, "start": 252.0}]`. Senza il flag si usa `timeline_override.json` nella cartella del video, poi nella radice: se non c'è, nessuna correzione. Un percorso indicato ma **mancante viene segnalato**; una slide ripetuta o un override che rompe l'ordine o il minimo leggibile vengono **rifiutati** col motivo, invece di essere aggiustati |
-| `--fix-slide` | — | Scrive una correzione nel file di override senza aprirlo a mano: `--fix-slide 5=252.0`, ripetibile (`--fix-slide 5=252.0 --fix-slide 9=431.25`). Le correzioni già nel file restano: è lo stesso file che si scriverebbe a mano |
+| `--fix-slide` | — | Scrive una correzione nel file di override senza aprirlo a mano: `--fix-slide 5=252.0`, ripetibile (`--fix-slide 5=252.0 --fix-slide 9=431.25`). Le correzioni già nel file restano: è lo stesso file che si scriverebbe a mano. Da solo **non ferma la run**: la correzione si applica e il video viene generato. Per scrivere solo l'override e fermarsi prima del video aggiungi `--dry-run` |
 | `--snap-pauses` | True | Sposta i confini **non ancorati** sulla pausa più vicina (entro 1.5 s) o, se il taglio cade dentro una parola, sul confine di parola. Le ancore pronunciate non si toccano, e nessuno spostamento può violare il minimo di durata. Attivo di default: sul materiale di prova ha portato **12 confini su 12** su una pausa, con spostamenti di 0,1–0,9 s |
 | `--no-snap-pauses` | — | Lascia i confini stimati dove li mette il pavimento anti-flicker, anche se cadono a metà parola. Utile per confrontare una run con il riferimento |
 | `--no-cache` | — | Ignora le cache **e** non riusa il video già renderizzato |
 | `--debug` | — | Log dettagliato |
 | `--transitions` | `0.0` | Dissolvenza tra slide (s) |
 | `--lang` | `ita` | Lingua OCR |
-| `--whisper-model` | `small` | tiny/base/small/medium/large/large-v3 |
+| `--whisper-model` | `small` | tiny/base/small/medium/large, oppure `large-v3`/`turbo`, un repo HuggingFace o un percorso locale |
 | `WHISPER_MODEL` (env) | `small` | Modello usato da `genera_video.bat` (es. `set WHISPER_MODEL=tiny` per la bozza veloce) |
 | `VERIFY_VIDEO` (env) | `1` | Controllo del video finito attivato da `genera_video.bat` (pochi secondi): `set VERIFY_VIDEO=0` per disattivarlo |
 | `SYNC_VIDEO_NO_PYTHON_INSTALL` (env) | — | Impostala a `1` per **non** far installare Python automaticamente con winget al primo avvio su Windows |
@@ -132,7 +132,7 @@ python -m unittest discover -s src -p "test_*.py"
 | `--whisper-device` | `cpu` | Device faster-whisper (`cpu`/`cuda`). **Sceglilo a mano solo se sai cosa fai**: in quel caso un fallimento di CUDA non viene ripiegato su CPU in silenzio, perché un fallback non richiesto sarebbe una sorpresa |
 | `--whisper-compute-type` | `int8` | Precisione faster-whisper (`int8` CPU, `float16` CUDA) |
 | `--openvino-model-dir` | `.cache/whisper_openvino_small` | Cartella del modello OpenVINO IR |
-| `--engine` | `ffmpeg` | Motore di rendering video (`ffmpeg` veloce, `moviepy` richiesto per `--transitions`) |
+| `--engine` | `ffmpeg` | Motore di rendering video: `ffmpeg` è il default veloce. `moviepy` non va scelto a mano per le dissolvenze: con `--transitions` maggiore di 0 viene usato automaticamente anche con `--engine ffmpeg` |
 | `--ocr-workers` | `min(6, core fisici)` | Thread per l'OCR (sovrappone `OCR_WORKERS`) |
 | `--dpi` | `300` | Risoluzione di rendering delle slide per l'OCR |
 | `--fallback-senza-grafica` | — | Converte il PPTX ricostruendo le slide dal solo testo (niente layout, colori o sfondi), quando nessun convertitore è installato. Di default il programma si ferma: la sincronizzazione peggiorerebbe senza che nessuno lo veda |

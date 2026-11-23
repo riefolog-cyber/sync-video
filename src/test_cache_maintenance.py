@@ -4,6 +4,7 @@
 Esegui con: python -m unittest test_cache_maintenance -v
 """
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -110,6 +111,44 @@ class TestCleanCache(unittest.TestCase):
                 self.assertEqual(list(vf.glob("*.png")), [])
             finally:
                 m.CACHE_DIR = old
+
+    def test_pulizia_frame_azzera_frame_check_nel_report(self) -> None:
+        # I mismatches del report citano i frame (tempo + slide): se la pulizia
+        # cancella i PNG, il report non deve continuare a citare file inesistenti.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            vf = base / "verify_frames"
+            vf.mkdir()
+            (vf / "seg00_t10.0_slide02.png").write_bytes(b"frame")
+            report = {
+                "frame_check": {
+                    "checked": 1,
+                    "coherent": 0,
+                    "mismatches": [{"slide": 2, "time": 10.0}],
+                },
+                "rio": "resta",
+            }
+            (base / "sync_report.json").write_text(json.dumps(report), encoding="utf-8")
+
+            esito = clean_cache(base)
+
+            self.assertEqual(esito["verify_frames"], 1)
+            self.assertEqual(list(vf.glob("*.png")), [])
+            rimasto = json.loads((base / "sync_report.json").read_text(encoding="utf-8"))
+            self.assertIsNone(rimasto["frame_check"])
+            self.assertEqual(rimasto["rio"], "resta")
+
+    def test_senza_pulizia_frame_il_report_resta(self) -> None:
+        # Con clean_verify_frames=False i frame (e il loro riferimento) restano.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "sync_report.json").write_text(
+                json.dumps({"frame_check": {"checked": 1, "coherent": 1, "mismatches": []}}),
+                encoding="utf-8",
+            )
+            clean_cache(base, clean_verify_frames=False)
+            rimasto = json.loads((base / "sync_report.json").read_text(encoding="utf-8"))
+            self.assertIsNotNone(rimasto["frame_check"])
 
     def test_pota_solo_i_parziali_vecchi(self) -> None:
         # I parziali servono alla ripresa: quelli recenti RESTANO, quelli di

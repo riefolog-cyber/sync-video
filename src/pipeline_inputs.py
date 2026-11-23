@@ -20,8 +20,12 @@ from config import AUDIO_SEARCH_SUFFIXES, PRESENTATION_ACCEPTED_SUFFIXES, log
 
 def find_audio_file(directory: Path) -> Path | None:
     """Cerca qualsiasi file audio nella directory (glob pattern).
-    Se più file audio presenti, sceglie il più recente per data di modifica."""
-    candidates = [f for f in directory.iterdir() if f.suffix.lower() in AUDIO_SEARCH_SUFFIXES]
+    Se più file audio presenti, sceglie il più recente per data di modifica.
+    Anche una cartella puo' finire per .m4a/.mp3: senza `is_file()` verrebbe
+    scelta come audio e la pipeline aprirebbe una directory al suo posto."""
+    candidates = [
+        f for f in directory.iterdir() if f.is_file() and f.suffix.lower() in AUDIO_SEARCH_SUFFIXES
+    ]
     if not candidates:
         return None
     # Ordina per data di modifica (più recente prima)

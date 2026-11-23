@@ -114,6 +114,8 @@ def clean_cache(
     include_models=True), parziali di trascrizione recenti (la ripresa li usa).
     """
     from pipeline_cache import clean_orphan_cache as _clean_orphan_cache
+    from pipeline_cache import load_sync_report as _load_sync_report
+    from pipeline_cache import save_sync_report as _save_sync_report
     from semantic_sync import _prune_embed_cache  # import locale: evita cicli
 
     esito: dict[str, int] = {
@@ -147,6 +149,13 @@ def clean_cache(
             for f in frame:
                 with contextlib.suppress(OSError):
                     f.unlink()
+        # Il report dell'ultima run cita quei frame nei mismatches (tempo + slide):
+        # cancellati i file, il riferimento resterebbe appeso a un file inesistente.
+        # Azzeriamo il campo: la verifica successiva lo riscrive con i frame nuovi.
+        report = _load_sync_report(cache_dir=cache_dir)
+        if report and report.get("frame_check") is not None:
+            report["frame_check"] = None
+            _save_sync_report(report, cache_dir=cache_dir)
     # 4. parziali di trascrizioni interrotte, vecchi: dopo una settimana non
     #    servono piu' a nessuno (se l'audio non e' stato rifatto, la run e'
     #    finita comunque). I recenti RESTANO: sono il punto della ripresa.

@@ -12,6 +12,7 @@ import itertools
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import subtitles
 from subtitles import (
@@ -173,6 +174,25 @@ class TestFile(unittest.TestCase):
         testo = build_srt(_parole([("Ultima", 0.5)]), durata=1.0)
         self.assertIn("00:00:00,500 --> 00:00:01,000", testo)
 
+    def test_cue_oltre_la_durata_non_ha_tempi_invertiti(self) -> None:
+        # Il secondo cue comincia a 8s, oltre la fine dell'audio (4s): il
+        # clamp lo porterebbe a "8.0 --> 4.0", che il player rifiuta. Va
+        # scartato, e la numerazione di cio' che resta e' consecutiva.
+        # (8s di distanza evitano che _adegua_lettura unisca i due cue.)
+        testo = build_srt(_parole([("Prima", 0.0), ("Dopo", 8.0)]), durata=4.0)
+        blocchi = [b for b in testo.strip().split("\n\n") if b.strip()]
+        self.assertEqual(len(blocchi), 1)
+        self.assertIn("00:00:00,000 --> 00:00:04,000", blocchi[0])
+        self.assertIn("Prima", blocchi[0])
+        self.assertNotIn("Dopo", testo)
+        self.assertTrue(testo.startswith("1\n"))
+
+    def test_cue_con_tempi_invertiti_scartato(self) -> None:
+        # Difesa finale: anche senza `durata`, un cue (5, 2) non e' valido.
+        con_invertito = [(5.0, 2.0, "invertito")]
+        with mock.patch("subtitles.costruisci_cue", return_value=con_invertito):
+            self.assertEqual(build_srt([]), "")
+
     def test_un_cue_denso_non_viene_spezzato_invano(self) -> None:
         # Parlato veloce: spezzare in proporzione lascerebbe 22 c/s in due cue
         # piu' corti, cioe' nessun miglioramento. Meglio un cue, onesto.
@@ -212,6 +232,35 @@ class TestFile(unittest.TestCase):
     def test_capitoli_partono_da_zero_e_usano_il_testo_della_slide(self) -> None:
         capitoli = build_capitoli({1: 0.0, 2: 76.0}, ["Prima slide", "Seconda slide"])
         self.assertEqual(capitoli.split("\n"), ["0:00 Prima slide", "1:16 Seconda slide"])
+
+    def test_capitoli_sotto_i_10s_vengono_uniti(self) -> None:
+        # YouTube scarta i capitoli piu' corti di 10s: qui la prima slide dura
+        # 8s, e verrebbe ignorata insieme al suo titolo. Si fonde con la
+        # successiva tenendo l'inizio a 0:00, che e' obbligatorio.
+        capitoli = build_capitoli(
+            {1: 0.0, 2: 8.0, 3: 25.0}, ["Prima", "Seconda", "Terza"]
+        )
+        righe = capitoli.split("\n")
+        self.assertEqual(len(righe), 2)
+        self.assertTrue(righe[0].startswith("0:00 "))
+        self.assertIn("Prima", righe[0])
+        self.assertIn("Seconda", righe[0])
+        self.assertEqual(righe[1], "0:25 Terza")
+
+    def test_capitoli_di_almeno_10s_non_si_toccano(self) -> None:
+        capitoli = build_capitoli({1: 0.0, 2: 10.0, 3: 20.0}, ["Prima", "Seconda", "Terza"])
+        self.assertEqual(
+            capitoli.split("\n"),
+            ["0:00 Prima", "0:10 Seconda", "0:20 Terza"],
+        )
+
+    def test_tutti_i_capitoli_corti_diventano_uno_solo(self) -> None:
+        capitoli = build_capitoli({1: 0.0, 2: 8.0, 3: 16.0}, ["Prima", "Seconda", "Terza"])
+        righe = capitoli.split("\n")
+        self.assertEqual(len(righe), 1)
+        self.assertTrue(righe[0].startswith("0:00 "))
+        for titolo in ("Prima", "Seconda", "Terza"):
+            self.assertIn(titolo, righe[0])
 
     def test_una_riga_di_simboli_non_diventa_titolo(self) -> None:
         # Caso reale da una slide infografica: senza il filtro questo diventava

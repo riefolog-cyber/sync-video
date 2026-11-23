@@ -71,13 +71,18 @@ Doppio clic su **`genera_video.bat`** e aspetta il riepilogo finale.
 
 ## 5. Come capire se è andato bene
 
-Nel riepilogo finale cerca:
+Nel riepilogo finale cerca le intestazioni e le righe qui sotto:
 
-- `Confini ancorati: N su N` (o quasi) — i cambi slide sono quelli
-  dichiarati nel podcast;
-- `Fiducia del motore: alta` — il contenuto corrisponde alle slide;
-- `Controllo del video finito: OK` — ogni segmento mostra la slide prevista;
-- `Dubbi da controllare a mano: nessuno` — non serve guardare il video.
+- `COSA È CERTO`: deve contenere `Il video finito è stato controllato:`
+  (ogni pezzo del video mostrava la slide prevista) e, se il podcast annunciava
+  le slide, `I cambi di slide sono quelli annunciati a voce dal relatore`.
+- `COSA NON È CERTO`: deve finire con `Niente da controllare a mano.`. Se sotto
+  c'è dell'altro, c'è qualcosa da guardare nel video.
+- `Quanto è sicuro il programma:` con esito `ALTO`. Se dice `BASSO`, torna al
+  blocco precedente: i punti da guardare sono elencati lì.
+- `COSA HA DECISO IL PROGRAMMA`, quando compare, raccoglie solo le scelte
+  automatiche (durate minime, confini spostati): non sono dubbi e non devi
+  guardare il video per quelle.
 
 Se invece la run si interrompe per `Copertura ancore insufficiente`,
 l'audio non annunciava abbastanza slide: rigenera il podcast seguendo il

@@ -130,12 +130,18 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> None:
     total_slides_review = len(segments) if segments else max(starts)
 
     anchors = cast("dict[str, object]", report.get("anchors") or {})
+    # `mentions_off=[]` e' un dato: la run ha confrontato gli annunci e non ne
+    # ha trovati fuori posto. `mentions_off` assente e' un report VECCHIO, che
+    # va ricalcolato. Con `if not items` i due casi coincidevano e la revisione
+    # stampava "(il report non li aveva salvati...)" anche quando la run ne
+    # aveva salvati 0 — facendo credere che il controllo non fosse girato.
+    mentions_salvati = "mentions_off" in anchors
     items = [
         dict(item)
         for item in cast("list[dict[str, object]]", anchors.get("mentions_off") or [])
     ]
     ricalcolati = False
-    if not items:
+    if not mentions_salvati:
         words = cast(
             "list[Word]",
             latest_transcript_words(

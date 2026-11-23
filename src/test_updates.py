@@ -298,8 +298,14 @@ class TestCheckUpdates(_TempCacheMixin, unittest.TestCase):
         self.assertEqual([d["name"] for d in result], ["av"])
         self.assertTrue(any("requirements.txt" in motivo for motivo in result[0]["blocked"]))
 
-    def test_cache_hit_con_installata_cambiata_non_riutilizza_la_voce(self):
-        """Entro TTL, ma l'installata non e' piu' quella del report: la voce e' stale."""
+    def test_cache_hit_con_installata_cambiata_rifa_il_controllo(self):
+        """Entro TTL, ma l'installata e' cambiata: NON si rinnova una cache vuota.
+
+        Caso reale: pip ha installato, health-check ko, cache mantenuta. Al prossimo
+        avvio la voce sembra stale; il vecchio codice scriveva ts=now con
+        outdated=[] e diceva "tutti aggiornati" per 6 ore senza aver verificato.
+        Ora la cache si invalida e il controllo si rifa' subito.
+        """
         self.cache_path.write_text(
             json.dumps(
                 {
@@ -309,12 +315,20 @@ class TestCheckUpdates(_TempCacheMixin, unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        with mock.patch("updates._installed_version", return_value="2.0.0"), mock.patch(
-            "updates._latest_version_pypi"
+        with mock.patch(
+            "updates._installed_version",
+            side_effect=lambda p: "2.0.0" if p == "numpy" else None,
+        ), mock.patch(
+            "updates._latest_version_pypi",
+            side_effect=lambda p: "9.9.9" if p == "numpy" else None,
         ) as net:
             result = updates.check_updates(ttl_hours=6)
-        net.assert_not_called()
-        self.assertEqual(result, [])
+        net.assert_called()
+        self.assertEqual([d["name"] for d in result], ["numpy"])
+        # La cache riscritta riflette il controllo appena fatto (installata
+        # aggiornata), non un timestamp fresco con la lista vuota.
+        dati = json.loads(self.cache_path.read_text(encoding="utf-8"))
+        self.assertEqual(dati["outdated"][0]["installed"], "2.0.0")
 
     def test_installed_none_non_e_conteggiato_come_errore_rete(self):
         """Pacchetto non installato: si salta, senza avvisare che PyPI e' down."""
@@ -337,6 +351,40 @@ class TestCheckUpdates(_TempCacheMixin, unittest.TestCase):
         self.assertEqual(result, [])
         avvisi = " ".join(str(a) for c in log.warning.call_args_list for a in c.args)
         self.assertIn("PyPI non raggiungibile", avvisi)
+
+    def test_rete_down_con_pacchetti_opzionali_non_installati_non_scrive_cache(self):
+        """ARM: i pacchetti opzionali mancano; con la rete down non dire 'tutti aggiornati'.
+
+        Il denominatore e' quello dei pacchetti INSTALLATI: confrontare con
+        len(_PACKAGES) faceva scattare la cache vuota quando solo una parte dei
+        pacchetti era presente (e nessuno rispondeva).
+        """
+        self.cache_path.write_text(json.dumps({"ts": 0, "outdated": []}), encoding="utf-8")
+        prima = self.cache_path.read_text(encoding="utf-8")
+        installati = {"numpy", "tqdm"}
+        with mock.patch("updates._latest_version_pypi", return_value=None), mock.patch(
+            "updates._installed_version",
+            side_effect=lambda p: "1.0.0" if p in installati else None,
+        ), mock.patch("updates.log") as log:
+            result = updates.check_updates(ttl_hours=6)
+        self.assertEqual(result, [])
+        self.assertEqual(self.cache_path.read_text(encoding="utf-8"), prima)
+        self.assertTrue(log.warning.called)
+        avviso = log.warning.call_args_list[0]
+        self.assertIn("PyPI non raggiungibile", str(avviso.args[0]))
+        self.assertEqual(avviso.args[1:], (2, 2))  # 2 installati senza risposta su 2 installati
+
+    def test_fallimento_parziale_senza_aggiornamenti_non_scrive_cache_vuota(self):
+        """Se un pacchetto installato non risponde, non certificare 'tutti aggiornati'."""
+        self.cache_path.write_text(json.dumps({"ts": 0, "outdated": []}), encoding="utf-8")
+        prima = self.cache_path.read_text(encoding="utf-8")
+        with mock.patch(
+            "updates._latest_version_pypi",
+            side_effect=lambda p: "1.0.0" if p == "numpy" else None,
+        ), mock.patch("updates._installed_version", return_value="1.0.0"):
+            result = updates.check_updates(ttl_hours=6)
+        self.assertEqual(result, [])
+        self.assertEqual(self.cache_path.read_text(encoding="utf-8"), prima)
 
 
 class TestReadCache(_TempCacheMixin, unittest.TestCase):
@@ -1135,8 +1183,12 @@ _PY_IRRAGGIUNGIBILE = ">=3.99"
 _PY_QUALSIASI = ">=3.9"
 
 
-def _file(yanked=False, requires_python=None):
-    return {"filename": "x.whl", "yanked": yanked, "requires_python": requires_python}
+def _file(yanked=False, requires_python=_PY_QUALSIASI, filename="x.whl"):
+    # Le wheel reali dichiarano requires_python: il default dei test e' un vincolo
+    # compatibile, cosi' le asserzioni storiche restano valide con la regola che
+    # esige una wheel non yanked con vincolo compatibile (un file senza vincolo,
+    # da solo, non basta piu').
+    return {"filename": filename, "yanked": yanked, "requires_python": requires_python}
 
 
 def _pypi(**releases):
@@ -1176,6 +1228,46 @@ class TestLatestCompatible(unittest.TestCase):
     def test_salta_requires_python_incompatibile(self):
         data = _pypi(**{"1.0.0": [_file()], "2.0.0": [_file(requires_python=_PY_IRRAGGIUNGIBILE)]})
         self.assertEqual(updates._latest_compatible(data), "1.0.0")
+
+    def test_solo_sdist_senza_metadata_non_e_installabile(self):
+        """La vecchia regola accettava una release la cui unica fonte era un sdist.
+
+        PyPI dice che il file c'e', non che pip lo costruisce davvero: senza
+        requires_python non si sa nemmeno se il Python corrente e' ammesso.
+        """
+        data = _pypi(
+            **{
+                "1.0.0": [_file()],
+                "2.0.0": [_file(filename="x.tar.gz", requires_python=None)],
+            }
+        )
+        self.assertEqual(updates._latest_compatible(data), "1.0.0")
+
+    def test_wheel_senza_requires_python_non_basta(self):
+        data = _pypi(**{"1.0.0": [_file()], "2.0.0": [_file(requires_python=None)]})
+        self.assertEqual(updates._latest_compatible(data), "1.0.0")
+
+    def test_wheel_compatibile_basta_anche_con_sdist_incompatibile(self):
+        data = _pypi(
+            **{
+                "2.0.0": [
+                    _file(filename="x.tar.gz", requires_python=_PY_IRRAGGIUNGIBILE),
+                    _file(requires_python=_PY_QUALSIASI),
+                ]
+            }
+        )
+        self.assertEqual(updates._latest_compatible(data), "2.0.0")
+
+    def test_wheel_yanked_e_solo_file_senza_vincolo_non_basta(self):
+        data = _pypi(
+            **{
+                "2.0.0": [
+                    _file(yanked=True, requires_python=_PY_QUALSIASI),
+                    _file(requires_python=None),
+                ]
+            }
+        )
+        self.assertIsNone(updates._latest_compatible(data))
 
     def test_salta_release_senza_file_e_versioni_illeggibili(self):
         data = _pypi(**{"1.0.0": [_file()], "2.0.0": [], "boh": [_file()]})
@@ -1247,6 +1339,17 @@ class TestPipUpgrade(unittest.TestCase):
         comando = run.call_args.args[0]
         self.assertEqual(comando[4:], ["-U", "--upgrade-strategy", "only-if-needed", "numpy==9.9.9"])
 
+    def test_log_mostra_lo_stesso_comando_eseguito(self):
+        """La riga stampata comprende strategia e requisiti nome==versione, come il run."""
+        res = self._risultato(0, stdout="Successfully installed numpy-9.9.9")
+        with mock.patch("updates.subprocess.run", return_value=res) as run, mock.patch(
+            "updates._health_check", return_value=True
+        ), mock.patch("updates.log") as log:
+            self.assertTrue(updates._pip_upgrade(["numpy==9.9.9"]))
+        comando = run.call_args.args[0]
+        righe = " ".join(str(a) for c in log.info.call_args_list for a in c.args)
+        self.assertIn(" ".join(comando), righe)
+
     def test_health_check_fallito_restituisce_false(self):
         """Exit 0 di pip non basta: se il controllo fallisce l'upgrade non e' riuscito."""
         res = self._risultato(0, stdout="Successfully installed numpy-9.9.9")
@@ -1282,26 +1385,71 @@ class TestPipUpgrade(unittest.TestCase):
 
 
 class TestHealthCheck(unittest.TestCase):
-    def test_pip_check_ko_restituisce_false(self):
-        res = mock.Mock(returncode=1, stdout="", stderr="numpy 1.0.0 requires pandas<2")
-        with mock.patch.object(updates.importlib, "import_module"), mock.patch.object(
-            updates.subprocess, "run", return_value=res
-        ) as run, mock.patch.object(updates, "log"):
-            self.assertFalse(updates._health_check(["numpy==2"]))
-        self.assertEqual(run.call_args.args[0][-1], "check")
+    """L'import gira in un interprete pulito; `pip check` e' qualificato, non globale.
+
+    ``importlib.import_module`` nel processo corrente dava sempre il modulo gia'
+    caricato (il test A/B lo ha importato), quindi verificava il codice VECCHIO.
+    `pip check` invece e' globale: un conflitto preesistente non puo' far
+    fallire un upgrade valido.
+    """
+
+    @staticmethod
+    def _res(returncode, stdout="", stderr=""):
+        return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def test_import_in_interprete_pulito_e_non_da_sys_modules(self):
+        with mock.patch("updates.subprocess.run", return_value=self._res(0)) as run, mock.patch.object(
+            updates.importlib, "import_module"
+        ) as importa, mock.patch.object(updates, "log"):
+            self.assertTrue(updates._health_check(["av==18.0.0", "openvino-genai==2024.0"]))
+        importa.assert_not_called()
+        comando_import = run.call_args_list[0].args[0]
+        self.assertEqual(comando_import[:3], [sys.executable, "-I", "-c"])
+        self.assertIn("av", comando_import[3])
+        self.assertIn("openvino_genai", comando_import[3])  # nome di import, non nome pip
+        self.assertEqual(run.call_args_list[1].args[0], [sys.executable, "-m", "pip", "check"])
 
     def test_import_ko_restituisce_false_senza_pip_check(self):
-        with mock.patch.object(
-            updates.importlib, "import_module", side_effect=ImportError("DLL load failed")
-        ), mock.patch.object(updates.subprocess, "run") as run, mock.patch.object(updates, "log"):
+        errore = self._res(1, stderr="ModuleNotFoundError: No module named 'av'")
+        with mock.patch("updates.subprocess.run", return_value=errore) as run, mock.patch.object(
+            updates, "log"
+        ) as log:
             self.assertFalse(updates._health_check(["av==18.0.0"]))
-        run.assert_not_called()
+        self.assertEqual(len(run.call_args_list), 1)  # pip check non viene nemmeno lanciato
+        self.assertTrue(log.warning.called)
+
+    def test_conflitto_preesistente_non_fa_fallire(self):
+        check = self._res(1, stdout="altro 1.0 requires numpy<2, but you have numpy 2.0")
+        with mock.patch(
+            "updates.subprocess.run", side_effect=[self._res(0), check]
+        ) as run, mock.patch.object(updates, "log") as log:
+            self.assertTrue(updates._health_check(["numpy==2.0"]))
+        self.assertEqual(len(run.call_args_list), 2)
+        self.assertFalse(log.warning.called)
+
+    def test_dipendenza_rotta_del_pacchetto_aggiornato_fa_fallire(self):
+        check = self._res(1, stdout="numpy 2.0 requires pandas<2, but you have pandas 3.0")
+        with mock.patch("updates.subprocess.run", side_effect=[self._res(0), check]), mock.patch.object(
+            updates, "log"
+        ) as log:
+            self.assertFalse(updates._health_check(["numpy==2.0"]))
+        self.assertTrue(log.warning.called)
+
+    def test_pip_check_non_disponibile_non_fa_fallire(self):
+        # E' uno smoke test: se pip check non gira, gli import sono gia' stati
+        # verificati e non si annulla un upgrade per questo.
+        with mock.patch(
+            "updates.subprocess.run",
+            side_effect=[self._res(0), subprocess.TimeoutExpired("pip", 120)],
+        ), mock.patch.object(updates, "log"):
+            self.assertTrue(updates._health_check(["numpy==2.0"]))
 
     def test_tutto_ok(self):
-        with mock.patch.object(updates.importlib, "import_module"), mock.patch.object(
-            updates.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="", stderr="")
-        ), mock.patch.object(updates, "log"):
+        with mock.patch(
+            "updates.subprocess.run", side_effect=[self._res(0), self._res(0)]
+        ) as run, mock.patch.object(updates, "log"):
             self.assertTrue(updates._health_check(["numpy==2"]))
+        self.assertEqual(len(run.call_args_list), 2)
 
 
 class TestUpgradeRequirement(unittest.TestCase):

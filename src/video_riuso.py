@@ -10,7 +10,9 @@ scritto, se l'impronta coincide E il file di output non e' stato toccato.
 Il riuso non puo' sbagliare: l'impronta copre tutto quello che puo' cambiare
 il video. Se una slide, un tempo, l'audio, i thread o l'encoder cambiano, il
 video si rifa. E se il file di output e' stato spostato o modificato
-(dimensione o momento di modifica diversi), si rifa.
+(dimensione diversa, oppure contenuto diverso a parita' di dimensione), si rifa:
+il solo momento di modifica puo' cambiare per un touch di antivirus/OneDrive e
+non basta piu' a invalidare il riuso.
 
 Il "come" e' un file .json nella cache: piccolo, ispezionabile, e non lascia
 niente addosso nella cartella dell'utente.
@@ -20,15 +22,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from config import CACHE_DIR, atomic_write_text
+from config import CACHE_DIR, DEFAULT_VIDEO_BUFFER_SEC, DEFAULT_VIDEO_RES, atomic_write_text
 
 _CARTELLA = "video_riuso"
 # VERSIONE: se la chiave cambia senso (nuovi parametri nel video), la versione
-# cambia e le chiavi vecchie non valgono piu'. v2: aggiunti i thread.
-_VERSIONE = "v2"
+# cambia e le chiavi vecchie non valgono piu'. v2: aggiunti i thread; v3:
+# risoluzione e buffer entrano nell'impronta, il percorso delle slide ne esce.
+_VERSIONE = "v3"
 
 
 def _hash_file(path: Path, h: Any) -> None:
@@ -41,6 +45,13 @@ def _hash_file(path: Path, h: Any) -> None:
         h.update(b"|file-mancante|")
 
 
+def _sha1_file(path: Path) -> str:
+    """Hash del CONTENUTO del file di output (stream, senza leggerlo tutto in memoria)."""
+    h = hashlib.sha1()
+    _hash_file(path, h)
+    return h.hexdigest()
+
+
 def chiave_video(
     slide_files: list[str],
     durations: list[float],
@@ -50,21 +61,35 @@ def chiave_video(
     engine: str,
     encoder: str,
     threads: int = 0,
+    video_res: tuple[int, int] | None = None,
+    video_buffer_sec: float | None = None,
 ) -> str:
     """Impronta di tutto quello che determina il video.
 
     Cambia se cambia una slide, un tempo, l'audio o un parametro di
     rendering: in quel caso il video va rifatto. ``threads`` entra
     nell'impronta perche' finisce nei flag di libx264 e un encoding con un
-    altro numero di thread non e' garantito identico.
+    altro numero di thread non e' garantito identico. Entrano anche la
+    risoluzione e il buffer video (che allungano l'ultima durata), mentre il
+    PERCORSO delle slide no: spostare la cartella non cambia il video.
     """
+    if video_res is None:
+        video_res = DEFAULT_VIDEO_RES
+    if video_buffer_sec is None:
+        video_buffer_sec = DEFAULT_VIDEO_BUFFER_SEC
     h = hashlib.sha1()
     h.update(_VERSIONE.encode("utf-8"))
     h.update(b"\x00")
-    h.update(f"{fps}|{transition_duration}|{engine}|{encoder}|{threads}".encode())
+    parametri = (
+        f"{fps}|{transition_duration}|{engine}|{encoder}|{threads}|"
+        f"{video_res[0]}x{video_res[1]}|{float(video_buffer_sec):.4f}"
+    )
+    h.update(parametri.encode())
     h.update(b"\x00")
     for i, slide in enumerate(slide_files):
-        h.update(f"{i}|{slide}".encode())
+        # Solo l'INDICE (l'ordine conta) e il CONTENUTO: il percorso non entra,
+        # altrimenti spostare la cartella delle slide cambiava la chiave.
+        h.update(f"{i}".encode())
         h.update(b"\x00")
         _hash_file(Path(slide), h)
         h.update(b"\x00")
@@ -99,18 +124,39 @@ def video_riutilizzabile(
         stat = output_path.stat()
     except OSError:
         return False
-    # Il file di output e' stato toccato (spostato, modificato, aperto da un
-    # altro programma)? Allora non e' piu' il video che abbiamo scritto: si
-    # rifa.
-    return int(dati.get("size", -1)) == stat.st_size and int(
-        dati.get("mtime_ns", -1)
-    ) == stat.st_mtime_ns
+    # Dimensione diversa: il file e' stato sostituito, si rifa senza leggerlo.
+    if int(dati.get("size", -1)) != stat.st_size:
+        return False
+    # mtime uguale: percorso rapido, e' il caso normale (nessuna lettura del video).
+    if int(dati.get("mtime_ns", -1)) == stat.st_mtime_ns:
+        return True
+    # mtime diverso ma dimensione uguale: puo' essere un semplice "touch" di
+    # antivirus/OneDrive oppure una modifica vera. Decide il contenuto.
+    atteso = dati.get("sha1")
+    if not isinstance(atteso, str):
+        # Marche vecchie, scritte prima del controllo sul contenuto: senza hash
+        # non si puo' distinguere un touch da una modifica, si rifa (sicuro).
+        return False
+    if _sha1_file(output_path) != atteso:
+        return False
+    # Contenuto identico: aggiorna il mtime nella marca, cosi' il prossimo
+    # controllo torna al percorso rapido senza rileggere il video.
+    dati["mtime_ns"] = stat.st_mtime_ns
+    # Cache in sola lettura: il riuso resta valido lo stesso.
+    with suppress(OSError):
+        atomic_write_text(marca, json.dumps(dati, ensure_ascii=False))
+    return True
 
 
 def segna_video(
     output_path: Path, chiave: str, cache_dir: Path | None = None
 ) -> None:
-    """Ricorda quale video e' stato scritto (e con quali input)."""
+    """Ricorda quale video e' stato scritto (e con quali input).
+
+    L'hash del contenuto serve a non rifare il video quando cambia solo il
+    momento di modifica (touch di antivirus/OneDrive): mtime e dimensione
+    restano come controllo rapido.
+    """
     try:
         stat = output_path.stat()
     except OSError:
@@ -123,6 +169,7 @@ def segna_video(
                 "chiave": chiave,
                 "size": stat.st_size,
                 "mtime_ns": stat.st_mtime_ns,
+                "sha1": _sha1_file(output_path),
                 "output": str(output_path),
             },
             ensure_ascii=False,

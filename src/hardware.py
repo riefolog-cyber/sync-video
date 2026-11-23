@@ -258,14 +258,16 @@ _ENCODER_ARGS: dict[str, list[str]] = {
 # batte un'iGPU anche per l'encoding).
 #
 # Attenzione: ogni catena puo' scendere SOLO su encoder che funzionano su
-# quella famiglia. Per 'amd' QSV non e' un ripiego legittimo: richiede una
-# GPU Intel, e se la macchina avesse anche quella, `_video_vendor` avrebbe
-# restituito 'intel'. Le build di ffmpeg senza AMF capitano spesso: senza
-# questo accorgimento una macchina AMD senza AMF finiva su h264_qsv e
-# falliva a runtime.
+# quella famiglia. AMF richiede una GPU AMD: tenerlo nelle catene nvidia/intel
+# faceva scegliere h264_amf su macchine NVIDIA-only (e' compilato in quasi tutte
+# le build ffmpeg, ma senza device AMD fallisce solo a runtime). Per 'amd' QSV
+# non e' un ripiego legittimo: richiede una GPU Intel, e se la macchina avesse
+# anche quella, `_video_vendor` avrebbe restituito 'intel'. Le build di ffmpeg
+# senza AMF capitano spesso: senza questo accorgimento una macchina AMD senza
+# AMF finiva su h264_qsv e falliva a runtime.
 _ENCODER_BY_VENDOR: dict[str, tuple[str, ...]] = {
-    "nvidia": ("h264_nvenc", "h264_amf", "libx264"),
-    "intel": ("h264_qsv", "h264_amf", "libx264"),
+    "nvidia": ("h264_nvenc", "libx264"),
+    "intel": ("h264_qsv", "libx264"),
     "amd": ("h264_amf", "libx264"),
     "apple": ("h264_videotoolbox", "libx264"),
     # Nessuna GPU nota: si resta sul software. Un encoder accelerato

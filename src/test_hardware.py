@@ -81,21 +81,21 @@ class TestChooseVideoEncoder(unittest.TestCase):
         # quando la build non ha AMF (le build senza AMF sono comuni).
         self.assertEqual(hw.choose_video_encoder("amd", frozenset({"libx264", "h264_qsv"})), "libx264")
 
-    def test_intel_puo_ripiegare_su_amf(self) -> None:
-        # Con Intel e AMD insieme vince 'intel' nella precedenza, e AMF puo'
-        # legittimamente funzionare sulla dGPU AMD.
-        self.assertEqual(hw.choose_video_encoder("intel", frozenset({"libx264", "h264_amf"})), "h264_amf")
+    def test_intel_non_sceglie_amf_su_macchina_intel_only(self) -> None:
+        # AMF richiede una GPU AMD: compilato in ffmpeg ma senza device AMD
+        # fallirebbe solo a runtime. Su Intel-only resta libx264.
+        self.assertEqual(hw.choose_video_encoder("intel", frozenset({"libx264", "h264_amf"})), "libx264")
 
     def test_se_l_accelerato_non_c_e_ripiega_su_libx264(self) -> None:
         # Build ffmpeg minimale: solo libx264.
         self.assertEqual(hw.choose_video_encoder("nvidia", frozenset({"libx264"})), "libx264")
         self.assertEqual(hw.choose_video_encoder("intel", frozenset()), "libx264")
 
-    def test_rispetta_l_ordine_di_precedenza(self) -> None:
-        # NVENC prima di AMF: su una macchina con entrambe, la dGPU NVIDIA
-        # vince (stessa precedenza di machine_setup.recommend).
+    def test_nvidia_non_ripiega_su_amf(self) -> None:
+        # NVENC assente e AMF e' un encoder AMD: su una macchina NVIDIA-only
+        # deve restare libx264, non un encoder che fallirebbe a runtime.
         solo_amf_e_libx = frozenset({"libx264", "h264_amf"})
-        self.assertEqual(hw.choose_video_encoder("nvidia", solo_amf_e_libx), "h264_amf")
+        self.assertEqual(hw.choose_video_encoder("nvidia", solo_amf_e_libx), "libx264")
 
 
 class TestEncoderArgs(unittest.TestCase):

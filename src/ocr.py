@@ -346,13 +346,22 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza
     # stantio. Il marker a lato memorizza l'MD5 del sorgente convertito.
     marker_path = out_dir / (ppt_path.stem + ".src_md5")
     if pdf_path.exists() and marker_path.exists():
+        motivo = "sorgente cambiato"
         try:
             if marker_path.read_text(encoding="ascii").strip() == _file_md5(ppt_path):
-                log.info("   -> PDF già presente (riusato): %s", pdf_path)
-                return pdf_path
+                # Il marker dice che il sorgente e' invariato, ma il PDF puo'
+                # essere stato danneggiato DOPO la conversione (copia
+                # interrotta, disco pieno). Riusarlo senza aprirlo significava
+                # trascinarsi il file guasto per sempre: la cache OCR ne
+                # ereditava l'hash e nessuno diceva niente. Stessa validazione
+                # del percorso di conversione, qui sotto.
+                if _pdf_valido(pdf_path):
+                    log.info("   -> PDF già presente (riusato): %s", pdf_path)
+                    return pdf_path
+                motivo = "non valido"
         except OSError:
             pass
-        log.info("   -> PDF in cache scaduto (sorgente cambiato), riconverto...")
+        log.info("   -> PDF in cache %s, riconverto...", motivo)
 
     ext_upper = ppt_path.suffix.upper().lstrip(".")
     # Rimuovi il PDF (e il marker) del tentativo precedente PRIMA di convertire.
@@ -840,6 +849,7 @@ def extract_slides_text_ocr(
     for idx, testo in nativi.items():
         slide_texts[idx] = testo
     da_ocr = [(idx, slide_files[idx]) for idx in indici_da_ocr]
+    tesseract_assente_segnalato = False
     if da_ocr:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
@@ -847,13 +857,27 @@ def extract_slides_text_ocr(
             }
             for future in as_completed(futures):
                 idx = futures[future]
-                slide_texts[idx] = future.result()
+                try:
+                    slide_texts[idx] = future.result()
+                except OSError as e:
+                    # TesseractNotFoundError eredita da OSError ed e' l'unica
+                    # OSError che _ocr_single_slide lascia uscire: gli altri
+                    # errori li gestisce lui con retry e segnaposto. Prima il
+                    # result() era senza cattura, il traceback saliva e la
+                    # guardia qui sotto non veniva mai raggiunta (codice morto).
+                    # Si segnala UNA volta e si lascia la slide vuota, cosi'
+                    # la guardia puo' dare il messaggio azionabile.
+                    slide_texts[idx] = ""
+                    if not tesseract_assente_segnalato:
+                        tesseract_assente_segnalato = True
+                        log.warning("   OCR non disponibile: Tesseract mancante (%s).", e)
 
-    # Tesseract assente = ogni slide prende il segnaposto e la run va a buon
-    # fine: il video esce con le slide vuote e nessun errore, che è la cosa più
-    # difficile da diagnosticare per chi clona il progetto. pytesseract
-    # eredita TesseractNotFoundError da OSError, quindi _ocr_single_slide lo
-    # tratta come un errore di OCR qualsiasi e lo annulla.
+    # Tesseract assente: _ocr_single_slide rilancia subito
+    # TesseractNotFoundError (ripetere il tentativo non servirebbe), il ciclo
+    # qui sopra la cattura una volta e lascia le slide interessate vuote. Senza
+    # la guardia sotto la run andrebbe a buon fine con slide vuote e nessun
+    # errore: e' la cosa piu' difficile da diagnosticare per chi clona il
+    # progetto.
     #
     # Una slide senza testo è legittima (un'immagine, una foto): il segnaposto
     # è la risposta giusta. TUTTE le slide vuote no: è quasi certamente

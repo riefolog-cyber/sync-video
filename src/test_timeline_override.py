@@ -75,6 +75,14 @@ class TestLettura(unittest.TestCase):
             leggi_override(self._file(json.dumps([{"slide": 5}])))
         self.assertIn("manca", str(ctx.exception))
 
+    def test_lista_con_slide_frazionaria_non_tronca(self) -> None:
+        # `int(_numero(...))` trasformava 5.7 in 5: l'override finiva sulla
+        # slide sbagliata senza che nessuno lo dicesse.
+        with self.assertRaises(ValueError) as ctx:
+            leggi_override(self._file(json.dumps([{"slide": 5.7, "start": 252}])))
+        self.assertIn("intero", str(ctx.exception))
+        self.assertIn("slide", str(ctx.exception))
+
     def test_tipo_sbagliato_in_cima(self) -> None:
         with self.assertRaises(ValueError):
             leggi_override(self._file('"slide 5"'))
@@ -99,6 +107,12 @@ class TestFissaggi(unittest.TestCase):
     def test_slide_indicata_due_volte(self) -> None:
         with self.assertRaises(ValueError):
             fissaggi_da_voci(["5=10", "5=20"])
+
+    def test_slide_frazionaria_rifiutata(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            fissaggi_da_voci(["5.7=252"])
+        self.assertIn("intero", str(ctx.exception))
+        self.assertIn("slide", str(ctx.exception))
 
 
 class TestAggiornamentoFile(unittest.TestCase):
@@ -172,6 +186,18 @@ class TestApplicazione(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             applica_override(self.TIMELINE, {3: 219.0}, 921.0, 3.0)
         self.assertIn("sotto il minimo", str(ctx.exception))
+
+    def test_ultima_slide_sotto_il_minimo_viene_rifiutata(self) -> None:
+        # L'ultima slide non ha un successore: senza il controllo sulla coda
+        # dell'audio poteva restare 1,5s e il video chiudersi subito dopo.
+        with self.assertRaises(ValueError) as ctx:
+            applica_override(self.TIMELINE, {4: 919.5}, 921.0, 3.0)
+        self.assertIn("sotto il minimo", str(ctx.exception))
+        self.assertIn("slide 4", str(ctx.exception))
+
+    def test_ultima_slide_esattamente_al_minimo_e_accettata(self) -> None:
+        nuova, _ = applica_override(self.TIMELINE, {4: 918.0}, 921.0, 3.0)
+        self.assertEqual(nuova[4], 918.0)
 
     def test_le_ancore_pronunciate_vengono_segnalate(self) -> None:
         _, mosse = applica_override(self.TIMELINE, {3: 140.0}, 921.0, 3.0)

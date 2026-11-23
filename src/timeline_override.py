@@ -39,11 +39,23 @@ def _numero(valore: Any, cosa: str) -> float:
     return numero
 
 
+def _slide_intera(valore: Any, cosa: str) -> int:
+    """Numero di slide intero, o ValueError con il nome del campo.
+
+    ``int(_numero(...))`` troncava 5.7 in 5: l'override finiva sulla slide
+    sbagliata e nessuno lo diceva. Un numero frazionario e' un errore.
+    """
+    numero = _numero(valore, cosa)
+    if not numero.is_integer():
+        raise ValueError(f"{cosa}: atteso un numero di slide intero, trovato {valore!r}")
+    return int(numero)
+
+
 def fissaggi_da_voci(voci: Sequence[str]) -> dict[int, float]:
     """``["5=252.0", "9=431.25"]`` -> ``{5: 252.0, 9: 431.25}``.
 
     E' il formato di ``--fix-slide``: chi corregge un confine non deve sapere
-    come e' fatto il JSON.
+    come e' fatto il JSON. Il numero di slide deve essere intero.
     """
     fissaggi: dict[int, float] = {}
     for voce in voci:
@@ -51,11 +63,12 @@ def fissaggi_da_voci(voci: Sequence[str]) -> dict[int, float]:
         if not sep:
             raise ValueError(f"'{voce}': atteso slide=secondi (esempio: 5=252.0)")
         try:
-            slide = int(slide_txt.strip())
-        except ValueError:
+            numero_slide = float(slide_txt.strip())
+        except (TypeError, ValueError):
             raise ValueError(
                 f"'{voce}': '{slide_txt.strip()}' non e' un numero di slide"
             ) from None
+        slide = _slide_intera(numero_slide, f"'{voce}' slide")
         if slide in fissaggi:
             raise ValueError(f"slide {slide}: indicata piu' di una volta")
         fissaggi[slide] = _numero(tempo_txt.strip(), f"slide {slide}")
@@ -82,7 +95,7 @@ def _da_lista(dati: list[Any]) -> dict[int, float]:
             raise ValueError(f"voce {i}: atteso un oggetto con 'slide' e 'start'")
         if "slide" not in voce or "start" not in voce:
             raise ValueError(f"voce {i}: manca 'slide' o 'start'")
-        slide = int(_numero(voce["slide"], f"voce {i} 'slide'"))
+        slide = _slide_intera(voce["slide"], f"voce {i} 'slide'")
         if slide in override:
             raise ValueError(f"slide {slide}: compare piu' di una volta nel file")
         override[slide] = _numero(voce["start"], f"slide {slide}")
@@ -172,6 +185,24 @@ def applica_override(
                     f"{min_secondi:.0f}s: sposta anche la slide {ordinate[i + 1]} "
                     "o togli questo override"
                 )
+
+    # L'ultima slide non ha un successore che ne definisca la fine: senza
+    # questo controllo poteva restare 0,1s davanti alla fine dell'audio e il
+    # video chiudersi quando era appena comparsa.
+    if ordinate:
+        ultima = ordinate[-1]
+        durata_ultima = total_duration - nuove[ultima]
+        if durata_ultima <= 0:
+            raise ValueError(
+                f"slide {ultima} ({nuove[ultima]:.1f}s) finirebbe dopo la fine "
+                f"dell'audio ({total_duration:.1f}s)"
+            )
+        if durata_ultima < min_secondi - 1e-9:
+            raise ValueError(
+                f"slide {ultima} durerebbe {durata_ultima:.1f}s, sotto il minimo "
+                f"di {min_secondi:.0f}s: sposta l'ultima slide o togli "
+                "questo override"
+            )
 
     # Non si rifiuta lo spostamento di un'ancora pronunciata: e' una scelta
     # esplicita che contraddice una misura, e il video la rispetta. Chi chiama

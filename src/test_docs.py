@@ -70,6 +70,25 @@ _COMANDO_TEST = re.compile(r"python(?:\.exe)?\s+-m\s+unittest\s+(?P<argomenti>[^
 # Un conteggio dichiarato: "424 test" o "147 unit test".
 _NUMERO_TEST = re.compile(r"(?P<numero>\d+)\s+(?:unit\s+)?test\b")
 
+# Un flag di riga di comando citato in una tabella. Le env var non cominciano
+# con `--`, quindi non vengono estratte: non sono flag di argparse.
+_FLAG_TABELLA = re.compile(r"--[A-Za-z][A-Za-z0-9-]*")
+
+
+def _flags_argparse() -> set[str]:
+    """Tutte le opzioni accettate dal parser, sinonimi `--no-*` compresi.
+
+    `vars(parse_args([]))` non basta: `--no-auto-beam` ha dest `auto_beam` e
+    `--no-snap-pauses` ha dest `snap_pauses`, quindi dai dest non si risalgono
+    ai flag scritti. Qui si leggono le `option_strings` delle azioni del parser
+    vero, che e' la fonte di verita' sia per i default sia per l'esistenza.
+    """
+    return {
+        opzione
+        for azione in config.build_parser()._actions
+        for opzione in azione.option_strings
+    }
+
 
 def _righe_tabella(testo: str) -> Generator[tuple[int, list[str]], None, None]:
     """(riga, celle) per ogni riga di tabella markdown con almeno 2 celle."""
@@ -275,6 +294,100 @@ class TestProseNonVerificabile(unittest.TestCase):
             flag for flag in self.FLAGS_CHIAVE if not any(flag in testo for testo in testi)
         ]
         self.assertEqual(non_documentate, [], "opzioni chiave non citate in nessuna doc")
+
+
+class TestFlagDocumentatiEsistono(unittest.TestCase):
+    """Il controllo sui default saltava i flag inesistenti: qui si fa il contrario.
+
+    `TestDefaultDocumentati` scarta una riga di tabella se il flag non e' in
+    argparse, quindi una opzione inventata (o rimossa e rimasta nelle doc)
+    passava inosservata. Questo test inverte il controllo: ogni `--flag` che
+    compare in una tabella deve esistere davvero nel parser.
+
+    Le eccezioni sono esplicite e numerate: env var (non iniziano con `--`),
+    flag dei `.bat`, opzioni di script terzi citate nelle doc e un flag rimosso
+    di proposito, ancora documentato come storico.
+    """
+
+    NON_ARGPARSE = frozenset(
+        {
+            "--help",  # aggiunto da argparse
+            "--semantic-min-sim",  # rimosso: la tabella lo cita come storico
+            "--check-updates",  # genera_video.bat
+            "--no-pause",  # genera_video.bat
+            "--ricrea",  # crea_venv.bat
+            "--id",  # winget install (troubleshooting)
+            "--upgrade",  # pip install (troubleshooting)
+            "--fix",  # ruff check --fix (struttura)
+            "--quality",  # archify (diagrammi)
+            "--json",  # archify (diagrammi)
+            "--platform",  # mypy (PIANO_OTTIMIZZAZIONI)
+            "--aggiorna",  # prova_materiale_reale.py (verifica)
+            "--scrivi",  # riga_baseline.py (verifica)
+            "--confronta",  # riga_baseline.py (verifica)
+        }
+    )
+
+    def test_ogni_flag_in_tabella_esiste_nel_parser(self) -> None:
+        reali = _flags_argparse()
+        problemi: list[str] = []
+        controllati = 0
+
+        for doc in DOCUMENTI:
+            if not doc.exists():
+                continue
+            testo = doc.read_text(encoding="utf-8", errors="replace")
+            for riga, celle in _righe_tabella(testo):
+                for cella in celle:
+                    for flag in _FLAG_TABELLA.findall(cella):
+                        controllati += 1
+                        if flag in reali or flag in self.NON_ARGPARSE:
+                            continue
+                        problemi.append(f"{doc.name}:{riga}  flag documentato ma inesistente: {flag}")
+
+        if controllati == 0:
+            self.skipTest("nessun flag di riga di comando trovato nelle tabelle")
+        self.assertEqual(problemi, [], "\n".join(problemi))
+
+
+class TestEtichetteRiepilogoPromemoria(unittest.TestCase):
+    """Le etichette che il promemoria dice di cercare devono essere stampate.
+
+    Una checklist con etichette inventate e' peggio di nessuna checklist: chi
+    legge cerca una riga che il programma non scrive e conclude che la run e'
+    andata storto. Qui si leggono le voci della checklist del paragrafo 5 e si
+    cerca ciascuna etichetta nel sorgente del riepilogo.
+    """
+
+    def test_etichette_citate_sono_quelle_del_riepilogo(self) -> None:
+        promemoria = RADICE / "promemoria prima installazione.md"
+        testo = promemoria.read_text(encoding="utf-8")
+        pezzi = testo.split("## 5. Come capire se è andato bene", 1)
+        if len(pezzi) < 2:
+            self.fail("il promemoria non ha piu' il paragrafo 5")
+        corpo = pezzi[1].split("\n## ", 1)[0]
+
+        # Solo le voci della checklist: nel resto del paragrafo i backtick
+        # citano messaggi di errore di altre fasi, non etichette del riepilogo.
+        etichette = [
+            etichetta
+            for riga in corpo.splitlines()
+            if riga.lstrip().startswith("- ")
+            for etichetta in re.findall(r"`([^`]+)`", riga)
+        ]
+        self.assertTrue(etichette, "nessuna etichetta citata nella checklist del promemoria")
+
+        sorgente_main = (RADICE / "src" / "main.py").read_text(encoding="utf-8")
+        inizio = sorgente_main.index("def _log_plain_summary(")
+        fine = sorgente_main.index("def _frame_check_video(", inizio)
+        sorgente_riepilogo = sorgente_main[inizio:fine]
+
+        mancanti = [etichetta for etichetta in etichette if etichetta not in sorgente_riepilogo]
+        self.assertEqual(
+            mancanti,
+            [],
+            "etichette citate nel promemoria ma non scritte dal riepilogo: " + ", ".join(mancanti),
+        )
 
 
 if __name__ == "__main__":

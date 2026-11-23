@@ -23,6 +23,11 @@ from config import (
     log,
 )
 
+# Soli encoder accelerati noti: tutto il resto ("" / "auto" / valori
+# sconosciuti) NON e' una prova che la GPU sia stata usata. Prima bastava
+# `encoder != "libx264"` e con --no-auto-setup restava "auto" -> "GPU" falso.
+_ENCODER_GPU = frozenset({"h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolbox"})
+
 
 def format_time(seconds: float) -> str:
     """Formatta secondi in formato leggibile."""
@@ -79,9 +84,10 @@ def print_timing(
     questo modulo, ma main.py passa la propria (così i test che patchano
     ``main._append_timing_history`` vedono il mock).
 
-    ``video_encoder``: l'encoder scelto dal rilevamento hardware, se noto.
-    Serve a rendere visibile che la GPU è stata usata anche per il video
-    (prima l'encoding era sempre su CPU, e il riepilogo non lo diceva).
+    ``video_encoder``: l'encoder EFFETTIVO usato per il video, se noto. Serve a
+    rendere visibile che la GPU è stata usata davvero (prima l'encoding era
+    sempre su CPU). Con ``auto``/valori sconosciuti non si può affermare nulla:
+    il riepilogo dice "non verificato" invece di "GPU".
     """
     log.info("\n" + "─" * 50)
     log.info(" ⏱️  RIEPILOGO TEMPI")
@@ -126,8 +132,12 @@ def print_timing(
         if totale_ram:
             righe_hw.append(memory_tier(totale_ram))
         righe_hw.append(f"batch whisper {DEFAULT_WHISPER_BATCH}, embedding {DEFAULT_EMBED_BATCH}")
-        righe_hw.append(
-            f"video {video_encoder} (GPU)" if video_encoder and video_encoder != "libx264" else "video libx264 (CPU)"
-        )
+        _enc = (video_encoder or "").strip().lower()
+        if _enc in _ENCODER_GPU:
+            righe_hw.append(f"video {_enc} (GPU)")
+        elif _enc == "libx264":
+            righe_hw.append("video libx264 (CPU)")
+        else:
+            righe_hw.append(f"video {_enc or 'sconosciuto'} (non verificato)")
         log.info("   🖥️  Hardware: %s", ", ".join(righe_hw))
     (history_fn or append_timing_history)(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total)

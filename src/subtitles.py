@@ -46,6 +46,9 @@ CODA_ULTIMA_PAROLA = 0.8
 QUALITA_MINIMA_TITOLO = 0.6
 # Titolo di capitolo: oltre ~60 caratteri YouTube lo tronca da solo, e peggio.
 MAX_CARATTERI_CAPITOLO = 60
+# YouTube scarta i capitoli piu' corti di 10s: qui sotto si fondono con i
+# consecutivi invece di scrivere un file che il sito ignorerebbe a meta'.
+MIN_SECONDI_CAPITOLO = 10.0
 
 
 def timestamp_srt(secondi: float) -> str:
@@ -244,10 +247,23 @@ def build_srt(
     """
     cue = _adegua_lettura(costruisci_cue(words))
     righe: list[str] = []
-    for i, (inizio, fine, testo) in enumerate(cue, start=1):
+    numero = 0
+    for inizio, fine, testo in cue:
         if durata is not None:
+            if inizio >= durata:
+                # Il clamp porterebbe `fine` sotto `inizio`: un cue con i tempi
+                # invertiti viene rifiutato dal player (o peggio, letto al
+                # contrario). Si scarta e la numerazione resta consecutiva.
+                log.debug("   Cue oltre la fine dell'audio scartato (%.1fs).", inizio)
+                continue
             fine = min(fine, durata)
-        righe.append(str(i))
+        if fine <= inizio:
+            # Difesa finale: anche senza `durata` un tempo invertito non e' un
+            # sottotitolo valido.
+            log.debug("   Cue con tempi invertiti scartato (%.1f-%.1fs).", inizio, fine)
+            continue
+        numero += 1
+        righe.append(str(numero))
         righe.append(f"{timestamp_srt(inizio)} --> {timestamp_srt(fine)}")
         righe.append(testo)
         righe.append("")
@@ -345,30 +361,71 @@ def _titolo_capitolo(testo: str, numero: int) -> str:
     return tagliato + "…"
 
 
+def _titolo_unito(titoli: Sequence[str]) -> str:
+    """Titoli di capitoli fusi in uno, entro il limite di YouTube."""
+    titolo = " / ".join(t for t in titoli if t)
+    if len(titolo) <= MAX_CARATTERI_CAPITOLO:
+        return titolo
+    tagliato = titolo[:MAX_CARATTERI_CAPITOLO]
+    if " " in tagliato:
+        tagliato = tagliato.rsplit(" ", 1)[0]
+    return tagliato.rstrip(" /") + "…"
+
+
 def build_capitoli(
     timeline: Mapping[int, float],
     slide_texts: Sequence[str],
     numeri_slide: Sequence[int] | None = None,
 ) -> str:
-    """Capitoli in formato YouTube: ``0:00 Titolo``, uno per slide, in ordine.
+    """Capitoli in formato YouTube: ``0:00 Titolo``, in ordine.
 
     Il primo capitolo deve stare a 0:00 (lo pretende YouTube) e la timeline
     mette sempre la slide 1 a zero: se cosi' non fosse, il primo viene
     comunque ancorato a zero invece di produrre un file che il sito rifiuta.
 
+    **Vincolo YouTube**: un capitolo dura almeno 10 secondi (e ne servono almeno
+    3 perche' la lista compaia). Una slide che resta 8s NON diventerebbe un
+    capitolo: verrebbe scartata insieme al suo titolo. I capitoli consecutivi
+    piu' corti di ``MIN_SECONDI_CAPITOLO`` si fondono quindi in uno solo, che
+    parte dal primo e tiene i titoli di tutti. L'ultimo capitolo non ha una
+    fine nota (dipende dalla durata del video) e resta cosi' com'e'.
+
     ``numeri_slide`` serve quando la sequenza mostrata non e' 1..N (per esempio
     dopo ``--skip-slides``): le chiavi della timeline sono le POSIZIONI, quindi
     il fallback "Slide N" deve usare il numero vero della slide li' mostrata.
     """
-    righe: list[str] = []
+    capitoli: list[tuple[float, str]] = []
     for pos, slide in enumerate(sorted(timeline)):
         inizio = float(timeline[slide])
         if pos == 0:
             inizio = 0.0
         testo = slide_texts[slide - 1] if 0 <= slide - 1 < len(slide_texts) else ""
         numero = int(numeri_slide[pos]) if numeri_slide is not None and pos < len(numeri_slide) else slide
-        righe.append(f"{timestamp_capitolo(inizio)} {_titolo_capitolo(testo, numero)}")
-    return "\n".join(righe)
+        capitoli.append((inizio, _titolo_capitolo(testo, numero)))
+
+    # Unisce i gruppi di capitoli troppo corti: si chiude un gruppo solo quando
+    # il capitolo corrente ha raggiunto il minimo (o e' l'ultimo, la cui fine
+    # non si conosce). Tenere l'inizio del primo del gruppo e' fondamentale:
+    # il primo capitolo di YouTube deve restare ancorato a 0:00.
+    gruppi: list[list[tuple[float, str]]] = []
+    gruppo_corrente: list[tuple[float, str]] = []
+    fusi = 0
+    for i, capitolo in enumerate(capitoli):
+        gruppo_corrente.append(capitolo)
+        # Ultimo capitolo: la fine e' la durata del video (durata sconosciuta).
+        durata = capitoli[i + 1][0] - capitolo[0] if i + 1 < len(capitoli) else None
+        if durata is None or durata >= MIN_SECONDI_CAPITOLO:
+            if len(gruppo_corrente) > 1:
+                fusi += len(gruppo_corrente) - 1
+            gruppi.append(gruppo_corrente)
+            gruppo_corrente = []
+
+    if fusi:
+        log.info("   Capitoli piu' corti di 10s uniti ai successivi (%d).", fusi)
+    return "\n".join(
+        f"{timestamp_capitolo(gruppo[0][0])} {_titolo_unito([t for _, t in gruppo])}"
+        for gruppo in gruppi
+    )
 
 
 def scrivi_sottotitoli(

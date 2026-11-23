@@ -27,6 +27,8 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
+from config import log
+
 
 @runtime_checkable
 class Embedder(Protocol):
@@ -55,8 +57,22 @@ class _FastEmbedEmbedder:
         self._fn = embed_fn
 
     def embed(self, texts: Sequence[str]) -> np.ndarray:
-        out = self._fn(texts)
-        return np.asarray(out, dtype=np.float32)
+        out = np.asarray(self._fn(texts), dtype=np.float32)
+        if out.ndim == 1:
+            out = out.reshape(1, -1)
+        if out.size == 0:
+            return out
+        # Il Protocol dichiara vettori normalizzati L2, ma `_make_embed_fn`
+        # non e' l'unica fonte possibile: un backend alternativo puo' non
+        # normalizzare, e il contratto resterebbe solo scritto. Qui la
+        # normalizzazione e' garantita.
+        norme = np.linalg.norm(out, axis=1, keepdims=True)
+        # Guardia sullo zero: un vettore nullo non ha direzione, dividerlo
+        # produrrebbe NaN e avvelenerebbe la cache dei punteggi.
+        return np.asarray(
+            np.divide(out, norme, out=np.zeros_like(out), where=norme > 0),
+            dtype=np.float32,
+        )
 
     @property
     def embed_id(self) -> str:
@@ -78,4 +94,15 @@ def load_embedder(
     model_obj = _load_embed_model(model_name, cache_dir, alternate_name=alternate_name)
     if model_obj is None:
         return None
-    return _FastEmbedEmbedder(model_obj, _make_embed_fn(model_obj))
+    embedder = _FastEmbedEmbedder(model_obj, _make_embed_fn(model_obj))
+    if not embedder.embed_id:
+        # Senza identita' la cache content-addressed non distingue i vettori
+        # di questo modello da quelli di un altro: meglio non avere un
+        # embedder che riusare vettori sbagliati.
+        log.warning(
+            "   Modello '%s' senza embed_id: embedding non disponibile "
+            "(cache dei punteggi non affidabile).",
+            model_name,
+        )
+        return None
+    return embedder

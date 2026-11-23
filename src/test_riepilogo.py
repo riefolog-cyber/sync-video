@@ -13,7 +13,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+from pipeline_report import print_timing
 from riepilogo import riepilogo_markdown, rigenera, scrivi_riepilogo
 
 
@@ -189,6 +192,76 @@ class TestSoloRiepilogoDaRigaDiComando(unittest.TestCase):
     def test_senza_report_esce_uno(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(self._esegui(Path(tmp)), 1)
+
+
+class TestEncoderNelRiepilogo(unittest.TestCase):
+    """La riga Hardware deve dire la verità sull'encoder usato per il video."""
+
+    def _hardware(self, encoder: str | None) -> str:
+        with self.assertLogs("slide2video", level="INFO") as logs:
+            print_timing(
+                1.0, 2.0, 3.0, 0.0, 0.0, 5.0, 11.0,
+                history_fn=lambda *_a: None,
+                video_encoder=encoder,
+            )
+        # assertLogs restituisce righe GIÀ formattate (str), non LogRecord.
+        return "\n".join(str(r) for r in logs.output)
+
+    def test_encoder_gpu_dichiarato(self) -> None:
+        self.assertIn("video h264_nvenc (GPU)", self._hardware("h264_nvenc"))
+
+    def test_encoder_cpu_dichiarato(self) -> None:
+        self.assertIn("video libx264 (CPU)", self._hardware("libx264"))
+
+    def test_auto_non_e_gpu(self) -> None:
+        # Con --no-auto-setup restava "auto": il vecchio confronto
+        # `!= "libx264"` stampava "video auto (GPU)" senza alcuna prova.
+        out = self._hardware("auto")
+        self.assertIn("video auto (non verificato)", out)
+        self.assertNotIn("(GPU)", out)
+
+    def test_encoder_sconosciuto_non_e_gpu(self) -> None:
+        out = self._hardware("boh")
+        self.assertIn("(non verificato)", out)
+        self.assertNotIn("(GPU)", out)
+
+
+class TestAutoEncoderSenzaAutoSetup(unittest.TestCase):
+    """`--no-auto-setup` non deve lasciare `encoder="auto"` a video.py."""
+
+    def test_auto_viene_risolto_dall_hardware(self) -> None:
+        import main
+
+        args = SimpleNamespace(video_encoder="auto")
+        with (
+            patch("main.detect_gpus", return_value=["NVIDIA GeForce RTX 3060"]),
+            patch("main.ffmpeg_encoders", return_value=frozenset({"h264_nvenc"})),
+            patch.dict("os.environ", {"VIDEO_ENCODER": ""}),
+            self.assertLogs("slide2video", level="INFO"),
+        ):
+            risolto = main._risolvi_encoder_video(args)
+        self.assertEqual(risolto, "h264_nvenc")
+        self.assertEqual(args.video_encoder, "h264_nvenc")
+
+    def test_senza_gpu_resta_libx264(self) -> None:
+        import main
+
+        args = SimpleNamespace(video_encoder="auto")
+        with (
+            patch("main.detect_gpus", return_value=[]),
+            patch("main.ffmpeg_encoders", return_value=frozenset({"h264_nvenc"})),
+            patch.dict("os.environ", {"VIDEO_ENCODER": ""}),
+            self.assertLogs("slide2video", level="INFO"),
+        ):
+            risolto = main._risolvi_encoder_video(args)
+        self.assertEqual(risolto, "libx264")
+
+    def test_scelta_esplicita_non_viene_toccata(self) -> None:
+        import main
+
+        args = SimpleNamespace(video_encoder="h264_qsv")
+        self.assertEqual(main._risolvi_encoder_video(args), "h264_qsv")
+        self.assertEqual(args.video_encoder, "h264_qsv")
 
 
 if __name__ == "__main__":

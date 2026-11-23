@@ -15,6 +15,7 @@ Esegui con: python -m unittest test_video_riuso -v
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -100,6 +101,31 @@ class TestChiaveVideo(unittest.TestCase):
         # di thread non e' garantito identico.
         self.assertNotEqual(self._chiave(), self._chiave(threads=4))
 
+    def test_stessi_input_percorso_diverso(self) -> None:
+        # Spostare/rinominare la cartella delle slide non cambia il video:
+        # l'impronta usa l'indice e il contenuto, non il percorso.
+        altra = self.base / "sotto" / "s1.png"
+        altra.parent.mkdir()
+        altra.write_bytes(self.slide.read_bytes())
+        self.assertEqual(self._chiave(), self._chiave(slide_files=[str(altra)]))
+
+    def test_cambia_se_cambia_la_risoluzione_o_il_buffer(self) -> None:
+        # Risoluzione e buffer non devono mancare dall'impronta: cambiandoli
+        # cambia il video (il buffer allunga l'ultima durata).
+        originale = self._chiave()
+        self.assertNotEqual(originale, self._chiave(video_res=(1280, 720)))
+        self.assertNotEqual(originale, self._chiave(video_buffer_sec=5.0))
+
+    def test_i_default_seguono_la_configurazione(self) -> None:
+        # I parametri non passati esplicitamente vanno letti dalla configurazione
+        # del modulo, cosi' chi cambia VIDEO_RES/VIDEO_BUFFER_SEC cambia chiave.
+        originale = self._chiave()
+        with (
+            mock.patch("video_riuso.DEFAULT_VIDEO_RES", (800, 600)),
+            mock.patch("video_riuso.DEFAULT_VIDEO_BUFFER_SEC", 9.0),
+        ):
+            self.assertNotEqual(originale, self._chiave())
+
 
 class TestRiusoVideo(unittest.TestCase):
     """Il video gia' renderizzato si riusa solo se la sua chiave coincide."""
@@ -131,6 +157,22 @@ class TestRiusoVideo(unittest.TestCase):
         # Il file di output e' stato spostato o modificato: non e' piu' il video
         # che abbiamo scritto, quindi si rifa.
         self.output.write_bytes(b"video modificato")
+        self.assertFalse(video_riutilizzabile(self.output, self.chiave, cache_dir=self.base))
+
+    def test_touch_senza_modifiche_non_invalida_il_riuso(self) -> None:
+        segna_video(self.output, self.chiave, cache_dir=self.base)
+        st = self.output.stat()
+        # Antivirus/OneDrive/touch: cambia SOLO il momento di modifica.
+        os.utime(self.output, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+        self.assertNotEqual(self.output.stat().st_mtime_ns, st.st_mtime_ns)
+        self.assertTrue(video_riutilizzabile(self.output, self.chiave, cache_dir=self.base))
+
+    def test_modifica_stessa_dimensione_non_si_riusa(self) -> None:
+        segna_video(self.output, self.chiave, cache_dir=self.base)
+        # Stessa lunghezza ma contenuto diverso: decide l'hash, non il mtime.
+        nuovo = b"video alterato"
+        self.assertEqual(len(nuovo), len(b"video fittizio"))
+        self.output.write_bytes(nuovo)
         self.assertFalse(video_riutilizzabile(self.output, self.chiave, cache_dir=self.base))
 
     def test_build_video_non_rifà_se_si_puo_riusare(self) -> None:
@@ -263,9 +305,16 @@ class TestTentativiEncoding(unittest.TestCase):
     """Le reti di sicurezza dell'encoding, nell'ordine in cui si provano."""
 
     def test_audio_copiato_ritenta_anche_in_aac(self) -> None:
+        # Si cambia PRIMA l'audio: riprovare la copia con libx264 dopo un
+        # errore chiaramente audio sprecava un encoding intero.
         self.assertEqual(
             _tentativi_encoding("h264_nvenc", True, True),
-            [("h264_nvenc", True), ("libx264", True), ("libx264", False)],
+            [
+                ("h264_nvenc", True),
+                ("h264_nvenc", False),
+                ("libx264", True),
+                ("libx264", False),
+            ],
         )
 
     def test_encoder_software_con_audio_aac_un_solo_tentativo(self) -> None:

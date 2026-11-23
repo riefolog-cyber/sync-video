@@ -71,7 +71,8 @@ from moviepy import AudioFileClip, VideoFileClip
 
 from boundary_snap import aggancia_confini, confini_dentro_parole
 from chunks import Word
-from machine_setup import machine_setup
+from hardware import choose_video_encoder, ffmpeg_encoders
+from machine_setup import _video_vendor, detect_gpus, machine_setup
 from ocr import (
     PRESENTATION_SUFFIXES,
     _set_dpi_effettivo,
@@ -1110,6 +1111,15 @@ def _frame_check_video(
             "attesa (frame in .cache/verify_frames/).",
             frame_check["coherent"],
             frame_check["checked"],
+        )
+    unreadable = cast("list[int]", frame_check.get("unreadable") or [])
+    skipped = cast("list[int]", frame_check.get("skipped") or [])
+    if unreadable or skipped:
+        log.warning(
+            "   ⚠️ Verifica frame incompleta: slide non leggibili %s, %d segmenti "
+            "non verificati. Le altre slide sono state controllate.",
+            ", ".join(str(s) for s in unreadable) or "(nessuna)",
+            len(skipped),
         )
     for m in cast("list[dict[str, object]]", frame_check["mismatches"]):
         log.warning(
@@ -3043,6 +3053,33 @@ def _scrivi_sottotitoli_mostrati(
     )
 
 
+def _risolvi_encoder_video(args: Any) -> str:
+    """Risolve "auto" anche quando l'auto-setup e' disattivato.
+
+    ``machine_setup`` e' l'unico posto che risolveva "auto": con
+    ``--no-auto-setup`` restava tale, e ``video.py`` lo trattava come GPU
+    (niente ``-threads``, tentativi duplicati, chiave di riuso instabile). Qui
+    si fa la STESSA scelta dell'auto-setup, senza installare nulla né
+    scaricare modelli: e' una decisione, non una configurazione della macchina.
+    """
+    scelto = (getattr(args, "video_encoder", "") or "").strip()
+    if scelto and scelto != "auto":
+        return scelto
+    scelto = os.environ.get("VIDEO_ENCODER", "").strip()
+    if scelto and scelto != "auto":
+        args.video_encoder = scelto
+        return scelto
+    try:
+        gpus = detect_gpus()
+        vendor = _video_vendor(gpus)
+    except (OSError, RuntimeError, ValueError):
+        vendor = "unknown"
+    risolto = choose_video_encoder(vendor, ffmpeg_encoders())
+    args.video_encoder = risolto
+    log.info("   Video: encoder risolto a %s (auto-setup non necessario).", risolto)
+    return risolto
+
+
 def main(argv: list | None = None) -> None:
     args = parse_args(argv)
 
@@ -3066,8 +3103,10 @@ def main(argv: list | None = None) -> None:
     # --- Misura cache e uscita (P1: policy sicura) ---
     # PRIMA di bootstrap/setup/update-check: e' un comando di ispezione che non
     # deve scaricare nulla né chiedere conferme di aggiornamento. Anche
-    # --frozen-report e --review (piu' giu') sono di sola lettura e restano
-    # fuori dal blocco run. --clean-cache, che CANCELLA, sta dopo il blocco.
+    # --frozen-report e --review (piu' giu') restano fuori dal blocco run:
+    # --review legge report/trascrizione/video e rigenera SOLO le anteprime in
+    # .cache/review/ (file derivati e idempotenti), non rifa' la pipeline.
+    # --clean-cache, che CANCELLA, sta dopo il blocco.
     if args.cache_du:
         from cache_maintenance import cache_disk_usage, format_bytes
 
@@ -3087,10 +3126,10 @@ def main(argv: list | None = None) -> None:
         return
 
     # --- Revisione di una run già fatta e uscita ---
-    # Stesso criterio dei comandi sopra: solo lettura dal disco (report,
-    # trascrizione, video), nessun download, nessuna domanda. Rivedere un
-    # confine non deve costare una pipeline intera né far ricaricare il modello
-    # di embedding: il report e i tempi di quella run sono già in .cache/.
+    # Stesso criterio dei comandi sopra: nessun download, nessuna domanda,
+    # nessuna pipeline da rifare. Legge report/trascrizione/video e SCRIVE le
+    # anteprime dei dubbi in .cache/review/ (derive, sovrascritte a ogni run):
+    # non sono input della pipeline, quindi il comando resta fuori dal blocco.
     if args.review:
         _review_boundary_doubts(Path(args.output_video))
         return
@@ -3129,8 +3168,8 @@ def main(argv: list | None = None) -> None:
     # Dopo il blocco run: `--clean-cache --include-models --yes` cancella
     # modelli, embedding e frame di verifica. Fuori dal blocco poteva girare
     # insieme a una pipeline attiva e cancellarle sotto i piedi. Restano prima
-    # del blocco solo i comandi di sola lettura (--cache-du, --frozen-report,
-    # --review), che non toccano nulla.
+    # del blocco solo i comandi che non producono il video (--cache-du,
+    # --frozen-report, --review con le sue anteprime derivate).
     if args.clean_cache:
         from cache_maintenance import clean_cache, format_bytes
 
@@ -3216,6 +3255,12 @@ def main(argv: list | None = None) -> None:
     # altrimenti CPU) e installa/scarica ciò che serve. Idempotente.
     if not args.no_auto_setup:
         machine_setup(args, force=args.force_setup)
+    # Anche con --no-auto-setup "auto" va risolto prima di calcolare la chiave
+    # di riuso e di passare l'encoder a build_video.
+    encoder_video_risolto = _risolvi_encoder_video(args)
+    # Riempito da build_video con l'encoder EFFETTIVO (ultimo tentativo riuscito):
+    # se l'accelerato fallisce e si ripiega su libx264, il riepilogo lo dice.
+    encoder_video_effettivo: list[str] = [encoder_video_risolto]
 
     # --- Controllo aggiornamenti pacchetti ---
     # Segnala gli aggiornamenti; di default chiede S/N per installare i
@@ -3335,6 +3380,11 @@ def main(argv: list | None = None) -> None:
     cache_key_transcript_accurate = _transcript_cache_key(
         audio_hash, args, beam=DEFAULT_WHISPER_BEAM_ACCURATE
     )
+    # Chiave EFFETTIVA delle parole usate dalla timeline. `--review` la rilegge
+    # per ricalcolare i dubbi: se l'escalation beam vince (o le parole vengono
+    # dalle zone ricucite) salvare sempre `cache_key_transcript` faceva leggere
+    # la trascrizione sbagliata. Aggiornata a ogni cambio di sorgente qui sotto.
+    chiave_parole_effettiva = cache_key_transcript
     # Anche la misura di confronto fra le due trascrizioni è una cache attiva:
     # rifarla a ogni run costerebbe due embedding completi per una decisione che
     # non cambia.
@@ -3476,6 +3526,8 @@ def main(argv: list | None = None) -> None:
                 if isinstance(_tentate, list):
                     _zones_tentate = [str(x) for x in _tentate]
             cached = cached_gap if _from_gap_cache else _load_cache(cache_key_transcript)
+            if _from_gap_cache:
+                chiave_parole_effettiva = cache_key_transcript_gap
             if cached is None and _chiave_trascrizione_equivalente:
                 # Stessi parametri, nome diverso: la cache vale lo stesso (il
                 # testo e' quello che conta, non il nome del file).
@@ -3544,6 +3596,7 @@ def main(argv: list | None = None) -> None:
                         "params": _transcript_params(audio_hash, args),
                     },
                 )
+            chiave_parole_effettiva = cache_key_transcript
 
         t_transcribe = time.time() - t_phase_start
 
@@ -3692,6 +3745,7 @@ def main(argv: list | None = None) -> None:
                         "zones_tentate": list(_zones.tried),
                     },
                 )
+                chiave_parole_effettiva = cache_key_transcript_gap
 
         # --- Beam automatico: la decisione arriva DOPO il recupero -------------
         # Prima si poteva decidere solo sulla decodifica veloce, e la scelta era
@@ -3725,6 +3779,7 @@ def main(argv: list | None = None) -> None:
             greedy_transcript = transcript
             greedy_words = list(words_raw or [])
             greedy_anchors = dict(flow_anchors)
+            chiave_parole_greedy = chiave_parole_effettiva
             log.info(
                 "\n   [Beam] La copertura delle ancore non basta a vincolare la timeline "
                 "(%d su %d, %s; la soglia in vigore è %s): la decidono i contenuti, "
@@ -3746,6 +3801,7 @@ def main(argv: list | None = None) -> None:
             t_transcribe += float(cast("float", beam_note.pop("accurate_seconds", 0.0)) or 0.0)
             if accurate_words:
                 words_raw = correct_transcript_names(accurate_words)
+                chiave_parole_effettiva = cache_key_transcript_accurate
             # Le ancore vanno ricercate nel testo nuovo: una trascrizione più
             # accurata può riconoscere annunci che la decodifica veloce aveva
             # perso, e allora la timeline torna vincolata (gratis).
@@ -3815,6 +3871,7 @@ def main(argv: list | None = None) -> None:
                     transcript = greedy_transcript
                     words_raw = greedy_words
                     flow_anchors = greedy_anchors
+                    chiave_parole_effettiva = chiave_parole_greedy
                     beam_note["chosen"] = "greedy"
                     # Le ancore che vincolano la timeline sono di nuovo quelle
                     # della decodifica veloce: il report deve dirlo, o risulta
@@ -3860,6 +3917,7 @@ def main(argv: list | None = None) -> None:
                                     "zones_tentate": list(_zones.tried),
                                 },
                             )
+                            chiave_parole_effettiva = cache_key_transcript_gap
                 log.info(
                     "   [Beam] Uso la trascrizione %s: %s.",
                     "ACCURATA" if use_accurate else "VELOCE",
@@ -4557,9 +4615,11 @@ def main(argv: list | None = None) -> None:
         # Il report dei segmenti va salvato SEMPRE, anche senza anomalie: è
         # l'artefatto che rende verificabile a posteriori cosa è stato mostrato,
         # con quale verdetto di contenuto e quale motore è stato scelto.
-        # La chiave della trascrizione usata, per `--review`: permette di
-        # rileggere le parole giuste invece di affidarsi al mtime.
-        sync_notes["transcript_cache_key"] = cache_key_transcript
+        # La chiave della trascrizione EFFETTIVAMENTE usata, per `--review`:
+        # permette di rileggere le parole giuste invece di affidarsi al mtime.
+        # Se l'escalation beam ha vinto (o le parole vengono dal recupero zone)
+        # la chiave veloce punterebbe a un testo diverso da quello della timeline.
+        sync_notes["transcript_cache_key"] = chiave_parole_effettiva
         # I tempi per fase nell'artefatto: con la cache e i tempi in un posto
         # solo si puo' capire PERCHE' una run e' stata lenta (e se la cache ha
         # funzionato) senza rileggere i log.
@@ -4760,7 +4820,12 @@ def main(argv: list | None = None) -> None:
                 log.info("   Slide %2d: %6.1fs ─ %6.1fs (%6.1fs) %s", slide_ids[i], start, end, dur, bar)
             log.info("=" * 70)
             log.info("   Durata totale: %.1fs", total_duration)
-            log.info("   Usa --dry-run per testare senza video, o rimuovi --preview per generare.")
+            log.info(
+                "   --preview esegue OCR, trascrizione e sincronizzazione completi e "
+                "mostra solo la timeline: nessun video viene generato. "
+                "Rimuovi --preview per creare il video (--dry-run, invece, "
+                "si ferma prima di questa anteprima)."
+            )
             return
 
         # --- Controllo incrociato annunci / confini dichiarati ---
@@ -4807,7 +4872,7 @@ def main(argv: list | None = None) -> None:
                 model_load_seconds(),
                 0.0,
                 t_total,
-                video_encoder=getattr(args, "video_encoder", None),
+                video_encoder=encoder_video_risolto,
             )
             _warn_sync_uncertainty(
                 all_anchored=_all_transitions_anchored(
@@ -4843,9 +4908,10 @@ def main(argv: list | None = None) -> None:
             threads=DEFAULT_VIDEO_THREADS,
             transition_duration=args.transitions,
             engine=args.engine,
-            encoder=getattr(args, "video_encoder", "libx264"),
+            encoder=encoder_video_risolto,
             # --no-cache vuol dire "rifai tutto": quindi niente video riusato.
             reuse=not args.no_cache,
+            encoder_out=encoder_video_effettivo,
         )
         t_video = time.time() - t_phase_start
 
@@ -4936,7 +5002,8 @@ def main(argv: list | None = None) -> None:
                         threads=DEFAULT_VIDEO_THREADS,
                         transition_duration=args.transitions,
                         engine=args.engine,
-                        encoder=getattr(args, "video_encoder", "libx264"),
+                        encoder=encoder_video_risolto,
+                        encoder_out=encoder_video_effettivo,
                         # Qui i confini sono cambiati: il video da riusare
                         # sarebbe un altro, ma il riuso lo esclude da se'
                         # (l'impronta cambia coi tempi).
@@ -4973,6 +5040,14 @@ def main(argv: list | None = None) -> None:
                 sync_notes["refine"] = refine_refresh
                 sync_report["refine"] = refine_refresh
             _save_sync_report(sync_report)
+            if args.strict_sync and frame_check.get("incomplete"):
+                _abort(
+                    "Verifica frame incompleta: alcune slide non erano leggibili "
+                    "e i loro segmenti non hanno potuto essere controllati. Il "
+                    "video esiste ma NON e' certificato (--strict-sync attivo): "
+                    "controlla .cache/sync_report.json e rigenera le slide "
+                    "danneggiate."
+                )
             if mismatches and args.strict_sync:
                 _abort(
                     f"Verifica frame fallita: {len(mismatches)} segmenti mostrano "
@@ -5007,7 +5082,7 @@ def main(argv: list | None = None) -> None:
             model_load_seconds(),
             t_video,
             t_total,
-            video_encoder=getattr(args, "video_encoder", None),
+            video_encoder=encoder_video_effettivo[-1] if encoder_video_effettivo else encoder_video_risolto,
         )
         _warn_sync_uncertainty(
             cast("dict[str, object] | None", sync_report.get("frame_check")),
@@ -5030,6 +5105,12 @@ def main(argv: list | None = None) -> None:
             _write_boundary_previews(
                 args.output_video, _review_items, CACHE_DIR / "review"
             )
+            # _write_boundary_previews aggiunge la chiave "preview" agli stessi
+            # dict che sono nel report: riscrivere report e riepilogo e'
+            # obbligatorio, altrimenti --review e la pagina leggibile non
+            # vedrebbero le anteprime appena create.
+            _save_sync_report(sync_report)
+            scrivi_riepilogo(sync_report, Path(args.output_video), dry_run=args.dry_run)
 
         # Pulizia cache orfana
         cleaned = _clean_orphan_cache(active_cache_keys)

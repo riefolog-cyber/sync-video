@@ -42,11 +42,12 @@ def _pdf_minimo() -> bytes:
 class TestOcrTuttoVuoto(unittest.TestCase):
     """Tesseract assente deve fermare la run, non produrre slide vuote.
 
-    `pytesseract.TesseractNotFoundError` eredita da `OSError`, quindi
-    `_ocr_single_slide` lo tratta come un errore di OCR qualsiasi, lo annulla e
-    rimette il segnaposto. Senza guardia la run andava a buon fine e usciva un
-    video con tutte le slide vuote: sembra a posto, non lo e', e per chi clona
-    il progetto non c'e' niente che lo dica.
+    `pytesseract.TesseractNotFoundError` eredita da `OSError`, ma
+    `_ocr_single_slide` la riconosce e la rilancia subito (inutile riprovare).
+    Il chiamante la cattura una volta, lascia le slide vuote e arriva alla
+    guardia: senza, la run andava a buon fine e usciva un video con tutte le
+    slide vuote: sembra a posto, non lo e', e per chi clona il progetto non
+    c'e' niente che lo dica.
     """
 
     VUOTO = "[Nessun testo rilevato. Immagine visiva.]"
@@ -95,6 +96,46 @@ class TestOcrTuttoVuoto(unittest.TestCase):
 
         self.assertEqual(ocr._TESTO_NESSUN_TESTO, self.VUOTO)
 
+    def test_tesseract_mancante_dalle_future_diventa_messaggio_azionabile(self):
+        """La TesseractNotFoundError delle future non deve piu' salire come traceback.
+
+        Prima `future.result()` era senza cattura: l'eccezione attraversava
+        `as_completed` e la guardia `_MESSAGGIO_OCR_VUOTO` non veniva mai
+        raggiunta (codice morto). Ora la si cattura una volta e si arriva al
+        messaggio che spiega come installare Tesseract.
+        """
+
+        class TesseractNotFoundErrorFinto(OSError):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            radice = Path(tmp)
+            out = radice / "slide"
+            out.mkdir()
+            doc = fitz.open()
+            try:
+                doc.new_page(width=1280, height=720)
+                doc.new_page(width=1280, height=720)
+                pdf = radice / "presentazione.pdf"
+                doc.save(str(pdf))
+            finally:
+                doc.close()
+
+            with (
+                mock.patch(
+                    "ocr._ocr_single_slide",
+                    side_effect=TesseractNotFoundErrorFinto("tesseract non trovato"),
+                ) as ocr_finto,
+                mock.patch("ocr._tesseract", side_effect=RuntimeError("binario assente")),
+                self.assertRaises(RuntimeError) as ctx,
+            ):
+                extract_slides_text_ocr(pdf, out, lang="ita", dpi=72, workers=1)
+            self.assertEqual(ocr_finto.call_count, 2)
+        testo = str(ctx.exception)
+        self.assertIn("Tesseract", testo)
+        self.assertIn("winget", testo)
+        self.assertIn("tesseract --list-langs", testo)
+
 
 class TestConvertPresentationToPdf(unittest.TestCase):
     def setUp(self):
@@ -109,7 +150,9 @@ class TestConvertPresentationToPdf(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_reuse_when_source_unchanged(self):
-        self.pdf.write_bytes(b"pdf esistente")
+        # Il riuso ora rivalida il PDF: un file finto verrebbe scartato come
+        # corrotto e riconvertito, falsando il test del solo marker MD5.
+        self.pdf.write_bytes(_pdf_minimo())
         marker = self.out_dir / "presentazione.src_md5"
         from ocr import _file_md5
 
@@ -159,6 +202,29 @@ class TestConvertPresentationToPdf(unittest.TestCase):
             result = convert_presentation_to_pdf(self.ppt, self.out_dir)
         self.assertEqual(result, self.pdf)
         self.assertTrue((self.out_dir / "presentazione.src_md5").exists())
+
+    def test_pdf_corrotto_in_cache_non_viene_riusato(self):
+        """Marker fresco ma PDF danneggiato dopo la conversione: si riconverte.
+
+        Il ramo di riuso controllava solo l'MD5 del sorgente e restituiva il
+        PDF senza aprirlo: un file troncato veniva riusato per sempre, e la
+        cache OCR ne ereditava l'hash.
+        """
+        self.pdf.write_bytes(b"pdf troncato da una copia interrotta")
+        marker = self.out_dir / "presentazione.src_md5"
+        from ocr import _file_md5
+
+        marker.write_text(_file_md5(self.ppt), encoding="ascii")
+        atteso = _pdf_minimo()
+        with (
+            mock.patch("ocr._find_soffice", return_value="soffice"),
+            self._mock_converter(content=atteso) as run,
+        ):
+            result = convert_presentation_to_pdf(self.ppt, self.out_dir)
+        self.assertEqual(result, self.pdf)
+        run.assert_called_once()
+        self.assertEqual(self.pdf.read_bytes(), atteso)
+        self.assertEqual(marker.read_text(encoding="ascii").strip(), _file_md5(self.ppt))
 
     def test_failed_conversion_does_not_reuse_stale_pdf(self):
         """Il converter fallisce e il PDF di prima NON deve essere riusato.
@@ -441,6 +507,42 @@ class TestTestoNativoDelPdf(unittest.TestCase):
             _files, testi = extract_slides_text_ocr(pdf, self.out, lang="ita", dpi=72, workers=1)
         self.assertEqual(testi, ["dal OCR", "dal OCR"])
         self.assertEqual(ocr.call_count, 2)
+
+
+class TestRicercaAudio(unittest.TestCase):
+    """Ricerca dell'audio: una cartella con suffisso audio non e' un audio.
+
+    `pipeline_inputs` non ha un file di test dedicato fra i test mirati, quindi
+    il caso sta qui insieme agli altri test sui materiali in ingresso.
+    """
+
+    def test_cartella_con_suffisso_audio_non_e_scelta(self):
+        import os
+
+        from config import AUDIO_SEARCH_SUFFIXES
+        from pipeline_inputs import find_audio_file
+
+        estensione = next(iter(AUDIO_SEARCH_SUFFIXES))
+        with tempfile.TemporaryDirectory() as tmp:
+            radice = Path(tmp)
+            audio = radice / f"registrazione{estensione}"
+            audio.write_bytes(b"audio finto")
+            cartella = radice / f"vecchio{estensione}"
+            cartella.mkdir()
+            # La cartella e' piu' recente: senza `is_file()` sarebbe scelta al
+            # posto del file e la pipeline aprirebbe una directory.
+            os.utime(audio, (1_000_000, 1_000_000))
+            os.utime(cartella, (2_000_000, 2_000_000))
+            self.assertEqual(find_audio_file(radice), audio)
+
+    def test_solo_la_cartella_non_restituisce_niente(self):
+        from config import AUDIO_SEARCH_SUFFIXES
+        from pipeline_inputs import find_audio_file
+
+        estensione = next(iter(AUDIO_SEARCH_SUFFIXES))
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / f"vecchio{estensione}").mkdir()
+            self.assertIsNone(find_audio_file(Path(tmp)))
 
 
 if __name__ == "__main__":
