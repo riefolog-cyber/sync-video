@@ -12,8 +12,11 @@ Due motori disponibili:
 import contextlib
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -37,6 +40,7 @@ from config import (
     get_stopwords,
     log,
     openvino_device_available,
+    openvino_model_complete,
 )
 from hardware import ram_available_bytes
 
@@ -321,22 +325,49 @@ def correct_transcript_names(
 # TRASCRIZIONE CON OPENVINO GENAI (iGPU/CPU, più veloce su Intel)
 # =====================================================================
 def download_openvino_model(model_dir: Path, model_id: str = DEFAULT_OPENVINO_MODEL_ID) -> Path:
-    """Scarica il modello Whisper OpenVINO IR da HuggingFace (una tantum)."""
-    if model_dir.exists():
+    """Scarica il modello Whisper OpenVINO IR da HuggingFace (una tantum).
+
+    Il download finisce in una cartella TEMPORANEA accanto alla destinazione e
+    diventa visibile solo se il contenuto e' completo: `os.replace` rinomina
+    in un secondo. Se la rete salta, la parziale viene cancellata e alla run
+    successiva si riprova da zero. Prima si scaricava dentro la cartella finale:
+    una snapshot interrotta lasciava un IR a meta' che tutti (qui, in
+    machine_setup e in openvino_usable) consideravano buono per sempre.
+    """
+    if openvino_model_complete(model_dir):
         return model_dir
+    if model_dir.exists():
+        # Parziale o vuota: non la si riusa, neppure come " gia' presente".
+        log.warning("   ⚠️ Modello OpenVINO incompleto in %s: lo scarico di nuovo.", model_dir)
+        try:
+            shutil.rmtree(model_dir)
+        except OSError as e:
+            raise RuntimeError(f"Impossibile rimuovere il modello OpenVINO incompleto in {model_dir}: {e}") from e
     from huggingface_hub import snapshot_download
 
-    model_dir.mkdir(parents=True, exist_ok=True)
+    model_dir.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=model_dir.name + ".tmp-", dir=model_dir.parent))
     log.info("   ⏳ Download modello OpenVINO %s (una tantum)...", model_id)
-    # `revision` esplicito: senza, si scarica il "main" di oggi, e se chi
-    # mantiene il modello pubblica una versione nuova il PC scarica un
-    # modello diverso da quello su cui e' stata misurata la baseline, senza
-    # alcun errore. Il caso silenzioso e' il peggiore.
-    snapshot_download(
-        model_id,
-        revision=OPENVINO_MODEL_REVISIONI.get(model_id),
-        local_dir=str(model_dir),
-    )
+    try:
+        # `revision` esplicito: senza, si scarica il "main" di oggi, e se chi
+        # mantiene il modello pubblica una versione nuova il PC scarica un
+        # modello diverso da quello su cui e' stata misurata la baseline, senza
+        # alcun errore. Il caso silenzioso e' il peggiore.
+        snapshot_download(
+            model_id,
+            revision=OPENVINO_MODEL_REVISIONI.get(model_id),
+            local_dir=str(tmp),
+        )
+        if not openvino_model_complete(tmp):
+            raise RuntimeError(
+                f"Download OpenVINO incompleto in {tmp}: manca config.json o un file IR (.xml/.bin)."
+            )
+        os.replace(tmp, model_dir)
+    except BaseException:
+        # Nessuna parziale deve restare vicino alla destinazione: verra'
+        # riscaricata alla prossima run invece di essere creduta valida.
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
     log.info("   ✅ Modello OpenVINO pronto in: %s", model_dir)
     return model_dir
 
@@ -514,7 +545,8 @@ def openvino_usable(openvino_model_dir: Path | str | None = None) -> bool:
     Tre condizioni, tutte necessarie:
 
     - il runtime ``openvino_genai`` è importabile;
-    - il modello IR è presente (senza, ogni run lo riscaricherebbe);
+    - il modello IR è presente e COMPLETO (senza, ogni run lo riscaricherebbe;
+      con una cartella a meta' la pipeline fallirebbe al caricamento);
     - il runtime espone un device **GPU** reale. La sola CPU non basta: senza
       iGPU non c'è guadagno di velocità, quindi su AMD/ARM (dove OpenVINO vede
       al più la CPU) l'avviso "usa OpenVINO" sarebbe rumore.
@@ -531,7 +563,10 @@ def openvino_usable(openvino_model_dir: Path | str | None = None) -> bool:
     except ImportError:
         return False
     model_dir = Path(openvino_model_dir) if openvino_model_dir is not None else Path(DEFAULT_OPENVINO_MODEL_DIR)
-    if not model_dir.exists():
+    # Non basta `exists()`: una snapshot interrotta lascia la cartella e i
+    # file a meta', e li' OpenVINO non carica nulla. Stesso criterio di
+    # download_openvino_model e machine_setup.
+    if not openvino_model_complete(model_dir):
         return False
     return openvino_device_available()
 
@@ -561,7 +596,7 @@ def resolved_transcriber(transcriber: str, openvino_model_dir: Path | str | None
     if transcriber == "openvino":
         # Motore esplicito: se il modello manca, transcribe_audio lo scarica.
         return "openvino"
-    if openvino_model_dir is not None and Path(openvino_model_dir).exists():
+    if openvino_model_dir is not None and openvino_model_complete(openvino_model_dir):
         return "openvino"
     return "whisper"
 
@@ -753,7 +788,7 @@ def transcribe_audio(
     """
     if resolved_transcriber(transcriber, openvino_model_dir) == "openvino":
         model_dir = openvino_model_dir
-        if model_dir is None or not model_dir.exists():
+        if model_dir is None or not openvino_model_complete(model_dir):
             model_dir = download_openvino_model(
                 Path(DEFAULT_OPENVINO_MODEL_DIR) if model_dir is None else model_dir
             )
@@ -811,11 +846,11 @@ def transcribe_audio(
         transcriber == "auto"
         and openvino_runtime
         and openvino_model_dir is not None
-        and not openvino_model_dir.exists()
+        and not openvino_model_complete(openvino_model_dir)
     ):
         log.warning(
-            "   ⚠️  Modello OpenVINO non trovato in %s, uso faster-whisper. "
-            "Scaricalo una tantum con `python main.py --openvino-download` "
+            "   ⚠️  Modello OpenVINO non trovato o incompleto in %s, uso faster-whisper. "
+            "Scaricalo una tantum con `python src/main.py --openvino-download` "
             "per usare la iGPU (~1.5x più veloce).",
             openvino_model_dir,
         )

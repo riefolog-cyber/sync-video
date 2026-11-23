@@ -61,10 +61,12 @@ from config import (
     CACHE_DIR,
     CUDA_LIBS_REMEDY,
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
+    atomic_write_text,
     cuda_available,
     cuda_runtime_lib_mancante,
     log,
     openvino_device_available,
+    openvino_model_complete,
 )
 from hardware import choose_video_encoder, ffmpeg_encoders
 
@@ -257,11 +259,17 @@ def _provision_openvino(model_dir: Path) -> bool:
         if importlib.util.find_spec("openvino_genai") is None:
             log.warning("   ⚠️ openvino-genai installato ma non importabile in questa run.")
             return False
-    if not model_dir.exists():
+    if not openvino_model_complete(model_dir):
         from transcription import download_openvino_model
 
-        download_openvino_model(model_dir)
-    return model_dir.exists()
+        try:
+            download_openvino_model(model_dir)
+        except Exception as e:
+            # Una snapshot interrotta non lascia piu' una cartella "valida":
+            # qui si limita a ripiegare su CPU invece di far morire il setup.
+            log.warning("   ⚠️ Download modello OpenVINO fallito: %s", e)
+            return False
+    return openvino_model_complete(model_dir)
 
 
 def _provision(rec: dict, model_dir: Path) -> dict:
@@ -317,8 +325,8 @@ def _validate(rec: dict, model_dir: Path | None) -> dict:
     if rec["transcriber"] == "openvino":
         if importlib.util.find_spec("openvino_genai") is None:
             return _downgrade(rec, "openvino-genai non e' installato")
-        if model_dir is not None and not model_dir.exists():
-            return _downgrade(rec, f"modello OpenVINO assente in {model_dir}")
+        if model_dir is not None and not openvino_model_complete(model_dir):
+            return _downgrade(rec, f"modello OpenVINO assente o incompleto in {model_dir}")
         # La GPU Intel c'e' ma il runtime potrebbe esporre solo la CPU (es.
         # driver non installato): si usa comunque OpenVINO, ma su CPU.
         if rec.get("openvino_device") == "GPU" and not openvino_device_available():
@@ -405,8 +413,10 @@ def _write_hardware(gpus: list[str]) -> None:
     delle GPU, che e' lento da ottenere e stabile nel tempo.
     """
     payload = {"fingerprint": _fingerprint(), "gpus": gpus}
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    MACHINE_CONFIG_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Scrittura atomica: un Ctrl+C o un crash mentre si scrive il JSON non
+    # deve lasciare un file troncato, che verrebbe letto come "hardware non
+    # rilevato" e fare ripetere il rilevamento a ogni avvio.
+    atomic_write_text(MACHINE_CONFIG_PATH, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 class _TranscriberArgs(Protocol):

@@ -17,10 +17,12 @@ se ci sono segnali che rendono opportuno (ri)fare il test A/B, ovvero:
   3. sono usciti nuovi sentence-embedding multilingue ONNX (candidati).
 
 Scrive un report in ``.cache/embedding_model_check.json`` (baseline) e un
-report leggibile in ``.cache/embedding_model_check_report.md``. Uscita:
+report leggibile in ``.cache/embedding_model_check_report.md``. I candidati
+già visti finiscono nello stato: non scatta per sempre lo stesso allarme.
+Uscita:
   0 = nessuna azione necessaria;
   2 = azione consigliata (fai il test A/B prima di cambiare modello);
-  3 = errore di rete (il controllo va ripetuto).
+  3 = non verificabile (rete o dipendenza mancante: il controllo va ripetuto).
 
 Uso:
   python check_embedding_models.py            # esegui controllo ora
@@ -33,6 +35,7 @@ import argparse
 import json
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 # Deve stare PRIMO: mette la radice nel sys.path. Questo script non importa
@@ -67,10 +70,39 @@ TRACKED_MODELS = [
 SEARCH_QUERY = "multilingual sentence embeddings onnx"
 SEARCH_LIMIT = 30
 
-# Modelli noti (inclusi in TRACKED_MODELS o già visti in passato). Serve a
-# distinguere "nuovo candidato" da "già valutato in precedenza".
-# Aggiornato automaticamente dallo script dopo ogni run.
+# Modelli noti al primo avvio (inclusi in TRACKED_MODELS). Serve a distinguere
+# "nuovo candidato" da "già valutato in precedenza". I modelli visti dopo
+# vengono persistiti nello stato e si sommano a questo insieme: la baseline
+# di codice resta immutabile, lo stato cresce con le run.
 KNOWN_MODELS: set[str] = set(TRACKED_MODELS)
+KNOWN_MODELS_KEY = "known_models"
+
+
+class NetworkError(RuntimeError):
+    """Controllo non verificabile: HF irraggiungibile o libreria mancante."""
+
+
+def _is_network_error(exc: BaseException) -> bool:
+    """Riconosce un errore di rete/HTTP 5xx (non un modello 404)."""
+    import urllib.error
+
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError)):
+        return True
+    if "HfHubHTTPError" in type(exc).__name__ or "HTTPError" in type(exc).__name__:
+        response = getattr(exc, "response", None)
+        code = getattr(response, "status_code", None)
+        return code is None or int(code) >= 500
+    msg = str(exc).lower()
+    return any(
+        k in msg
+        for k in ("connection", "timeout", "timed out", "unreachable", "network", "name or service")
+    )
+
+
+def _known_models(state: dict | None) -> set[str]:
+    """Modelli già noti: base di codice + quelli persistiti nello stato."""
+    saved = (state or {}).get(KNOWN_MODELS_KEY) or []
+    return set(KNOWN_MODELS) | {str(m) for m in saved}
 
 
 def _utcnow() -> str:
@@ -93,18 +125,24 @@ def _check_network() -> None:
     try:
         from huggingface_hub import HfApi  # noqa: F401
     except ImportError as e:
-        print(f"ERRORE: huggingface_hub non installato ({e}). Esegui: pip install huggingface_hub")
-        sys.exit(4)
+        raise NetworkError(f"huggingface_hub non installato ({e}): pip install huggingface_hub") from e
 
 
-def _gather(api: Any) -> dict:
-    """Interroga HF: info modelli tracciati + ricerca nuovi candidati."""
-    from huggingface_hub import HfApi
+def _gather(api: Any, known: set[str] | None = None) -> dict:
+    """Interroga HF: info modelli tracciati + ricerca nuovi candidati.
 
+    Un errore di rete che impedisce di leggere TUTTI i modelli tracciati rende
+    il controllo non verificabile: solleva NetworkError invece di spacciare
+    una risposta vuota per "nessuna azione". Un singolo 404 resta tollerato.
+    """
     if api is None:
+        from huggingface_hub import HfApi
+
         api = HfApi()
+    known = set(KNOWN_MODELS) if known is None else known
 
     tracked = {}
+    network_errors: list[str] = []
     for mid in TRACKED_MODELS:
         try:
             info = api.model_info(mid, files_metadata=False)
@@ -114,8 +152,11 @@ def _gather(api: Any) -> dict:
             }
         except Exception as e:  # noqa: BLE001 - un modello mancante non deve bloccare il resto
             tracked[mid] = {"lastModified": None, "downloads": None, "error": str(e)}
+            if _is_network_error(e):
+                network_errors.append(f"{mid}: {e}")
 
     new_candidates = {}
+    search_network_error = False
     try:
         models = api.list_models(
             search=SEARCH_QUERY,
@@ -126,7 +167,8 @@ def _gather(api: Any) -> dict:
         for m in models:
             mid = m.modelId
             tags = m.tags or []
-            if mid in KNOWN_MODELS or mid in TRACKED_MODELS:
+            # I modelli già visti non sono più "nuovi": segnalali una volta.
+            if mid in known or mid in TRACKED_MODELS:
                 continue
             # Interessano solo embedding multilingue ONNX/quantizzati.
             name_l = mid.lower()
@@ -140,19 +182,35 @@ def _gather(api: Any) -> dict:
                 "downloads": m.downloads,
             }
     except Exception as e:  # noqa: BLE001
-        print(f"AVVISO: ricerca candidati fallita: {e}")
+        if _is_network_error(e):
+            search_network_error = True
+            network_errors.append(f"ricerca candidati: {e}")
+        else:
+            print(f"AVVISO: ricerca candidati fallita: {e}")
+
+    tracked_ok = any(info.get("lastModified") or info.get("downloads") is not None for info in tracked.values())
+    if network_errors and (search_network_error or not tracked_ok):
+        raise NetworkError("; ".join(network_errors))
 
     return {"tracked": tracked, "new_candidates": new_candidates}
 
 
-def _recommendation(prev: dict | None, data: dict) -> tuple[bool, list[str]]:
-    """Confronta con la baseline e produce le raccomandazioni."""
+def _recommendation(
+    prev: dict | None, data: dict, known: set[str] | None = None
+) -> tuple[bool, list[str]]:
+    """Confronta con la baseline e produce le raccomandazioni.
+
+    I candidati già noti (baseline di codice o run precedenti) non generano
+    altro rumore: il primo avviso è sufficiente.
+    """
     reasons: list[str] = []
     action = False
 
     # Prima esecuzione (o baseline cancellata): registra solo lo stato.
     if prev is None:
         return False, ["Prima esecuzione: baseline registrata. Nessuna azione richiesta."]
+
+    known = _known_models(prev) if known is None else known
 
     # 1. Modello preferito aggiornato?
     pref = data["tracked"].get(PREFERRED_MODEL, {})
@@ -176,8 +234,10 @@ def _recommendation(prev: dict | None, data: dict) -> tuple[bool, list[str]]:
                 "Può essere un candidato: valuta il test A/B."
             )
 
-    # 3. Nuovi candidati multilingue ONNX?
+    # 3. Nuovi candidati multilingue ONNX? (solo se non li abbiamo già visti)
     for mid, info in data["new_candidates"].items():
+        if mid in known:
+            continue
         action = True
         reasons.append(
             f"Nuovo candidato rilevato: {mid} ({info.get('lastModified')}, "
@@ -187,15 +247,25 @@ def _recommendation(prev: dict | None, data: dict) -> tuple[bool, list[str]]:
     return action, reasons
 
 
-def _save_state(data: dict) -> None:
-    CACHE_DIR.mkdir(exist_ok=True)
-    STATE_FILE.write_text(
+def _atomic_write(path: Path, text: str) -> None:
+    """Scrittura atomica: import lazily, come gli altri moduli core di questo script."""
+    from config import atomic_write_text
+
+    atomic_write_text(path, text)
+
+
+def _save_state(data: dict, known: set[str] | None = None) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    # Persiste i modelli già visti: al secondo run non deve scattare di nuovo
+    # lo stesso "nuovo candidato" (e non va riscritto lo stato se la rete manca).
+    models = sorted(set(KNOWN_MODELS) | (known or set()))
+    _atomic_write(
+        STATE_FILE,
         json.dumps(
-            {"checked_at": _utcnow(), **data},
+            {"checked_at": _utcnow(), KNOWN_MODELS_KEY: models, **data},
             ensure_ascii=False,
             indent=2,
         ),
-        encoding="utf-8",
     )
 
 
@@ -247,32 +317,45 @@ def _write_report(action: bool, reasons: list[str], data: dict) -> None:
         "similarità media, durate bilanciate e zero slide anomale. Un modello "
         "più veloce che abbassa il segnale semantico NON va adottato.",
     ]
-    REPORT_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _atomic_write(REPORT_FILE, "\n".join(lines) + "\n")
 
 
-def main() -> int:
+def main(argv: list | None = None) -> int:
     parser = argparse.ArgumentParser(description="Monitoraggio modello embedding (regola e5).")
     parser.add_argument(
         "--force",
         action="store_true",
         help="ignora la baseline e forza il report anche senza novità",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    _check_network()
-    from huggingface_hub import HfApi
+    try:
+        _check_network()
+        from huggingface_hub import HfApi
 
-    prev = _load_state()
-    data = _gather(HfApi())
+        prev = _load_state()
+        known = _known_models(prev)
+        data = _gather(HfApi(), known=known)
+    except NetworkError as e:
+        # Non scrivere uno stato vuoto: un errore di rete NON è "nessuna azione".
+        print(f"ERRORE: controllo non verificabile (rete/dipendenza: {e}). Riprova più tardi.", file=sys.stderr)
+        print("Esito: NON VERIFICABILE")
+        return 3
+    except Exception as e:  # noqa: BLE001 - API/JSON inattesi: non è un verdetto
+        print(f"ERRORE: controllo non verificabile ({e}). Riprova più tardi.", file=sys.stderr)
+        print("Esito: NON VERIFICABILE")
+        return 3
 
     if args.force:
         reasons = ["--force: report generato per verifica manuale."]
         action = False
     else:
-        action, reasons = _recommendation(prev, data)
+        action, reasons = _recommendation(prev, data, known=known)
 
+    # Ogni candidato osservato diventa noto: non si ripete l'allarme.
+    known |= set(data["new_candidates"])
     _write_report(action, reasons, data)
-    _save_state(data)
+    _save_state(data, known=known)
 
     print(f"\nControllo completato. Report: {REPORT_FILE}")
     if reasons:

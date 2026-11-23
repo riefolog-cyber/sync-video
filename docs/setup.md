@@ -104,8 +104,19 @@ Windows **non devi installare niente a mano**. Il programma, in ordine:
 3. **I modelli** (~2,1 GB di embedding + ~460 MB di Whisper; 6,4 GB è il
    caso peggiore storico usato dal controllo spazio), annunciati prima di
    essere scaricati.
-4. **L'ambiente** `.venv`, con i pacchetti del progetto isolati dagli altri
-   programmi del PC.
+4. **I pacchetti pip** del progetto, installati nell'interprete usato dal
+   programma.
+
+> **La `.venv` NON viene creata al primo avvio.** I `.bat` (compreso
+> `genera_video.bat`) scelgono l'interprete con `_python.bat`: se esiste già una
+> `.venv` la usano, altrimenti usano il Python di sistema. La venv è un passo
+> **facoltativo e separato**, da fare a mano con `crea_venv.bat` quando vuoi
+> isolare i pacchetti dagli altri programmi del PC (vedi
+> [Ambiente dedicato](../README.md#-ambiente-dedicato-consigliato)). Se non la
+> crei, i pacchetti vanno nel Python globale: la pipeline funziona lo stesso, ma
+> un `pip install` fatto per un altro progetto può cambiare una versione e
+> impedire l'avvio (il rimedio è `python -m pip check`, vedi
+> [troubleshooting](troubleshooting.md)).
 
 Riepilogo: **Tesseract, ffmpeg, i modelli, i pacchetti, l'encoder video e i
 thread** si adattano da soli. Python richiede winget (cioè Windows 10
@@ -136,7 +147,7 @@ installazione: **non** fallisce con un errore incomprensibile.
 | Modello embedding e5-large | **~2.1 GB** di disco | fastembed (download automatico) |
 | Modello Whisper `small` (CPU) | ~460 MB | faster-whisper (download automatico) |
 | Modello Whisper OpenVINO | ~75 MB (`tiny`) / ~470 MB (`small`) | `--openvino-download` (facoltativo) |
-| Lingua Tesseract ITA | inclusa | `tessdata/ita.traineddata` |
+| Lingua Tesseract ITA | ~1,1 MB, **scaricata al primo avvio** | download automatico in `tessdata/` (cartella gitignored) |
 
 > **Le dimensioni sono misurate, non stimate.** I valori sopra sono i byte
 > reali occupati dopo una run completa con le versioni pinnate in
@@ -433,11 +444,18 @@ installazione: **non** fallisce con un errore incomprensibile.
 > La sola CPU OpenVINO non conta (nessun guadagno di velocità): su macchine
 > AMD/ARM (es. Snapdragon X) il suggerimento viene soppresso.
 >
-> **Controllo aggiornamenti.** All'avvio (`updates.py`) verifica via PyPI se i
-> pacchetti usati hanno versioni più recenti (risultato cachato per default 6h
-> in `.cache/updates_check.json`). Di default chiede S/N per aggiornare
-> automaticamente i pacchetti **non pinnati**; disabilita con `--no-update`
-> (solo notifica) o `--no-update-check` (nessun controllo).
+> **Controllo aggiornamenti.** `updates.py` verifica via PyPI se i pacchetti
+> usati hanno versioni più recenti (risultato cachato per default 6h in
+> `.cache/updates_check.json`) e, quando il controllo è attivo, chiede S/N per
+> aggiornare automaticamente i pacchetti **non pinnati**; `--no-update` fa solo
+> notificare, `--no-update-check` non controlla affatto.
+>
+> **Nel launcher consigliato il controllo è DISATTIVATO.** `genera_video.bat`
+> imposta `CHECK_UPDATES=0` e passa `--no-update-check`: al normale avvio
+> **nessun prompt S/N compare** e non si interroga PyPI, per non rallentare la
+> generazione del video. Per usarlo serve `aggiornamenti.bat` (check + S/N),
+> oppure rilancia `genera_video.bat --check-updates`. Dettagli in
+> "Aggiornamento manuale dedicato" più sotto.
 >
 > Il report distingue tre motivi per cui una voce non è un'azione disponibile:
 > è **pinnata** (scelta del progetto), è un salto di **major version** (da
@@ -466,8 +484,14 @@ installazione: **non** fallisce con un errore incomprensibile.
 > **test A/B isolato**: raccoglie i testi reali del progetto (slide + blocchi
 > trascrizione da `.cache`), calcola gli embedding con la versione installata
 > e con la candidata (in una venv temporanea, senza toccare l'ambiente di
-> lavoro), e confronta coseno-similarità per vettore e stabilità della
-> decisione di sync (argmax z-score per blocco). Verdetto:
+> lavoro), e confronta la coseno-similarità per vettore e la stabilità della
+> **decisione di sync**. Il metro del verdetto è `decision_match`: la frazione
+> di blocchi in cui coincidono le posizioni di partenza della timeline calcolata
+> con la **DP monotona** di `semantic_sync` (z-score per slide, competizione
+> softmax e allineamento monotono, esattamente come nella run vera). La soglia è
+> **0.95** (`decision_match >= 0.95`, insieme al coseno medio). L'`argmax_match`
+> stampato nel report accanto è solo il segnale grezzo per blocco (argmax dello
+> z-score): non entra nel verdetto.
 >
 > - **EQUIVALENTE** → il pinnato viene incluso nell'aggiornamento automatico;
 > - **DIVERGENTE** → resta pinnato e si aggiornano solo gli altri pacchetti.

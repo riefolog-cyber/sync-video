@@ -12,3 +12,7 @@ ruff>=0.16.0
 # Usato direttamente da src/test_controlli.py: prima arrivava solo come
 # dipendenza transitiva, meglio dichiararlo esplicitamente.
 PyYAML>=6.0
+# Usato direttamente da src/scripts/check_embedding_models.py (HfApi): prima
+# arrivava solo come dipendenza transitiva di fastembed, quindi lo smoke test
+# poteva fallire su un ambiente pulito. Qui serve anche alla CI.
+huggingface_hub>=0.20

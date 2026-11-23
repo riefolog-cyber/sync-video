@@ -495,12 +495,16 @@ def _motore_senza_openvino(scelto: str) -> Esito:
     try:
         import openvino_genai  # noqa: F401
     except ImportError:
+        # Il pip di sistema non e' quello della venv che esegue il programma:
+        # suggerire `py -m pip` installa altrove e il problema ricompare.
         return Esito(
             "Motore",
             AVV,
             dettaglio + " (OpenVINO non e' installato)",
-            "Funziona cosi', ma piu' lento. Rilancia aggiornamenti.bat per "
-            "provare a installare OpenVINO su questo PC.",
+            "Funziona cosi', ma piu' lento. Per provare OpenVINO installa i "
+            f'pacchetti con "{sys.executable}" -m pip install openvino '
+            "openvino-genai (oppure lancia crea_venv.bat, che prepara la venv "
+            "con tutte le dipendenze), poi riavvia.",
         )
 
     try:
@@ -521,8 +525,10 @@ def _motore_senza_openvino(scelto: str) -> Esito:
         "Motore",
         AVV,
         dettaglio + " (manca solo il modello OpenVINO)",
-        " Temporaneo: appena genera_video.bat scarica il modello, su questo PC "
-        "la trascrizione passa a OpenVINO. Non e' un problema.",
+        "Temporaneo: scarica il modello IR una tantum con "
+        "`python src/main.py --openvino-download` (oppure `--force-setup` se "
+        "vuoi rilevare di nuovo l'hardware). Dopo la trascrizione passa a "
+        "OpenVINO. Non e' un problema.",
     )
 
 

@@ -18,7 +18,9 @@ segnala solo e rispetta le versioni pinnate in requirements.txt.
 
 import importlib.metadata
 import json
+import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -27,7 +29,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
 from typing import Any
 
-from config import BASE_DIR, CACHE_DIR, _installed_version, atomic_write_text, log
+from config import _REQUIRED_PACKAGES, BASE_DIR, CACHE_DIR, _installed_version, atomic_write_text, log
 
 UPDATES_CACHE = CACHE_DIR / "updates_check.json"
 DEFAULT_UPDATE_TTL_HOURS = 6.0  # ri-check di rete ogni N ore
@@ -60,6 +62,23 @@ _PINNED: dict[str, str] = {
     # per e5-large, cambiando gli embedding rispetto alla baseline validata.
     "fastembed": "pinnato a 0.5.1: embedding e5-large validati A/B",
 }
+
+# Sorgenti dei vincoli dichiarati dal progetto (distinti dalla metadata installata).
+_PROJECT_REQ_SOURCE = "requirements.txt"
+_CONFIG_REQ_SOURCE = "config._REQUIRED_PACKAGES"
+
+# Moduli da importare nel health-check dopo un upgrade (nome pip -> nome import).
+# Quelli non presenti qui si importano col nome pip con i trattini sostituiti.
+_IMPORT_NAMES: dict[str, str] = {
+    "pillow": "PIL",
+    "pymupdf": "pymupdf",
+    "faster-whisper": "faster_whisper",
+    "openvino-genai": "openvino_genai",
+}
+
+# Un verdetto A/B resta spendibile solo per pochi giorni: dopo, testi reali e
+# versione installata possono essere cambiati anche se la candidata e' la stessa.
+_AB_REPORT_TTL_DAYS = 7
 
 
 def _latest_version_pypi(pip_name: str) -> str | None:
@@ -125,13 +144,20 @@ def _installable_releases(data: dict[str, Any]) -> list[tuple[Any, str]]:
       nulla);
     - quelle il cui ``requires_python`` esclude il Python in esecuzione sono escluse.
 
-    ``requires_python`` è dichiarato per-file: si usa il primo file non yanked che lo
-    dichiara, non il solo primo file della release (che può essere l'sdist, o un file
-    yanked).
+    ``requires_python`` è dichiarato per-file: basta che UN file non yanked lo
+    dichiari compatibile (oppure non lo dichiari affatto) perché la release sia
+    installabile. Guardare solo il primo file utile sbaglierebbe in entrambi i
+    versi: un file con un vincolo troppo stretto può far scartare una release che
+    ha anche una wheel perfettamente installabile, e un primo file senza vincolo
+    può far accettare una release i cui altri file sono tutti incompatibili.
+
+    Il confronto usa la versione COMPLETA del Python (3.10.5, non 3.10): con
+    ``>=3.10.3`` un 3.10.5 va ammesso, e ``major.minor`` lo escluderebbe a torto.
     """
-    from packaging.specifiers import SpecifierSet
+    from packaging.specifiers import InvalidSpecifier, SpecifierSet
     from packaging.version import InvalidVersion, Version
 
+    python = platform.python_version()
     releases = data.get("releases", {})
     out: list[tuple[Any, str]] = []
     for version_str, files in releases.items():
@@ -144,10 +170,21 @@ def _installable_releases(data: dict[str, Any]) -> list[tuple[Any, str]]:
             continue
         if version.is_prerelease:
             continue
-        requires_python = next((f.get("requires_python") for f in files_validi if f.get("requires_python")), None)
-        if requires_python and not SpecifierSet(requires_python).contains(
-            f"{sys.version_info.major}.{sys.version_info.minor}"
-        ):
+        # ALMENO UN file non yanked deve essere installabile: senza vincolo e'
+        # compatibile di default, con vincolo va verificato sul Python completo.
+        compatibile = False
+        for file in files_validi:
+            requires_python = file.get("requires_python")
+            if not requires_python:
+                compatibile = True
+                break
+            try:
+                if SpecifierSet(requires_python).contains(python):
+                    compatibile = True
+                    break
+            except InvalidSpecifier:
+                continue  # dichiarazione invalida: quel file non e' utilizzabile
+        if not compatibile:
             continue
         out.append((version, version_str))
     return out
@@ -184,7 +221,7 @@ def _pinned_requirement(pip_name: str) -> str | None:
     req_path = BASE_DIR / "requirements.txt"
     if req_path.exists():
         for line in req_path.read_text(encoding="utf-8").splitlines():
-            trovato = re.match(rf"^{re.escape(pip_name)}\s*==\s*(\S+)", line)
+            trovato = re.match(rf"^{re.escape(pip_name)}\s*==\s*([^\s;#]+)", line, re.IGNORECASE)
             if trovato:
                 return f"=={trovato.group(1)}"
     return None
@@ -276,7 +313,53 @@ def _installed_constraints() -> _Constraints:
             except Exception:
                 continue
             vincoli.setdefault(req.name.lower(), []).append((nome, versione, str(req.specifier)))
+
+    # I cap del progetto (av<19, pillow<11, numpy>=1.26...) sono dichiarati in
+    # requirements.txt e in config._REQUIRED_PACKAGES, NON nella metadata delle
+    # dipendenze installate. Senza questa aggiunta un upgrade che li viola
+    # sembrava installabile e finiva nell'invito a `pip install -U`.
+    for nome, vincoli_progetto in _project_constraints().items():
+        vincoli.setdefault(nome, []).extend(vincoli_progetto)
     return vincoli
+
+
+def _project_constraints() -> _Constraints:
+    """Vincoli di versione dichiarati dal progetto, nella stessa forma di `_installed_constraints`.
+
+    I pin ``==`` sono esclusi di proposito: sono già la condizione ``pinned`` e il
+    test A/B è il modo previsto per sbloccarli. Metterli anche tra i blocchi
+    renderebbe quel percorso irraggiungibile (e i test A/B non girerebbero mai).
+    """
+    try:
+        from packaging.requirements import Requirement
+    except ImportError:  # senza packaging non si inventa nessun blocco
+        return {}
+
+    sorgenti: list[tuple[str, list[str]]] = []
+    req_path = BASE_DIR / "requirements.txt"
+    if req_path.exists():
+        with suppress(OSError):
+            sorgenti.append((_PROJECT_REQ_SOURCE, req_path.read_text(encoding="utf-8").splitlines()))
+    # Le chiavi di _REQUIRED_PACKAGES sono nomi di import, i VALORI sono i
+    # requisiti pip veri (ed e' li' che il bootstrap installa davvero).
+    sorgenti.append((_CONFIG_REQ_SOURCE, list(_REQUIRED_PACKAGES.values())))
+
+    out: _Constraints = {}
+    for sorgente, righe in sorgenti:
+        for riga in righe:
+            testo = riga.split("#", 1)[0].strip()
+            if not testo:
+                continue
+            try:
+                req = Requirement(testo)
+            except Exception:
+                continue  # riga non parseabile: non produce un blocco inventato
+            if not req.specifier or str(req.specifier).strip().startswith("=="):
+                continue
+            if req.marker is not None and not req.marker.evaluate():
+                continue
+            out.setdefault(req.name.lower(), []).append((sorgente, "", str(req.specifier)))
+    return out
 
 
 def _blockers(pip_name: str, candidate: str, vincoli: _Constraints) -> list[str]:
@@ -305,15 +388,29 @@ def _blockers(pip_name: str, candidate: str, vincoli: _Constraints) -> list[str]
                 continue
         except Exception:
             continue
-        motivo = f"{chi} {versione_chi} impone {spec}"
+        motivo = f"{chi} {versione_chi} impone {spec}" if versione_chi else f"{chi} impone {spec}"
         if motivo not in motivi:
             motivi.append(motivo)
     return motivi
 
 
 def _pin_note(pip_name: str) -> str:
-    """Nota sul pin per i pacchetti pinnati."""
-    return _PINNED.get(pip_name, "")
+    """Nota sul pin per i pacchetti pinnati, con la versione attuale di requirements.txt.
+
+    La nota storica dice "pinnato a 0.5.1": dopo che `_aggiorna_pin` ha aggiornato
+    il pin (e il file letto al prossimo avvio e' quello nuovo), ripetere il vecchio
+    numero sarebbe fuorviante. Se requirements.txt dichiara `==X`, si mostra X e
+    si conserva il motivo dopo i due punti; altrimenti resta la nota storica.
+    """
+    nota = _PINNED.get(pip_name, "")
+    if not nota:
+        return ""
+    pin = _pinned_requirement(pip_name)
+    if not pin:
+        return nota
+    versione = pin[2:]  # pin e' della forma "==0.6.0"
+    _, separatore, motivo = nota.partition(": ")
+    return f"pinnato a {versione}{separatore}{motivo}"
 
 
 def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
@@ -329,17 +426,28 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
     now = time.time()
     if cache and now - cache.get("ts", 0) < ttl_hours * 3600:
         log.debug("   Check aggiornamenti: cache valida (%.1fh).", ttl_hours)
-        return list(cache.get("outdated", []))
+        # La cache puo' essere ancora dentro il TTL ma contenere una versione
+        # installata ormai cambiata (upgrade/downgrade fatto fuori dal tool).
+        # Rileggere l'installata per ogni voce evita di annunciare "X -> Y"
+        # quando X non e' piu' quello che c'e' nell'ambiente.
+        cached = list(cache.get("outdated", []))
+        valide = [d for d in cached if _installed_version(d.get("name", "")) == d.get("installed")]
+        if len(valide) != len(cached):
+            log.debug(
+                "   Check aggiornamenti: %d voce/i di cache scartate (installata cambiata).",
+                len(cached) - len(valide),
+            )
+            _write_cache({"ts": now, "outdated": valide})
+        return valide
 
     outdated: list[dict] = []
-    # Quanti pacchetti sono rimasti senza risposta: se sono TUTTI, il problema
-    # non e' "nessun aggiornamento", e' che PyPI non ha risposto. Senza questo
-    # conteggio la run con rete down scriveva `outdated: []` in cache e la seconda
-    # run (entro TTL) stampava "tutti aggiornati" con la stessa sicurezza di
-    # quando la rete funziona: 6 ore di falsi allarmi indistinguibili dalla
-    # verita'. Con la rete tirata fuori, invece, la cache NON viene scritta e il
-    # check viene ritentato alla run successiva.
+    # Due contatori DISTINTI: `unreachable` conta solo i `latest is None` (PyPI
+    # non ha risposto), `non_installati` conta gli `installed is None` (pacchetto
+    # assente: si salta, non e' un errore di rete). Confonderli faceva scattare
+    # l'avviso "PyPI non raggiungibile" quando semplicemente qualcosa non era
+    # installato, e faceva passare una rete down come "tutti aggiornati" in cache.
     unreachable = 0
+    non_installati = 0
     # I vincoli delle dipendenze installate si leggono UNA volta per tutti i
     # candidati: la scansione della metadata e' la parte costosa.
     vincoli = _installed_constraints()
@@ -349,7 +457,10 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
             pip_name = futures[fut]
             latest = fut.result()  # _latest_version_pypi non solleva mai (None su errore)
             installed = _installed_version(pip_name)
-            if latest is None or installed is None:
+            if installed is None:
+                non_installati += 1  # non installato: si salta, non e' un errore di rete
+                continue
+            if latest is None:
                 unreachable += 1
                 continue
             # Confronto per ORDINE, non per disuguaglianza di stringhe:
@@ -386,6 +497,8 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
     outdated.sort(key=lambda d: d["name"].lower())
     if unreachable:
         log.debug("   %d pacchetti senza risposta su %d.", unreachable, len(_PACKAGES))
+    if non_installati:
+        log.debug("   %d pacchetti non installati: saltati (non e' un errore di rete).", non_installati)
     _write_cache({"ts": now, "outdated": outdated})
     return outdated
 
@@ -494,39 +607,72 @@ def _pinned_with_update(outdated: list[dict]) -> list[dict]:
     return [d for d in outdated if d["pinned"] and d["name"] in _AB_TESTABLE_PINNED and not (d.get("blocked") or [])]
 
 
+def _hash_texts(texts: list[str]) -> str:
+    """Hash stabile dei testi reali usati dal test A/B."""
+    import hashlib
+
+    return hashlib.sha256(json.dumps(texts, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _ab_report_valido(
+    cached: Any,
+    candidate: str,
+    pkg: dict,
+    texts_hash: str,
+    model: str,
+    thresholds: tuple[float, float],
+) -> bool:
+    """True se il report puo' essere riutilizzato: contenuto identico e recente.
+
+    Non basta che candidata e modello coincidano: se e' cambiata la versione di
+    partenza, sono cambiate le soglie o sono cambiati i testi reali, il verdetto
+    vecchio non descrive piu' il confronto che stiamo per fare. Un report senza
+    questi campi (quelli scritti dalle versioni precedenti del tool) NON va
+    riusato: meglio ripetere il test che fidarsi di un confronto cieco.
+    """
+    if not isinstance(cached, dict):
+        return False
+    if cached.get("candidate") != candidate or cached.get("model") != model:
+        return False
+    if cached.get("verdict") not in ("EQUIVALENTE", "DIVERGENTE"):
+        return False
+    if cached.get("installed") != pkg.get("installed") or cached.get("texts_hash") != texts_hash:
+        return False
+    # Baseline e candidata devono usare lo STESSO batch: il padding e' per-batch
+    # (vedi semantic_sync), quindi due versioni identiche possono dare un coseno
+    # diverso se_calcolate con batch diversi e il verdetto non e' confrontabile.
+    from config import DEFAULT_EMBED_BATCH
+
+    if cached.get("batch_size") != DEFAULT_EMBED_BATCH:
+        return False
+    sim_mean, decision_match = thresholds
+    if cached.get("threshold_sim_mean") != sim_mean or cached.get("threshold_decision_match") != decision_match:
+        return False
+    ts = cached.get("ts")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return False
+    return time.time() - ts < _AB_REPORT_TTL_DAYS * 86400
+
+
 def _run_pinned_ab_test(pkg: dict) -> str | None:
     """Esegue il test A/B per un pinnato testabile. Ritorna il verdetto o None.
 
-    Riutilizza il report già salvato in ``.cache/fastembed_ab.json`` se
-    riguarda la stessa versione candidata e lo stesso modello: il test
-    completo crea una venv temporanea e installa fastembed candidato, quindi
-    ripeterlo a ogni avvio sarebbe lento.
+    Riutilizza il report salvato in ``.cache/fastembed_ab.json`` solo se descrive
+    ESATTAMENTE lo stesso confronto (candidata, modello, installata di partenza,
+    soglie, testi, eta') e se e' recente. Il test completo crea una venv temporanea
+    e installa la candidata, quindi ripeterlo a ogni avvio sarebbe lento; ma un
+    verdetto riusato senza queste verifiche e' peggio che rifare il test.
     """
-    from config import DEFAULT_EMBEDDING_CACHE_DIR, DEFAULT_EMBEDDING_MODEL
+    from config import DEFAULT_EMBED_BATCH, DEFAULT_EMBEDDING_CACHE_DIR, DEFAULT_EMBEDDING_MODEL
 
     candidate = pkg["latest"]
     report_path = CACHE_DIR / "fastembed_ab.json"
-    try:
-        if report_path.exists():
-            cached = json.loads(report_path.read_text(encoding="utf-8"))
-            if (
-                cached.get("candidate") == candidate
-                and cached.get("model") == DEFAULT_EMBEDDING_MODEL
-                and cached.get("verdict") in ("EQUIVALENTE", "DIVERGENTE")
-            ):
-                log.info("   🧪 Test A/B %s (%s): riutilizzo report cache.", pkg["name"], candidate)
-                return str(cached["verdict"])
-    except (OSError, json.JSONDecodeError, ValueError):
-        pass
-
     try:
         # Lo script A/B sta in src/scripts/ e non e' un pacchetto: si rende
         # importabile aggiungendo la sua cartella al sys.path. Senza questo,
         # `import` fallirebbe e il test A/B non girerebbe mai (e' successo
         # dopo lo spostamento del codice in src/: il percorso vecchio non
         # esiste piu' e il verdetto era sempre "test non disponibile").
-        import sys
-
         _scripts = BASE_DIR / "src" / "scripts"
         if not (_scripts / "check_fastembed_upgrade.py").exists():
             _scripts = BASE_DIR / "scripts"
@@ -537,21 +683,44 @@ def _run_pinned_ab_test(pkg: dict) -> str | None:
         log.warning("   ⚠️ Impossibile eseguire il test A/B per %s: %s", pkg["name"], e)
         return None
 
-    log.info("   🧪 Test A/B isolato per %s (%s -> %s)...", pkg["name"], pkg["installed"], candidate)
     texts = ab.collect_real_texts()
     if texts is None or not texts["slides"] or not texts["blocks"]:
         log.warning("   ⚠️ Test A/B saltato: nessun dato reale in .cache.")
         return None
 
     all_texts = texts["slides"] + texts["blocks"]
+    texts_hash = _hash_texts(all_texts)
+    soglie = (
+        getattr(ab, "DEFAULT_SIM_MEAN_THRESHOLD", 0.90),
+        getattr(ab, "DEFAULT_DECISION_MATCH_THRESHOLD", 0.95),
+    )
+    try:
+        if report_path.exists():
+            cached = json.loads(report_path.read_text(encoding="utf-8"))
+            if _ab_report_valido(cached, candidate, pkg, texts_hash, DEFAULT_EMBEDDING_MODEL, soglie):
+                log.info("   🧪 Test A/B %s (%s): riutilizzo report cache.", pkg["name"], candidate)
+                return str(cached["verdict"])
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+
+    log.info("   🧪 Test A/B isolato per %s (%s -> %s)...", pkg["name"], pkg["installed"], candidate)
     base = ab.baseline_embeddings(all_texts, model=DEFAULT_EMBEDDING_MODEL)
     if base is None:
         log.warning("   ⚠️ Test A/B saltato: baseline non calcolata.")
         return None
-    cand, _ = ab.candidate_embeddings(
-        all_texts, candidate, model=DEFAULT_EMBEDDING_MODEL,
-        cache_dir=DEFAULT_EMBEDDING_CACHE_DIR,
-    )
+
+    cand = None
+    venv_dir = None
+    try:
+        cand, venv_dir = ab.candidate_embeddings(
+            all_texts, candidate, model=DEFAULT_EMBEDDING_MODEL,
+            cache_dir=DEFAULT_EMBEDDING_CACHE_DIR,
+        )
+    finally:
+        # `candidate_embeddings` restituisce (embeddings, venv_dir): la venv e'
+        # temporanea e va rimossa anche se il calcolo della candidata fallisce.
+        if venv_dir is not None:
+            shutil.rmtree(venv_dir, ignore_errors=True)
     if cand is None:
         log.warning("   ⚠️ Test A/B saltato: candidata non calcolata.")
         return None
@@ -561,11 +730,17 @@ def _run_pinned_ab_test(pkg: dict) -> str | None:
         "      coseno medio %.3f | decision match %.2f (timeline reale) | argmax %.2f (%d blocchi) -> %s",
         res["cosine_mean"], res["decision_match"], res["argmax_match"], int(res["n_blocks"]), res["verdict"],
     )
+    report = {
+        **res,
+        "candidate": candidate,
+        "installed": pkg["installed"],
+        "model": DEFAULT_EMBEDDING_MODEL,
+        "texts_hash": texts_hash,
+        "batch_size": DEFAULT_EMBED_BATCH,
+        "ts": time.time(),
+    }
     with suppress(OSError):
-        report_path.write_text(
-            json.dumps({**res, "candidate": candidate, "model": DEFAULT_EMBEDDING_MODEL}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(res["verdict"])
 
 
@@ -575,6 +750,59 @@ def _tail_lines(testo: str | None, quante: int = 12) -> list[str]:
     return righe[-quante:]
 
 
+def _upgrade_requirement(pkg: dict) -> str:
+    """Requisito pip da passare a pip per l'upgrade: ``nome==latest`` se noto.
+
+    I nomi nudi con ``-U`` lasciavano a pip scegliere la versione: il resolver
+    poteva restare fermo a quella vecchia (cap delle dipendenze) e riportare
+    successo, oppure saltare a una versione diversa da quella annunciata nel
+    report. Vincolare la versione annunciata rende l'esito verificabile; le voci
+    senza una versione parseabile restano nomi nudi.
+    """
+    nome = str(pkg["name"])
+    latest = str(pkg.get("latest") or "")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+\-_!]*", latest) and re.search(r"\d", latest):
+        return f"{nome}=={latest}"
+    return nome
+
+
+def _health_check(packages: list[str]) -> bool:
+    """Controllo dopo l'install: importa i moduli chiave e lancia `pip check`.
+
+    Un exit 0 di pip non basta: puo' aver installato una versione che rompe
+    un'import (o le dipendenze di un altro pacchetto). Se il controllo fallisce
+    l'upgrade va considerato non riuscito, così la cache resta valida e il pin
+    A/B non viene scritto.
+    """
+    for req in packages:
+        nome = re.split(r"[<>=!~]", req, maxsplit=1)[0].strip().lower()
+        modulo = _IMPORT_NAMES.get(nome, nome.replace("-", "_"))
+        try:
+            importlib.import_module(modulo)
+        except Exception as e:
+            log.warning("   ❌ Health check fallito: import di %s (%s) non riuscito: %s", req, modulo, e)
+            return False
+    try:
+        res = subprocess.run(
+            [sys.executable, "-m", "pip", "check"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=120,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        log.warning("   ❌ Health check fallito (pip check): %s", e)
+        return False
+    if res.returncode != 0:
+        log.warning("   ❌ Health check fallito (pip check exit %d):", res.returncode)
+        for riga in _tail_lines(res.stderr or res.stdout):
+            log.warning("      %s", riga)
+        return False
+    log.debug("   ✅ Health check superato (%d pacchetti importati, pip check ok).", len(packages))
+    return True
+
+
 def _pip_upgrade(packages: list[str]) -> bool:
     """Aggiorna i pacchetti indicati (pip install -U). True se riuscito.
 
@@ -582,12 +810,14 @@ def _pip_upgrade(packages: list[str]) -> bool:
     ultime righe. Senza quelle l'utente vedrebbe solo "non-zero exit status 1"
     e non saprebbe se è la rete, un conflitto di versioni o i permessi; in
     caso di successo l'ultima riga di pip dice cosa è stato davvero installato
-    (utile quando pip non cambia nulla).
+    (utile quando pip non cambia nulla). I requisiti completi (``nome==latest``)
+    e ``--upgrade-strategy only-if-needed`` evitano che pip scelga una versione
+    diversa da quella annunciata o aggiorni di nuovo le dipendenze.
     """
     log.info("   ⏳ pip install -U %s ...", " ".join(packages))
     try:
         res = subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-U", *packages],
+            [sys.executable, "-m", "pip", "install", "-U", "--upgrade-strategy", "only-if-needed", *packages],
             capture_output=True,
             text=True,
             errors="replace",
@@ -605,7 +835,10 @@ def _pip_upgrade(packages: list[str]) -> bool:
         return False
 
     esito = _tail_lines(res.stdout, 1)
-    log.info("   ✅ Aggiornati: %s%s", ", ".join(packages), f" — {esito[0]}" if esito else "")
+    log.info("   ✅ Installati: %s%s", ", ".join(packages), f" — {esito[0]}" if esito else "")
+    if not _health_check(packages):
+        log.warning("   ❌ Upgrade non confermato dal health check: cache e pin restano invariati.")
+        return False
     return True
 
 
@@ -692,7 +925,10 @@ def run_update_check(
     if major:
         log.info("   ⚠️ Salti di major version NON aggiornati automaticamente: %s", ", ".join(major))
 
-    names = [d["name"] for d in upgradable]
+    # Si passano requisiti completi (nome==versione annunciata), non nomi nudi:
+    # cosi' pip non puo' riportare successo senza aver installato quella versione
+    # (e non puo' prenderne un'altra diversa da quella del report).
+    names = [_upgrade_requirement(d) for d in upgradable]
 
     # Per i pinnati testabili, il verdetto del test A/B decide se includerli:
     # EQUIVALENTE -> SI, procedi; DIVERGENTE/None -> NO, lascia come ora.
@@ -709,7 +945,7 @@ def run_update_check(
                 verdict = _run_pinned_ab_test(d)
                 if verdict == "EQUIVALENTE":
                     log.info("   ✅ %s: equivalente -> SI, procedi (incluso nell'aggiornamento).", d["name"])
-                    names.append(d["name"])
+                    names.append(_upgrade_requirement(d))
                     pin_accettati[d["name"]] = d["latest"]
                 elif verdict == "DIVERGENTE":
                     log.info("   🔒 %s: divergente -> NO, lascia come ora (resta pinnato).", d["name"])
@@ -729,8 +965,13 @@ def run_update_check(
         # davvero installato: un upgrade fallito non deve cambiare i pin.
         if esito and pin_accettati:
             _aggiorna_pin(pin_accettati)
-        # Invalida la cache così al prossimo avvio riverifica da zero
-        UPDATES_CACHE.unlink(missing_ok=True)
+        # Invalida la cache SOLO se l'upgrade e' davvero riuscito (pip ok e
+        # health-check ok): su fallimento i dati vecchi restano validi e il
+        # prossimo avvio deve riprovare senza perdere il controllo gia' fatto.
+        if esito:
+            UPDATES_CACHE.unlink(missing_ok=True)
+        else:
+            log.info("   ⚠️ Cache mantenuta: al prossimo avvio il controllo verra' ripetuto.")
     else:
         log.info("   Ok, nessun aggiornamento installato.")
 
@@ -740,7 +981,8 @@ def run_update_check(
 # =====================================================================
 
 # Autore dei vincoli che non è un pacchetto installato: il pin del progetto.
-_PIN_SOURCE = "requirements.txt"
+# E' la stessa sorgente usata da `_project_constraints` per i cap di requirements.txt.
+_PIN_SOURCE = _PROJECT_REQ_SOURCE
 
 
 def _max_satisfying(versions: list[str] | None, specs: list[str]) -> str | None:
@@ -954,9 +1196,17 @@ def run_frozen_report(ttl_hours: float = 0.0) -> None:
 def _read_cache() -> dict:
     try:
         data = json.loads(UPDATES_CACHE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
     except (json.JSONDecodeError, OSError, ValueError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    # Un timestamp scritto come stringa (cache corrotta o scritta a mano) fa
+    # sollevare TypeError in `check_updates` e bloccherebbe main(): cache non
+    # valida si comporta come cache assente.
+    ts = data.get("ts")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return {}
+    return data
 
 
 def _write_cache(data: dict) -> None:

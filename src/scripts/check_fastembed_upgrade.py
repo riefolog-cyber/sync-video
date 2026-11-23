@@ -19,9 +19,16 @@ realmente diversi su testi reali del progetto:
   4. confronta:
        - coseno-similarita' media/min per vettore tra baseline e candidata;
        - stabilita' della decisione di sync: matrice di similarita' blocchi x
-         slide, z-score per colonna, argmax per blocco -> frazione di blocchi
-         in cui la slide "best" e' identica;
+         slide, z-score per colonna, allineamento monotono -> frazione di
+         blocchi in cui l'inizio della slide "best" e' identico;
   5. emette un verdetto: EQUIVALENTE (aggiornabile) o DIVERGENTE (tieni il pin).
+     Se anche solo uno dei due allineamenti fallisce il verdetto e'
+     DIVERGENTE con match=0: -1 == -1 non e' una prova di equivalenza.
+
+Baseline e candidata usano lo STESSO batch (config.DEFAULT_EMBED_BATCH, passato
+al worker): il padding e' per-batch, quindi batch diversi darebbero vettori non
+confrontabili. Il batch usato finisce nel report. Le cache sono quelle di
+config (SYNC_VIDEO_CACHE_DIR / EMBEDDING_CACHE_DIR), non un .cache hardcoded.
 
 Non modifica l'ambiente di lavoro: la candidata vive solo nella venv
 temporanea (cancellata al termine a meno di --keep-venv).
@@ -36,12 +43,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 
@@ -52,7 +60,24 @@ from _bootstrap import RADICE
 # La radice la dà il bootstrap: `__file__` sta in scripts/, quindi `parent`
 # qui sarebbe la cartella sbagliata.
 BASE_DIR = RADICE
-CACHE_DIR = BASE_DIR / ".cache"
+
+
+def _config_value(name: str, fallback: Any) -> Any:
+    """Legge una costante di config, con fallback se config non e' importabile."""
+    try:
+        import config
+    except ImportError:
+        return fallback
+    return getattr(config, name, fallback)
+
+
+# config.CACHE_DIR rispetta SYNC_VIDEO_CACHE_DIR: il vecchio `.cache` hardcoded
+# faceva cercare/leggere i cache nel posto sbagliato quando la cache e' altrove.
+CACHE_DIR = Path(_config_value("CACHE_DIR", BASE_DIR / ".cache"))
+# Stesso batch della baseline: `_make_embed_fn` usa config.DEFAULT_EMBED_BATCH e
+# il padding e' per-batch, quindi la candidata deve ricevere questo valore.
+DEFAULT_EMBED_BATCH = int(_config_value("DEFAULT_EMBED_BATCH", 64))
+
 # Il worker e' suo, sta nella stessa cartella di questo script.
 WORKER = Path(__file__).resolve().parent / "_embed_candidate_worker.py"
 
@@ -70,21 +95,132 @@ DEFAULT_DECISION_MATCH_THRESHOLD = 0.95
 # =====================================================================
 # Raccolta testi reali
 # =====================================================================
-def _newest(pattern: str) -> Path | None:
-    files = sorted(CACHE_DIR.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+def _newest(pattern: str, cache_dir: Path | None = None) -> Path | None:
+    d = cache_dir if cache_dir is not None else CACHE_DIR
+    files = sorted(d.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
     return files[0] if files else None
+
+
+def _embedding_cache_dir(cache_dir: str | Path | None = None) -> str:
+    """Cache dei modelli: quella usata dal flusso automatico (config.py)."""
+    if cache_dir is not None:
+        return str(cache_dir)
+    return str(_config_value("DEFAULT_EMBEDDING_CACHE_DIR", CACHE_DIR / "embedding_model"))
+
+
+# Token di run: prima il run_id nel JSON, altrimenti un timestamp/run tag nel
+# nome file. Senza token (vecchi cache) si mantiene il comportamento storico.
+_TIME_TOKEN_RE = re.compile(
+    r"(?<!\d)(20\d{2}[-_]\d{2}[-_]\d{2}(?:[T_\- ]?\d{2}[:\-_]?\d{2}[:\-_]?\d{2})?|\d{8}[T_\-]?\d{6})(?!\d)"
+)
+_RUN_TOKEN_RE = re.compile(r"(?i)run[-_]([a-z0-9]+)")
+
+
+def _read_json(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _run_token(path: Path, data: dict | None) -> str | None:
+    """Identificatore della run di un cache, o None se non dichiarato."""
+    if data:
+        rid = data.get("run_id") or data.get("runId")
+        if rid is not None and str(rid).strip():
+            return f"id:{rid}"
+    match = _RUN_TOKEN_RE.search(path.stem)
+    if match:
+        return f"run:{match.group(1)}"
+    match = _TIME_TOKEN_RE.search(path.stem)
+    if match:
+        digits = re.sub(r"\D", "", match.group(1))
+        return f"ts:{digits}" if digits else None
+    return None
+
+
+def _find_with_token(tokens: dict[Path, str | None], token: str) -> Path | None:
+    """File piu' recente con quel token di run, se esiste."""
+    files = sorted(tokens, key=lambda p: p.stat().st_mtime, reverse=True)
+    return next((p for p in files if tokens[p] == token), None)
+
+
+def _pair_cache_files(
+    cache_dir: Path,
+    slide_cache: Path | None,
+    transcript_cache: Path | None,
+) -> tuple[Path, Path] | None:
+    """Sceglie slide e trascrizione della STESSA run; None se non coerenti."""
+    slides_path: Path | None
+    transcript_path: Path | None
+    if slide_cache is not None and transcript_cache is not None:
+        slides_path, transcript_path = slide_cache, transcript_cache
+        ts = _run_token(slides_path, _read_json(slides_path))
+        tt = _run_token(transcript_path, _read_json(transcript_path))
+        if ts and tt and ts != tt:
+            print(
+                f"ERRORE: cache di run diverse ({slides_path.name}: {ts}, "
+                f"{transcript_path.name}: {tt}).",
+                file=sys.stderr,
+            )
+            return None
+        return slides_path, transcript_path
+
+    slides_path = _newest("slides_*.json", cache_dir)
+    transcript_path = _newest("transcript_*.json", cache_dir)
+    if slides_path is None or transcript_path is None:
+        return None
+
+    # I due file PIU' recenti possono venire da run diverse: cerca prima una
+    # coppia con lo stesso token, poi rifiuta l'accoppiamento invece di
+    # confrontare testi che non sono mai appartenuti alla stessa run.
+    slide_tokens = {p: _run_token(p, _read_json(p)) for p in cache_dir.glob("slides_*.json")}
+    trans_tokens = {p: _run_token(p, _read_json(p)) for p in cache_dir.glob("transcript_*.json")}
+    ts, tt = slide_tokens.get(slides_path), trans_tokens.get(transcript_path)
+    if ts is not None and tt is not None and ts != tt:
+        alt_tr = _find_with_token(trans_tokens, ts)
+        alt_sl = _find_with_token(slide_tokens, tt)
+        if alt_tr is not None:
+            transcript_path = alt_tr
+        elif alt_sl is not None:
+            slides_path = alt_sl
+        else:
+            print(
+                "ERRORE: cache slides/transcript di run diverse "
+                f"({slides_path.name}: {ts}, {transcript_path.name}: {tt}). "
+                "Riesegui la run o rimuovi i cache inattuali.",
+                file=sys.stderr,
+            )
+            return None
+    elif ts is not None and tt is None:
+        alt_tr = _find_with_token(trans_tokens, ts)
+        if alt_tr is not None:
+            transcript_path = alt_tr
+    elif tt is not None and ts is None:
+        alt_sl = _find_with_token(slide_tokens, tt)
+        if alt_sl is not None:
+            slides_path = alt_sl
+    return slides_path, transcript_path
 
 
 def collect_real_texts(
     slide_cache: Path | None = None,
     transcript_cache: Path | None = None,
     max_slides: int = 100,
+    cache_dir: Path | None = None,
 ) -> dict[str, list[str]] | None:
-    """Restituisce {"slides": [...], "blocks": [...]} dai cache reali."""
-    slides_path = slide_cache or _newest("slides_*.json")
-    transcript_path = transcript_cache or _newest("transcript_*.json")
-    if not slides_path or not transcript_path:
+    """Restituisce {"slides": [...], "blocks": [...]} dai cache reali.
+
+    I percorsi espliciti hanno precedenza; altrimenti si cerca una coppia
+    coerente per token/timestamp di run (o run_id nel JSON) e si rifiutano le
+    coppie di run diverse.
+    """
+    d = cache_dir if cache_dir is not None else CACHE_DIR
+    pair = _pair_cache_files(d, slide_cache, transcript_cache)
+    if pair is None:
         return None
+    slides_path, transcript_path = pair
 
     slides: list[str] = []
     try:
@@ -122,13 +258,17 @@ def collect_real_texts(
 def baseline_embeddings(
     texts: list[str],
     model: str = DEFAULT_MODEL,
-    cache_dir: str | None = None,
+    cache_dir: str | Path | None = None,
 ) -> np.ndarray | None:
-    """Embedding di baseline con la fastembed installata (via interfaccia embedder)."""
+    """Embedding di baseline con la fastembed installata (via interfaccia embedder).
+
+    Il batch e' quello di config.DEFAULT_EMBED_BATCH, usato da `_make_embed_fn`
+    dentro `load_embedder`: e' lo stesso valore passato al worker della
+    candidata, quindi i vettori sono confrontabili.
+    """
     from embedder import load_embedder
 
-    cache_dir = cache_dir or str(CACHE_DIR / "embedding_model")
-    emb = load_embedder(model, cache_dir, alternate_name=ALTERNATE_MODEL)
+    emb = load_embedder(model, _embedding_cache_dir(cache_dir), alternate_name=ALTERNATE_MODEL)
     if emb is None:
         return None
     return np.asarray(emb.embed(texts), dtype=np.float32)
@@ -164,13 +304,19 @@ def candidate_embeddings(
     texts: list[str],
     candidate: str,
     model: str = DEFAULT_MODEL,
-    cache_dir: str | None = None,
+    cache_dir: str | Path | None = None,
     venv_dir: Path | None = None,
+    batch_size: int | None = None,
 ) -> tuple[np.ndarray | None, Path | None]:
-    """Embedding della candidata tramite venv isolata. Restituisce (emb, venv_dir)."""
+    """Embedding della candidata tramite venv isolata. Restituisce (emb, venv_dir).
+
+    `batch_size` deve essere quello della baseline (config.DEFAULT_EMBED_BATCH):
+    il worker lo riceve esplicitamente per evitare padding per-batch diverso.
+    """
     own_venv = venv_dir is None
     venv_dir = venv_dir or Path(tempfile.mkdtemp(prefix="fastembed_ab_"))
-    cache_dir = cache_dir or str(CACHE_DIR / "embedding_model")
+    cache_dir = _embedding_cache_dir(cache_dir)
+    batch = DEFAULT_EMBED_BATCH if batch_size is None else batch_size
 
     texts_path = venv_dir / "texts.json"
     texts_path.write_text(json.dumps({"slides": texts}), encoding="utf-8")
@@ -189,6 +335,7 @@ def candidate_embeddings(
                 model,
                 cache_dir,
                 str(out),
+                str(batch),
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -212,13 +359,17 @@ def compare(
     n_slides: int,
     sim_mean_threshold: float = DEFAULT_SIM_MEAN_THRESHOLD,
     decision_match_threshold: float = DEFAULT_DECISION_MATCH_THRESHOLD,
-) -> dict[str, float | str]:
+) -> dict[str, float | str | bool]:
     """Confronta baseline vs candidata sugli stessi testi.
 
     - cosine per vettore (le righe sono gli stessi testi in ordine);
     - stabilita' della decisione di sync: con i primi `n_slides` come slide e
       il resto come blocchi, calcola la matrice (B,N), lo z-score per colonna
-      e la frazione di blocchi in cui l'argmax (slide best) coincide.
+      e la frazione di blocchi in cui l'inizio della slide best coincide.
+
+    Se `monotonic_alignment` non produce un allineamento valido per una delle
+    due sequenze, `decision_match` e' 0 e il verdetto e' DIVERGENTE: il -1
+    usato come segnaposto non puo' essere interpretato come "stesse decisioni".
     """
     n = min(base.shape[0], cand.shape[0])
     base, cand = base[:n], cand[:n]
@@ -253,17 +404,24 @@ def compare(
     if candidates is None:
         raise ValueError("candidates non costruibili: blocchi insufficienti")
 
-    def real_starts(sim: np.ndarray) -> np.ndarray:
+    def real_starts(sim: np.ndarray) -> np.ndarray | None:
         znorm = zscore_matrix(sim)
         comp = competition_matrix(znorm)
         starts = monotonic_alignment(comp, candidates, min_gap)
         if starts is None:
-            return np.full(n_slides, -1)
+            return None
         return np.asarray(starts, dtype=int)
 
     base_start = real_starts(base_sim)
     cand_start = real_starts(cand_sim)
-    match = float((base_start == cand_start).mean()) if base_start.size else 1.0
+    # Allineamento fallito = esito non confrontabile, NON "tutti -1 uguali":
+    # forzare match=0 evita il falso EQUIVALENTE (task "verdetto falso").
+    if base_start is not None and cand_start is not None:
+        alignment_valid = True
+        match = float((base_start == cand_start).mean()) if base_start.size else 1.0
+    else:
+        alignment_valid = False
+        match = 0.0
 
     def zscore_best(sim: np.ndarray) -> np.ndarray:
         std = sim.std(axis=0)
@@ -276,7 +434,9 @@ def compare(
     argmax_match = float((base_best == cand_best).mean()) if base_best.size else 1.0
 
     verdict = "EQUIVALENTE" if (
-        cosine.mean() >= sim_mean_threshold and match >= decision_match_threshold
+        alignment_valid
+        and cosine.mean() >= sim_mean_threshold
+        and match >= decision_match_threshold
     ) else "DIVERGENTE"
 
     return {
@@ -287,6 +447,7 @@ def compare(
         "cosine_min": float(cosine.min()),
         "decision_match": match,
         "argmax_match": argmax_match,
+        "alignment_valid": alignment_valid,
         "verdict": str(verdict),
         "threshold_sim_mean": float(sim_mean_threshold),
         "threshold_decision_match": float(decision_match_threshold),
@@ -294,12 +455,80 @@ def compare(
 
 
 # =====================================================================
+# Versione candidata (stessa regola del flusso automatico)
+# =====================================================================
+def _fallback_latest_compatible(data: dict) -> str | None:
+    """Fallback equivalente a `updates._latest_compatible` se updates non importa.
+
+    Esclude release con tutti i file yanked, pre-release e quelle il cui
+    `requires_python` non contiene il Python corrente: la vecchia lettura di
+    `info.version` poteva proporre una versione che pip non installerebbe.
+    """
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import InvalidVersion, Version
+
+    best: tuple[Any, str] | None = None
+    for version_str, files in data.get("releases", {}).items():
+        validi = [f for f in files if not f.get("yanked")] if files else []
+        if not validi:
+            continue
+        try:
+            version = Version(version_str)
+        except InvalidVersion:
+            continue
+        if version.is_prerelease:
+            continue
+        requires_python = next((f.get("requires_python") for f in validi if f.get("requires_python")), None)
+        if requires_python and not SpecifierSet(requires_python).contains(
+            f"{sys.version_info.major}.{sys.version_info.minor}"
+        ):
+            continue
+        if best is None or version > best[0]:
+            best = (version, version_str)
+    return best[1] if best else None
+
+
+def _candidate_version_from_pypi() -> str | None:
+    """Ultima versione INSTALLABILE di fastembed (regola condivisa con updates.py)."""
+    try:
+        # Import locale: updates importa questo script solo dentro una funzione,
+        # quindi non c'e' dipendenza circolare al livello dei moduli.
+        from updates import _fetch_pypi_json, _latest_compatible
+    except ImportError:
+        import urllib.request
+
+        try:
+            req = urllib.request.Request(
+                "https://pypi.org/pypi/fastembed/json",
+                headers={"User-Agent": "slide2video-update-check/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return _fallback_latest_compatible(data)
+        except Exception:
+            return None
+
+    data = _fetch_pypi_json("fastembed")
+    if data is None:
+        return None
+    try:
+        return _latest_compatible(data)
+    except Exception:
+        return None
+
+
+# =====================================================================
 # CLI
 # =====================================================================
 def main(argv: list | None = None) -> int:
     parser = argparse.ArgumentParser(description="Test A/B isolato fastembed")
-    parser.add_argument("--candidate", default=None, help="Versione candidata (default: ultima PyPI)")
+    parser.add_argument("--candidate", default=None, help="Versione candidata (default: ultima installabile su PyPI)")
     parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument(
+        "--cache-dir",
+        default=None,
+        help="Cartella cache della run (default: config.CACHE_DIR); i modelli stanno in <dir>/embedding_model",
+    )
     parser.add_argument("--report", default=str(CACHE_DIR / "fastembed_ab.json"))
     parser.add_argument("--keep-venv", action="store_true", help="Non cancellare la venv temporanea")
     parser.add_argument("--sim-mean", type=float, default=DEFAULT_SIM_MEAN_THRESHOLD)
@@ -311,31 +540,39 @@ def main(argv: list | None = None) -> int:
         return 2
 
     if args.candidate is None:
-        import urllib.request
-
-        try:
-            with urllib.request.urlopen("https://pypi.org/pypi/fastembed/json", timeout=15) as r:
-                args.candidate = json.load(r)["info"]["version"]
-        except Exception as e:
-            print(f"ERRORE: non riesco a determinare l'ultima versione: {e}", file=sys.stderr)
+        args.candidate = _candidate_version_from_pypi()
+        if args.candidate is None:
+            print(
+                "ERRORE: non riesco a determinare l'ultima versione INSTALLABILE di fastembed "
+                "(rete assente o nessuna release compatibile).",
+                file=sys.stderr,
+            )
             return 3
 
-    texts = collect_real_texts()
+    cache_dir = Path(args.cache_dir) if args.cache_dir else None
+    texts = collect_real_texts(cache_dir=cache_dir)
     if texts is None or not texts["slides"] or not texts["blocks"]:
-        print("ERRORE: nessun dato reale in .cache (slides_*.json / transcript_*.json).", file=sys.stderr)
+        print("ERRORE: nessun dato reale coerente in cache (slides_*.json / transcript_*.json).", file=sys.stderr)
         return 4
 
-    print(f"[Test A/B fastembed] baseline installata vs candidata {args.candidate}")
+    batch = DEFAULT_EMBED_BATCH
+    print(f"[Test A/B fastembed] baseline installata vs candidata {args.candidate} (batch={batch})")
     print(f"  Testi reali: {len(texts['slides'])} slide, {len(texts['blocks'])} blocchi")
 
+    # La cache dei modelli e' derivata da quella della run, come in config.py
+    # (a meno di EMBEDDING_CACHE_DIR); updates.py la passa esplicita alla candidata.
+    embedding_cache = _embedding_cache_dir(cache_dir / "embedding_model" if cache_dir else None)
+
     all_texts = texts["slides"] + texts["blocks"]
-    base = baseline_embeddings(all_texts, model=args.model)
+    base = baseline_embeddings(all_texts, model=args.model, cache_dir=embedding_cache)
     if base is None:
         print("ERRORE: baseline non calcolata.", file=sys.stderr)
         return 5
     print(f"  Baseline ({base.shape[0]}x{base.shape[1]}) OK")
 
-    cand, venv_dir = candidate_embeddings(all_texts, args.candidate, model=args.model)
+    cand, venv_dir = candidate_embeddings(
+        all_texts, args.candidate, model=args.model, cache_dir=embedding_cache, batch_size=batch
+    )
     if cand is None:
         print("ERRORE: candidata non calcolata (venv/install o embedding falliti).", file=sys.stderr)
         return 6
@@ -343,7 +580,12 @@ def main(argv: list | None = None) -> int:
 
     result = compare(base, cand, n_slides=len(texts["slides"]), sim_mean_threshold=args.sim_mean,
                      decision_match_threshold=args.decision_match)
-    result.update({"candidate": args.candidate, "model": args.model})
+    result.update({
+        "candidate": args.candidate,
+        "model": args.model,
+        "batch_size": batch,
+        "cache_dir": embedding_cache,
+    })
 
     report = Path(args.report)
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -353,6 +595,8 @@ def main(argv: list | None = None) -> int:
     print(f"  coseno medio  : {result['cosine_mean']:.4f} (min {result['cosine_min']:.4f})")
     print(f"  decision match: {result['decision_match']:.3f} ({result['n_blocks']:.0f} blocchi)")
     print(f"  argmax match  : {result['argmax_match']:.3f} (segnale grezzo per blocco)")
+    if not result["alignment_valid"]:
+        print("  allineamento  : FALLITO -> DIVERGENTE (match forzato a 0)")
     print(f"\n  VERDETTO: {result['verdict']}")
     print(f"  Report: {report}")
 

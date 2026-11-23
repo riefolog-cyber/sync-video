@@ -10,7 +10,11 @@ normalizzazione L2) cosi' baseline e candidata producono vettori
 confrontabili.
 
 Uso (chiamato da check_fastembed_upgrade.py, non a mano):
-  python scripts/_embed_candidate_worker.py <texts.json> <model> <cache_dir> <out.npy>
+  python _embed_candidate_worker.py <texts.json> <model> <cache_dir> <out.npy> [batch_size]
+
+Il batch_size e' passato dalla baseline: il padding e' per-batch, quindi se la
+candidata usasse un batch diverso i vettori non sarebbero confrontabili. Se
+omesso resta 64 (vecchia firma, usata solo per compatibilita').
 
 testi.json: {"texts": [...]} oppure {"slides": [...], "blocks": [...]}.
 """
@@ -36,11 +40,25 @@ def _normalized_embed(model: Any, texts: list[str], batch_size: int = 64) -> np.
 
 
 def main() -> int:
-    if len(sys.argv) != 5:
-        print("uso: _embed_candidate_worker.py <texts.json> <model> <cache_dir> <out.npy>", file=sys.stderr)
+    if len(sys.argv) not in (5, 6):
+        print(
+            "uso: _embed_candidate_worker.py <texts.json> <model> <cache_dir> <out.npy> [batch_size]",
+            file=sys.stderr,
+        )
         return 2
 
     texts_path, model, cache_dir, out = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+    # Stesso batch della baseline (config.DEFAULT_EMBED_BATCH): il padding del
+    # modello e' per-batch, quindi batch diversi => vettori non confrontabili.
+    try:
+        batch_size = int(sys.argv[5]) if len(sys.argv) == 6 else 64
+    except ValueError:
+        print("ERRORE: batch_size non valido", file=sys.stderr)
+        return 2
+    if batch_size < 1:
+        print("ERRORE: batch_size deve essere positivo", file=sys.stderr)
+        return 2
+
     with open(texts_path, encoding="utf-8") as f:
         data: dict[str, Any] = json.load(f)
 
@@ -49,7 +67,7 @@ def main() -> int:
     from fastembed import TextEmbedding
 
     embed_model = TextEmbedding(model_name=model, cache_dir=cache_dir)
-    emb = _normalized_embed(embed_model, texts)
+    emb = _normalized_embed(embed_model, texts, batch_size=batch_size)
     np.save(out, emb)
     print(f"OK {emb.shape[0]}x{emb.shape[1]} -> {out}")
     return 0

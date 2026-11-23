@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import unittest
+from unittest import mock
 
 import controlli
 from hardware import project_root
@@ -105,6 +106,35 @@ class TestControlliCopronoLaCi(unittest.TestCase):
                 if arg == "--platform" and i + 1 < len(argomenti):
                     piattaforme.add(argomenti[i + 1])
         self.assertEqual(piattaforme, {"win32", "linux", "darwin"})
+
+
+class TestTimeoutFigli(unittest.TestCase):
+    """Nessun passo puo' restare appeso per sempre senza un KO che lo spieghi."""
+
+    def test_ogni_passo_ha_un_timeout(self) -> None:
+        for controllo in controlli._passi():
+            with self.subTest(passo=controllo.nome):
+                self.assertGreater(controllo.timeout, 0)
+
+    def test_timeout_diventa_ko_con_motivo(self) -> None:
+        import subprocess
+
+        controllo = controlli.Controllo("finto", ["finto"], "prova", timeout=7)
+        errore = subprocess.TimeoutExpired(["finto"], 7, output=b"output parziale")
+        with mock.patch("controlli.subprocess.run", side_effect=errore):
+            esito = controlli._esegui(controllo)
+        self.assertNotEqual(esito.codice, 0)
+        self.assertIn("TIMEOUT", esito.output)
+        self.assertIn("7s", esito.output)
+        self.assertIn("output parziale", esito.output)
+
+    def test_il_timeout_viene_passato_al_figlio(self) -> None:
+        controllo = controlli.Controllo("finto", ["finto"], "prova", timeout=42)
+        con_esito = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("controlli.subprocess.run", return_value=con_esito) as run:
+            esito = controlli._esegui(controllo)
+        self.assertEqual(esito.codice, 0)
+        self.assertEqual(run.call_args.kwargs["timeout"], 42)
 
 
 if __name__ == "__main__":

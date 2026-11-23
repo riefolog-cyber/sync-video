@@ -8,11 +8,15 @@ Esegui con: python -m unittest test_updates -v
 
 import json
 import subprocess
+import sys
 import tempfile
+import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import config
 import updates
 
 
@@ -26,6 +30,21 @@ class _TempCacheMixin:
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(self.tmp_dir.cleanup)
+        # Il controllo su cache hit riverifica l'installata di ogni voce: nei
+        # test la cache e' l'unica fonte di verita' (nessuna installazione reale).
+        def installed_da_cache(pip_name):
+            try:
+                dati = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+            for voce in dati.get("outdated", []):
+                if voce.get("name") == pip_name:
+                    return voce.get("installed")
+            return None
+
+        patcher = mock.patch("updates._installed_version", side_effect=installed_da_cache)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
 
 class TestInstalledVersion(unittest.TestCase):
@@ -60,7 +79,11 @@ class TestInstalledConstraints(unittest.TestCase):
             self.requires = requires
 
     def _scan(self, dists):
-        with mock.patch("updates.importlib.metadata.distributions", return_value=dists):
+        # Qui si verifica la sola metadata installata: i vincoli del progetto
+        # hanno test dedicati, altrimenti si sommerebbero a ogni asserzione.
+        with mock.patch("updates.importlib.metadata.distributions", return_value=dists), mock.patch(
+            "updates._project_constraints", return_value={}
+        ):
             return updates._installed_constraints()
 
     def test_raccoglie_gli_specifier(self):
@@ -138,6 +161,45 @@ class TestBlockers(unittest.TestCase):
 
     def test_nome_normalizzato(self):
         self.assertEqual(len(updates._blockers("Pillow", "12.3.0", self._vincoli())), 2)
+
+
+class TestProjectConstraints(unittest.TestCase):
+    """I cap di requirements.txt/config._REQUIRED_PACKAGES vanno visti dal bloccante.
+
+    La metadata installata dice cosa regge insieme, ma il tetto `av<19` (o
+    `pillow<11`) e' dichiarato dal progetto: senza leggerlo, un upgrade che lo
+    viola veniva annunciato come installabile.
+    """
+
+    def test_vincoli_da_requirements_e_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            req = Path(tmp) / "requirements.txt"
+            req.write_text(
+                "# commento\n"
+                "av>=12,<19\n"
+                "pillow>=10.0.0,<11\n"
+                "fastembed==0.5.1\n"
+                "foo<1; python_version < '2.0'\n",
+                encoding="utf-8",
+            )
+            with mock.patch("updates.BASE_DIR", Path(tmp)), mock.patch(
+                "updates.importlib.metadata.distributions", return_value=[]
+            ):
+                vincoli = updates._installed_constraints()
+        self.assertIn(("requirements.txt", "", "<19,>=12"), vincoli["av"])
+        self.assertIn(("config._REQUIRED_PACKAGES", "", "<19,>=12"), vincoli["av"])
+        self.assertTrue(any(sorgente == "requirements.txt" for sorgente, _, _ in vincoli["pillow"]))
+        # I pin == non sono blocchi: sono gestiti da `pinned` e dal test A/B.
+        self.assertNotIn("fastembed", vincoli)
+        # Marker che non vale qui: nessun vincolo inventato.
+        self.assertNotIn("foo", vincoli)
+
+    def test_candidata_che_viola_un_cap_del_progetto_e_bloccata(self):
+        vincoli = {"av": [("requirements.txt", "", "<19,>=12")]}
+        motivi = updates._blockers("av", "19.0.1", vincoli)
+        self.assertEqual(len(motivi), 1)
+        self.assertIn("requirements.txt", motivi[0])
+        self.assertIn("<19", motivi[0])
 
 
 class TestCheckUpdates(_TempCacheMixin, unittest.TestCase):
@@ -221,6 +283,73 @@ class TestCheckUpdates(_TempCacheMixin, unittest.TestCase):
             result = updates.check_updates(ttl_hours=6)
         scan.assert_called_once()
         self.assertGreater(len(result), 1)
+
+    def test_cap_del_progetto_blocca_l_upgrade(self):
+        """av 19 e' fuori dal cap `av<19`: va marcato blocked senza metadata di terzi."""
+        self.cache_path.write_text(json.dumps({"ts": 0, "outdated": []}), encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "requirements.txt").write_text("av>=12,<19\n", encoding="utf-8")
+            with mock.patch("updates.BASE_DIR", Path(tmp)), mock.patch(
+                "updates.importlib.metadata.distributions", return_value=[]
+            ), mock.patch(
+                "updates._latest_version_pypi", side_effect=lambda p: "19.0.1" if p == "av" else None
+            ), mock.patch("updates._installed_version", side_effect=lambda p: "18.0.1" if p == "av" else None):
+                result = updates.check_updates(ttl_hours=6)
+        self.assertEqual([d["name"] for d in result], ["av"])
+        self.assertTrue(any("requirements.txt" in motivo for motivo in result[0]["blocked"]))
+
+    def test_cache_hit_con_installata_cambiata_non_riutilizza_la_voce(self):
+        """Entro TTL, ma l'installata non e' piu' quella del report: la voce e' stale."""
+        self.cache_path.write_text(
+            json.dumps(
+                {
+                    "ts": 1e15,
+                    "outdated": [{"name": "numpy", "installed": "1.0.0", "latest": "9.9.9"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch("updates._installed_version", return_value="2.0.0"), mock.patch(
+            "updates._latest_version_pypi"
+        ) as net:
+            result = updates.check_updates(ttl_hours=6)
+        net.assert_not_called()
+        self.assertEqual(result, [])
+
+    def test_installed_none_non_e_conteggiato_come_errore_rete(self):
+        """Pacchetto non installato: si salta, senza avvisare che PyPI e' down."""
+        self.cache_path.write_text(json.dumps({"ts": 0, "outdated": []}), encoding="utf-8")
+        with mock.patch("updates._latest_version_pypi", return_value="9.9.9"), mock.patch(
+            "updates._installed_version", return_value=None
+        ), mock.patch("updates.log") as log:
+            result = updates.check_updates(ttl_hours=6)
+        self.assertEqual(result, [])
+        avvisi = " ".join(str(a) for c in log.warning.call_args_list for a in c.args)
+        self.assertNotIn("PyPI non raggiungibile", avvisi)
+
+    def test_latest_none_avvisa_e_non_scrive_cache(self):
+        """Solo `latest is None` (PyPI muto) fa scattare l'avviso di rete."""
+        self.cache_path.write_text(json.dumps({"ts": 0, "outdated": []}), encoding="utf-8")
+        with mock.patch("updates._latest_version_pypi", return_value=None), mock.patch(
+            "updates._installed_version", return_value="1.0.0"
+        ), mock.patch("updates.log") as log:
+            result = updates.check_updates(ttl_hours=6)
+        self.assertEqual(result, [])
+        avvisi = " ".join(str(a) for c in log.warning.call_args_list for a in c.args)
+        self.assertIn("PyPI non raggiungibile", avvisi)
+
+
+class TestReadCache(_TempCacheMixin, unittest.TestCase):
+    def test_timestamp_stringa_restituisce_cache_vuota(self):
+        """Un ts non numerico faceva TypeError e bloccava main()."""
+        self.cache_path.write_text(
+            json.dumps({"ts": "non-un-numero", "outdated": [{"name": "x"}]}), encoding="utf-8"
+        )
+        self.assertEqual(updates._read_cache(), {})
+
+    def test_timestamp_numerico_valido(self):
+        self.cache_path.write_text(json.dumps({"ts": 1e15, "outdated": []}), encoding="utf-8")
+        self.assertEqual(updates._read_cache()["ts"], 1e15)
 
 
 class TestIsNewer(unittest.TestCase):
@@ -749,8 +878,28 @@ class TestRunUpdateCheck(_TempCacheMixin, unittest.TestCase):
             "updates._run_pinned_ab_test", return_value=None
         ):
             updates.run_update_check(ttl_hours=6, ask_to_update=True)
-        upg.assert_called_once_with(["numpy"])
+        upg.assert_called_once_with(["numpy==2"])
         self.assertFalse(self.cache_path.exists())
+
+    def test_upgrade_fallito_non_invalida_la_cache(self):
+        """Con health-check ko la cache resta: non si perde il controllo gia' fatto."""
+        self.cache_path.write_text(
+            json.dumps(
+                {
+                    "ts": 1e15,
+                    "outdated": [
+                        {"name": "numpy", "installed": "1", "latest": "2", "pinned": False, "note": ""},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch("builtins.input", return_value="s"), mock.patch(
+            "updates._pip_upgrade", return_value=False
+        ) as upg:
+            updates.run_update_check(ttl_hours=6, ask_to_update=True)
+        upg.assert_called_once_with(["numpy==2"])
+        self.assertTrue(self.cache_path.exists())
 
     def test_pinned_equivalent_included_in_upgrade(self):
         self.cache_path.write_text(
@@ -768,7 +917,7 @@ class TestRunUpdateCheck(_TempCacheMixin, unittest.TestCase):
             "updates._run_pinned_ab_test", return_value="EQUIVALENTE"
         ), mock.patch("updates._aggiorna_pin") as pin:
             updates.run_update_check(ttl_hours=6, ask_to_update=True)
-        upg.assert_called_once_with(["fastembed"])
+        upg.assert_called_once_with(["fastembed==2"])
         # Il pin va persistito, ma i test non devono mai scrivere davvero
         # requirements.txt né il file di override nella cache.
         pin.assert_called_once_with({"fastembed": "2"})
@@ -840,7 +989,7 @@ class TestRunUpdateCheck(_TempCacheMixin, unittest.TestCase):
         )
         with mock.patch("builtins.input", return_value="s"), mock.patch("updates._pip_upgrade") as upg:
             updates.run_update_check(ttl_hours=6, ask_to_update=True)
-        upg.assert_called_once_with(["tqdm"])
+        upg.assert_called_once_with(["tqdm==1.1"])
 
     def test_prompt_no_skips(self):
         self.cache_path.write_text(
@@ -872,7 +1021,7 @@ class TestRunUpdateCheck(_TempCacheMixin, unittest.TestCase):
         self._cache_con_bloccato(solo_pillow=False)
         with mock.patch("builtins.input", return_value="s"), mock.patch("updates._pip_upgrade") as upg:
             updates.run_update_check(ttl_hours=6, ask_to_update=True)
-        upg.assert_called_once_with(["tqdm"])
+        upg.assert_called_once_with(["tqdm==4.67.0"])
 
     def test_ab_script_esiste_dove_lo_cerca_il_test(self):
         """Il percorso dello script A/B deve esistere davvero.
@@ -1079,12 +1228,33 @@ class TestPipUpgrade(unittest.TestCase):
 
     def test_successo_mostra_la_riga_di_pip(self):
         res = self._risultato(0, stdout="Successfully installed numpy-1.26.4")
-        with mock.patch("updates.subprocess.run", return_value=res) as run, mock.patch("updates.log") as log:
-            self.assertTrue(updates._pip_upgrade(["numpy"]))
+        with mock.patch("updates.subprocess.run", return_value=res) as run, mock.patch(
+            "updates._health_check", return_value=True
+        ), mock.patch("updates.log") as log:
+            self.assertTrue(updates._pip_upgrade(["numpy==1.26.4"]))
         comando = run.call_args.args[0]
-        self.assertEqual(comando[-2:], ["-U", "numpy"])
+        self.assertEqual(comando[-1], "numpy==1.26.4")
         messaggi = " ".join(str(argomento) for chiamata in log.info.call_args_list for argomento in chiamata.args)
         self.assertIn("Successfully installed numpy-1.26.4", messaggi)
+
+    def test_upgrade_strategy_only_if_needed_e_requisiti_completi(self):
+        """Mai `-U nome` nudo: pip deve mirare alla versione annunciata."""
+        res = self._risultato(0, stdout="Successfully installed numpy-9.9.9")
+        with mock.patch("updates.subprocess.run", return_value=res) as run, mock.patch(
+            "updates._health_check", return_value=True
+        ), mock.patch("updates.log"):
+            self.assertTrue(updates._pip_upgrade(["numpy==9.9.9"]))
+        comando = run.call_args.args[0]
+        self.assertEqual(comando[4:], ["-U", "--upgrade-strategy", "only-if-needed", "numpy==9.9.9"])
+
+    def test_health_check_fallito_restituisce_false(self):
+        """Exit 0 di pip non basta: se il controllo fallisce l'upgrade non e' riuscito."""
+        res = self._risultato(0, stdout="Successfully installed numpy-9.9.9")
+        with mock.patch("updates.subprocess.run", return_value=res), mock.patch(
+            "updates._health_check", return_value=False
+        ) as check, mock.patch("updates.log"):
+            self.assertFalse(updates._pip_upgrade(["numpy==9.9.9"]))
+        check.assert_called_once_with(["numpy==9.9.9"])
 
     def test_fallimento_mostra_le_ultime_righe_di_pip(self):
         # prima si vedeva solo "non-zero exit status 1": inutile per capire se
@@ -1109,6 +1279,296 @@ class TestPipUpgrade(unittest.TestCase):
             "updates.subprocess.run", side_effect=subprocess.TimeoutExpired("pip", 900)
         ), mock.patch("updates.log"):
             self.assertFalse(updates._pip_upgrade(["numpy"]))
+
+
+class TestHealthCheck(unittest.TestCase):
+    def test_pip_check_ko_restituisce_false(self):
+        res = mock.Mock(returncode=1, stdout="", stderr="numpy 1.0.0 requires pandas<2")
+        with mock.patch.object(updates.importlib, "import_module"), mock.patch.object(
+            updates.subprocess, "run", return_value=res
+        ) as run, mock.patch.object(updates, "log"):
+            self.assertFalse(updates._health_check(["numpy==2"]))
+        self.assertEqual(run.call_args.args[0][-1], "check")
+
+    def test_import_ko_restituisce_false_senza_pip_check(self):
+        with mock.patch.object(
+            updates.importlib, "import_module", side_effect=ImportError("DLL load failed")
+        ), mock.patch.object(updates.subprocess, "run") as run, mock.patch.object(updates, "log"):
+            self.assertFalse(updates._health_check(["av==18.0.0"]))
+        run.assert_not_called()
+
+    def test_tutto_ok(self):
+        with mock.patch.object(updates.importlib, "import_module"), mock.patch.object(
+            updates.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="", stderr="")
+        ), mock.patch.object(updates, "log"):
+            self.assertTrue(updates._health_check(["numpy==2"]))
+
+
+class TestUpgradeRequirement(unittest.TestCase):
+    def test_versione_nota_diventa_requirement(self):
+        self.assertEqual(
+            updates._upgrade_requirement({"name": "numpy", "latest": "1.26.4"}), "numpy==1.26.4"
+        )
+
+    def test_versione_non_parseabile_resta_nome_nudo(self):
+        self.assertEqual(updates._upgrade_requirement({"name": "numpy", "latest": "boh"}), "numpy")
+
+
+class TestPinNote(unittest.TestCase):
+    """La nota del pinnato deve seguire il pin aggiornato da `_aggiorna_pin`."""
+
+    def test_nota_usa_il_pin_attuale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "requirements.txt").write_text(
+                "fastembed==0.6.0; python_version >= '3.10'  # commento\n", encoding="utf-8"
+            )
+            with mock.patch("updates.BASE_DIR", Path(tmp)):
+                nota = updates._pin_note("fastembed")
+        self.assertEqual(nota, "pinnato a 0.6.0: embedding e5-large validati A/B")
+
+    def test_senza_pin_resta_la_nota_storica(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("updates.BASE_DIR", Path(tmp)):
+            self.assertEqual(updates._pin_note("fastembed"), updates._PINNED["fastembed"])
+
+
+class TestRequiresPythonCompleto(unittest.TestCase):
+    """Un `>=3.10.3` va accettato su 3.10.5, e basta una wheel compatibile."""
+
+    def test_confronto_sulla_versione_completa(self):
+        with mock.patch("updates.platform.python_version", return_value="3.10.5"):
+            data = _pypi(**{"2.0.0": [_file(requires_python=">=3.10.3")]})
+            self.assertEqual(updates._all_compatible_versions(data), ["2.0.0"])
+
+    def test_basta_un_file_non_yanked_compatibile(self):
+        with mock.patch("updates.platform.python_version", return_value="3.10.5"):
+            data = _pypi(
+                **{
+                    "2.0.0": [
+                        _file(requires_python=">=3.99"),
+                        _file(requires_python=">=3.10.3"),
+                    ]
+                }
+            )
+            self.assertEqual(updates._latest_compatible(data), "2.0.0")
+
+    def test_tutti_i_file_incompatibili_escludono_la_release(self):
+        with mock.patch("updates.platform.python_version", return_value="3.10.5"):
+            data = _pypi(
+                **{
+                    "2.0.0": [
+                        _file(requires_python=">=3.99"),
+                        _file(requires_python=">=3.11"),
+                    ]
+                }
+            )
+            self.assertIsNone(updates._latest_compatible(data))
+
+
+class _AbFake(types.ModuleType):
+    """Lo script A/B finto: nessuna venv e nessun modello davvero coinvolti."""
+
+    def __init__(self, cand="embedding", venv=None):
+        super().__init__("check_fastembed_upgrade")
+        self.DEFAULT_SIM_MEAN_THRESHOLD = 0.90
+        self.DEFAULT_DECISION_MATCH_THRESHOLD = 0.95
+        self.cand = cand
+        self.venv = venv
+        self.candidate_calls = 0
+
+    def collect_real_texts(self):
+        return {"slides": ["slide"], "blocks": ["blocco"]}
+
+    def baseline_embeddings(self, texts, model):
+        return "baseline"
+
+    def candidate_embeddings(self, texts, candidate, model, cache_dir):
+        self.candidate_calls += 1
+        return self.cand, self.venv
+
+    def compare(self, base, cand, n_slides):
+        return {
+            "cosine_mean": 0.99,
+            "decision_match": 1.0,
+            "argmax_match": 1.0,
+            "n_blocks": 1,
+            "verdict": "EQUIVALENTE",
+            "threshold_sim_mean": self.DEFAULT_SIM_MEAN_THRESHOLD,
+            "threshold_decision_match": self.DEFAULT_DECISION_MATCH_THRESHOLD,
+        }
+
+
+class _AbTestBase(unittest.TestCase):
+    MODELLO = "modello-di-test"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.cache_dir = self.root / "cache"
+        self.cache_dir.mkdir()
+        self.report_path = self.cache_dir / "fastembed_ab.json"
+        for target, valore in (
+            ("updates.CACHE_DIR", self.cache_dir),
+            ("updates.BASE_DIR", self.root),
+        ):
+            patcher = mock.patch(target, valore)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for nome, valore in (
+            ("DEFAULT_EMBEDDING_MODEL", self.MODELLO),
+            ("DEFAULT_EMBEDDING_CACHE_DIR", str(self.cache_dir / "embeddings")),
+            ("DEFAULT_EMBED_BATCH", 32),
+        ):
+            patcher = mock.patch.object(config, nome, valore)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.ab = _AbFake()
+        patcher = mock.patch.dict(sys.modules, {"check_fastembed_upgrade": self.ab})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        vecchio_path = list(sys.path)
+
+        def ripristina_path():
+            sys.path[:] = vecchio_path
+
+        self.addCleanup(ripristina_path)
+        self.pkg = {"name": "fastembed", "installed": "0.5.1", "latest": "0.8.0", "pinned": True}
+
+    def _report(self, **modifiche):
+        report = {
+            "candidate": "0.8.0",
+            "model": self.MODELLO,
+            "installed": "0.5.1",
+            "texts_hash": updates._hash_texts(["slide", "blocco"]),
+            "threshold_sim_mean": 0.90,
+            "threshold_decision_match": 0.95,
+            "batch_size": 32,
+            "ts": time.time(),
+            "verdict": "DIVERGENTE",
+        }
+        report.update(modifiche)
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+
+
+class TestAbReportCache(_AbTestBase):
+    """Il verdetto si riusa solo se il contesto e' identico e il report e' fresco."""
+
+    def test_report_valido_riutilizza_il_verdetto(self):
+        self._report()
+        with mock.patch("updates.log"):
+            self.assertEqual(updates._run_pinned_ab_test(self.pkg), "DIVERGENTE")
+        self.assertEqual(self.ab.candidate_calls, 0)
+
+    def test_installata_di_partenza_diversa_non_riutilizza(self):
+        self._report(installed="0.4.0")
+        with mock.patch("updates.log"):
+            self.assertEqual(updates._run_pinned_ab_test(self.pkg), "EQUIVALENTE")
+        self.assertEqual(self.ab.candidate_calls, 1)
+
+    def test_soglie_diverse_non_riutilizzano(self):
+        self._report(threshold_sim_mean=0.5)
+        with mock.patch("updates.log"):
+            self.assertEqual(updates._run_pinned_ab_test(self.pkg), "EQUIVALENTE")
+        self.assertEqual(self.ab.candidate_calls, 1)
+
+    def test_testi_diversi_non_riutilizzano(self):
+        self._report(texts_hash="hash-di-altri-testi")
+        with mock.patch("updates.log"):
+            self.assertEqual(updates._run_pinned_ab_test(self.pkg), "EQUIVALENTE")
+        self.assertEqual(self.ab.candidate_calls, 1)
+
+    def test_batch_diverso_non_riutilizza(self):
+        # Baseline e candidata con padding per-batch diverso non sono confrontabili.
+        self._report(batch_size=8)
+        with mock.patch("updates.log"):
+            self.assertEqual(updates._run_pinned_ab_test(self.pkg), "EQUIVALENTE")
+        self.assertEqual(self.ab.candidate_calls, 1)
+
+    def test_report_scaduto_non_riutilizza(self):
+        self._report(ts=time.time() - 8 * 86400)
+        with mock.patch("updates.log"):
+            self.assertEqual(updates._run_pinned_ab_test(self.pkg), "EQUIVALENTE")
+        self.assertEqual(self.ab.candidate_calls, 1)
+
+    def test_report_senza_i_campi_nuovi_non_riutilizza(self):
+        # I report scritti prima di questa correzione non hanno installed/hash/ts.
+        self._report()
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        for chiave in ("installed", "texts_hash", "ts", "threshold_sim_mean", "threshold_decision_match"):
+            report.pop(chiave, None)
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        with mock.patch("updates.log"):
+            self.assertEqual(updates._run_pinned_ab_test(self.pkg), "EQUIVALENTE")
+        self.assertEqual(self.ab.candidate_calls, 1)
+
+    def test_report_creato_contiene_i_campi_di_validazione(self):
+        with mock.patch("updates.log"):
+            self.assertEqual(updates._run_pinned_ab_test(self.pkg), "EQUIVALENTE")
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["installed"], "0.5.1")
+        self.assertEqual(report["texts_hash"], updates._hash_texts(["slide", "blocco"]))
+        self.assertEqual(report["candidate"], "0.8.0")
+        self.assertEqual(report["model"], self.MODELLO)
+        self.assertEqual(report["threshold_sim_mean"], 0.90)
+        self.assertEqual(report["threshold_decision_match"], 0.95)
+        self.assertEqual(report["batch_size"], 32)
+        self.assertIsInstance(report["ts"], float)
+
+
+class TestAbVenvCleanup(_AbTestBase):
+    """La venv temporanea creata da candidate_embeddings va sempre rimossa."""
+
+    def _venv(self):
+        venv = self.root / "venv_temporanea"
+        venv.mkdir()
+        (venv / "sentinel.txt").write_text("x", encoding="utf-8")
+        return venv
+
+    def test_venv_rimossa_se_candidata_fallisce(self):
+        venv = self._venv()
+        self.ab.cand = None
+        self.ab.venv = venv
+        with mock.patch("updates.log"):
+            self.assertIsNone(updates._run_pinned_ab_test(self.pkg))
+        self.assertFalse(venv.exists())
+
+    def test_venv_rimossa_anche_se_test_riesce(self):
+        venv = self._venv()
+        self.ab.venv = venv
+        with mock.patch("updates.log"):
+            self.assertEqual(updates._run_pinned_ab_test(self.pkg), "EQUIVALENTE")
+        self.assertFalse(venv.exists())
+
+
+class TestAggiornaPin(unittest.TestCase):
+    """Il pin si aggiorna SOLO sui file temporanei, non su quelli del repo."""
+
+    def test_modifica_solo_il_numero_e_scrive_override(self):
+        req_reale = Path(__file__).resolve().parent.parent / "requirements.txt"
+        contenuto_reale = req_reale.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            req = root / "requirements.txt"
+            req.write_text(
+                "# commento da preservare\n"
+                "fastembed==0.5.1; python_version >= '3.10'  # nota da preservare\n"
+                "numpy>=1.26.0\n",
+                encoding="utf-8",
+            )
+            cache = root / ".cache"
+            cache.mkdir()
+            with mock.patch("updates.BASE_DIR", root), mock.patch("updates.CACHE_DIR", cache), mock.patch(
+                "updates.log"
+            ):
+                updates._aggiorna_pin({"fastembed": "0.6.0"})
+            testo = req.read_text(encoding="utf-8")
+            self.assertIn("fastembed==0.6.0; python_version >= '3.10'  # nota da preservare", testo)
+            self.assertIn("# commento da preservare", testo)
+            self.assertIn("numpy>=1.26.0", testo)
+            self.assertNotIn("0.5.1", testo)
+            override = cache / "pin_overrides.json"
+            self.assertEqual(json.loads(override.read_text(encoding="utf-8")), {"fastembed": "0.6.0"})
+        self.assertEqual(req_reale.read_text(encoding="utf-8"), contenuto_reale)
 
 
 if __name__ == "__main__":

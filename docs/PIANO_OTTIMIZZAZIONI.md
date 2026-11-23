@@ -5,10 +5,10 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 10 (la prova sul materiale reale), dopo il batch 5
-(audit completo del codice: 6 difetti corretti e 7 ottimizzazioni misurate) e la
-chiusura del piano (P2 #11 archiviata come non consigliata, primo avvio automatico
-di Python su Windows).
+Ultimo aggiornamento: batch 11 (la revisione del codice), dopo il batch 10
+(la prova sul materiale reale) e il batch 5 (audit completo del codice: 6 difetti
+corretti e 7 ottimizzazioni misurate), con la chiusura del piano (P2 #11
+archiviata come non consigliata, primo avvio automatico di Python su Windows).
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -273,7 +273,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1297 test).
+`python -m unittest discover -s src -p "test_*.py"` (1388 test).
 
 ## Stato delle voci
 

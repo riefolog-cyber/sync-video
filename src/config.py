@@ -731,10 +731,15 @@ _CUDA_RUNTIME_LIBS = {
 }
 
 # Testo unico per log e referto: il rimedio e' lo stesso ovunque compaia.
+# `py -m pip` puntava al Python di sistema, ma il programma gira nella venv:
+# i pacchetti finivano altrove e l'errore ricompariva al run dopo. Qui si usa
+# l'interprete CHE STA GIRANDO, con le virgolette per i percorsi con spazi.
+_PIP_CUDA_LIBS = 'nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"'
 CUDA_LIBS_REMEDY = (
-    'Installa cuBLAS 12 e cuDNN 9 con: py -m pip install --upgrade '
-    'nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*", poi aggiungi al PATH le due '
-    "cartelle bin di nvidia/cublas e nvidia/cudnn e riapri la finestra "
+    "Installa cuBLAS 12 e cuDNN 9 con: "
+    f'"{sys.executable}" -m pip install --upgrade {_PIP_CUDA_LIBS}. '
+    "Su Windows puoi anche lanciare installa_cuda.bat, che li installa e "
+    "aggiorna il PATH. Poi riapri la finestra di comando "
     "(vedi docs/troubleshooting.md)."
 )
 
@@ -828,16 +833,36 @@ _BREW_ENV = {
 
 # Dimensioni dei modelli whisper misurate su questo progetto (cache
 # faster-whisper sull'hub HuggingFace), non stime: sono cioe' i byte che
-# l'utente vede comparire sul disco. Gli altri modelli non hanno una misura
-# affidabile qui, quindi per quelli non si scrive una cifra inventata.
-_DIMENSIONI_WHISPER = {"tiny": "~80 MB", "base": "~150 MB", "small": "~490 MB"}
+# l'utente vede comparire sul disco. Per una taglia standard senza misura
+# (es. turbo) vale il caso peggiore, non "nessun controllo": vedere sotto.
+_DIMENSIONI_WHISPER = {
+    "tiny": "~80 MB",
+    "base": "~150 MB",
+    "small": "~490 MB",
+    "medium": "~1.5 GB",
+    "large": "~3.1 GB",
+}
 
 # Stesse dimensioni in BYTE, per il controllo dello spazio libero. Vivono
 # qui accanto alle stringhe e non dentro di esse perche' una stringa "~6.4 GB"
 # va ri-parsata per ottenere un numero, e una parsata sbagliata (-> 64 byte,
 # per il punto e' lo stesso) fa fallire il controllo in silenzio. Il test
-# `test_bootstrap` confronta le due tabelle quindi non possono divergere.
-_BYTES_WHISPER = {"tiny": 80 * 1024**2, "base": 150 * 1024**2, "small": 490 * 1024**2}
+# `test_disco` confronta le due tabelle quindi non possono divergere.
+_BYTES_WHISPER = {
+    "tiny": 80 * 1024**2,
+    "base": 150 * 1024**2,
+    "small": 490 * 1024**2,
+    "medium": int(1.5 * 1024**3),
+    "large": int(3.1 * 1024**3),
+}
+
+# Una taglia standard che non e' ancora nelle tabelle (es. turbo) puo' essere
+# piu' grande di qualunque altra: il controllo dello spazio usa quindi la
+# misura peggiore invece di saltare il controllo. Un percorso locale o un repo
+# custom non ha una cartella prevedibile e resta fuori (_cache_whisper_faster
+# restituisce None): li' non c'e' niente da controllare.
+_BYTE_WHISPER_PEGGIOR_CASO = max(_BYTES_WHISPER.values())
+_DIMENSIONE_WHISPER_PEGGIOR_CASO = "~3.1 GB (stima massima)"
 
 # Dimensione su disco della cache embedding del modello di default. Sono i due
 # file che fastembed tiene (coppia "fast-" e ONNX), misurati: 2.1 + 4.3 GB. Il
@@ -956,10 +981,13 @@ def _modelli_mancanti_dettagliati(
         ))
     cache_whisper = _cache_whisper_faster(whisper_model)
     if cache_whisper is not None and not _gia_scaricato(cache_whisper):
+        # Taglia standard senza misura: caso peggiore, non un controllo saltato.
+        # Dire "non so" qui vorrebbe dire scoprire il disco pieno a download
+        # gia' iniziato, che e' il danno che il controllo deve evitare.
         mancanti.append((
             f"modello di trascrizione (whisper {whisper_model})",
-            _DIMENSIONI_WHISPER.get(whisper_model, ""),
-            _BYTES_WHISPER.get(whisper_model),
+            _DIMENSIONI_WHISPER.get(whisper_model, _DIMENSIONE_WHISPER_PEGGIOR_CASO),
+            _BYTES_WHISPER.get(whisper_model, _BYTE_WHISPER_PEGGIOR_CASO),
         ))
     return mancanti
 
@@ -998,6 +1026,11 @@ def _spazio_modelli_necessario(
     None se anche solo un modello non ha una dimensione misurata: preferisce
     non controllare lo spazio a controllarlo con una cifra inventata (che
     darebbe un falso senso di sicurezza peggio di nessun avviso).
+
+    Eccezione voluta: una taglia whisper STANDARD senza misura (es. turbo)
+    usa il caso peggiore tra quelli misurati, invece di saltare il controllo.
+    Resta None solo cio' che non si puo' nemmeno stimare (modello embedding
+    custom): li' non esiste un "peggior caso" attendibile.
     """
     totale = 0
     for _, _, byte in _modelli_mancanti_dettagliati(embedding_cache, whisper_model, embedding_model):
@@ -1037,6 +1070,44 @@ def _gia_scaricato(directory: Path) -> bool:
     except OSError:
         return False
     return True
+
+
+def openvino_model_complete(model_dir: Path | str | None) -> bool:
+    """True se la cartella contiene un modello IR OpenVINO COMPLETO.
+
+    Criterio unico, usato da chi scarica (``transcription``), da chi decide
+    (``machine_setup``) e da chi diagnostica (``openvino_usable``). Conta che
+    ci siano:
+
+    - ``config.json`` (la configurazione del modello);
+    - almeno un file ``.xml`` (grafo IR) e uno ``.bin`` (pesi) non vuoti;
+    - nessun file con suffisso di download interrotto.
+
+    ``exists()`` non bastava: ``snapshot_download`` interrotta lascia la
+    cartella e magari qualche file a meta', e da quel momento tutti la
+    consideravano valida per sempre (la pipeline caricava un IR troncato e
+    moriva con un errore che non nominava la causa). Una cartella vuota o
+    solo parziale va quindi riscaricata, non fidata.
+    """
+    if model_dir is None:
+        return False
+    directory = Path(model_dir)
+    try:
+        if not directory.is_dir():
+            return False
+        file = [p for p in directory.rglob("*") if p.is_file()]
+        if not file:
+            return False
+        if any(p.name.lower().endswith(_DOWNLOAD_INCOMPLETI) for p in file):
+            return False
+        config_json = directory / "config.json"
+        if not config_json.is_file() or config_json.stat().st_size == 0:
+            return False
+        grafo = any(p.suffix.lower() == ".xml" and p.stat().st_size > 0 for p in file)
+        pesi = any(p.suffix.lower() == ".bin" and p.stat().st_size > 0 for p in file)
+        return grafo and pesi
+    except OSError:
+        return False
 
 
 def _annuncia_primo_avvio(
@@ -1215,6 +1286,113 @@ def _try_system_install(name: str, winget_id: str, apt_pkg: str, brew_pkg: str) 
             print("❌ (package manager assente, tento alternativa)")
     _print_output_tail(ultimo_output, _SYSINSTALL_TAIL_LINES)
     return False
+
+
+def _ffmpeg_disponibile() -> bool:
+    """True se `ffmpeg -version` risponde (non basta "il comando esiste")."""
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+        return res.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _aggiorna_path_da_registro() -> None:
+    """Rilegge il PATH dal registro su Windows dopo un'installazione di sistema.
+
+    winget/Chocolatey mettono il binario in una cartella che aggiungono al
+    PATH *utente*, ma il processo corrente ha ereditato il PATH di quando e'
+    partito: senza questo aggiornamento `ffmpeg -version` non trova il
+    binario appena installato e il bootstrap lo dichiara mancante. Sugli altri
+    sistemi non c'e' nulla da fare.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import winreg
+
+        chiavi = (
+            (winreg.HKEY_CURRENT_USER, "Environment"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        )
+        nuove: list[str] = []
+        for radice, percorso in chiavi:
+            try:
+                with winreg.OpenKey(radice, percorso) as chiave:
+                    valore, _ = winreg.QueryValueEx(chiave, "Path")
+            except OSError:
+                # Una chiave assunta non deve cancellare l'altra: il PATH
+                # utente e' quello che conta per winget senza admin.
+                continue
+            if isinstance(valore, str):
+                nuove.extend(part for part in valore.split(os.pathsep) if part)
+        if nuove:
+            # Il PATH corrente va tenuto: puo' contenere cartelle della venv o
+            # aggiunte a mano che non sono nel registro.
+            unite = os.environ.get("PATH", "").split(os.pathsep) + nuove
+            visti: set[str] = set()
+            ordinati: list[str] = []
+            for parte in unite:
+                if parte and parte.lower() not in visti:
+                    visti.add(parte.lower())
+                    ordinati.append(parte)
+            os.environ["PATH"] = os.pathsep.join(ordinati)
+    except (ImportError, OSError):
+        return
+
+
+def _verifica_ffmpeg() -> None:
+    """Accerta che ffmpeg sia DAVVERA utilizzabile, anche dopo l'auto-install.
+
+    Il package manager puo' rispondere "ok" senza aver installato niente (feed
+    che risponde 504, visto nella CI del 19/10/2026), e il PATH del processo
+    puo' essere vecchio. Per questo il binario si ricontrolla SEMPRE dopo
+    `_try_system_install`, non solo quando quest'ultimo dice di aver fallito:
+    fidarsi del suo exit code e' il modo piu' rapido per arrivare a meta'
+    trascrizione e morire con FileNotFoundError.
+    """
+    if _ffmpeg_disponibile():
+        log.debug("   ffmpeg trovato.")
+        return
+    log.info("🔧 ffmpeg non trovato — tentativo auto-install...")
+    installato = _try_system_install(
+        "ffmpeg",
+        winget_id="Gyan.FFmpeg.Shared",
+        apt_pkg="ffmpeg",
+        brew_pkg="ffmpeg",
+    )
+    _aggiorna_path_da_registro()
+    if _ffmpeg_disponibile():
+        log.info("   ✅ ffmpeg disponibile e verificato con `ffmpeg -version`.")
+        return
+    # ffmpeg e' indispensabile: video.py lo lancia come processo per
+    # l'encoding (non e' una libreria linkata). Senza, la run arriva in fondo
+    # e muore con un FileNotFoundError dopo dieci minuti di trascrizione e
+    # OCR, che e' la diagnosi piu' lontana dalla causa che si possa immaginare.
+    # Tesseract, sopra, esce subito: qui si fa lo stesso.
+    esito_installazione = (
+        "Il package manager ha segnalato successo ma `ffmpeg -version` non risponde: "
+        "l'installazione non e' davvero disponibile (PATH vecchio o pacchetto non installato)."
+        if installato
+        else "Auto-install fallita."
+    )
+    log.error(
+        "\n❌ FFMPEG NON VERIFICATO — obbligatorio per montare il video.\n"
+        "   %s\n"
+        "   Scaricalo da: %s\n"
+        "   Oppure installalo con: winget install Gyan.FFmpeg.Shared\n"
+        "   (apt: `apt-get install ffmpeg` / brew: `brew install ffmpeg`)\n"
+        "   Poi rilancia genera_video.bat (dettagli: docs/troubleshooting.md).\n",
+        esito_installazione,
+        _FFMPEG_DOWNLOAD_URL,
+    )
+    sys.exit(1)
 
 
 # Righe di output mostrate quando un'installazione fallisce: abbastanza per
@@ -1544,19 +1722,22 @@ def _download_traineddata(url: str, dest: Path) -> None:
         raise
 
 
-def bootstrap(*, ignora_spazio: bool = False) -> None:
+def bootstrap(*, ignora_spazio: bool = False, whisper_model: str | None = None) -> None:
     """
     Verifica e installa automaticamente tutte le dipendenze.
     - Python >= 3.10
     - Pacchetti pip (auto-install)
     - Tesseract OCR (auto-install via winget/apt/brew)
-    - ffmpeg (auto-install via winget/apt/brew)
+    - ffmpeg (auto-install via winget/apt/brew, SEMPRE riverificato)
 
     Deve essere chiamata esplicitamente da main.py all'avvio.
 
     `ignora_spazio` (da `--ignora-spazio`) trasforma il blocco per disco
     insufficiente in un semplice avviso. Per default il download dei modelli
     non parte se lo spazio non c'è: vedi `_avvisa_spazio_insufficiente`.
+    `whisper_model` (da `--whisper-model`/WHISPER_MODEL) e' la taglia che la
+    run scaricera' davvero: il controllo dello spazio va fatto su QUELLA, non
+    sempre su `DEFAULT_WHISPER_MODEL` (medium/large pesano fino a 6x small).
     """
     # --- Python version ---
     if sys.version_info[:2] < _PYTHON_MIN:  # guardia runtime per utenti finali
@@ -1679,59 +1860,22 @@ def bootstrap(*, ignora_spazio: bool = False) -> None:
             os.environ["TESSDATA_PREFIX"] = str(_local_tessdata)
             log.debug("   TESSDATA_PREFIX impostato su: %s", _local_tessdata)
 
-    # --- ffmpeg (verifica rapida) ---
-    try:
-        subprocess.run(
-            ["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False
-        )
-        log.debug("   ffmpeg trovato.")
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        log.info("🔧 ffmpeg non trovato — tentativo auto-install...")
-        ok = _try_system_install(
-            "ffmpeg",
-            winget_id="Gyan.FFmpeg.Shared",
-            apt_pkg="ffmpeg",
-            brew_pkg="ffmpeg",
-        )
-        if not ok:
-            # ffmpeg e' indispensabile: video.py lo lancia come processo per
-            # l'encoding (non e' una libreria linkata). Senza, la run arriva in
-            # fondo e muore con un FileNotFoundError dopo dieci minuti di
-            # trascrizione e OCR, che e' la diagnosi piu' lontana dalla causa
-            # che si possa immaginare. Tesseract, due righe sopra, esce subito:
-            # qui si fa lo stesso.
-            try:
-                subprocess.run(
-                    ["ffmpeg", "-version"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False,
-                )
-                log.info("   ✅ ffmpeg installato nel PATH.")
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                log.error(
-                    "\n❌ FFMPEG NON TROVATO — obbligatorio per montare il video.\n"
-                    "   Auto-install fallita. Scaricalo da: %s\n"
-                    "   Oppure installalo con: winget install Gyan.FFmpeg.Shared\n"
-                    "   (apt: `apt-get install ffmpeg` / brew: `brew install ffmpeg`)\n"
-                    "   Poi rilancia genera_video.bat (dettagli: docs/troubleshooting.md).\n",
-                    _FFMPEG_DOWNLOAD_URL,
-                )
-                sys.exit(1)
+    # --- ffmpeg (verifica sempre, non solo se l'installazione fallisce) ---
+    _verifica_ffmpeg()
 
     # --- Primo avvio: i modelli ML si scaricano al primo uso ---
     # Lo dico PRIMA, non mentre succede: il silenzio di un download da qualche
     # gigabyte è indistinguibile da un blocco, e la cosa piu' probabile a quel
     # punto e' chiudere il programma e non riaprirlo.
+    modello_whisper = whisper_model or DEFAULT_WHISPER_MODEL
     _annuncia_primo_avvio(
         _modelli_mancanti(
             Path(DEFAULT_EMBEDDING_CACHE_DIR),
-            DEFAULT_WHISPER_MODEL,
+            modello_whisper,
             DEFAULT_EMBEDDING_MODEL,
         ),
         embedding_cache=Path(DEFAULT_EMBEDDING_CACHE_DIR),
-        whisper_model=DEFAULT_WHISPER_MODEL,
+        whisper_model=modello_whisper,
         embedding_model=DEFAULT_EMBEDDING_MODEL,
         ignora_spazio=ignora_spazio,
     )

@@ -126,29 +126,46 @@ if errorlevel 1 goto install_diretta
 goto dopo_install_python
 
 rem ------------------------------------------------------------
-rem install_diretta: winget manca o ha fallito. Si prova il download
-rem diretto da python.org, poi l'installer trovato nella cartella
-rem (chiavetta USB, PC offline con file portato a mano: niente download).
+rem install_diretta: winget manca o ha fallito. Si cerca l'installer esatto
+rem nella cartella del programma (chiavetta USB, PC offline con file portato
+rem a mano: niente download), altrimenti si scarica da python.org. In entrambi
+rem i casi la firma Authenticode va verificata PRIMA di eseguire il file.
 rem ------------------------------------------------------------
 :install_diretta
 set "_SETUP_EXE="
+rem SOLO il nome esatto: il vecchio wildcard prendeva il primo installer
+rem presente nella cartella, anche di un'altra versione (soprattutto su ARM,
+rem dove serve quello x86-64 e non quello ARM64). La versione e' poi ricontrollata
+rem sui risultati dopo l'installazione.
 if exist "%~dp0python-%_PY_FULL%-amd64.exe" set "_SETUP_EXE=%~dp0python-%_PY_FULL%-amd64.exe"
-if not "%_SETUP_EXE%"=="" goto install_esegui
-for %%F in ("%~dp0python-*-amd64.exe") do set "_SETUP_EXE=%%F"
-if not "%_SETUP_EXE%"=="" (
-    echo Trovato installer locale, lo uso senza scaricare nulla.
-    goto install_esegui
-)
+if "%_SETUP_EXE%"=="" goto install_scarica
+echo Trovato installer locale: python-%_PY_FULL%-amd64.exe (senza scaricare nulla).
+goto install_esegui
+
+:install_scarica
 set "_SETUP_URL=https://www.python.org/ftp/python/%_PY_FULL%/python-%_PY_FULL%-amd64.exe"
 set "_SETUP_EXE=%TEMP%\sync-video-python-setup.exe"
 set "_SETUP_SCARICATO="
 echo winget non disponibile o fallito: scarico Python %_PY_VERSION% da python.org...
-where curl >NUL 2>&1 && curl -L --fail -o "%_SETUP_EXE%" "%_SETUP_URL%" >NUL 2>&1 && set "_SETUP_SCARICATO=1"
+rem --retry/--max-time: su una rete lenta il download non deve finire troncato
+rem (un installer a meta' non si puo' verificare e non va eseguito).
+where curl >NUL 2>&1 && curl -L --fail --retry 3 --max-time 300 -o "%_SETUP_EXE%" "%_SETUP_URL%" >NUL 2>&1 && set "_SETUP_SCARICATO=1"
 if "%_SETUP_SCARICATO%"=="1" goto install_esegui
-where powershell >NUL 2>&1 && powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri '%_SETUP_URL%' -OutFile '%_SETUP_EXE%'" >NUL 2>&1 && set "_SETUP_SCARICATO=1"
+where powershell >NUL 2>&1 && powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri '%_SETUP_URL%' -OutFile '%_SETUP_EXE%' -TimeoutSec 300" >NUL 2>&1 && set "_SETUP_SCARICATO=1"
 if "%_SETUP_SCARICATO%"=="" goto install_fallito_scaricamento
 
 :install_esegui
+rem QUALSIASI installer (locale o scaricato) passa da qui: nessun eseguibile
+rem viene lanciato prima della verifica della firma Authenticode.
+where powershell >NUL 2>&1
+if errorlevel 1 goto install_fallito_verifica
+rem Il percorso passa da una variabile d'ambiente: apostrofi o spazi nel nome
+rem utente non rompono il comando PowerShell.
+set "SYNC_SETUP_EXE=%_SETUP_EXE%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$f = Get-AuthenticodeSignature -LiteralPath $env:SYNC_SETUP_EXE; if (($f.Status -ne 'Valid') -or (-not $f.SignerCertificate) -or ($f.SignerCertificate.Subject -notlike '*Python Software Foundation*')) { exit 1 }" >NUL 2>&1
+if errorlevel 1 goto install_fallito_firma
+set "SYNC_SETUP_EXE="
+echo Firma Authenticode verificata (Python Software Foundation).
 echo Installazione di Python %_PY_VERSION% in corso...
 rem TargetDir esplicita nella cartella standard per-utente (e' dove guarda
 rem anche il passo 5 qui sotto): niente sorprese sui percorsi.
@@ -168,9 +185,36 @@ rem cmd.exe eredita gia' il PATH vecchio: va riletto dal registro.
 call :ricarica_path
 call :cerca_python
 if errorlevel 1 goto install_fallito
+rem Verifica sui risultati: l'interprete trovato deve essere la versione
+rem richiesta. Un installer diverso (vecchio file nella cartella, sbagliato
+rem su ARM) altrimenti passerebbe inosservato fino al primo pip install.
+set "_PY_VER_INSTALL="
+for /f "delims=" %%V in ('%PY_CMD% -c "import sys;print('%%d.%%d' %% sys.version_info[:2])" 2^>NUL') do set "_PY_VER_INSTALL=%%V"
+if /i not "%_PY_VER_INSTALL%"=="%_PY_VERSION%" goto versione_python_sbagliata
 echo.
 echo Python %_PY_VERSION% installato e pronto.
 goto pulisci_e_esci
+
+:install_fallito_firma
+echo.
+echo [ERRORE] L'installer non ha una firma Authenticode valida
+echo (Python Software Foundation): non lo eseguo, perche' puo' essere
+echo corrotto o contraffatto. Riprova il download o scaricalo da python.org.
+goto install_fallito
+
+:install_fallito_verifica
+echo.
+echo [ERRORE] PowerShell non e' disponibile: non posso verificare la firma
+echo dell'installer e quindi non lo eseguo. Installa PowerShell oppure
+echo installa Python a mano da https://www.python.org/downloads/ (vedi README).
+goto install_fallito
+
+:versione_python_sbagliata
+echo.
+echo [ERRORE] Dopo l'installazione e' stato trovato Python %_PY_VER_INSTALL%,
+echo ma serve Python %_PY_VERSION%. Controlla gli installer nella cartella
+echo del programma (devono chiamarsi python-%_PY_FULL%-amd64.exe) e rilancia.
+goto pulisci_e_esci_1
 
 :install_fallito
 echo.
@@ -219,6 +263,8 @@ set "_WINGET_ARCH="
 set "_SETUP_URL="
 set "_SETUP_EXE="
 set "_SETUP_SCARICATO="
+set "SYNC_SETUP_EXE="
+set "_PY_VER_INSTALL="
 exit /b 0
 
 :pulisci_e_esci_1
@@ -233,6 +279,8 @@ set "_WINGET_ARCH="
 set "_SETUP_URL="
 set "_SETUP_EXE="
 set "_SETUP_SCARICATO="
+set "SYNC_SETUP_EXE="
+set "_PY_VER_INSTALL="
 exit /b 1
 
 

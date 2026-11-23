@@ -75,6 +75,9 @@ if errorlevel 1 goto ffmpeg_fallito
 
 echo.
 echo FFmpeg non presente su questo PC: lo installo adesso (una tantum)...
+rem --scope user va tenuto allineato a config._try_system_install: installare
+rem in machine scope qui e' inutile (serve solo all'utente corrente) e chiede
+rem permessi di amministratore che il programma non richiede.
 winget install --id Gyan.FFmpeg.Shared -e --scope user --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
 call :ricarica_path_utente
 set "FFMPEG_FOUND="

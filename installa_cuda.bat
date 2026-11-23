@@ -24,8 +24,12 @@ if errorlevel 1 (
 )
 
 rem --- Stesso Python che usa genera_video.bat (venv o py -3.x). ---
+rem Tutto, pip incluso, deve girare su QUESTO interprete: il rimedio che
+rem mostra config.py dice "py -m pip", ma qui py potrebbe puntare a un'installazione
+rem diversa da quella scelta dall'helper (soprattutto con la .venv del progetto).
 call "%~dp0_python.bat"
 if errorlevel 1 goto senza_python
+if not defined PY_CMD goto senza_python
 echo Python scelto: !PY_CMD!
 echo.
 

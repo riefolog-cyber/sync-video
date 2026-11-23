@@ -11,6 +11,7 @@ Non tocca PyPI ne' installs: il bootstrap e il controllo sono mockati.
 
 import contextlib
 import io
+import re
 import unittest
 from unittest import mock
 
@@ -35,7 +36,10 @@ class TestInterruttori(unittest.TestCase):
         check.assert_called_once_with(ask_to_update=True)
 
     def test_no_update_notifica_senza_installare(self) -> None:
-        _, check = self._esegui(["--no-update"])
+        # Qui il controllo PyPI gira davvero: serve il bootstrap (packaging),
+        # ma la domanda di conferma resta disattivata.
+        boot, check = self._esegui(["--no-update"])
+        boot.assert_called_once()
         check.assert_called_once_with(ask_to_update=False)
 
     def test_no_update_check_non_controlla_pyPI(self) -> None:
@@ -45,8 +49,16 @@ class TestInterruttori(unittest.TestCase):
         _, check = self._esegui(["--no-update-check"])
         check.assert_not_called()
 
+    def test_no_update_check_non_tocca_lambiente(self) -> None:
+        # Il guasto che ha ispirato la correzione: il bootstrap veniva chiamato
+        # PRIMA di guardare i flag, quindi "non controllare nulla" installava
+        # pacchetti, Tesseract, ffmpeg e poteva fermarsi per spazio.
+        boot, _ = self._esegui(["--no-update-check"])
+        boot.assert_not_called()
+
     def test_i_due_interruttori_insieme(self) -> None:
-        _, check = self._esegui(["--no-update", "--no-update-check"])
+        boot, check = self._esegui(["--no-update", "--no-update-check"])
+        boot.assert_not_called()
         check.assert_not_called()
 
     def test_opzione_sconosciuta_esce_con_errore(self) -> None:
@@ -111,6 +123,20 @@ class TestInterruttori(unittest.TestCase):
             aggiornamenti.main()
         self.assertEqual(ctx.exception.code, 0)
         boot.assert_not_called()
+
+
+class TestTettiDipendenze(unittest.TestCase):
+    """I tetti che evitano salti di major non devono sparire dai requisiti."""
+
+    def test_openvino_resta_dentro_la_major_supportata(self) -> None:
+        # Il controllo aggiornamenti segnala le versioni nuove: se requirements
+        # non dichiara il tetto, una 2026.x verrebbe proposta e installata senza
+        # che nessuno l'abbia collaudata (config.py e' x86-only, API in movimento).
+        testo = (config.BASE_DIR / "requirements.txt").read_text(encoding="utf-8")
+        righe = [r for r in testo.splitlines() if re.match(r"^openvino(?:-genai)?\s*>=", r)]
+        self.assertEqual(len(righe), 2, "mancano le voci openvino in requirements.txt")
+        for riga in righe:
+            self.assertIn("<2026", riga, f"tettico mancante: {riga}")
 
 
 if __name__ == "__main__":

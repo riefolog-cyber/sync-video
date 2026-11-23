@@ -26,6 +26,19 @@ def _words(items):
     return [{"word": w, "start": float(t), "end": float(t) + 0.3, "conf": 1.0} for w, t in items]
 
 
+def _modello_ir_finto(directory: Path) -> Path:
+    """Crea una cartella che passi il controllo di completezza dell'IR.
+
+    Serve perche' `exists()` non basta piu': config.openvino_model_complete
+    chiede config.json + un .xml + un .bin non vuoti.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "config.json").write_text("{}", encoding="utf-8")
+    (directory / "openvino_encoder_model.xml").write_bytes(b"<net/>")
+    (directory / "openvino_encoder_model.bin").write_bytes(b"pesi-finti")
+    return directory
+
+
 class _FakeFWWord:
     def __init__(self, word, start):
         self.word = word
@@ -301,8 +314,7 @@ class TestOpenvinoUsable(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.model_dir = Path(self._tmp.name) / "openvino_model"
-        self.model_dir.mkdir()
+        self.model_dir = _modello_ir_finto(Path(self._tmp.name) / "openvino_model")
 
     def _patch_runtime(self, genai_ok: bool, devices: list[str] | None = None):
         """Simula la presenza/assenza del runtime OpenVINO in sys.modules."""
@@ -358,13 +370,83 @@ class TestOpenvinoUsable(unittest.TestCase):
             self.assertFalse(openvino_usable(self.model_dir / "personalizzato_inesistente"))
 
     def test_given_model_dir_that_exists_is_usable(self):
-        altro = self.model_dir / "personalizzato"
-        altro.mkdir()
+        altro = _modello_ir_finto(self.model_dir / "personalizzato")
         with (
             self._patch_runtime(genai_ok=True, devices=["GPU"]),
             mock.patch("transcription.DEFAULT_OPENVINO_MODEL_DIR", self.model_dir / "inesistente"),
         ):
             self.assertTrue(openvino_usable(altro))
+
+    def test_not_usable_with_incomplete_model(self):
+        """Cartella presente ma IR a meta': non deve essere creduta valida."""
+        parziale = self.model_dir / "parziale"
+        parziale.mkdir()
+        (parziale / "config.json").write_text("{}", encoding="utf-8")
+        (parziale / "openvino_encoder_model.xml").write_bytes(b"<net/>")
+        with self._patch_runtime(genai_ok=True, devices=["GPU"]):
+            self.assertFalse(openvino_usable(parziale))
+
+
+class TestDownloadOpenvinoModel(unittest.TestCase):
+    """Il download va in temporanea e diventa visibile solo se e' completo."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.radice = Path(self.tmp.name)
+        self.dest = self.radice / "modello_ir"
+
+    @staticmethod
+    def _snapshot(completo: bool):
+        def scarica(model_id: str, revision: str | None = None, local_dir: str | None = None):
+            if local_dir is None:
+                raise ValueError("snapshot_download senza local_dir")
+            cartella = Path(local_dir)
+            cartella.mkdir(parents=True, exist_ok=True)
+            (cartella / "config.json").write_text("{}", encoding="utf-8")
+            (cartella / "openvino_encoder_model.xml").write_bytes(b"<net/>")
+            if completo:
+                (cartella / "openvino_encoder_model.bin").write_bytes(b"pesi-finti")
+            else:
+                (cartella / "openvino_encoder_model.bin.incomplete").write_bytes(b"a meta'")
+                raise OSError("rete interrotta")
+
+        return scarica
+
+    def _temporanee(self) -> list[Path]:
+        return [p for p in self.radice.iterdir() if ".tmp-" in p.name]
+
+    def test_download_completo_rinomina_e_non_lascia_temporanee(self):
+        with mock.patch("huggingface_hub.snapshot_download", side_effect=self._snapshot(True)) as snap:
+            esito = transcription.download_openvino_model(self.dest)
+        self.assertEqual(esito, self.dest)
+        self.assertTrue((self.dest / "config.json").is_file())
+        self.assertTrue((self.dest / "openvino_encoder_model.bin").is_file())
+        self.assertEqual(self._temporanee(), [])
+        self.assertNotEqual(Path(snap.call_args.kwargs["local_dir"]), self.dest)
+
+    def test_download_interrotto_rimuove_la_parziale(self):
+        with (
+            mock.patch("huggingface_hub.snapshot_download", side_effect=self._snapshot(False)),
+            self.assertRaises(OSError),
+        ):
+            transcription.download_openvino_model(self.dest)
+        self.assertFalse(self.dest.exists())
+        self.assertEqual(self._temporanee(), [])
+
+    def test_cartella_parziale_gia_presente_viene_riscaricata(self):
+        self.dest.mkdir()
+        (self.dest / "config.json").write_text("{}", encoding="utf-8")
+        with mock.patch("huggingface_hub.snapshot_download", side_effect=self._snapshot(True)):
+            transcription.download_openvino_model(self.dest)
+        self.assertTrue((self.dest / "openvino_encoder_model.bin").is_file())
+        self.assertEqual(self._temporanee(), [])
+
+    def test_modello_gia_completo_non_riscarica(self):
+        _modello_ir_finto(self.dest)
+        with mock.patch("huggingface_hub.snapshot_download") as snap:
+            transcription.download_openvino_model(self.dest)
+        snap.assert_not_called()
 
 
 class TestWhisperBeamConfig(unittest.TestCase):
@@ -555,7 +637,7 @@ class TestResolvedTranscriber(unittest.TestCase):
 
     def test_auto_with_model(self):
 
-        self.model_dir.mkdir(parents=True)
+        _modello_ir_finto(self.model_dir)
         with self._runtime(installed=True):
             self.assertEqual(resolved_transcriber("auto", self.model_dir), "openvino")
 
@@ -565,7 +647,7 @@ class TestResolvedTranscriber(unittest.TestCase):
         # il risultato è verificato anche quando il percorso NON esiste: era
         # esattamente quel ramo a mandare in crash.
 
-        self.model_dir.mkdir(parents=True)
+        _modello_ir_finto(self.model_dir)
         with self._runtime(installed=True):
             self.assertEqual(resolved_transcriber("auto", str(self.model_dir)), "openvino")
             self.assertEqual(resolved_transcriber("auto", str(self.model_dir / "no")), "whisper")
@@ -650,8 +732,7 @@ class TestTranscriptCacheKey(unittest.TestCase):
         from main import _transcript_cache_key
 
         with tempfile.TemporaryDirectory() as tmp:
-            model_dir = Path(tmp) / "ov"
-            model_dir.mkdir()
+            model_dir = _modello_ir_finto(Path(tmp) / "ov")
             with mock.patch.dict(sys.modules, {"openvino_genai": mock.MagicMock()}):
                 auto = _transcript_cache_key(
                     "a" * 32, self._args(transcriber="auto", openvino_model_dir=str(model_dir))
@@ -1229,8 +1310,9 @@ class TestFallbackIntegrazione(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.audio = self.radice / "podcast.m4a"
         self.audio.write_bytes(b"finto-audio")
-        self.modelli = self.radice / "ir"
-        self.modelli.mkdir()
+        # Cartella COMPLETA: altrimenti transcribe_audio la ritiene parziale
+        # e tenta un download reale da HuggingFace durante il test.
+        self.modelli = _modello_ir_finto(self.radice / "ir")
         patch_cache = mock.patch.object(transcription, "CACHE_DIR", self.radice)
         patch_cache.start()
         self.addCleanup(patch_cache.stop)
@@ -1421,8 +1503,7 @@ class TestModelloNonApplicabileAOpenVino(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.audio = self.radice / "podcast.m4a"
         self.audio.write_bytes(b"finto-audio")
-        self.modelli = self.radice / "ir"
-        self.modelli.mkdir()
+        self.modelli = _modello_ir_finto(self.radice / "ir")
 
     def _chiama(self, model_size: str) -> tuple[str, list[dict[str, object]]]:
         with (

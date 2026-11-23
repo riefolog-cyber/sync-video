@@ -192,6 +192,46 @@ class TestConvertitorePptx(unittest.TestCase):
         self.assertIn("GenOffice", esito.dettaglio)
 
 
+class TestRimediMotore(unittest.TestCase):
+    """I rimedi devono indicare comandi che funzionano davvero su questo PC."""
+
+    def test_openvino_assente_rimanda_al_pip_della_venv(self) -> None:
+        import builtins
+        import sys
+
+        vero_import = builtins.__import__
+
+        def _senza_openvino(nome: str, *a: object, **k: object) -> object:
+            if nome == "openvino_genai":
+                raise ImportError("modulo assente")
+            return vero_import(nome, *a, **k)  # type: ignore[arg-type]
+
+        with (
+            mock.patch.object(config, "cuda_available", return_value=False),
+            mock.patch("builtins.__import__", side_effect=_senza_openvino),
+        ):
+            esito = verifica_pc._motore_senza_openvino("whisper")
+        self.assertIn(sys.executable, esito.rimedio)
+        self.assertIn("-m pip install openvino", esito.rimedio)
+        self.assertIn("crea_venv.bat", esito.rimedio)
+        self.assertNotIn("aggiornamenti.bat", esito.rimedio)
+
+    def test_modello_ir_mancante_dice_il_comando_giusto(self) -> None:
+        import sys
+        import types
+
+        modulo = types.ModuleType("openvino_genai")
+        with (
+            mock.patch.object(config, "cuda_available", return_value=False),
+            mock.patch.dict(sys.modules, {"openvino_genai": modulo}),
+            mock.patch("transcription.openvino_device_available", return_value=True),
+        ):
+            esito = verifica_pc._motore_senza_openvino("whisper")
+        self.assertIn("python src/main.py --openvino-download", esito.rimedio)
+        self.assertIn("--force-setup", esito.rimedio)
+        self.assertNotIn("genera_video.bat", esito.rimedio)
+
+
 class TestRete(unittest.TestCase):
     """La rete serve solo a scaricare: mai un KO, solo AVV con rimedio."""
 

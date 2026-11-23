@@ -126,6 +126,17 @@ jobs:
         # nulla. E' il perche' del -s esplicito, non una formalta'.
         run: python -m unittest discover -s src -p "test_*.py"
 
+      - name: Smoke entry point aggiornamenti (senza rete ne' installazioni)
+        # --no-update-check fa saltare bootstrap (pip/Tesseract/ffmpeg/controllo
+        # spazio) e la chiamata a PyPI; --no-update disattiva la domanda. Se uno
+        # dei due diventasse decorativo, qui la CI installerebbe cose o batterebbe
+        # la rete. check_embedding_models.py NON ha un flag offline (l'unico e'
+        # --force, che pero' interroga HuggingFace): ne verifico solo l'import,
+        # insieme a huggingface_hub che usa direttamente.
+        run: |
+          python src/aggiornamenti.py --no-update-check --no-update
+          python -c "import sys; sys.path.insert(0, 'src/scripts'); import check_embedding_models, huggingface_hub; print('check_embedding_models import ok')"
+
   nightly-full:
     # Suite completa notturna con test lenti (modelli reali, rete).
     # Gira col cron notturno O se lanciato a mano (workflow_dispatch).
@@ -217,9 +228,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/embedding_model
-          key: embed-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            embed-${{ runner.os }}-
+          # Il modello da 2 GB si sceglie in src/config.py (DEFAULT_EMBEDDING_MODEL):
+          # senza quel file nella chiave, cambiare modello riuserebbe la cache
+          # del vecchio e il test end-to-end girerebbe sulle embedding sbagliate.
+          key: embed-${{ runner.os }}-${{ hashFiles('requirements.txt', 'src/config.py') }}
+          # Nessun restore-key largo: un prefisso del tipo "embed-Linux-" farebbe
+          # ripescare la cache vecchia proprio dopo aver cambiato il modello,
+          # vanificando l'invalidazione qui sopra. Solo chiave esatta.
 
       - name: Suite completa (lenti inclusi)
         env:

@@ -92,3 +92,56 @@ class TestInstallaCuda(unittest.TestCase):
         # stessa ricerca, mentre il default di ctypes ignora il PATH.
         self.assertIn("winmode=0", testo)
         self.assertIn("'User'", testo)
+
+    def test_pip_usa_l_interprete_selezionato(self) -> None:
+        # Il rimedio di config.py mostra "py -m pip", ma qui py puo' puntare a
+        # un interprete diverso da quello scelto (venv). Tutto deve passare da
+        # PY_CMD, e una selezione vuota va fermata.
+        testo = (RADICE / "installa_cuda.bat").read_text(encoding="utf-8")
+        self.assertIn("!PY_CMD! -m pip install", testo)
+        self.assertNotIn("py -m pip", _codice(testo))
+        self.assertIn("if not defined PY_CMD goto senza_python", testo)
+
+
+class TestPythonInstaller(unittest.TestCase):
+    """L'installer scaricato non va mai eseguito senza verifica."""
+
+    @staticmethod
+    def _testo() -> str:
+        return (RADICE / "_python.bat").read_text(encoding="utf-8")
+
+    def test_firma_prima_dellesecuzione(self) -> None:
+        testo = self._testo()
+        self.assertIn("Get-AuthenticodeSignature", testo)
+        self.assertIn("$f.Status -ne 'Valid'", testo)
+        self.assertLess(
+            testo.index("Get-AuthenticodeSignature"),
+            testo.index('"%_SETUP_EXE%" /quiet'),
+        )
+
+    def test_download_con_retry_e_timeout(self) -> None:
+        testo = self._testo()
+        self.assertIn("--retry 3", testo)
+        self.assertIn("--max-time 300", testo)
+
+    def test_solo_installer_con_nome_esatto_e_versione_verificata(self) -> None:
+        testo = self._testo()
+        # Niente wildcard: su ARM prendeva il primo .exe, anche di versione
+        # diversa da quella calcolata in _PY_FULL.
+        self.assertNotIn("python-*-amd64.exe", testo)
+        self.assertIn('python-%_PY_FULL%-amd64.exe', testo)
+        self.assertIn("_PY_VER_INSTALL", testo)
+
+
+class TestWingetFFmpeg(unittest.TestCase):
+    def test_scope_user_allineato_a_config(self) -> None:
+        # config._try_system_install usa lo scope utente (nessun admin): qui
+        # non puo' installare in machine scope senza divergere dal rimedio.
+        testo = (RADICE / "genera_video.bat").read_text(encoding="utf-8")
+        righe = [
+            r
+            for r in testo.splitlines()
+            if r.lstrip().startswith("winget install") and "FFmpeg" in r
+        ]
+        self.assertEqual(len(righe), 1, "riga winget ffmpeg non trovata")
+        self.assertIn("--scope user", righe[0])

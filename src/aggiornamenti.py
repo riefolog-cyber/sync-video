@@ -54,15 +54,22 @@ def main() -> None:
         run_frozen_report()
         return
 
+    # --no-update-check dice esplicitamente di NON controllare nulla: in quel
+    # caso deve saltare anche il bootstrap, che e' la parte che tocca pip,
+    # Tesseract, ffmpeg e puo' fermarsi per spazio insufficiente. Chiedere di
+    # non fare niente e poi installare l'ambiente e' un interruttore bugiardo.
+    # Resta bootstrap nel percorso normale (compreso --no-update da solo, dove
+    # il controllo PyPI gira davvero e gli strumenti come packaging servono).
+    if args.no_update_check:
+        log.info("Controllo aggiornamenti saltato (--no-update-check): ambiente non toccato.")
+        return
+
     bootstrap()
     log.info("=" * 40)
     # Come in main.py: --no-update-check non è un parametro di run_update_check,
     # e' proprio l'assenza della chiamata. Senza questo, l'interruttore
     # accetterebbe il flag e non cambierebbe nulla.
-    if not args.no_update_check:
-        run_update_check(ask_to_update=not args.no_update)
-    else:
-        log.info("Controllo aggiornamenti saltato (--no-update-check).")
+    run_update_check(ask_to_update=not args.no_update)
 
 
 if __name__ == "__main__":

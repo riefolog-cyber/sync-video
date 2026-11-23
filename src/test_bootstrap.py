@@ -12,6 +12,7 @@ Esegui con: python -m unittest test_bootstrap -v
 import builtins
 import os
 import re
+import sys
 import unittest
 from pathlib import Path
 from typing import ClassVar
@@ -455,16 +456,22 @@ class TestAnnunciaPrimoAvvio(unittest.TestCase):
                 Path("/tmp/e"), "small", "BAAI/bge-m3")]
         self.assertIn("BAAI/bge-m3", nomi[0])
 
-    def test_dimensione_whisper_solo_se_misurata(self):
-        # Per un modello senza misura (medium/large) si nomma il modello senza
-        # inventare una cifra: e' l'unica cosa che fa capire quanto manca.
+    def test_dimensione_whisper_misurata_e_caso_peggiore(self):
+        # medium/large hanno una misura; una taglia standard senza misura
+        # (turbo) prende il caso peggiore invece di saltare il controllo.
         from pathlib import Path
 
         with mock.patch("config._gia_scaricato", return_value=False):
             grandi = dict(config._modelli_mancanti(Path("/tmp/embedding"), "large"))
+            medi = dict(config._modelli_mancanti(Path("/tmp/embedding"), "medium"))
             piccoli = dict(config._modelli_mancanti(Path("/tmp/embedding"), "small"))
-        self.assertEqual(grandi["modello di trascrizione (whisper large)"], "")
+            ignoti = dict(config._modelli_mancanti(Path("/tmp/embedding"), "turbo"))
+        self.assertEqual(grandi["modello di trascrizione (whisper large)"], "~3.1 GB")
+        self.assertEqual(medi["modello di trascrizione (whisper medium)"], "~1.5 GB")
         self.assertEqual(piccoli["modello di trascrizione (whisper small)"], "~490 MB")
+        self.assertEqual(
+            ignoti["modello di trascrizione (whisper turbo)"], config._DIMENSIONE_WHISPER_PEGGIOR_CASO
+        )
 
     def test_il_messaggio_dice_che_non_e_un_blocco(self):
         import io
@@ -841,3 +848,123 @@ class TestRepoWhisperNonSystran(unittest.TestCase):
         self.assertIsNone(config.whisper_repo("deepdml/faster-whisper-large-v3"))
         self.assertIsNone(config.whisper_repo(r"C:\modelli\mio"))
         self.assertIsNone(config.whisper_repo(""))
+
+
+class TestOpenvinoModelComplete(unittest.TestCase):
+    """Criterio unico di completezza dell'IR, condiviso da tutti i controlli."""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name) / "ir"
+
+    def _scrivi(self, *, config_json: bool = True, xml: bool = True, binario: bool = True) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        if config_json:
+            (self.dir / "config.json").write_text("{}", encoding="utf-8")
+        if xml:
+            (self.dir / "openvino_encoder_model.xml").write_bytes(b"<net/>")
+        if binario:
+            (self.dir / "openvino_encoder_model.bin").write_bytes(b"pesi")
+
+    def test_modello_completo(self) -> None:
+        self._scrivi()
+        self.assertTrue(config.openvino_model_complete(self.dir))
+
+    def test_cartella_vuota_non_e_completa(self) -> None:
+        self.dir.mkdir()
+        self.assertFalse(config.openvino_model_complete(self.dir))
+
+    def test_senza_pesi_non_e_completa(self) -> None:
+        self._scrivi(binario=False)
+        self.assertFalse(config.openvino_model_complete(self.dir))
+
+    def test_senza_config_non_e_completa(self) -> None:
+        self._scrivi(config_json=False)
+        self.assertFalse(config.openvino_model_complete(self.dir))
+
+    def test_file_incompleto_non_e_completa(self) -> None:
+        self._scrivi()
+        (self.dir / "openvino_encoder_model.bin.incomplete").write_bytes(b"meta")
+        self.assertFalse(config.openvino_model_complete(self.dir))
+
+    def test_percorso_inesistente_o_none(self) -> None:
+        self.assertFalse(config.openvino_model_complete(self.dir))
+        self.assertFalse(config.openvino_model_complete(None))
+
+
+class TestVerificaFfmpeg(unittest.TestCase):
+    """Il binario si ricontrolla SEMPRE, anche se il package manager dice ok."""
+
+    def test_gia_presente_non_installa(self) -> None:
+        with (
+            mock.patch("config._ffmpeg_disponibile", return_value=True),
+            mock.patch("config._try_system_install") as installa,
+        ):
+            config._verifica_ffmpeg()
+        installa.assert_not_called()
+
+    def test_package_manager_mente_viene_detto(self) -> None:
+        with (
+            mock.patch("config._ffmpeg_disponibile", side_effect=[False, False]),
+            mock.patch("config._try_system_install", return_value=True),
+            mock.patch("config._aggiorna_path_da_registro") as aggiorna,
+            mock.patch("config.log") as log,
+            self.assertRaises(SystemExit) as uscita,
+        ):
+            config._verifica_ffmpeg()
+        self.assertEqual(uscita.exception.code, 1)
+        aggiorna.assert_called_once_with()
+        messaggio = " ".join(str(a) for c in log.error.call_args_list for a in c.args)
+        self.assertIn("package manager", messaggio)
+        self.assertIn("ffmpeg -version", messaggio)
+
+    def test_installazione_fallita_ma_binario_ora_c_è(self) -> None:
+        # PATH aggiornato dal registro: il binario c'e' anche se il package
+        # manager ha risposto male. Il controllo sul binario vince.
+        with (
+            mock.patch("config._ffmpeg_disponibile", side_effect=[False, True]),
+            mock.patch("config._try_system_install", return_value=False),
+            mock.patch("config._aggiorna_path_da_registro") as aggiorna,
+        ):
+            config._verifica_ffmpeg()
+        aggiorna.assert_called_once_with()
+
+    def test_aggiorna_path_da_registro_su_windows(self) -> None:
+        """Rilegge il PATH utente: winget lo cambia ma il processo no."""
+        finto = mock.MagicMock()
+        finto.HKEY_CURRENT_USER = "HKCU"
+        finto.HKEY_LOCAL_MACHINE = "HKLM"
+        finto.QueryValueEx.side_effect = [
+            (r"C:\Programmi\ffmpeg\bin", None),
+            (r"C:\Windows\System32", None),
+        ]
+        with (
+            mock.patch.dict(sys.modules, {"winreg": finto}),
+            mock.patch.object(config.sys, "platform", "win32"),
+            mock.patch.dict(os.environ, {"PATH": r"C:\vecchio"}),
+        ):
+            config._aggiorna_path_da_registro()
+            percorso = os.environ["PATH"]
+        self.assertIn(r"C:\Programmi\ffmpeg\bin", percorso)
+        self.assertIn(r"C:\vecchio", percorso)
+
+    def test_su_linux_non_tocca_nulla(self) -> None:
+        with (
+            mock.patch.object(config.sys, "platform", "linux"),
+            mock.patch.dict(os.environ, {"PATH": "/vecchio"}),
+        ):
+            config._aggiorna_path_da_registro()
+            self.assertEqual(os.environ["PATH"], "/vecchio")
+
+
+class TestCudaRemedy(unittest.TestCase):
+    """Il rimedio deve puntare all'interprete che esegue il programma."""
+
+    def test_usa_l_interprete_attivo_e_il_bat(self) -> None:
+        self.assertIn(sys.executable, config.CUDA_LIBS_REMEDY)
+        self.assertIn("-m pip install --upgrade", config.CUDA_LIBS_REMEDY)
+        self.assertIn("installa_cuda.bat", config.CUDA_LIBS_REMEDY)
+        self.assertNotIn("py -m pip", config.CUDA_LIBS_REMEDY)

@@ -147,6 +147,7 @@ python -m unittest discover -s src -p "test_*.py"
 | `--version` | — | Stampa la versione del programma (da VERSIONE.txt nello ZIP, altrimenti dal git locale) ed esce senza fare nulla |
 | `--no-update` | — | Al controllo aggiornamenti: notifica senza installare |
 | `--no-update-check` | — | Non controllare gli aggiornamenti su PyPI (default di `genera_video.bat`) |
+| `genera_video.bat --check-updates` | — | Riattiva il controllo aggiornamenti nel launcher, che di default passa `--no-update-check`: il prompt S/N compare come con `aggiornamenti.bat`. È un flag del `.bat`, non di `main.py` |
 | `--frozen-report` | — | Diagnostica i pacchetti **fermi**: per ognuno elenca chi lo vincola (tutti i vincoli dei pacchetti installati), il tetto raggiungibile in questo ambiente e a quali versioni si arriverebbe sciogliendo i vincoli **uno alla volta**. Legge PyPI, non installa nulla e non chiede conferme: stampa il referto ed esce. Stesso interruttore in `aggiornamenti.bat` |
 | `--semantic-cache-dir` | `.cache/embedding_model` | Cartella dei modelli embedding |
 | `--log-file` | — | Scrivi anche il log su file |

@@ -89,16 +89,31 @@ class TestSpazioNecessario(unittest.TestCase):
         self.assertLess(importanti["tiny"], importanti["base"])
         self.assertLess(importanti["base"], importanti["small"])
 
-    def test_dimensione_ignora_ritorna_none(self) -> None:
-        # whisper large non ha una dimensione misurata: meglio nessun
-        # controllo che un controllo con una cifra inventata.
+    def test_taglia_standard_non_misurata_usa_il_caso_peggiore(self) -> None:
+        # whisper large/medium hanno una misura; 'turbo' no, ma ha una cartella
+        # di cache prevedibile: meglio il caso peggiore che saltare il controllo.
         with (
             tempfile.TemporaryDirectory() as d,
             patch.object(config, "_cache_whisper_faster", return_value=Path(d) / "hf"),
         ):
-            got = config._spazio_modelli_necessario(
-                Path(d) / "emb", "large", config.DEFAULT_EMBEDDING_MODEL
+            peggiore = config._spazio_modelli_necessario(
+                Path(d) / "emb1", "turbo", config.DEFAULT_EMBEDDING_MODEL
             )
+            grande = config._spazio_modelli_necessario(
+                Path(d) / "emb2", "large", config.DEFAULT_EMBEDDING_MODEL
+            )
+        assert peggiore is not None and grande is not None
+        self.assertEqual(peggiore, grande)
+        self.assertGreater(peggiore, config._BYTES_CACHE_EMBEDDING)
+
+    def test_dimensione_ignora_ritorna_none(self) -> None:
+        # Un embedding custom non ha un "peggior caso" attendibile: qui non si
+        # inventa nessuna cifra e il controllo si saltava (comportamento noto).
+        with (
+            tempfile.TemporaryDirectory() as d,
+            patch.object(config, "_cache_whisper_faster", return_value=None),
+        ):
+            got = config._spazio_modelli_necessario(Path(d) / "emb", "small", "altro/modello")
         self.assertIsNone(got)
 
     def test_semantic_model_alterno_ignora_ritorna_none(self) -> None:
@@ -208,7 +223,14 @@ class TestBloccoSuBootstrapReale(unittest.TestCase):
 
 
 class TestAvvisoSpazio(unittest.TestCase):
-    def _cattura(self, libero: int | None, modello_whisper: str = "small", *, ignora: bool = False) -> list[str]:
+    def _cattura(
+        self,
+        libero: int | None,
+        modello_whisper: str = "small",
+        *,
+        ignora: bool = False,
+        embedding_model: str | None = None,
+    ) -> list[str]:
         """Righe emesse dall'avviso, con il disco finto a `libero`.
 
         Di default lo spazio insufficiente FERMA il download (SystemExit 1):
@@ -230,7 +252,10 @@ class TestAvvisoSpazio(unittest.TestCase):
                     patch.object(config, "_cache_whisper_faster", return_value=Path(d) / "hf"),
                 ):
                     config._avvisa_spazio_insufficiente(
-                        Path(d) / "emb", modello_whisper, config.DEFAULT_EMBEDDING_MODEL, ignora=ignora
+                        Path(d) / "emb",
+                        modello_whisper,
+                        embedding_model or config.DEFAULT_EMBEDDING_MODEL,
+                        ignora=ignora,
                     )
             finally:
                 logger.removeHandler(handler)
@@ -295,8 +320,8 @@ class TestAvvisoSpazio(unittest.TestCase):
         self.assertEqual(self._cattura(100 * GB), [])
 
     def test_dimensione_ignora_non_blocca(self) -> None:
-        # whisper large non e' misurato: niente blocco con cifra inventata.
-        self.assertEqual(self._cattura(1 * GB, modello_whisper="large"), [])
+        # Un embedding custom non ha misura: niente blocco con cifra inventata.
+        self.assertEqual(self._cattura(1 * GB, embedding_model="custom/sconosciuto"), [])
 
     def test_spazio_non_rilevabile_non_blocca(self) -> None:
         # Se il disco non e' interrogabile non si inventa nulla: bloccherebbe
@@ -359,6 +384,41 @@ class TestIntegrazioneAnnuncio(unittest.TestCase):
                 ignora_spazio=True,
             )
         self.assertTrue(avviso.call_args.kwargs["ignora"])
+
+
+class TestBootstrapUsaLaTagliaScelta(unittest.TestCase):
+    """Il controllo spazio va fatto sul modello che la run scarica davvero."""
+
+    def test_bootstrap_passa_la_taglia_al_controllo(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "tesseract_finto"
+            exe.write_bytes(b"finto")
+            with (
+                patch.object(config, "_ensure_pip_packages"),
+                patch.object(config, "_TESSERACT_CANDIDATE", [str(exe)]),
+                patch.object(config, "_list_tessdata", return_value=({"ita"}, None)),
+                patch.object(config, "_verifica_ffmpeg"),
+                patch.object(config, "_modelli_mancanti", return_value=[]) as mancanti,
+                patch.object(config, "_annuncia_primo_avvio") as annuncio,
+            ):
+                config.bootstrap(whisper_model="large")
+        self.assertEqual(mancanti.call_args.args[1], "large")
+        self.assertEqual(annuncio.call_args.kwargs["whisper_model"], "large")
+
+    def test_senza_argomento_resta_il_default(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / "tesseract_finto"
+            exe.write_bytes(b"finto")
+            with (
+                patch.object(config, "_ensure_pip_packages"),
+                patch.object(config, "_TESSERACT_CANDIDATE", [str(exe)]),
+                patch.object(config, "_list_tessdata", return_value=({"ita"}, None)),
+                patch.object(config, "_verifica_ffmpeg"),
+                patch.object(config, "_modelli_mancanti", return_value=[]),
+                patch.object(config, "_annuncia_primo_avvio") as annuncio,
+            ):
+                config.bootstrap()
+        self.assertEqual(annuncio.call_args.kwargs["whisper_model"], config.DEFAULT_WHISPER_MODEL)
 
 
 if __name__ == "__main__":

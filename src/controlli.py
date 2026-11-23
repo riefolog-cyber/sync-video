@@ -61,6 +61,11 @@ class Controllo:
     # dell'output non e' sempre il verdetto: _debug_hardware.py scrive i log su
     # stderr, che finisce DOPO il suo "RISULTATO: ..." stampato su stdout.
     riassunto: str = ""
+    # Timeout del figlio, in secondi. Ogni passo ha il suo: la suite unittest
+    # puo' scaricare modelli (minuti), ruff/mypy no. Senza, un figlio appeso
+    # (rete, lock, subprocess figlia) blocca `controlli.bat` per sempre e non
+    # si riesce nemmeno a capire quale passo si e' fermato.
+    timeout: int = 300
 
 
 @dataclass
@@ -106,12 +111,14 @@ def _passi() -> list[Controllo]:
             [py, "-m", "unittest", "discover", "-s", "src", "-p", "test_*.py"],
             "la stessa suite della CI",
             r"^(OK|FAILED)",
+            timeout=900,  # primo avvio: puo' scaricare modelli da gigabyte
         ),
         Controllo(
             "debug hardware",
             [py, str(Path(__file__).parent / "_debug_hardware.py")],
             "encoder reali, ripiego a runtime",
             r"^RISULTATO:",
+            timeout=180,  # probe ffmpeg/encoder: se pende, non e' un risultato
         ),
     ]
 
@@ -130,22 +137,45 @@ def _riassunto(output: str, pattern: str) -> str:
     return righe[-1] if righe else ""
 
 
+def _testo_parziale(blocco: bytes | str | None) -> str:
+    """Output parziale di un figlio interrotto, decodificato senza esplodere."""
+    if blocco is None:
+        return ""
+    if isinstance(blocco, bytes):
+        return blocco.decode("utf-8", errors="replace")
+    return blocco
+
+
 def _esegui(controllo: Controllo) -> Esito:
     # PYTHONIOENCODING: i figli scrivono output con accenti ed emoji, e qui
     # viene letto e ristampato. Fissa l'UTF-8 una volta, invece di sperare
     # nell'encoding di questa console.
     ambiente = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     avvio = time.monotonic()
-    esito = subprocess.run(
-        controllo.argomenti,
-        cwd=RADICE,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        env=ambiente,
-        check=False,
-    )
+    try:
+        esito = subprocess.run(
+            controllo.argomenti,
+            cwd=RADICE,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=ambiente,
+            check=False,
+            timeout=controllo.timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        # Senza timeout il figlio restava appeso e il comando non finiva mai:
+        # qui diventa un KO con la durata e l'eventuale output parziale.
+        secondi = time.monotonic() - avvio
+        parziale = _testo_parziale(e.stdout) + _testo_parziale(e.stderr)
+        output = (
+            f"TIMEOUT: '{controllo.nome}' non e' terminato entro {controllo.timeout}s "
+            f"(il processo e' stato interrotto). Motivo: il figlio e' rimasto appeso "
+            f"oppure ha superato il tempo previsto per questo controllo.\n"
+            f"{parziale}".rstrip()
+        )
+        return Esito(controllo, 124, secondi, output)
     secondi = time.monotonic() - avvio
     output = (esito.stdout or "") + (esito.stderr or "")
     return Esito(controllo, esito.returncode, secondi, output)

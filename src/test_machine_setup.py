@@ -21,12 +21,22 @@ from machine_setup import (
     _classify_gpu,
     _fingerprint,
     _provision,
+    _provision_openvino,
     _read_hardware,
     _validate,
     _write_hardware,
     machine_setup,
     recommend,
 )
+
+
+def _modello_ir_finto(directory: Path) -> Path:
+    """Cartella che passa openvino_model_complete (config.json + IR .xml/.bin)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "config.json").write_text("{}", encoding="utf-8")
+    (directory / "openvino_encoder_model.xml").write_bytes(b"<net/>")
+    (directory / "openvino_encoder_model.bin").write_bytes(b"pesi-finti")
+    return directory
 
 
 class _FakeArgs:
@@ -232,6 +242,15 @@ class TestReadHardware(_TempConfigMixin, unittest.TestCase):
         _write_hardware([])
         self.assertEqual(_read_hardware(), [])
 
+    def test_write_hardware_usa_scrittura_atomica(self):
+        """Un file troncato non deve fare ripetere il rilevamento a ogni run."""
+        with mock.patch("machine_setup.atomic_write_text") as scrivi:
+            _write_hardware(["Intel(R) Iris(R) Xe Graphics"])
+        scrivi.assert_called_once()
+        percorso, testo = scrivi.call_args.args[:2]
+        self.assertEqual(percorso, self.config_path)
+        self.assertIn('"gpus"', testo)
+
     def test_non_string_gpu_entries_rejected(self):
         self.config_path.write_text(
             json.dumps({"fingerprint": _fingerprint(), "gpus": [1, 2]}), encoding="utf-8"
@@ -305,6 +324,32 @@ class TestProvision(unittest.TestCase):
             out = _provision(dict(rec), Path(tempfile.gettempdir()))
         self.assertEqual(out["whisper_device"], "cuda")
 
+    def test_openvino_incomplete_model_is_redownloaded(self):
+        """Una cartella vuota non basta: _provision deve scaricare di nuovo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "ir"
+            model_dir.mkdir()
+            with (
+                mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
+                mock.patch("transcription.download_openvino_model") as scarica,
+            ):
+
+                def scrivi_completo(dest):
+                    _modello_ir_finto(dest)
+                    return dest
+
+                scarica.side_effect = scrivi_completo
+                self.assertTrue(_provision_openvino(model_dir))
+            scarica.assert_called_once_with(model_dir)
+
+    def test_openvino_download_failure_falls_back(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
+            mock.patch("transcription.download_openvino_model", side_effect=OSError("rete")),
+        ):
+            self.assertFalse(_provision_openvino(Path(tmp) / "ir"))
+
 
 class TestValidate(unittest.TestCase):
     """`_validate` e' il controllo che impedisce di morire su un device assente."""
@@ -373,22 +418,37 @@ class TestValidate(unittest.TestCase):
     def test_openvino_without_gpu_device_demotes_to_cpu_openvino(self):
         # La iGPU c'e' ma il runtime non espone il device GPU: si usa comunque
         # OpenVINO, solo su CPU. Non e' un ripiego su faster-whisper.
-        with (
-            mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
-            mock.patch("machine_setup.openvino_device_available", return_value=False),
-        ):
-            out = _validate(dict(self._OPENVINO), Path(tempfile.gettempdir()))
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = _modello_ir_finto(Path(tmp) / "ir")
+            with (
+                mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
+                mock.patch("machine_setup.openvino_device_available", return_value=False),
+            ):
+                out = _validate(dict(self._OPENVINO), model_dir)
         self.assertEqual(out["transcriber"], "openvino")
         self.assertEqual(out["openvino_device"], "CPU")
 
     def test_valid_openvino_is_untouched(self):
-        with (
-            mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
-            mock.patch("machine_setup.openvino_device_available", return_value=True),
-        ):
-            out = _validate(dict(self._OPENVINO), Path(tempfile.gettempdir()))
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = _modello_ir_finto(Path(tmp) / "ir")
+            with (
+                mock.patch("machine_setup.importlib.util.find_spec", return_value=object()),
+                mock.patch("machine_setup.openvino_device_available", return_value=True),
+            ):
+                out = _validate(dict(self._OPENVINO), model_dir)
         self.assertEqual(out["transcriber"], "openvino")
         self.assertEqual(out["openvino_device"], "GPU")
+
+    def test_openvino_with_incomplete_model_falls_back_to_cpu(self):
+        """Una cartella a meta' NON e' un modello: va ripiegato su CPU."""
+        with tempfile.TemporaryDirectory() as tmp:
+            parziale = Path(tmp) / "ir"
+            parziale.mkdir()
+            (parziale / "config.json").write_text("{}", encoding="utf-8")
+            with mock.patch("machine_setup.importlib.util.find_spec", return_value=object()):
+                out = _validate(dict(self._OPENVINO), parziale)
+        self.assertEqual(out["transcriber"], "whisper")
+        self.assertIn("incompleto", out["reason"])
 
     def test_cpu_recommendation_needs_no_check(self):
         rec = {

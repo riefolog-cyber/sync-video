@@ -42,6 +42,7 @@ from config import (
     bootstrap,
     installa_dipendenze_se_mancano,
     log,
+    openvino_model_complete,
     parse_args,
     versione_programma,
     whisper_repo,
@@ -2724,10 +2725,12 @@ def _prefetch_models(args: Any) -> None:
     _ovino_dir = Path(args.openvino_model_dir)
     if resolved_transcriber(args.transcriber, _ovino_dir) == "openvino":
         try:
-            # `download_openvino_model` esce in silenzio se la cartella esiste
-            # gia': qui si dice lo stesso, altrimenti un prefetch ripetuto
-            # sembra aver saltato un passaggio.
-            if _ovino_dir.exists():
+            # La sola esistenza della cartella non basta: un download
+            # interrotto puo' lasciare un IR parziale che tutte le run
+            # successive dichiarerebbero pronto (e la trascrizione partirebbe
+            # con un modello corrotto). Usa lo stesso criterio di completezza
+            # del provisioning e della selezione del motore.
+            if openvino_model_complete(_ovino_dir):
                 log.info("   · Modello OpenVINO gia' presente in %s", _ovino_dir)
             else:
                 from transcription import download_openvino_model
@@ -3193,7 +3196,7 @@ def main(argv: list | None = None) -> None:
     # `ignora_spazio`: di default, se lo spazio non basta per i modelli il
     # bootstrap FERMA il download invece di avvisare e proseguire. Un download
     # interrotto a meta' lascia una cache corrotta e il PC a meta' sistemato.
-    bootstrap(ignora_spazio=args.ignora_spazio)
+    bootstrap(ignora_spazio=args.ignora_spazio, whisper_model=args.whisper_model)
 
     # Se l'utente ha scelto il device a mano, un eventuale fallimento di CUDA non
     # viene nascosto da un ripiego silenzioso su CPU. Va segnalato PRIMA che

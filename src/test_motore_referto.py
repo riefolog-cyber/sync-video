@@ -67,7 +67,14 @@ class TestMotoreReferto(unittest.TestCase):
     def test_runtime_assente_dice_come_installarlo(self) -> None:
         e = self._esito(genai=False, gpu=False)
         self.assertIn("non e' installato", e.dettaglio)
-        self.assertIn("aggiornamenti.bat", e.rimedio or "")
+        # Il vecchio rimedio diceva "rilancia aggiornamenti.bat", ma il
+        # bootstrap non installa openvino-genai: il referto deve dare il comando
+        # pip con l'interprete attivo (o crea_venv.bat), non un rimedio che non
+        # funziona.
+        rimedio = e.rimedio or ""
+        self.assertIn("openvino", rimedio)
+        self.assertIn("pip install", rimedio)
+        self.assertNotIn("aggiornamenti.bat", rimedio)
 
     # --- 2. runtime presente, nessuna GPU ---
     def test_senza_gpu_non_promette_openvino(self) -> None:
