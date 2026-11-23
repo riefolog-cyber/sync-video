@@ -1314,6 +1314,11 @@ def _aggiorna_path_da_registro() -> None:
     """
     if sys.platform != "win32":
         return
+    # Il PATH letto dal registro di Windows e' SEMPRE separato da ';', anche
+    # quando questo codice viene eseguito da un test su un altro sistema con
+    # sys.platform patched: usare os.pathsep li' separerebbe le lettere di unita'
+    # (C:) invece delle voci.
+    separatore = ";"
     try:
         import winreg
 
@@ -1336,19 +1341,19 @@ def _aggiorna_path_da_registro() -> None:
                 # cartelle inesistenti e l'ffmpeg appena installato resterebbe
                 # invisibile al controllo seguente.
                 nuove.extend(
-                    os.path.expandvars(part) for part in valore.split(os.pathsep) if part
+                    os.path.expandvars(part) for part in valore.split(separatore) if part
                 )
         if nuove:
             # Il PATH corrente va tenuto: puo' contenere cartelle della venv o
             # aggiunte a mano che non sono nel registro.
-            unite = os.environ.get("PATH", "").split(os.pathsep) + nuove
+            unite = os.environ.get("PATH", "").split(separatore) + nuove
             visti: set[str] = set()
             ordinati: list[str] = []
             for parte in unite:
                 if parte and parte.lower() not in visti:
                     visti.add(parte.lower())
                     ordinati.append(parte)
-            os.environ["PATH"] = os.pathsep.join(ordinati)
+            os.environ["PATH"] = separatore.join(ordinati)
     except (ImportError, OSError):
         return
 
