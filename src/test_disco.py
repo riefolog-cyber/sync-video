@@ -433,13 +433,16 @@ class TestPathDaRegistro(unittest.TestCase):
 
     def test_variabili_ambiente_vengono_espanse(self) -> None:
         variabile = "SYNCVIDEO_TEST_REG_PATH"
+        # Il registro di Windows separa SEMPRE con ';', anche quando il test
+        # gira su Linux con sys.platform patched: usare os.pathsep (':' qui)
+        # separerebbe le lettere di unita' e le voci non sarebbero piu' tre.
         if os.name == "nt":
             sentinella = r"C:\sentinella-registro"
-            frammento = f"%{variabile}%{os.pathsep}C:\\fissa"
+            frammento = f"%{variabile}%;C:\\fissa"
             path_iniziale = r"C:\preesistente"
         else:
             sentinella = "/sentinella-registro"
-            frammento = f"${variabile}{os.pathsep}/fissa"
+            frammento = f"${variabile};/fissa"
             path_iniziale = "/preesistente"
 
         winreg_finto = MagicMock()
@@ -458,6 +461,9 @@ class TestPathDaRegistro(unittest.TestCase):
         self.assertIn(sentinella, path_finale)
         self.assertNotIn(variabile, path_finale)
         self.assertIn(path_iniziale, path_finale)
+        self.assertEqual(
+            len(path_finale.split(";")), 3, "devono restare tre voci: PATH iniziale, variabile espansa e fissa"
+        )
 
 
 if __name__ == "__main__":

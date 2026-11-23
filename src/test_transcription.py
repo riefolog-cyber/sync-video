@@ -1533,5 +1533,60 @@ class TestModelloNonApplicabileAOpenVino(unittest.TestCase):
             self._chiama("small")
 
 
+class TestLoadAudioPipeRotta(unittest.TestCase):
+    """Se la lettura del PCM solleva, il figlio ffmpeg non resta zombie."""
+
+    class _StdoutRotta:
+        def __init__(self) -> None:
+            self.chiusa = False
+
+        def read(self, quanti: int) -> bytes:
+            raise OSError("pipe rotta")
+
+        def close(self) -> None:
+            self.chiusa = True
+
+    class _StderrFinita:
+        def read(self) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            pass
+
+    class _ProcFinto:
+        def __init__(self) -> None:
+            self.stdout = TestLoadAudioPipeRotta._StdoutRotta()
+            self.stderr = TestLoadAudioPipeRotta._StderrFinita()
+            self.killato = False
+            self.attese = 0
+            self._vivo = True
+
+        def poll(self) -> int | None:
+            return None if self._vivo else -9
+
+        def kill(self) -> None:
+            self.killato = True
+            self._vivo = False
+
+        def wait(self) -> int:
+            self.attese += 1
+            return -9
+
+    def test_letto_errore_finchiuso_e_atteso(self) -> None:
+        proc = self._ProcFinto()
+        with (
+            mock.patch("shutil.which", return_value="/ffmpeg"),
+            mock.patch.object(transcription.subprocess, "Popen", return_value=proc),
+            self.assertRaisesRegex(OSError, "pipe rotta"),
+        ):
+            transcription._load_audio_16k(Path("audio.wav"))
+        # Prima il wait() stava DOPO il finally: con l'eccezione veniva saltato
+        # e il processo restava zombie. Deve essere chiamato una volta, anche
+        # se la lettura e' fallita.
+        self.assertTrue(proc.killato)
+        self.assertEqual(proc.attese, 1)
+        self.assertTrue(proc.stdout.chiusa)
+
+
 if __name__ == "__main__":
     unittest.main()

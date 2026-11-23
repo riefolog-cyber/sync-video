@@ -75,17 +75,32 @@ def _mypy_cross_platform() -> bool:
     print(f"\n{'=' * 66}\n6. MYPY SU TUTTE LE PIATTAFORME (la CI gira su Linux)\n{'=' * 66}")
     ok = True
     for piattaforma in ("win32", "linux", "darwin"):
-        esito = subprocess.run(
-            [sys.executable, "-m", "mypy", "--platform", piattaforma, "."],
-            capture_output=True,
-            text=True,
-        )
-        riga = (esito.stdout or esito.stderr).strip().splitlines()[-1] if (esito.stdout or esito.stderr) else "?"
-        buono = esito.returncode == 0
+        try:
+            esito = subprocess.run(
+                [sys.executable, "-m", "mypy", "--platform", piattaforma, "."],
+                capture_output=True,
+                text=True,
+                # Anche qui serve un tetto: senza, un mypy appeso blocca
+                # `_debug_hardware.py` (e il passo "debug hardware" dei
+                # controlli) per sempre, invece di dare un KO con motivo.
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            buono = False
+            riga = "TIMEOUT: mypy non e' terminato entro 300s"
+            dettagli: list[str] = []
+        else:
+            riga = (
+                (esito.stdout or esito.stderr).strip().splitlines()[-1]
+                if (esito.stdout or esito.stderr)
+                else "?"
+            )
+            buono = esito.returncode == 0
+            dettagli = (esito.stdout or "").strip().splitlines()[:8]
         ok &= buono
         print(f"   [{'OK ' if buono else 'KO '}] {piattaforma:7s}: {riga}")
-        if not buono and esito.stdout:
-            for dettaglio in esito.stdout.strip().splitlines()[:8]:
+        if not buono:
+            for dettaglio in dettagli:
                 print(f"          {dettaglio}")
     return ok
 

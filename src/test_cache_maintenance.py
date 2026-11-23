@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cache_maintenance import cache_disk_usage, clean_cache, format_bytes
+from cache_maintenance import cache_disk_usage, clean_cache, descrizione_pulizia_cache, format_bytes
 
 
 class TestFormatBytes(unittest.TestCase):
@@ -19,6 +19,22 @@ class TestFormatBytes(unittest.TestCase):
         self.assertEqual(format_bytes(2048), "2.0 KB")
         self.assertEqual(format_bytes(3 * 1024 * 1024), "3.0 MB")
         self.assertEqual(format_bytes(2 * 1024**3), "2.0 GB")
+
+
+class TestDescrizionePulizia(unittest.TestCase):
+    def test_include_i_parziali_rimossi(self) -> None:
+        esito = {
+            "orphan_json": 2,
+            "embed_npz": 3,
+            "verify_frames": 4,
+            "parziali": 5,
+            "model_bytes": 0,
+        }
+        messaggio = descrizione_pulizia_cache(esito)
+        self.assertIn("5 parziali vecchi", messaggio)
+        self.assertIn("2 JSON orfani", messaggio)
+        self.assertIn("3 embedding", messaggio)
+        self.assertIn("4 frame", messaggio)
 
 
 class TestCacheDu(unittest.TestCase):

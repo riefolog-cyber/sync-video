@@ -266,17 +266,19 @@ def prova_spazio(r: Relazione, radice: Path) -> None:
         _MARGINE_DISCO,
         DEFAULT_EMBEDDING_CACHE_DIR,
         DEFAULT_EMBEDDING_MODEL,
+        DEFAULT_WHISPER_MODEL,
         _spazio_modelli_necessario,
     )
 
     # Si passa il modello ESPLICITAMENTE come fa il bootstrap: con il
     # parametro vuoto la funzione non trovava la dimensione, restituiva None,
     # e `if not necessario` leggeva quel None come "modelli gia' in cache".
-    # Su un PC nuovo il referto diceva quindi che i modelli erano in cache
-    # mentre la riga sotto diceva che non lo erano: proprio sul controllo che
-    # serve a non riempire il disco.
+    # Usiamo DEFAULT_WHISPER_MODEL (che rispetta WHISPER_MODEL dal .env) così
+    # il referto non e' piu' permissivo della guardia reale del bootstrap:
+    # con WHISPER_MODEL=large dire "small" faceva passare il controllo su un
+    # disco dove i ~3 GB del modello grande non ci stanno.
     necessario = _spazio_modelli_necessario(
-        Path(DEFAULT_EMBEDDING_CACHE_DIR), "small", DEFAULT_EMBEDDING_MODEL
+        Path(DEFAULT_EMBEDDING_CACHE_DIR), DEFAULT_WHISPER_MODEL, DEFAULT_EMBEDDING_MODEL
     )
     if necessario == 0:
         r.aggiungi(Esito("Spazio disco", OK, "modelli gia' in cache"))

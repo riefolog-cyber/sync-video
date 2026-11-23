@@ -432,6 +432,7 @@ def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
         # ferma, e la lettura di stdout resta appesa per sempre.
         t_stderr = threading.Thread(target=_leggi_stderr, daemon=True)
         t_stderr.start()
+        returncode = 0
         try:
             try:
                 while True:
@@ -446,11 +447,15 @@ def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
         finally:
             if proc.poll() is None:
                 proc.kill()
-            # Join dopo la kill e prima di wait()/ritorno: se la lettura PCM
-            # solleva, il processo può ancora scrivere e il thread resterebbe
-            # in attesa di EOF. Cosi' stderr_bytes e' completo quando serve.
+            # Join dopo la kill e prima di wait(): se la lettura PCM solleva,
+            # il processo può ancora scrivere e il thread resterebbe in attesa
+            # di EOF. Cosi' stderr_bytes e' completo quando serve.
             t_stderr.join()
-        returncode = proc.wait()
+            # wait() DENTRO il finally, non dopo: se `stdout.read()` solleva,
+            # l'eccezione saltava il wait() lasciando il figlio zombie finché
+            # non usciva il processo. Il returncode resta disponibile qui sotto
+            # per il controllo sul risultato della decodifica.
+            returncode = proc.wait()
         if returncode != 0:
             raise RuntimeError(
                 f"Decodifica audio fallita (ffmpeg exit {returncode}): "

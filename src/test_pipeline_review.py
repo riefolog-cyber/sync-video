@@ -123,5 +123,45 @@ class TestChiaveTrascrizioneEffettiva(unittest.TestCase):
             self.assertEqual([p["word"] for p in parole], ["accurata"])
 
 
+class TestReviewPersisteGliArtefatti(unittest.TestCase):
+    """`--review` non si limita a stampare: aggiorna report e riepilogo."""
+
+    def test_anteprime_finite_vanno_nel_report_e_nel_riepilogo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            cache = _cache(
+                td,
+                _report(mentions_off=[{"slide": 2, "mention": 300.0, "declared": 60.0}]),
+            )
+            video = td / "lezione.mp4"
+            video.write_bytes(b"video finto")
+            anteprima = cache / "review" / "confine.png"
+            with (
+                patch("main.boundary_review_sheet", return_value=anteprima),
+                patch("pipeline_review.scrivi_riepilogo") as riepilogo,
+                self.assertLogs("slide2video", level="INFO"),
+            ):
+                _review_boundary_doubts(video, cache_dir=cache)
+            riepilogo.assert_called_once()
+            self.assertEqual(riepilogo.call_args.args[1], video)
+            dati = json.loads((cache / "sync_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                dati["anchors"]["mentions_off"][0]["preview"], str(anteprima)
+            )
+
+    def test_mentions_off_ricalcolati_vengono_salvati(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            cache = _cache(td, _report(), words=_parole_che_dicono_slide_2())
+            with (
+                patch("pipeline_review.scrivi_riepilogo") as riepilogo,
+                self.assertLogs("slide2video", level="INFO"),
+            ):
+                _review_boundary_doubts(cache / "video_assente.mp4", cache_dir=cache)
+            dati = json.loads((cache / "sync_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(dati["anchors"]["mentions_off"]), 1)
+            riepilogo.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

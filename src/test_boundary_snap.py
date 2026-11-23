@@ -123,5 +123,53 @@ class TestLeggibilita(unittest.TestCase):
         self.assertEqual(confini_dentro_parole({1: 0.0, 2: 5.0}, []), [])
 
 
+class TestVettoreStartsRiutilizzato(unittest.TestCase):
+    """Il vettore ordinato passato dal chiamante deve dare gli stessi risultati.
+
+    Il percorso di produzione calcola ``starts`` una volta e lo passa alle
+    quattro chiamate (prima, snap, dopo): qui si verifica che la ricerca con
+    ``bisect`` sia equivalente alle vecchie scansioni lineari.
+    """
+
+    def test_starts_passato_non_cambia_niente(self) -> None:
+        parole = _parole([("a", 0.0), ("b", 5.0), ("c", 5.3), ("d", 20.0), ("e", 40.0)])
+        timeline = {1: 0.0, 2: 5.15, 3: 20.6, 4: 40.0}
+        starts = boundary_snap.starts_parole(parole)
+
+        self.assertEqual(
+            confini_disponibili(parole), confini_disponibili(parole, starts)
+        )
+        self.assertEqual(
+            confini_dentro_parole(timeline, parole),
+            confini_dentro_parole(timeline, parole, starts),
+        )
+        self.assertEqual(
+            aggancia_confini(timeline, {3: 20.6}, parole, min_secondi=3.0),
+            aggancia_confini(timeline, {3: 20.6}, parole, min_secondi=3.0, starts=starts),
+        )
+
+    def test_bisect_e_equivalente_all_scansione(self) -> None:
+        starts = [0.0, 0.1, 5.0, 5.3, 20.0, 40.0, 40.1]
+        durata = boundary_snap.DURATA_PAROLA_DEFAULT
+        for t in (0.0, 0.15, 0.3, 5.0, 5.15, 5.29, 5.3, 19.9, 39.95, 40.5, 100.0):
+            atteso = any(inizio + 1e-6 < t < inizio + durata - 1e-6 for inizio in starts)
+            self.assertEqual(
+                boundary_snap._dentro_una_parola(t, starts), atteso, f"t={t}"
+            )
+
+        candidati = [0.0, 1.0, 2.0, 5.0, 5.3, 20.0]
+        tolleranza = 1.5
+        for valore in (-1.0, 0.0, 0.4, 1.0, 1.5, 5.15, 6.7, 19.0, 21.0, 100.0):
+            migliore: float | None = None
+            for c in candidati:
+                if abs(c - valore) > tolleranza:
+                    continue
+                if migliore is None or abs(c - valore) < abs(migliore - valore):
+                    migliore = c
+            self.assertEqual(
+                boundary_snap._piu_vicino(valore, candidati, tolleranza), migliore, f"valore={valore}"
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -267,6 +267,16 @@ class TestCudaRuntimeLibs(unittest.TestCase):
             with mock.patch.dict(config.os.environ, {"PATH": tmp}):
                 self.assertTrue(config._cerca_dll_windows("cublas64_12.dll"))
 
+    def test_path_multi_voce_usa_il_separatore_di_windows(self):
+        # Anche su Linux (dove os.pathsep e' ':') la ricerca simula Windows:
+        # un PATH scritto con ';' deve essere letto come due cartelle, non come
+        # un unico nome con due lettere di unita' dentro.
+        with tempfile.TemporaryDirectory() as prima, tempfile.TemporaryDirectory() as seconda:
+            (Path(seconda) / "cublas64_12.dll").write_bytes(b"x")
+            path_windows = f"{prima};{seconda}"
+            with mock.patch.dict(config.os.environ, {"PATH": path_windows}):
+                self.assertTrue(config._cerca_dll_windows("cublas64_12.dll"))
+
     def test_non_inventa_file_inesistenti(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(config.os.environ, {"PATH": tmp}):
             self.assertFalse(config._cerca_dll_windows("libreria_inesistente_123.dll"))

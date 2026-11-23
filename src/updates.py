@@ -966,12 +966,16 @@ def _ask_yes_no(prompt: str) -> bool:
     Svuota lo stdout prima di leggere: quando Python è avviato da un .bat la
     stdout è bufferizzata e il prompt di `input()` non comparirebbe finché il
     buffer non si svuota (i log di loguru, su stderr, invece compaiono subito).
+
+    Ctrl+C (KeyboardInterrupt) vale come EOF: risposta "no", senza traceback.
+    L'aggiornamento e' un passo opzionale, interromperlo non deve far credere
+    che il programma sia rotto.
     """
     try:
         sys.stdout.write(f"   {prompt} [s/N]: ")
         sys.stdout.flush()
         answer = input().strip().lower()
-    except EOFError:
+    except (EOFError, KeyboardInterrupt):
         return False
     return answer in ("s", "si", "y", "yes")
 

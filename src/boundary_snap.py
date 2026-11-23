@@ -23,6 +23,7 @@ illeggibile).
 
 from __future__ import annotations
 
+import bisect
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -50,10 +51,24 @@ def _starts(words: Sequence[Mapping[str, Any]]) -> list[float]:
     return tempi
 
 
+def starts_parole(words: Sequence[Mapping[str, Any]]) -> list[float]:
+    """`_starts` pubblico: chi chiama piu' funzioni qui le calcola una volta.
+
+    Il vettore e' ordinato: e' la premessa per le ricerche con ``bisect`` qui
+    sotto. Chi lo passa alle funzioni di questo modulo deve usare QUESTO (o
+    un vettore equivalente), non la lista grezza delle parole.
+    """
+    return _starts(words)
+
+
 def confini_disponibili(
     words: Sequence[Mapping[str, Any]],
+    starts: Sequence[float] | None = None,
 ) -> tuple[list[float], list[float]]:
     """(pause, estremi di parola) fra cui un confine puo' essere spostato.
+
+    ``starts`` (opzionale): vettore ordinato degli inizi di parola, calcolato
+    una volta dal chiamante con ``starts_parole``. Senza, si ricalcola qui.
 
     Le pause stanno poco PRIMA della parola successiva, dentro il silenzio:
     la slide nuova entra quando il relatore riattacca, non a meta' della
@@ -61,7 +76,8 @@ def confini_disponibili(
     silenzio). Gli estremi di parola sono gli inizi, piu' la fine stimata
     dell'ultima.
     """
-    starts = _starts(words)
+    if starts is None:
+        starts = _starts(words)
     if not starts:
         return [], []
     pause: list[float] = []
@@ -83,20 +99,35 @@ def _dentro_una_parola(t: float, starts: Sequence[float]) -> bool:
     Lo spazio e' ``start + DURATA_PAROLA_DEFAULT``, la stessa fine stimata che
     usa ``confini_disponibili``: due definizioni diverse nella stessa funzione
     facevano divergere il calcolo del silenzio e quello del taglio.
+
+    ``starts`` e' ordinato: si salta direttamente al primo inizio che puo'
+    contenere ``t`` con ``bisect`` invece di scandire tutte le parole. Il
+    confronto dentro il ciclo resta letteralmente quello di prima, cosi' i
+    casi limite in virgola mobile danno lo stesso risultato.
     """
-    return any(inizio + 1e-6 < t < inizio + DURATA_PAROLA_DEFAULT - 1e-6 for inizio in starts)
+    i = bisect.bisect_right(starts, t - DURATA_PAROLA_DEFAULT)
+    while i < len(starts) and starts[i] + 1e-6 < t:
+        if t < starts[i] + DURATA_PAROLA_DEFAULT - 1e-6:
+            return True
+        i += 1
+    return False
 
 
 def confini_dentro_parole(
     timeline: Mapping[int, float],
     words: Sequence[Mapping[str, Any]],
+    starts: Sequence[float] | None = None,
 ) -> list[int]:
     """Slide il cui confine cade DENTRO una parola: verrebbe troncata a meta'.
 
     E' la misura della leggibilita' prima e dopo lo snap, non una regola: nel
     referto dice se l'aggancio su questo materiale ha servito a qualcosa.
+
+    ``starts`` opzionale: lo stesso vettore ordinato passato ad
+    ``aggancia_confini``, per non ricalcolarlo a ogni misurazione.
     """
-    starts = _starts(words)
+    if starts is None:
+        starts = _starts(words)
     if not starts:
         return []
     ordinate = sorted(timeline)
@@ -104,12 +135,24 @@ def confini_dentro_parole(
 
 
 def _piu_vicino(valore: float, candidati: Sequence[float], tolleranza: float) -> float | None:
+    """Candidato entro ``tolleranza`` piu' vicino a ``valore``.
+
+    ``candidati`` e' ordinato (pause e estremi lo sono per costruzione): con
+    ``bisect`` bastano i due valori che incorniciano ``valore``, non serve
+    scandire tutta la lista. In caso di pari distanza vince il piu' piccolo,
+    esattamente come nella scansione originaria che incontrava prima lui.
+    """
+    if not candidati:
+        return None
+    i = bisect.bisect_left(candidati, valore)
     migliore: float | None = None
-    for c in candidati:
-        if abs(c - valore) > tolleranza:
-            continue
-        if migliore is None or abs(c - valore) < abs(migliore - valore):
-            migliore = c
+    for j in (i - 1, i):
+        if (
+            0 <= j < len(candidati)
+            and abs(candidati[j] - valore) <= tolleranza
+            and (migliore is None or abs(candidati[j] - valore) < abs(migliore - valore))
+        ):
+            migliore = candidati[j]
     return migliore
 
 
@@ -120,18 +163,25 @@ def aggancia_confini(
     *,
     tolleranza: float = TOLLERANZA,
     min_secondi: float,  # obbligatorio: il default vive in --semantic-min-duration
+    starts: Sequence[float] | None = None,
 ) -> tuple[dict[int, float], list[tuple[int, float, float, str]]]:
     """Restituisce (timeline agganciata, mosse) con ``mosse`` = (slide, prima, dopo, tipo).
 
     ``tipo`` e' ``"pausa"`` o ``"parola"``: serve al log e al report perche' sono
     due qualita' diverse di correzione (una pausa e' una scelta, un estremo di
-    parola e' un rattoppo).
+    parola e' un rattoppo). ``starts`` e' il vettore ordinato opzionale di
+    ``starts_parole``: passandolo, chi misura prima e dopo non paga due
+    ricostruzioni del vettore ne' il ricalcolo interno di
+    ``confini_disponibili``.
     """
     nuove = {int(s): float(t) for s, t in timeline.items()}
-    starts = _starts(words)
+    if starts is None:
+        starts = _starts(words)
     if not starts or len(nuove) < 2:
         return nuove, []
-    pause, estremi = confini_disponibili(words)
+    # Lo stesso vettore serve a pause, estremi e prova "dentro parola": calcolarlo
+    # una volta sola evita tre ordinamenti delle stesse parole.
+    pause, estremi = confini_disponibili(words, starts)
     ancore = anchors or {}
     ordinate = sorted(nuove)
     mosse: list[tuple[int, float, float, str]] = []

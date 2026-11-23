@@ -86,6 +86,20 @@ _EMBED_CACHE_MAX_BYTES = 300 * 1024 * 1024
 _EMBED_CACHE_MAX_ETA_GIORNI = 30
 _EMBED_MEMO: dict[str, tuple[np.ndarray, float]] = {}
 
+# Indice del riuso PARZIALE, costruito una volta per processo: embed_id ->
+# {chiave_testo: (path, riga, mtime)}. Senza, ogni `_riuso_parziale` faceva
+# glob + stat + ordinamento + apertura di TUTTI gli npz solo per leggere
+# modello e chiavi (che non cambiano fra due chiamate). La mtime per voce e
+# quella della cartella servono a rilevare modifiche esterne (un altro
+# processo che scrive o cancella una voce): in quel caso l'indice si rifà.
+_EMBED_INDEX: dict[str, dict[str, tuple[Path, int, float]]] = {}
+_EMBED_INDEX_DIR_MTIME: float | None = None
+# Quante voci scritte dall'ultima potatura: la potatura NON sta più nel
+# percorso di salvataggio di ogni singola voce, ma scatta solo sopra soglia
+# (oppure su richiesta esplicita a fine run, vedi `potatura_cache_embedding`).
+_EMBED_SCRITTURE_DALLA_POTATURA = 0
+_EMBED_PRUNE_OGNI_SCRITTURE = 20
+
 # ``--no-cache`` deve ignorare anche questi vettori, altrimenti il flag
 # mentirebbe su una delle poche cache che sopravvivono alla pulizia orfana.
 _EMBED_CACHE_ENABLED = True
@@ -121,8 +135,20 @@ def embed_seconds() -> float:
 
 
 def reset_embed_cache() -> None:
-    """Svuota il memo di processo della cache embedding (usato dai test)."""
+    """Svuota memo e indice di processo della cache embedding (usato dai test)."""
     _EMBED_MEMO.clear()
+    invalida_indice_embedding()
+
+
+def invalida_indice_embedding() -> None:
+    """Scarta l'indice del riuso parziale: si ricostruisce al prossimo uso.
+
+    Serve quando una voce viene scritta o potata fuori dal normale percorso
+    (cache_maintenance, un altro processo, un test che cambia i file).
+    """
+    global _EMBED_INDEX_DIR_MTIME
+    _EMBED_INDEX.clear()
+    _EMBED_INDEX_DIR_MTIME = None
 
 
 def set_embed_cache_enabled(enabled: bool) -> None:
@@ -338,6 +364,21 @@ def _make_embed_fn(model: TextEmbedding, batch_size: int | None = None) -> Embed
     return _embed
 
 
+def _normalizza_l2_in_place(mat: np.ndarray) -> np.ndarray:
+    """Normalizza L2 riga per riga SENZA allocare una seconda matrice.
+
+    I vettori che arrivano da `_embed_list` sono già normalizzati, ma il
+    raffinamento li usa dopo averli presi dalla cache: ricalcolare norma e
+    divisione in place evita due copie complete (una per il dividendo, una per
+    il `.astype`) su matrici di centinaia di righe. `np.maximum` è la guardia
+    sullo zero: un vettore nullo resta nullo, non diventa NaN.
+    """
+    if mat.size == 0:
+        return mat
+    norme = np.linalg.norm(mat, axis=1, keepdims=True)
+    return cast(np.ndarray, np.divide(mat, np.maximum(norme, 1e-9), out=mat))
+
+
 def _embed_cache_key(embed_id: str, texts: Sequence[str]) -> str:
     """Chiave content-addressed dell'embedding di una lista di testi."""
     h = hashlib.sha1()
@@ -354,8 +395,56 @@ def _chiave_testo(testo: str) -> str:
     return hashlib.sha1(testo.encode("utf-8")).hexdigest()[:16]
 
 
+def _indice_embedding() -> dict[str, dict[str, tuple[Path, int, float]]]:
+    """Indice in memoria ``embed_id -> {chiave_testo: (file, riga, mtime)}``.
+
+    Lo si costruisce una volta: le voci di cache non cambiano (content-addressed)
+    e il costo della scansione iniziale si paga una sola volta per processo.
+    Un cambiamento della cartella (nuova voce, potatura, altro processo) o
+    della mtime di una voce la rileva e rifà l'indice, senza mai riusare una
+    chiave che punta a un file scomparso o riscritto.
+    """
+    global _EMBED_INDEX_DIR_MTIME
+    try:
+        mtime_cartella = _EMBED_CACHE_DIR.stat().st_mtime
+    except OSError:
+        invalida_indice_embedding()
+        return _EMBED_INDEX
+    if mtime_cartella == _EMBED_INDEX_DIR_MTIME:
+        return _EMBED_INDEX
+    indice: dict[str, dict[str, tuple[Path, int, float]]] = {}
+    try:
+        voci = sorted(
+            _EMBED_CACHE_DIR.glob("emb_*.npz"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        invalida_indice_embedding()
+        return _EMBED_INDEX
+    for path in voci:
+        try:
+            info = path.stat()
+            with np.load(path, allow_pickle=False) as data:
+                modello = str(np.asarray(data["model"]).reshape(()))
+                chiavi = np.asarray(data["keys"]).astype("U16")
+        except (OSError, ValueError, KeyError):
+            # Voce vecchia (senza chiavi/modello) o illeggibile: non serve
+            # nemmeno come indizio per il riuso.
+            continue
+        per_modello = indice.setdefault(modello, {})
+        # Ordine per mtime decrescente, come nella scansione originaria: se due
+        # voci contengono lo stesso testo, vince la PIU' RECENTE.
+        for riga, chiave in enumerate(chiavi):
+            per_modello.setdefault(str(chiave), (path, riga, info.st_mtime))
+    _EMBED_INDEX.clear()
+    _EMBED_INDEX.update(indice)
+    _EMBED_INDEX_DIR_MTIME = mtime_cartella
+    return _EMBED_INDEX
+
+
 def _riuso_parziale(
-    embed_id: str, texts: Sequence[str]
+    embed_id: str, texts: Sequence[str], _retry: bool = True
 ) -> tuple[dict[int, np.ndarray], list[int]]:
     """Vettori già calcolati per una lista, anche se la lista è cambiata.
 
@@ -372,45 +461,54 @@ def _riuso_parziale(
     Le chiavi dei testi NON bastano da sole: lo stesso testo embedding cambia
     se cambiano modello o batch, quindi ogni voce porta con se' l'identita' del
     modello e il riuso e' concesso solo a identita' uguale.
+
+    La ricerca delle chiavi usa l'indice in memoria (`_indice_embedding`); i
+    file npz si aprono SOLO per leggere i vettori davvero riusati, non per
+    scoprire quali testi contengono. `_retry` e' una guardia interna: se una
+    voce indicizzata e' sparita o cambiata, si rifa' l'indice una volta.
     """
     if not embed_id or not _EMBED_CACHE_ENABLED:
         return {}, list(range(len(texts)))
     wanted = [_chiave_testo(t) for t in texts]
+    indice = _indice_embedding().get(embed_id, {})
+    # path -> {posizione nel testo: (riga nel file, mtime attesa)}
+    da_leggere: dict[Path, dict[int, tuple[int, float]]] = {}
+    for pos, chiave in enumerate(wanted):
+        voce = indice.get(chiave)
+        if voce is None:
+            continue
+        path, riga, mtime = voce
+        da_leggere.setdefault(path, {})[pos] = (riga, mtime)
+
     trovati: dict[int, np.ndarray] = {}
-    try:
-        candidati = sorted(
-            _EMBED_CACHE_DIR.glob("emb_*.npz"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-    except OSError:
-        return {}, list(range(len(texts)))
-    for path in candidati:
-        if len(trovati) == len(texts):
-            break
+    for path, richieste in da_leggere.items():
+        _, mtime = next(iter(richieste.values()))
         try:
+            if path.stat().st_mtime != mtime:
+                # File riscritto: la riga indicizzata potrebbe non essere piu'
+                # la stessa. Si rifa' tutto una volta.
+                raise OSError("voce di cache cambiata")
             with np.load(path, allow_pickle=False) as data:
                 if str(np.asarray(data["model"]).reshape(())) != embed_id:
-                    continue
-                keys = np.asarray(data["keys"]).astype("U16")
-                indice = {str(k): i for i, k in enumerate(keys)}
-                utili = {
-                    pos: indice[chiave]
-                    for pos, chiave in enumerate(wanted)
-                    if pos not in trovati and chiave in indice
-                }
-                if not utili:
-                    # Il file non contiene nessuno dei testi cercati: non si
-                    # carica la matrice dei vettori (il pezzo grosso).
-                    continue
+                    raise ValueError("identita' del modello diversa")
+                chiavi = np.asarray(data["keys"]).astype("U16")
+                for pos, (riga, _) in richieste.items():
+                    if riga >= len(chiavi) or str(chiavi[riga]) != wanted[pos]:
+                        raise ValueError("chiave di testo diversa")
                 emb = np.asarray(data["emb"], dtype=np.float32)
         except (OSError, ValueError, KeyError):
-            # Voce vecchia (senza chiavi/modello) o illeggibile: non serve.
+            if _retry:
+                invalida_indice_embedding()
+                return _riuso_parziale(embed_id, texts, _retry=False)
             continue
-        if emb.ndim != 2 or emb.shape[0] != len(keys):
+        if emb.ndim != 2 or emb.shape[0] != len(chiavi):
             continue
-        for pos, riga in utili.items():
+        for pos, (riga, _) in richieste.items():
             trovati[pos] = emb[riga]
+            if len(trovati) == len(texts):
+                break
+        if len(trovati) == len(texts):
+            break
     mancanti = [pos for pos in range(len(texts)) if pos not in trovati]
     return trovati, mancanti
 
@@ -460,7 +558,39 @@ def _prune_embed_cache(cache_dir: Path | None = None) -> int:
                 rimosse += 1
             continue
         totale += size
+    if rimosse:
+        # L'indice punta a file cancellati: non si può limitare a togliere le
+        # voci, perché l'ordine per mtime delle restanti resta valido, ma è
+        # più semplice e sicuro ricostruirlo al prossimo riuso parziale.
+        invalida_indice_embedding()
     return rimosse
+
+
+def potatura_cache_embedding(cache_dir: Path | None = None) -> int:
+    """Potatura esplicita della cache embedding (da chiamare a fine run).
+
+    Non sta più dentro ogni salvataggio: `_salva_cache_voce` la scatena solo
+    oltre `_EMBED_PRUNE_OGNI_SCRITTURE` nuove voci in questo processo. Chi ha
+    una run lunga può chiamarla una volta alla fine, senza pagare un glob+stat
+    per ogni singolo npz scritto.
+    """
+    global _EMBED_SCRITTURE_DALLA_POTATURA
+    rimosse = _prune_embed_cache(cache_dir)
+    _EMBED_SCRITTURE_DALLA_POTATURA = 0
+    return rimosse
+
+
+def _aggiorna_mtime_indice(path: Path) -> None:
+    """Allinea l'indice quando una voce esistente viene toccata (LRU)."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        invalida_indice_embedding()
+        return
+    for voci in _EMBED_INDEX.values():
+        for chiave, (file, riga, _) in list(voci.items()):
+            if file == path:
+                voci[chiave] = (file, riga, mtime)
 
 
 def _embed_list_cached(
@@ -507,6 +637,9 @@ def _embed_list_cached(
                 # ricalcolano da zero senza motivo.
                 with contextlib.suppress(OSError):
                     path.touch()
+                    # Il touch cambia la mtime che l'indice usa per validare la
+                    # voce: aggiornarla evita di rifare l'indice a ogni riuso.
+                    _aggiorna_mtime_indice(path)
                 log.info(
                     "   [%s] Embedding riusati dalla cache: ~%.0fs risparmiati "
                     "(stessi testi, stesso modello).",
@@ -517,6 +650,7 @@ def _embed_list_cached(
             log.debug("   [%s] Cache embedding con forma inattesa: ricalcolo.", context)
         with contextlib.suppress(OSError):
             path.unlink()
+            invalida_indice_embedding()
     return None
 
 
@@ -548,16 +682,32 @@ def _salva_cache_voce(embed_id: str, texts: Sequence[str], arr: np.ndarray, save
         return
     key = _embed_cache_key(embed_id, texts)
     _EMBED_MEMO[key] = (arr, saved)
+    global _EMBED_SCRITTURE_DALLA_POTATURA, _EMBED_INDEX_DIR_MTIME
     try:
         _EMBED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _EMBED_CACHE_DIR / f"emb_{key}.npz"
         np.savez(
-            _EMBED_CACHE_DIR / f"emb_{key}.npz",
+            path,
             emb=arr,
             seconds=np.float32(saved),
             keys=np.array([_chiave_testo(t) for t in texts], dtype="U16"),
             model=np.array(embed_id),
         )
-        _prune_embed_cache()
+        # Indice aggiornato SENZA riaprire il file appena scritto: chiavi e
+        # righe sono quelle che abbiamo sotto mano, la mtime si legge una volta.
+        mtime = path.stat().st_mtime
+        # Se l'indice non era ancora stato costruito (o e' cambiato un altro
+        # processo) lo si aggiorna una volta, poi si aggiunge la voce nuova.
+        per_modello = _indice_embedding().setdefault(embed_id, {})
+        for riga, testo in enumerate(texts):
+            per_modello[_chiave_testo(testo)] = (path, riga, mtime)
+        _EMBED_INDEX_DIR_MTIME = _EMBED_CACHE_DIR.stat().st_mtime
+        _EMBED_SCRITTURE_DALLA_POTATURA += 1
+        if _EMBED_SCRITTURE_DALLA_POTATURA >= _EMBED_PRUNE_OGNI_SCRITTURE:
+            # Soglia, non ogni scrittura: una run ancorata scrive ~3 voci e una
+            # senza ancore ~18, quindi nella pratica la potatura resta fuori
+            # dal percorso caldo (o si chiama esplicitamente a fine run).
+            potatura_cache_embedding()
     except OSError as e:
         # La cache è un'ottimizzazione: se il disco non collabora si prosegue.
         log.debug("   Cache embedding non salvata (%s).", e)
@@ -1194,6 +1344,51 @@ def _timeline_solo_ancore(
     return timeline
 
 
+def _ancore_valide(
+    anchors: dict[int, float] | None,
+    total_slides: int,
+    total_duration: float,
+) -> dict[int, float]:
+    """Solo le ancore entro il deck e la durata dell'audio; avvisa gli scarti.
+
+    Un "slide 15" su 14 pagine, o un tempo oltre la fine dell'audio, non e' un
+    vincolo valido: romperebbe la riconciliazione (ValueError) con un
+    messaggio fuorviante. L'avviso va dato SEMPRE, non solo nel ramo lento:
+    prima esisteva solo li', quindi il percorso tutto-ancorato scartava le
+    stesse ancore in silenzio.
+    """
+    if not anchors:
+        return {}
+    valide = {
+        s: t
+        for s, t in anchors.items()
+        if 2 <= s <= total_slides and 0.0 <= t < total_duration
+    }
+    if len(valide) != len(anchors):
+        log.warning(
+            "   [Semantico] Scartate %d ancore fuori portata (slide>deck o tempo fuori durata).",
+            len(anchors) - len(valide),
+        )
+    return valide
+
+
+def _assigned_pairs(
+    starts: Sequence[int],
+    total_slides: int,
+    num_blocks: int,
+) -> list[tuple[int, int]]:
+    """Coppie (blocco, slide) assegnate dalla DP, identiche nelle due catene.
+
+    ``starts`` ha solo N elementi (indici 0..N-1): per s == total_slides il
+    confine finale e' la fine dei blocchi, non ``starts[s]`` (che non esiste).
+    """
+    return [
+        (blk, s - 1)
+        for s in range(1, total_slides + 1)
+        for blk in range(starts[s - 1], num_blocks if s == total_slides else starts[s])
+    ]
+
+
 def semantic_timeline_from_texts(
     slide_texts: Sequence[str],
     blocks: Sequence[dict[str, Any]],
@@ -1232,6 +1427,10 @@ def semantic_timeline_from_texts(
         )
         return None
 
+    # Filtro unico, prima dei due rami (tutto ancorato / DP): cosi' l'avviso
+    # sulle ancore fuori portata non dipende piu' da quale ramo venga preso.
+    anchors = _ancore_valide(anchors, total_slides, total_duration)
+
     # --- Ancoraggio completo: i confini li dice il podcast, non il motore ---
     # Se OGNI cambio di slide e' annunciato a voce, la timeline la fa il
     # podcast: l'embed dei blocchi (300+ testi, ~36s misurati) non
@@ -1240,14 +1439,9 @@ def semantic_timeline_from_texts(
     # slide annunciata RESTA (e' un'altra catena, molto piu' piccola: le slide
     # e gli estratti). Non si rinuncia a nulla sulla timeline: e' la stessa,
     # costruita dagli stessi tempi.
-    _ancore_valide = {
-        s: t
-        for s, t in (anchors or {}).items()
-        if 2 <= s <= total_slides and 0.0 <= t < total_duration
-    }
-    if len(_ancore_valide) == total_slides - 1:
+    if anchors and len(anchors) == total_slides - 1:
         return _timeline_solo_ancore(
-            _ancore_valide,
+            anchors,
             total_slides,
             total_duration,
             embed_fn,
@@ -1329,11 +1523,7 @@ def semantic_timeline_from_texts(
     # L'ultimo segmento conta quanto gli altri: ``starts`` ha solo N elementi
     # (indici 0..N-1), quindi per s == total_slides il confine finale e' la fine
     # dei blocchi, non ``starts[s]`` (che non esiste).
-    pairs = [
-        (blk, s - 1)
-        for s in range(1, total_slides + 1)
-        for blk in range(starts[s - 1], len(blocks) if s == total_slides else starts[s])
-    ]
+    pairs = _assigned_pairs(starts, total_slides, len(blocks))
     avg_sim, avg_z = _mean_pair_scores(sim, sim_norm, pairs)
     _LAST_QUALITY.clear()
     # `confusability` entra qui e non solo dentro il confronto A/B del beam:
@@ -1384,20 +1574,8 @@ def semantic_timeline_from_texts(
     # "slide N" al tempo T, la slide deve comparire esattamente in quel momento
     # (T è già verificato essere entro ±1 blocco dall'inizio scelto). La
     # monotonicità viene preservata con un piccolo margine di sicurezza.
-    # Scarta ancore fuori portata: un "slide 15" su 14 pagine, o un tempo oltre
-    # la durata dell'audio, non e' un vincolo valido e romperebbe la
-    # riconciliazione (ValueError) con un messaggio fuorviante.
-    if anchors:
-        _valide = {
-            s: t for s, t in anchors.items()
-            if 2 <= s <= total_slides and 0.0 <= t < total_duration
-        }
-        if len(_valide) != len(anchors):
-            log.warning(
-                "   [Semantico] Scartate %d ancore fuori portata (slide>deck o tempo fuori durata).",
-                len(anchors) - len(_valide),
-            )
-        anchors = _valide
+    # Le ancore sono gia' state filtrate all'ingresso da `_ancore_valide`: qui
+    # restano solo quelle applicabili alla timeline.
     if anchors:
         for s in anchors:
             if s > 1:
@@ -1536,6 +1714,9 @@ def alignment_quality_from_words(
     min_gap = _min_gap_blocks(
         total_slides, len(blocks), opts.min_slide_duration, opts.window_seconds
     )
+    # Stesso filtro della sync vera: qui prima le ancore fuori portata entravano
+    # in `build_candidates` senza avviso, e le due catene potevano dividersi.
+    anchors = _ancore_valide(anchors, total_slides, total_duration)
     candidates = build_candidates(len(blocks), total_slides, min_gap, blocks, anchors)
     if candidates is None:
         return None
@@ -1547,11 +1728,7 @@ def alignment_quality_from_words(
     # L'ultimo segmento conta quanto gli altri: ``starts`` ha solo N elementi
     # (indici 0..N-1), quindi per s == total_slides il confine finale e' la fine
     # dei blocchi, non ``starts[s]`` (che non esiste).
-    pairs = [
-        (blk, s - 1)
-        for s in range(1, total_slides + 1)
-        for blk in range(starts[s - 1], len(blocks) if s == total_slides else starts[s])
-    ]
+    pairs = _assigned_pairs(starts, total_slides, len(blocks))
     avg_sim, avg_z = _mean_pair_scores(sim, sim_norm, pairs)
     return {
         "avg_sim": avg_sim,
@@ -2125,7 +2302,7 @@ def _refine_wins_under_perturbation(
         return False
     if embs.ndim != 2 or embs.shape[0] != 4:
         return False
-    embs = (embs / np.maximum(np.linalg.norm(embs, axis=1, keepdims=True), 1e-9)).astype(np.float32)
+    embs = _normalizza_l2_in_place(embs)
     best_score = float(embs[0] @ slide_emb[prev_slide]) + float(embs[1] @ slide_emb[next_slide])
     cur_score = float(embs[2] @ slide_emb[prev_slide]) + float(embs[3] @ slide_emb[next_slide])
     return best_score > cur_score
@@ -2214,7 +2391,7 @@ def refine_segment_boundaries(
         return segments
     if slide_emb.ndim != 2 or slide_emb.shape[0] < 1:
         return segments
-    slide_emb = (slide_emb / np.maximum(np.linalg.norm(slide_emb, axis=1, keepdims=True), 1e-9)).astype(np.float32)
+    slide_emb = _normalizza_l2_in_place(slide_emb)
 
     word_times = [float(w["start"]) for w in words]
     out = [dict(s) for s in segments]
@@ -2336,7 +2513,7 @@ def refine_segment_boundaries(
                     decision="non valutabile: embedding delle finestre con forma inattesa",
                 )
                 continue
-            embs = (embs / np.maximum(np.linalg.norm(embs, axis=1, keepdims=True), 1e-9)).astype(np.float32)
+            embs = _normalizza_l2_in_place(embs)
         except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
             log.warning("   [Refine] Embedding finestre non disponibile: confini invariati (%s).", e)
             _record_refine(

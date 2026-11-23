@@ -121,8 +121,15 @@ class TestTimeoutFigli(unittest.TestCase):
 
         controllo = controlli.Controllo("finto", ["finto"], "prova", timeout=7)
         errore = subprocess.TimeoutExpired(["finto"], 7, output=b"output parziale")
-        with mock.patch("controlli.subprocess.run", side_effect=errore):
+        figlio = mock.MagicMock()
+        figlio.__enter__.return_value = figlio
+        figlio.communicate.side_effect = [errore, ("output parziale", "")]
+        with (
+            mock.patch("controlli.subprocess.Popen", return_value=figlio),
+            mock.patch("controlli._uccidi_gruppo") as uccidi,
+        ):
             esito = controlli._esegui(controllo)
+        uccidi.assert_called_once_with(figlio)
         self.assertNotEqual(esito.codice, 0)
         self.assertIn("TIMEOUT", esito.output)
         self.assertIn("7s", esito.output)
@@ -130,11 +137,33 @@ class TestTimeoutFigli(unittest.TestCase):
 
     def test_il_timeout_viene_passato_al_figlio(self) -> None:
         controllo = controlli.Controllo("finto", ["finto"], "prova", timeout=42)
-        con_esito = mock.Mock(returncode=0, stdout="", stderr="")
-        with mock.patch("controlli.subprocess.run", return_value=con_esito) as run:
+        figlio = mock.MagicMock()
+        figlio.__enter__.return_value = figlio
+        figlio.communicate.return_value = ("", "")
+        figlio.returncode = 0
+        with mock.patch("controlli.subprocess.Popen", return_value=figlio) as apri:
             esito = controlli._esegui(controllo)
         self.assertEqual(esito.codice, 0)
-        self.assertEqual(run.call_args.kwargs["timeout"], 42)
+        self.assertEqual(figlio.communicate.call_args.kwargs["timeout"], 42)
+        self.assertTrue(apri.call_args.kwargs["start_new_session"])
+
+    def test_su_timeout_viene_ucciso_l_intero_gruppo(self) -> None:
+        """Non basta kill() del figlio: i suoi figli resterebbero appesi."""
+        import subprocess
+
+        controllo = controlli.Controllo("finto", ["finto"], "prova", timeout=1)
+        errore = subprocess.TimeoutExpired(["finto"], 1)
+        figlio = mock.MagicMock()
+        figlio.__enter__.return_value = figlio
+        figlio.communicate.side_effect = [errore, ("", "")]
+        with (
+            mock.patch("controlli.subprocess.Popen", return_value=figlio),
+            mock.patch("controlli.os.name", "posix"),
+            mock.patch("controlli.os.killpg", create=True) as killpg,
+            mock.patch("controlli.signal.SIGKILL", 9, create=True),
+        ):
+            controlli._esegui(controllo)
+        killpg.assert_called_once_with(figlio.pid, 9)
 
 
 if __name__ == "__main__":

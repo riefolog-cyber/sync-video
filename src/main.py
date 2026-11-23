@@ -20,6 +20,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn, cast
 
+import config as _config
 from blocco_run import NON_DISPONIBILE, OCCUPATO, BloccoRun
 from config import (
     AUTO_BEAM_AB_MARGIN,
@@ -40,7 +41,6 @@ from config import (
     STOPWORDS_ITA,
     WHISPER_REVISIONI,
     bootstrap,
-    installa_dipendenze_se_mancano,
     log,
     openvino_model_complete,
     parse_args,
@@ -65,11 +65,54 @@ from config import (
 #
 # Quando i pacchetti ci sono gia' la chiamata costa una lettura di metadata
 # e non installa niente, quindi non rallenta test, CI e run normali.
+#
+# I comandi di sola ispezione pero' devono essere innocui: "versione subito e
+# senza effetti" vale anche per pip, che puo' installare e arrivare fino a
+# sys.exit(1) solo a FORZA di importare questo modulo. Per loro il wrapper qui
+# sotto non passa nulla a config. La chiamata che resta in cima (prima degli
+# import pesanti, come impone il primo avvio su un PC vuoto) serve quindi solo
+# a garantire quegli import; la decisione sulla run vera e' dentro main(),
+# dopo i fast-path, con l'argv effettivo passato dal chiamante.
+_FLAG_SENZA_EFFETTI = frozenset({
+    "--version",
+    "--help",
+    "-h",
+    "--cache-du",
+    "--frozen-report",
+    "--review",
+    "--solo-riepilogo",
+})
+_dipendenze_verificate = False
+
+
+def _comando_senza_effetti(argv: Sequence[str]) -> bool:
+    """True se argv chiede solo informazioni/anteprime, senza toccare l'ambiente."""
+    return any(flag in argv for flag in _FLAG_SENZA_EFFETTI)
+
+
+def installa_dipendenze_se_mancano(argv: Sequence[str] | None = None) -> bool:
+    """Installa i pacchetti mancanti, salvo per i comandi senza effetti.
+
+    Richiamata sia in cima (per gli import pesanti) sia dentro main() (per le
+    fasi che seguono i fast-path): il flag evita di ripetere la scansione dei
+    metadata quando in cima ha gia' fatto. Con ``argv=None`` si legge sys.argv,
+    com'e' giusto per l'import del modulo.
+    """
+    global _dipendenze_verificate
+    if _dipendenze_verificate:
+        return False
+    argomenti = list(sys.argv[1:] if argv is None else argv)
+    if _comando_senza_effetti(argomenti):
+        return False
+    _dipendenze_verificate = True
+    return _config.installa_dipendenze_se_mancano()
+
+
 installa_dipendenze_se_mancano()
 
 from moviepy import AudioFileClip, VideoFileClip
 
-from boundary_snap import aggancia_confini, confini_dentro_parole
+from boundary_snap import aggancia_confini, confini_dentro_parole, starts_parole
 from chunks import Word
 from hardware import choose_video_encoder, ffmpeg_encoders
 from machine_setup import _video_vendor, detect_gpus, machine_setup
@@ -1692,13 +1735,14 @@ def _openvino_model_fingerprint(args: Any) -> str:
     return hashlib.sha1(identita.encode("utf-8")).hexdigest()[:12]
 
 
-def _transcript_params(audio_hash: str, args: Any, beam: int | None = None) -> dict[str, str]:
-    """Parametri che determinano il TESTO prodotto da una trascrizione.
+def _transcript_engine_params(args: Any, beam: int | None = None) -> tuple[str, list[object]]:
+    """Motore RISOLTO e parametri che cambiano il TESTO della trascrizione.
 
-    Sono gli stessi della chiave, ma in forma leggibile: cosi' una cache
-    scritta con una chiave di formato diverso (o con una chiave piu' vecchia)
-    puo' essere riconosciuta come la stessa trascrizione e ripresa, invece di
-    costringere a rifare minuti di Whisper.
+    Unica fonte per la chiave di cache e per i `params` leggibili dentro la
+    cache: prima le due liste erano costruite due volte, e bastava cambiarne una
+    per far riusare una trascrizione prodotta con impostazioni diverse (o non
+    riusare quella giusta). Restituisce anche il motore, perche' e' lui a
+    decidere quali parametri contano.
     """
     engine = resolved_transcriber(args.transcriber, Path(args.openvino_model_dir))
     if engine == "openvino":
@@ -1706,7 +1750,7 @@ def _transcript_params(audio_hash: str, args: Any, beam: int | None = None) -> d
         # diversi nella stessa cartella (o due OPENVINO_MODEL_ID) producono
         # parole e timestamp diversi. L'impronta di entrambi entra nei params,
         # altrimenti cambiare modello riusa in silenzio la trascrizione vecchia.
-        engine_params = [
+        engine_params: list[object] = [
             args.openvino_device,
             "decode-ffmpeg-f32le",
             _openvino_model_fingerprint(args),
@@ -1718,6 +1762,18 @@ def _transcript_params(audio_hash: str, args: Any, beam: int | None = None) -> d
             f"beam{args.whisper_beam if beam is None else beam}",
             f"batch{args.whisper_batch}",
         ]
+    return engine, engine_params
+
+
+def _transcript_params(audio_hash: str, args: Any, beam: int | None = None) -> dict[str, str]:
+    """Parametri che determinano il TESTO prodotto da una trascrizione.
+
+    Sono gli stessi della chiave, ma in forma leggibile: cosi' una cache
+    scritta con una chiave di formato diverso (o con una chiave piu' vecchia)
+    puo' essere riconosciuta come la stessa trascrizione e ripresa, invece di
+    costringere a rifare minuti di Whisper.
+    """
+    engine, engine_params = _transcript_engine_params(args, beam)
     return {
         "audio": audio_hash,
         "lang": str(args.lang),
@@ -1773,24 +1829,11 @@ def _transcript_cache_key(audio_hash: str, args: Any, beam: int | None = None) -
             alla decodifica accurata, che deve avere una chiave SUA (altrimenti
             la seconda trascrizione sovrascriverebbe la prima).
     """
-    engine = resolved_transcriber(args.transcriber, Path(args.openvino_model_dir))
-    if engine == "openvino":
-        # Stessi parametri di `_transcript_params`: la chiave e i `params` che
-        # identificano una trascrizione devono cambiare insieme, altrimenti
-        # `_trascrizione_equivalente` puo' far riusare il testo del modello
-        # precedente con la chiave nuova.
-        engine_params = [
-            args.openvino_device,
-            "decode-ffmpeg-f32le",
-            _openvino_model_fingerprint(args),
-        ]
-    else:
-        engine_params = [
-            args.whisper_device,
-            args.whisper_compute_type,
-            f"beam{args.whisper_beam if beam is None else beam}",
-            f"batch{args.whisper_batch}",
-        ]
+    # Stessa fonte di `_transcript_params`: la chiave e i `params` che
+    # identificano una trascrizione devono cambiare insieme, altrimenti
+    # `_trascrizione_equivalente` puo' far riusare il testo del modello
+    # precedente con la chiave nuova.
+    engine, engine_params = _transcript_engine_params(args, beam)
     parts = ["transcript", audio_hash[:12], args.lang, args.whisper_model, engine, *engine_params]
     return "_".join(str(p) for p in parts)
 
@@ -2297,17 +2340,14 @@ _BLOCCO_ATTESA_SECONDI = 900.0
 _SECONDI_MINIMI_PER_PAGINA = 30.0
 
 
-def _avviso_materiale_poco_denso(n_slide: int, audio_path: Path) -> None:
+def _avviso_materiale_poco_denso(n_slide: int, durata: float) -> None:
     """Avvisa se il parlato e' poco rispetto alle pagine.
 
-    Apre l'audio (MoviePy/ffprobe, ~0,2s): e' comunque un ordine di grandezza
-    meno dell'OCR e tre ordini meno di Whisper, quindi arriva in tempo utile.
+    La durata arriva gia' letta da chi ha aperto l'audio all'inizio della run:
+    riaprire lo stesso file solo per `.duration` costava un secondo accesso a
+    ffprobe (e su Windows un altro handle sul file), senza nessuna informazione
+    in piu'.
     """
-    try:
-        with AudioFileClip(str(audio_path)) as clip:
-            durata = float(clip.duration or 0.0)
-    except Exception:  # noqa: BLE001 - la stima non deve mai fermare la run
-        return
     if durata <= 0 or n_slide <= 0:
         return
     per_pagina = durata / n_slide
@@ -2410,6 +2450,9 @@ def _recover_anchor_zones(
     flow: str,
     max_zone_share: float | None = DEFAULT_RECOVERY_MAX_ZONE_SHARE,
     zones_tentate: Sequence[str] = (),
+    *,
+    vocabolario_nomi: dict[str, int] | None = None,
+    correzioni_nomi: list[str] | None = None,
 ) -> ZoneRecovery:
     """Ritrascrive le zone cieche e restituisce le ancore che ne tornano.
 
@@ -2456,6 +2499,13 @@ def _recover_anchor_zones(
         zones_tentate: impronte delle zone gia' ritrascritte in una run
             precedente. Una zona con lo STESSO contenuto viene saltata: il
             risultato sarebbe lo stesso (e costerebbe ~25s).
+        vocabolario_nomi: nomi propri del deck, calcolati UNA volta dalla run.
+            Anche le zone ritrascritte vanno trattate come la trascrizione
+            veloce e quella accurata, altrimenti un nome corretto nei primi
+            minuti resta storpiato proprio nel punto in cui serve a trovare
+            un'ancora.
+        correzioni_nomi: lista condivisa in cui annotare le correzioni fatte
+            (finisce nel report: si vede COSA e' stato cambiato).
 
     Returns:
         Uno ``ZoneRecovery``: le parole ricucite, le ancore complete, il tempo
@@ -2565,7 +2615,7 @@ def _recover_anchor_zones(
         seconds += time.time() - t0
         if not nuove:
             continue
-        nuove = correct_transcript_names(nuove)
+        nuove = correct_transcript_names(nuove, vocabolario_nomi, correzioni_nomi)
         words = sorted(
             [w for w in words if not (lo <= float(w["start"]) <= hi)] + nuove,
             key=lambda w: float(w["start"]),
@@ -2597,6 +2647,9 @@ def _deferred_zone_recovery(
     args: Any,
     flow: str,
     zones_tentate: Sequence[str] = (),
+    *,
+    vocabolario_nomi: dict[str, int] | None = None,
+    correzioni_nomi: list[str] | None = None,
 ) -> ZoneRecovery:
     """Il recupero delle zone cieche rifatto quando era stato differito.
 
@@ -2624,6 +2677,8 @@ def _deferred_zone_recovery(
         flow,
         max_zone_share=None,
         zones_tentate=zones_tentate,
+        vocabolario_nomi=vocabolario_nomi,
+        correzioni_nomi=correzioni_nomi,
     )
 
 
@@ -3134,6 +3189,13 @@ def main(argv: list | None = None) -> None:
         _review_boundary_doubts(Path(args.output_video))
         return
 
+    # Le fasi che seguono (OCR, Whisper, embedding, video) usano i moduli
+    # pesanti importati in cima: qui si verifica che le dipendenze ci siano,
+    # con l'argv EFFETTIVO della run. I comandi qui sopra sono usciti prima,
+    # senza toccare l'ambiente. La scansione in cima ha gia' coperto l'import:
+    # il wrapper non la ripete.
+    installa_dipendenze_se_mancano(argv or [])
+
     # --- Blocco: una run per volta sulla stessa cartella ---
     # Due run insieme si pestano a vicenda (le slide, la cache, i frame di
     # verifica): il risultato e' un video a meta' costruito con i pezzi
@@ -3171,7 +3233,7 @@ def main(argv: list | None = None) -> None:
     # del blocco solo i comandi che non producono il video (--cache-du,
     # --frozen-report, --review con le sue anteprime derivate).
     if args.clean_cache:
-        from cache_maintenance import clean_cache, format_bytes
+        from cache_maintenance import clean_cache, descrizione_pulizia_cache
 
         # --clean-cache: i modelli pesanti solo con --include-models + conferma.
         if args.include_models and not args.yes and sys.stdin.isatty():
@@ -3220,13 +3282,7 @@ def main(argv: list | None = None) -> None:
                 "Cancello tutte le cache di contenuto (modelli esclusi)."
             )
         esito = clean_cache(CACHE_DIR, include_models=args.include_models, active_keys=attive)
-        log.info(
-            "Cache pulita: %d JSON orfani, %d embedding oltre il tetto, %d frame di verifica%s.",
-            esito["orphan_json"],
-            esito["embed_npz"],
-            esito["verify_frames"],
-            f", modelli rimossi ({format_bytes(esito['model_bytes'])})" if esito["model_bytes"] else "",
-        )
+        log.info("%s", descrizione_pulizia_cache(esito))
         if attive:
             log.info("   Cache dei materiali in questa cartella conservata (%d chiavi).", len(attive))
         return
@@ -3556,7 +3612,7 @@ def main(argv: list | None = None) -> None:
         # Avviso a costo zero PRIMA di trascrivere: se le pagine sono tante
         # per la durata del parlato, il problema si vede gratis qui e non
         # dopo tre minuti di Whisper.
-        _avviso_materiale_poco_denso(len(slide_files), audio_path)
+        _avviso_materiale_poco_denso(len(slide_files), total_duration)
 
         if transcript is None:
             # Perché si rifà: senza questa riga un parametro cambiato (o un audio
@@ -3627,9 +3683,14 @@ def main(argv: list | None = None) -> None:
         # COSA e' stato corretto (e quindi da quanto il confronto fra parole e
         # slide si e' mosso).
         _correzioni_nomi: list[str] = []
+        # Calcolato UNA volta e condiviso: la trascrizione veloce, le zone
+        # ritrascritte e quella accurata devono ricevere lo STESSO trattamento.
+        # Confrontare A/B due testi corretti in modo diverso faceva sembrare
+        # migliore quello che aveva semplicemente avuto il vocabolario in piu'.
+        _vocabolario_nomi = vocabolario_del_deck(slide_texts)
         if words_raw:
             words_raw = correct_transcript_names(
-                words_raw, vocabolario_del_deck(slide_texts), _correzioni_nomi
+                words_raw, _vocabolario_nomi, _correzioni_nomi
             )
 
         # Scelte fatte dalla run che finiscono in sync_report.json (es.
@@ -3719,6 +3780,8 @@ def main(argv: list | None = None) -> None:
                 flow,
                 max_zone_share=_zone_share,
                 zones_tentate=_zones_tentate,
+                vocabolario_nomi=_vocabolario_nomi,
+                correzioni_nomi=_correzioni_nomi,
             )
             words_raw, flow_anchors = _zones.words, _zones.anchors
             _gap_seconds = _zones.seconds
@@ -3800,7 +3863,12 @@ def main(argv: list | None = None) -> None:
             )
             t_transcribe += float(cast("float", beam_note.pop("accurate_seconds", 0.0)) or 0.0)
             if accurate_words:
-                words_raw = correct_transcript_names(accurate_words)
+                # Stesso vocabolario e stessa lista di correzioni della veloce:
+                # cosi' il confronto A/B misura il beam, non un trattamento
+                # diverso delle due trascrizioni.
+                words_raw = correct_transcript_names(
+                    accurate_words, _vocabolario_nomi, _correzioni_nomi
+                )
                 chiave_parole_effettiva = cache_key_transcript_accurate
             # Le ancore vanno ricercate nel testo nuovo: una trascrizione più
             # accurata può riconoscere annunci che la decodifica veloce aveva
@@ -3895,6 +3963,8 @@ def main(argv: list | None = None) -> None:
                             args,
                             flow,
                             zones_tentate=_zones_tentate,
+                            vocabolario_nomi=_vocabolario_nomi,
+                            correzioni_nomi=_correzioni_nomi,
                         )
                         words_raw, flow_anchors = _zones.words, _zones.anchors
                         _gap_seconds += _zones.seconds
@@ -4393,15 +4463,20 @@ def main(argv: list | None = None) -> None:
         # stimato su una pausa, spostandolo di 0.1-0.9s. --no-snap-pauses lo
         # spegne; il getattr lascia funzionare i Namespace dei test.
         _snap = bool(getattr(args, "snap_pauses", True))
+        # L'elenco degli inizi di parola e' ordinato e costoso da ricostruire
+        # (tutta la trascrizione). Calcolarlo UNA volta e passarlo alle tre
+        # misure di leggibilita' e all'aggancio: prima si pagava 4 volte.
+        _starts_parole = starts_parole(words_raw)
         if _snap and len(semantic_anchors) < total_slides - 1:
             # Misura di leggibilita' prima/dopo: e' il numero che dice se su
             # questo materiale l'aggancio ha servito a qualcosa.
-            in_parola_prima = confini_dentro_parole(timeline, words_raw)
+            in_parola_prima = confini_dentro_parole(timeline, words_raw, _starts_parole)
             timeline, snapped = aggancia_confini(
                 timeline,
                 semantic_anchors,
                 words_raw,
                 min_secondi=min_slide_seconds,
+                starts=_starts_parole,
             )
             if snapped:
                 log.info(
@@ -4415,7 +4490,7 @@ def main(argv: list | None = None) -> None:
                     {"slide": s, "before": round(a, 3), "after": round(b, 3), "kind": k}
                     for s, a, b, k in snapped
                 ]
-            in_parola_dopo = confini_dentro_parole(timeline, words_raw)
+            in_parola_dopo = confini_dentro_parole(timeline, words_raw, _starts_parole)
             if in_parola_prima or in_parola_dopo:
                 log.info(
                     "   Confini a meta' parola: %d prima, %d dopo.",
@@ -4429,7 +4504,7 @@ def main(argv: list | None = None) -> None:
         else:
             # Spento (o niente da agganciare): se restano confini a meta'
             # parola vale la pena dirlo, perche' si sentono.
-            a_meta = confini_dentro_parole(timeline, words_raw)
+            a_meta = confini_dentro_parole(timeline, words_raw, _starts_parole)
             if a_meta:
                 log.warning(
                     "   [Avviso] %d confini cadono a meta' parola%s.",

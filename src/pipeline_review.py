@@ -17,9 +17,10 @@ from typing import cast
 
 from chunks import Word
 from config import log
-from pipeline_cache import latest_transcript_words, load_sync_report
+from pipeline_cache import latest_transcript_words, load_sync_report, save_sync_report
 from pipeline_report import format_time as _format_time
 from pipeline_report import slide_list_text as _slide_list_text
+from riepilogo import scrivi_riepilogo
 from timeline import announcements_off_timeline
 
 
@@ -199,9 +200,7 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> None:
             "dichiarati: niente da rivedere.%s",
             " (controllo ricalcolato dalle parole in cache)" if ricalcolati else "",
         )
-        log.info("=" * 70)
-        return
-    if video_path.exists():
+    elif video_path.exists():
         _write_boundary_previews(video_path, items, cache_dir / "review")
     else:
         log.info("   Video assente (%s): i dubbi restano, senza anteprima.", video_path)
@@ -209,7 +208,21 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> None:
         log.info(
             "   (il report non li aveva salvati: ricalcolati dalle parole in cache)"
         )
-    log.info("   Da controllare a mano:")
-    for item in items:
-        log.info("     - %s", _boundary_doubt_text(item))
+    if items:
+        log.info("   Da controllare a mano:")
+        for item in items:
+            log.info("     - %s", _boundary_doubt_text(item))
+
+    # Le anteprime appena create vanno nella cache: senza questa scrittura
+    # `--review` le genera ma il referto e la pagina restano quelli della run
+    # precedente, senza i collegamenti ai file (proprio cio' che il commento
+    # di `_write_boundary_previews` dice essere obbligatorio). Vengono salvate
+    # anche le voci ricalcolate: la revisione successiva non deve rifare il
+    # confronto sulle parole in cache. Il report e' quello letto all'inizio,
+    # con `mentions_off` aggiornato dalle copie che hanno ricevuto `preview`.
+    if items or ricalcolati:
+        cast("dict[str, object]", anchors)["mentions_off"] = items
+        report["anchors"] = anchors
+        save_sync_report(report, cache_dir=cache_dir)
+        scrivi_riepilogo(report, video_path, video_presente=video_path.exists())
     log.info("=" * 70)

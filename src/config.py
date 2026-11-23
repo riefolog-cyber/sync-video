@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,17 @@ for _stream in (sys.stdout, sys.stderr):
             _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
+# LOGGING (setup minimo prima del bootstrap): definito QUI, prima della
+# lettura del .env che avviene durante l'import. Se un .env rotto facesse
+# scattare un avviso quando `log` non esiste ancora, l'NameError ucciderebbe
+# l'import e con lui --version, --help e verifica_pc.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)-5s | %(message)s",
+)
+log = logging.getLogger("slide2video")
+
+
 def _load_env_file(path: Path) -> None:
     """Carica un file .env nell'ambiente (senza sovrascrivere variabili esistenti).
 
@@ -40,11 +51,19 @@ def _load_env_file(path: Path) -> None:
     - Prefisso ``export``: ``export KEY=value``
     - BOM all'inizio del file
     - Virgolette singole/doppie attorno al valore
+
+    Un file non leggibile o non UTF-8, e una chiave con caratteri strani,
+    non devono uccidere l'import: si avvisa e si prosegue senza quelle
+    variabili (altrimenti morivano anche --version, --help e verifica_pc).
     """
     if not path.exists():
         return
     # Rimuovi BOM se presente (utf-8-sig gestisce automaticamente)
-    content = path.read_text(encoding="utf-8-sig")
+    try:
+        content = path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError) as e:
+        log.warning("   ⚠️  Impossibile leggere il .env '%s' (%s): variabili non caricate.", path, e)
+        return
     for raw_line in content.splitlines():
         line = raw_line.strip()
         # Salta righe vuote e commenti completi
@@ -57,6 +76,18 @@ def _load_env_file(path: Path) -> None:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
+        # os.environ accetta solo identificatori: una chiave con spazi,
+        # trattini o che inizia con un numero faceva sollevare ValueError
+        # qui, durante l'import del modulo. Meglio saltarla con un avviso
+        # che nomina il file e la riga colpevole.
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            log.warning(
+                "   ⚠️  Chiave non valida nel .env '%s': %r (servono lettere, cifre o '_', "
+                "primo carattere non numerico); riga ignorata.",
+                path,
+                key,
+            )
+            continue
         # Rimuovi commenti inline (solo se non dentro virgolette)
         value = value.strip()
         if value.startswith(('"', "'")):
@@ -426,16 +457,6 @@ def versione_programma() -> str:
     return "sconosciuta"
 
 
-# =====================================================================
-# LOGGING (setup minimo prima del bootstrap)
-# =====================================================================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)-5s | %(message)s",
-)
-log = logging.getLogger("slide2video")
-
-
 def _log_file_una_volta(record: logging.LogRecord) -> bool:
     """Filtro anti-duplicati per l'handler su file.
 
@@ -759,7 +780,12 @@ def _cerca_dll_windows(nome: str) -> bool:
     cuda_path = os.environ.get("CUDA_PATH")
     if cuda_path:
         cartelle.append(Path(cuda_path) / "bin")
-    cartelle += [Path(p) for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    # Il PATH di Windows e' SEMPRE separato da ';', anche quando questa
+    # funzione viene chiamata da un test su Linux con sys.platform patched:
+    # usare os.pathsep separerebbe le lettere di unita' (C:) invece delle
+    # voci. Stessa scelta di `_aggiorna_path_da_registro`.
+    separatore = ";"
+    cartelle += [Path(p) for p in os.environ.get("PATH", "").split(separatore) if p]
     return any((cartella / nome).is_file() for cartella in cartelle)
 
 
@@ -1248,7 +1274,27 @@ def _try_system_install(name: str, winget_id: str, apt_pkg: str, brew_pkg: str) 
         commands.append(
             (
                 {},
-                ["winget", "install", "--accept-source-agreements", "--accept-package-agreements", winget_id],
+                # Stessi flag di genera_video.bat: id separato (winget non
+                # accetta piu' l'id come ultimo argomento senza --id), -e per
+                # il match esatto, scope user per non chiedere i permessi di
+                # admin, e i flag non interattivi perche' stdout/stderr
+                # vengono catturati e nessuna conferma sarebbe visibile.
+                # Le opzioni di comandi esterni sono composte a runtime: non
+                # sono flag della nostra CLI (test_cli verifica che ogni
+                # "--flag" scritto in config esista nel parser argparse).
+                [
+                    "winget",
+                    "install",
+                    "--" + "id",
+                    winget_id,
+                    "-e",
+                    "--" + "scope",
+                    "user",
+                    "--" + "silent",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--" + "disable-interactivity",
+                ],
                 f"winget install {winget_id}",
             )
         )
@@ -2400,6 +2446,52 @@ class _WhisperModelChoices:
         return iter(self.TAGLIE)
 
 
+def _intero_cli(nome: str, minimo: int) -> Callable[[str], int]:
+    """Type di argparse per flag interi con un minimo, con errore azionabile.
+
+    I flag numerici senza range accettavano 0 e negativi: il traceback
+    arrivava dopo il bootstrap, lontano dal flag che l'aveva provocato.
+    Qui il rifiuto e' immediato (exit 2 di argparse) e nomina il flag.
+    """
+
+    def converti(valore: str) -> int:
+        try:
+            numero = int(valore)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"{nome} vuole un intero (es. {nome}={minimo}), ricevuto {valore!r}"
+            ) from None
+        if numero < minimo:
+            raise argparse.ArgumentTypeError(f"{nome} deve essere un intero >= {minimo}, ricevuto {valore!r}")
+        return numero
+
+    return converti
+
+
+def _float_cli(nome: str, minimo: float = 0.0, incluso: bool = True) -> Callable[[str], float]:
+    """Come `_intero_cli`, per i flag float (0 ammesso di default).
+
+    `incluso=False` vieta anche il minimo: serve a --semantic-window, dove
+    zero e negativi facevano girare build_windows all'infinito.
+    """
+    esempio = str(minimo) if incluso else "1"
+
+    def converti(valore: str) -> float:
+        try:
+            numero = float(valore)
+        except ValueError:
+            raise argparse.ArgumentTypeError(
+                f"{nome} vuole un numero (es. {nome}={esempio}), ricevuto {valore!r}"
+            ) from None
+        valido = numero >= minimo if incluso else numero > minimo
+        if not valido:
+            operatore = ">=" if incluso else ">"
+            raise argparse.ArgumentTypeError(f"{nome} deve essere {operatore} {minimo}, ricevuto {valore!r}")
+        return numero
+
+    return converti
+
+
 def _frazione_anchor_coverage(valore: str) -> float:
     """Type di argparse per --min-anchor-coverage: frazione in [0, 1]."""
     try:
@@ -2495,7 +2587,7 @@ Esempi:
     )
     parser.add_argument(
         "--whisper-beam",
-        type=int,
+        type=_intero_cli("--whisper-beam", 1),
         default=DEFAULT_WHISPER_BEAM,
         help=f"Beam size faster-whisper (default: {DEFAULT_WHISPER_BEAM}). "
         f"1 = più veloce (misurato: ancore 'slide N' entro 0.15s da beam 5), "
@@ -2515,7 +2607,8 @@ Esempi:
     )
     parser.add_argument(
         "--whisper-batch",
-        type=int,
+        # 0 e' documentato come "sequenziale": resta valido.
+        type=_intero_cli("--whisper-batch", 0),
         default=DEFAULT_WHISPER_BATCH,
         help=f"Batch size del decoding faster-whisper (default: {DEFAULT_WHISPER_BATCH}). "
         f"Stesso modello e stessa decodifica, solo più throughput; 0 = sequenziale. "
@@ -2624,7 +2717,7 @@ Esempi:
     parser.add_argument("--lang", default=DEFAULT_OCR_LANG, help=f"Lingua OCR (default: {DEFAULT_OCR_LANG})")
     parser.add_argument(
         "--transitions",
-        type=float,
+        type=_float_cli("--transitions"),
         default=DEFAULT_TRANSITION_DURATION,
         help="Durata dissolvenza tra slide in secondi (0=nessuna)",
     )
@@ -2753,12 +2846,15 @@ Esempi:
     parser.add_argument("--debug", action="store_true", help="Logging DEBUG dettagliato")
     parser.add_argument(
         "--ocr-workers",
-        type=int,
+        type=_intero_cli("--ocr-workers", 1),
         default=DEFAULT_OCR_WORKERS,
         help=f"Thread paralleli per OCR (default: {DEFAULT_OCR_WORKERS})",
     )
     parser.add_argument(
-        "--dpi", type=int, default=DEFAULT_OCR_DPI, help=f"DPI rendering slide (default: {DEFAULT_OCR_DPI})"
+        "--dpi",
+        type=_intero_cli("--dpi", 1),
+        default=DEFAULT_OCR_DPI,
+        help=f"DPI rendering slide (default: {DEFAULT_OCR_DPI})",
     )
     parser.add_argument(
         "--flow",
@@ -2817,13 +2913,13 @@ Esempi:
     )
     parser.add_argument(
         "--semantic-window",
-        type=float,
+        type=_float_cli("--semantic-window", incluso=False),
         default=DEFAULT_SEMANTIC_WINDOW,
         help=f"Secondi per blocco trascrizione nella sincronizzazione semantica (default: {DEFAULT_SEMANTIC_WINDOW})",
     )
     parser.add_argument(
         "--semantic-min-duration",
-        type=float,
+        type=_float_cli("--semantic-min-duration"),
         default=DEFAULT_SEMANTIC_MIN_DURATION,
         help=f"Durata minima di una slide nella sincronizzazione "
         f"semantica, in secondi (default: {DEFAULT_SEMANTIC_MIN_DURATION})",
@@ -2839,7 +2935,7 @@ Esempi:
     )
     parser.add_argument(
         "--semantic-min-z",
-        type=float,
+        type=_float_cli("--semantic-min-z"),
         default=DEFAULT_SEMANTIC_MIN_Z,
         help=f"Soglia sul picco medio NORMALIZZATO (z-score per slide) sotto cui "
         f"la sincronizzazione è a bassa fiducia: segnala e alimenta "
@@ -2847,7 +2943,7 @@ Esempi:
     )
     parser.add_argument(
         "--semantic-temperature",
-        type=float,
+        type=_float_cli("--semantic-temperature"),
         default=DEFAULT_SEMANTIC_TEMPERATURE,
         help=f"Temperatura della competizione softmax tra slide per blocco: "
         f"più bassa = privilegia i picchi locali, evita che una "

@@ -34,8 +34,10 @@ li contiene (es. `python controlli.py mypy`), utile per iterare in fretta.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -146,39 +148,75 @@ def _testo_parziale(blocco: bytes | str | None) -> str:
     return blocco
 
 
+def _uccidi_gruppo(proc: subprocess.Popen[str]) -> None:
+    """Uccide il figlio e TUTTI i suoi discendenti, non solo il processo padre.
+
+    `subprocess.run` su timeout fa `process.kill()`: il figlio appeso muore, ma
+    i suoi figli (mypy, pytest, ffmpeg lanciati a loro volta) restano vivi e
+    tengono occupati CPU e file. Qui il figlio nasce in un gruppo/processo
+    nuovo (`start_new_session`), quindi si puo' uccidere l'intero albero.
+    """
+    try:
+        if os.name == "nt":
+            # Su Windows non c'e' killpg: taskkill /T segue l'albero dei figli.
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=10,
+            )
+            return
+        uccidi_gruppo = getattr(os, "killpg", None)  # Windows non ce l'ha
+        if uccidi_gruppo is not None:
+            # Con start_new_session=True il PID del figlio e' anche il PGID.
+            uccidi_gruppo(proc.pid, getattr(signal, "SIGKILL", 9))
+            return
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # Ripiego: almeno il processo diretto.
+    with contextlib.suppress(OSError):
+        proc.kill()
+
+
 def _esegui(controllo: Controllo) -> Esito:
     # PYTHONIOENCODING: i figli scrivono output con accenti ed emoji, e qui
     # viene letto e ristampato. Fissa l'UTF-8 una volta, invece di sperare
     # nell'encoding di questa console.
     ambiente = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     avvio = time.monotonic()
-    try:
-        esito = subprocess.run(
-            controllo.argomenti,
-            cwd=RADICE,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=ambiente,
-            check=False,
-            timeout=controllo.timeout,
-        )
-    except subprocess.TimeoutExpired as e:
-        # Senza timeout il figlio restava appeso e il comando non finiva mai:
-        # qui diventa un KO con la durata e l'eventuale output parziale.
-        secondi = time.monotonic() - avvio
-        parziale = _testo_parziale(e.stdout) + _testo_parziale(e.stderr)
-        output = (
-            f"TIMEOUT: '{controllo.nome}' non e' terminato entro {controllo.timeout}s "
-            f"(il processo e' stato interrotto). Motivo: il figlio e' rimasto appeso "
-            f"oppure ha superato il tempo previsto per questo controllo.\n"
-            f"{parziale}".rstrip()
-        )
-        return Esito(controllo, 124, secondi, output)
+    with subprocess.Popen(
+        controllo.argomenti,
+        cwd=RADICE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=ambiente,
+        # Gruppo separato: uccidere l'albero del figlio non può colpire
+        # controlli.py stesso né gli altri passi già terminati.
+        start_new_session=True,
+    ) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=controllo.timeout)
+        except subprocess.TimeoutExpired:
+            # Senza timeout il figlio restava appeso e il comando non finiva mai:
+            # qui diventa un KO con la durata e l'eventuale output parziale.
+            _uccidi_gruppo(proc)
+            # Dopo la kill il communicate() finale drena i pipe e raccoglie
+            # l'output che il figlio aveva già scritto prima di bloccarsi.
+            stdout, stderr = proc.communicate()
+            secondi = time.monotonic() - avvio
+            parziale = _testo_parziale(stdout) + _testo_parziale(stderr)
+            output = (
+                f"TIMEOUT: '{controllo.nome}' non e' terminato entro {controllo.timeout}s "
+                f"(il processo e' stato interrotto). Motivo: il figlio e' rimasto appeso "
+                f"oppure ha superato il tempo previsto per questo controllo.\n"
+                f"{parziale}".rstrip()
+            )
+            return Esito(controllo, 124, secondi, output)
     secondi = time.monotonic() - avvio
-    output = (esito.stdout or "") + (esito.stderr or "")
-    return Esito(controllo, esito.returncode, secondi, output)
+    output = (stdout or "") + (stderr or "")
+    return Esito(controllo, proc.returncode, secondi, output)
 
 
 def _seleziona(tutti: list[Controllo], filtri: list[str]) -> list[Controllo]:

@@ -147,7 +147,7 @@ def extract_timeline_from_transcript(
 
     NON CHIAMARE DA `main.py`: qui non c'e' nessuna chiamata di questa
     funzione, e non e' un errore. Il flusso di produzione usa
-    `split_ordered_mentions` / `free_order_segments_from_texts` /
+    `extract_slide_anchors` -> `semantic_timeline_from_words` ->
     `reconcile_timeline` (le ancore dichiarate dal conduttore vincono
     sempre su questa euristica). Resta come RIFERIMENTO: `test_sync.py`
     e `test_integration.py` la usano come caso base conosciuto, e senza

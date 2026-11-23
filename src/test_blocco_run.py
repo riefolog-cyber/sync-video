@@ -11,14 +11,32 @@ Esegui con: python -m unittest test_blocco_run -v
 
 from __future__ import annotations
 
+import gc
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from blocco_run import NON_DISPONIBILE, PRESO, BloccoRun
+import blocco_run
+from blocco_run import NON_DISPONIBILE, OCCUPATO, PRESO, BloccoRun
+
+
+def _esito_figlio(base: Path) -> str:
+    """Cosa dice un altro processo quando prova a prendere il blocco."""
+    src = str(Path(__file__).resolve().parent)
+    codice = (
+        f"import sys; sys.path.insert(0, {src!r})\n"
+        "from pathlib import Path\n"
+        "from blocco_run import BloccoRun\n"
+        f"print('LIBERO' if BloccoRun(Path({str(base)!r})).acquired() else 'BLOCCATO')\n"
+    )
+    esito = subprocess.run(
+        [sys.executable, "-c", codice], capture_output=True, text=True, timeout=120
+    )
+    return esito.stdout
 
 
 class TestBloccoRun(unittest.TestCase):
@@ -29,17 +47,7 @@ class TestBloccoRun(unittest.TestCase):
 
     def _figlio(self, base: Path) -> str:
         """Cosa dice un altro processo quando prova a prendere il blocco."""
-        src = str(Path(__file__).resolve().parent)
-        codice = (
-            f"import sys; sys.path.insert(0, {src!r})\n"
-            "from pathlib import Path\n"
-            "from blocco_run import BloccoRun\n"
-            f"print('LIBERO' if BloccoRun(Path({str(base)!r})).acquired() else 'BLOCCATO')\n"
-        )
-        esito = subprocess.run(
-            [sys.executable, "-c", codice], capture_output=True, text=True, timeout=120
-        )
-        return esito.stdout
+        return _esito_figlio(base)
 
     def test_una_run_in_un_altro_processo_non_puo_partire(self) -> None:
         # Il conflitto che conta e' fra PROCESSI diversi: due run sulla stessa
@@ -193,6 +201,51 @@ class TestDueIstanzeStessoProcesso(unittest.TestCase):
             terzo = BloccoRun(Path(tmp))
             self.assertEqual(terzo.tenta(), PRESO)
             primo.release()
+            # Il terzo e' ancora dentro il conteggio: va rilasciato anche lui,
+            # altrimenti il file resta aperto (ed e' la cosa GIUSTA).
+            terzo.release()
+
+    def test_se_il_primo_proprietario_muore_il_blocco_resta(self) -> None:
+        # `__del__` del primo non deve sbloccare mentre il secondo crede di
+        # tenere ancora il lock: il contatore tiene vivo il file condiviso.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            primo = BloccoRun(base)
+            self.assertEqual(primo.tenta(), PRESO)
+            secondo = BloccoRun(base)
+            self.assertEqual(secondo.tenta(), PRESO)
+            del primo
+            gc.collect()
+
+            self.assertIn((base / "run.lock").resolve(), blocco_run._proprietari)
+            self.assertIn("BLOCCATO", _esito_figlio(base))
+            secondo.release()
+            self.assertIn("LIBERO", _esito_figlio(base))
+
+    def test_attesa_breve_non_dorme_due_secondi(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            blocco = BloccoRun(Path(tmp))
+            # Due tentativi: uno subito (occupato), uno dopo 0.6s (ancora oltre
+            # la scadenza di 0.5s). Il sonno va limitato al tempo che manca.
+            istanti = iter([0.0, 0.0, 0.0, 0.6])
+
+            def _ora() -> float:
+                return next(istanti, 10.0)
+
+            con_tempo = mock.patch.object(blocco_run.time, "time", side_effect=_ora)
+            con_sonno = mock.patch.object(blocco_run.time, "sleep")
+            with (
+                con_tempo,
+                con_sonno as dorme,
+                mock.patch.object(blocco, "_prova", return_value=OCCUPATO),
+                # il logging crea un LogRecord con time.time(): senza questo
+                # consumo l'orario falso non sarebbe quello della loop.
+                mock.patch.object(blocco_run.log, "info"),
+            ):
+                esito = blocco.tenta(attesa_secondi=0.5)
+            self.assertEqual(esito, OCCUPATO)
+            dorme.assert_called_once()
+            self.assertAlmostEqual(dorme.call_args.args[0], 0.5)
 
 
 if __name__ == "__main__":

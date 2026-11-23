@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import time
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
@@ -58,8 +59,16 @@ _NOME_FILE = "run.lock"
 
 # Le cartelle gia' bloccate da QUESTO processo: due run nello stesso processo
 # non si pestano (le slide sono gia' state pulite, la cache e' la stessa),
-# quindi la seconda passa. Si ripulisce da sola in ``release``.
-_proprietari: set[Path] = set()
+# quindi la seconda passa. Il contatore e' il numero di oggetti che credono di
+# tenere il blocco: se il primo viene distrutto mentre il secondo e' ancora
+# vivo, il file resta aperto e il lock del SO non si libera troppo presto.
+@dataclass
+class _BloccoCondiviso:
+    file: IO[str]
+    utenti: int = 1
+
+
+_proprietari: dict[Path, _BloccoCondiviso] = {}
 
 
 class BloccoRun:
@@ -71,6 +80,7 @@ class BloccoRun:
         # quindi lo stesso blocco.
         self._chiave = self.path.resolve()
         self._file: IO[str] | None = None
+        self._stato: _BloccoCondiviso | None = None
 
     def acquired(self, attesa_secondi: float = 0.0) -> bool:
         """True se la run puo' partire (anche quando il blocco non si crea)."""
@@ -82,7 +92,17 @@ class BloccoRun:
         Con ``attesa_secondi`` si aspetta che l'altra run finisca: di solito e'
         un rilancio mentre la prima lavora, non due run in competizione.
         """
-        if self._chiave in _proprietari:
+        if self._stato is not None:
+            # Questo oggetto ha gia' preso (o ereditato) il blocco: un secondo
+            # `tenta`/`acquired` non deve contarlo due volte.
+            return PRESO
+        stato = _proprietari.get(self._chiave)
+        if stato is not None:
+            # Non e' un nuovo lock del SO: ci si aggrega a quello gia' preso,
+            # ma il proprietario va contato, altrimenti il `__del__` del primo
+            # toglierebbe la chiave e chiuderebbe il file sotto il secondo.
+            stato.utenti += 1
+            self._stato = stato
             return PRESO
         deadline = time.time() + max(0.0, attesa_secondi)
         avvisato = False
@@ -99,7 +119,9 @@ class BloccoRun:
                     "   Un'altra run è già in corso su questa cartella: aspetto che finisca."
                 )
                 avvisato = True
-            time.sleep(2.0)
+            # Non dormire 2s quando mancano meno di 2s alla scadenza: con
+            # `attesa_secondi=0.5` l'attesa promessa era invece di 2 secondi.
+            time.sleep(max(0.0, min(2.0, deadline - time.time())))
 
     def _prova(self) -> str:
         """Un tentativo di prendere il blocco."""
@@ -126,19 +148,27 @@ class BloccoRun:
             fh.close()
             return OCCUPATO
         self._file = fh
-        _proprietari.add(self._chiave)
+        stato = _BloccoCondiviso(fh)
+        self._stato = stato
+        _proprietari[self._chiave] = stato
         return PRESO
 
     def release(self) -> None:
         """Rilascia il blocco (il SO lo rilascia comunque alla fine del processo)."""
-        fh = self._file
-        if fh is None:
-            # Non possiede il blocco (era gia' di un altro oggetto dello stesso
-            # processo): togliere la chiave libererebbe il posto a un terzo
-            # tentativo che poi aspetterebbe se stesso.
+        stato = self._stato
+        if stato is None:
+            # Questo oggetto non ha mai preso (o ha gia' rilasciato) il blocco.
             return
+        self._stato = None
         self._file = None
-        _proprietari.discard(self._chiave)
+        stato.utenti -= 1
+        if stato.utenti > 0:
+            # Un altro oggetto crede ancora di tenere il blocco: il file resta
+            # aperto (e' referenziato dallo stato condiviso), quindi il lock del
+            # SO resta attivo anche se questo e' il proprietario originale.
+            return
+        _proprietari.pop(self._chiave, None)
+        fh = stato.file
         try:
             fh.seek(0)
             if fcntl is not None:

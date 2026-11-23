@@ -20,6 +20,7 @@ from typing import ClassVar
 from unittest import mock
 
 import config
+from chunks import Word
 
 
 class TestHelpSiGenera(unittest.TestCase):
@@ -310,6 +311,149 @@ class TestMutuaEsclusioneUscitaAnticipata(unittest.TestCase):
                 with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as ctx:
                     config.parse_args([primo, secondo])
                 self.assertEqual(ctx.exception.code, 2)
+
+
+class TestDipendenzeSoloSeServono(unittest.TestCase):
+    """I comandi che escono subito non devono avviare pip né sys.exit(1)."""
+
+    def test_version_e_help_non_installano(self) -> None:
+        import main
+
+        with (
+            mock.patch.object(config, "installa_dipendenze_se_mancano") as installa,
+            mock.patch.object(main, "_dipendenze_verificate", False),
+        ):
+            for argv in (["--version"], ["--help"]):
+                with self.subTest(argv=argv):
+                    installa.reset_mock()
+                    # Sia il wrapper chiamato in cima (import) sia main()
+                    # devono lasciare l'ambiente intatto.
+                    self.assertFalse(main.installa_dipendenze_se_mancano(argv))
+                    with (
+                        mock.patch.object(main, "bootstrap") as boot,
+                        contextlib.redirect_stdout(io.StringIO()),
+                        contextlib.suppress(SystemExit),  # --help esce con 0
+                    ):
+                        main.main(argv)
+                    installa.assert_not_called()
+                    boot.assert_not_called()
+
+    def test_run_normale_controlla_le_dipendenze(self) -> None:
+        import main
+
+        with (
+            mock.patch.object(config, "installa_dipendenze_se_mancano") as installa,
+            mock.patch.object(main, "_dipendenze_verificate", False),
+        ):
+            self.assertIs(main.installa_dipendenze_se_mancano([]), installa.return_value)
+        installa.assert_called_once_with()
+
+
+class TestAvvisoMaterialePocoDenso(unittest.TestCase):
+    def test_usa_la_durata_gia_nota_senza_riaprire_l_audio(self) -> None:
+        import main
+
+        with (
+            mock.patch.object(main, "AudioFileClip") as clip,
+            mock.patch.object(main.log, "warning") as avviso,
+        ):
+            main._avviso_materiale_poco_denso(10, 100.0)
+        clip.assert_not_called()
+        avviso.assert_called_once()
+        self.assertEqual(avviso.call_args.args[1], 10)
+
+
+class TestCorrezioneNomiTutteLeTrascrizioni(unittest.TestCase):
+    """Veloce, zone ritrascritte e accurata ricevono lo stesso vocabolario."""
+
+    def test_il_vocabolario_e_calcolato_una_volta_solo(self) -> None:
+        import ast
+
+        import main
+
+        albero = ast.parse(Path(main.__file__).read_text(encoding="utf-8"))
+        funzioni = {n.name: n for n in albero.body if isinstance(n, ast.FunctionDef)}
+
+        def chiamate_in(nome: str) -> list[ast.Call]:
+            return [
+                n
+                for n in ast.walk(funzioni[nome])
+                if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "correct_transcript_names"
+            ]
+
+        # Due in main (veloce + accurata) e una nel recupero zone: nessuna
+        # puo' piu' chiamare la correzione senza il vocabolario del deck.
+        self.assertEqual(len(chiamate_in("main")), 2)
+        self.assertEqual(len(chiamate_in("_recover_anchor_zones")), 1)
+        for chiamata in chiamate_in("main") + chiamate_in("_recover_anchor_zones"):
+            self.assertGreaterEqual(len(chiamata.args), 2, "manca il vocabolario")
+            self.assertIsInstance(chiamata.args[1], ast.Name)
+        # La variabile e' la stessa per veloce e accurata: l'A/B confronta
+        # due trascrizioni trattate in modo identico.
+        self.assertEqual(
+            {
+                chiamata.args[1].id
+                for chiamata in chiamate_in("main")
+                if isinstance(chiamata.args[1], ast.Name)
+            },
+            {"_vocabolario_nomi"},
+        )
+        calcoli = [
+            n for n in ast.walk(funzioni["main"])
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id == "vocabolario_del_deck"
+        ]
+        self.assertEqual(len(calcoli), 1, "il vocabolario va calcolato una volta")
+
+    def test_zone_ritrascritte_correggono_i_nomi_dal_deck(self) -> None:
+        import main
+
+        parole: list[Word] = [
+            {"word": "ciao", "start": 5.0},
+            {"word": "mondo", "start": 20.0},
+        ]
+        correzioni: list[str] = []
+
+        def _fake(audio_path: Path, lo: float, hi: float, **kwargs: object) -> list[dict]:
+            return [{"word": "kappo", "start": lo + 1.0}]
+
+        with (
+            mock.patch.object(main, "retranscribe_zone", side_effect=_fake),
+            mock.patch.object(main, "_write_raw_transcript", return_value=None),
+        ):
+            esito = main._recover_anchor_zones(
+                parole,
+                {2: 10.0, 4: 50.0},
+                4,
+                300.0,
+                Path("audio.m4a"),
+                config.parse_args([]),
+                "slide-audio",
+                vocabolario_nomi={"kappa": 2},
+                correzioni_nomi=correzioni,
+            )
+        self.assertIn("kappa", [w["word"] for w in esito.words])
+        self.assertTrue(correzioni, "la correzione va annotata per il report")
+
+
+class TestParametriTrascrizioneUnicaFonte(unittest.TestCase):
+    def test_chiave_e_params_usano_la_stessa_funzione(self) -> None:
+        import main
+
+        args = config.parse_args([])
+        with mock.patch.object(
+            main,
+            "_transcript_engine_params",
+            return_value=("whisper", ["cpu", "int8", "beam1", "batch8"]),
+        ) as fonte:
+            params = main._transcript_params("a" * 32, args)
+            chiave = main._transcript_cache_key("a" * 32, args)
+        self.assertEqual(fonte.call_count, 2)
+        self.assertEqual(params["engine_params"], "cpu,int8,beam1,batch8")
+        self.assertIn("cpu_int8_beam1_batch8", chiave)
 
 
 if __name__ == "__main__":

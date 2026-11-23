@@ -232,6 +232,28 @@ class TestRimediMotore(unittest.TestCase):
         self.assertNotIn("genera_video.bat", esito.rimedio)
 
 
+class TestProvaSpazioModello(unittest.TestCase):
+    """Il referto deve controllare lo spazio per il modello che usa davvero."""
+
+    def test_prova_spazio_usa_default_whisper_model(self) -> None:
+        """Non 'small' scritto a mano: la guardia e il referto devono combaciare.
+
+        Con WHISPER_MODEL=medium nel .env il bootstrap riserva spazio per
+        medium, ma verifica_pc continuava a passare la stringa 'small':
+        il referto diceva "modelli gia' in cache" guardando il modello
+        sbagliato. Si cambia il default a 'medium' per rendere il test
+        sensibile alla differenza (con 'small' i due casi sono uguali).
+        """
+        rep = Relazione()
+        with (
+            mock.patch.object(config, "DEFAULT_WHISPER_MODEL", "medium"),
+            mock.patch.object(config, "_spazio_modelli_necessario", return_value=0) as spazio,
+        ):
+            verifica_pc.prova_spazio(rep, Path("."))
+        spazio.assert_called_once()
+        self.assertEqual(spazio.call_args.args[1], "medium")
+
+
 class TestRete(unittest.TestCase):
     """La rete serve solo a scaricare: mai un KO, solo AVV con rimedio."""
 

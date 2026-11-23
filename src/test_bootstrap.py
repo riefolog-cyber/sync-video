@@ -10,6 +10,8 @@ Esegui con: python -m unittest test_bootstrap -v
 """
 
 import builtins
+import contextlib
+import io
 import os
 import re
 import sys
@@ -303,6 +305,52 @@ class TestLoadEnvFile(unittest.TestCase):
             with mock.patch.dict(os.environ, {"S2VTEST_I": "gia_impostata"}):
                 config._load_env_file(p)
                 self.assertEqual(os.environ["S2VTEST_I"], "gia_impostata")
+
+    def test_file_non_utf8_non_blocca_l_import(self) -> None:
+        """Un .env non leggibile non deve uccidere l'import di config.
+
+        senza il try/except sulla read_text, un file con byte non UTF-8
+        faceva morire anche --version, --help e verifica_pc, cioe' proprio
+        i comandi che servono per diagnosticare il .env rotto.
+        """
+        import os
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / ".env"
+            p.write_bytes(b"S2VTEST_NON_UTF8=\xff\nS2VTEST_OK=si\n")
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch("config.log") as log,
+            ):
+                config._load_env_file(p)  # non deve sollevare
+                self.assertNotIn("S2VTEST_NON_UTF8", os.environ)
+                self.assertNotIn("S2VTEST_OK", os.environ)
+            self.assertTrue(log.warning.called, "manca l'avviso che nomina il file")
+            self.assertEqual(log.warning.call_args.args[1], p)
+
+    def test_chiave_invalida_viene_ignorata(self) -> None:
+        """Le chiavi non valide non devono far sollevare ValueError da os.environ."""
+        import os
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / ".env"
+            # Prima cifra e trattino: os.environ li rifiuta entrambi.
+            p.write_text("1S2VTEST_BAD=nope\nS2VTEST-BAD=nope2\nS2VTEST_OK=si\n", encoding="utf-8")
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch("config.log") as log,
+            ):
+                config._load_env_file(p)
+                self.assertEqual(os.environ.get("S2VTEST_OK"), "si")
+                self.assertNotIn("1S2VTEST_BAD", os.environ)
+                self.assertNotIn("S2VTEST-BAD", os.environ)
+            self.assertEqual(log.warning.call_count, 2)
+            self.assertIn("1S2VTEST_BAD", str(log.warning.call_args_list[0]))
+            self.assertEqual(log.warning.call_args_list[0].args[1], p)
 
 
 class TestEnvPath(unittest.TestCase):
@@ -724,6 +772,81 @@ class TestSystemInstallTail(unittest.TestCase):
             esito, uscita = self._esegui()
         self.assertFalse(esito)
         self.assertIn("linea apt di log", uscita)
+
+
+class TestWingetFlags(unittest.TestCase):
+    """I flag di winget devono combaciare con quelli di genera_video.bat."""
+
+    def test_flag_allineati_al_bat(self) -> None:
+        import subprocess
+        import sys
+
+        with (
+            mock.patch.object(sys, "platform", "win32"),
+            mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)) as run,
+            mock.patch("builtins.print"),
+        ):
+            config._try_system_install("Finto", "Finto.Id", "", "")
+
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "winget",
+                "install",
+                "--id",
+                "Finto.Id",
+                "-e",
+                "--scope",
+                "user",
+                "--silent",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--disable-interactivity",
+            ],
+        )
+        # La cattura resta: serve per mostrare la coda di diagnosi in caso
+        # di errore, anche se ormai nessuna conferma puo' restare nascosta.
+        self.assertEqual(run.call_args.kwargs["stdout"], subprocess.PIPE)
+        self.assertEqual(run.call_args.kwargs["stderr"], subprocess.STDOUT)
+
+
+class TestFlagNumericiCLI(unittest.TestCase):
+    """I flag numerici vanno rifiutati subito, non dopo il bootstrap."""
+
+    NON_VALIDI: ClassVar[dict[str, tuple[str, ...]]] = {
+        "--ocr-workers": ("0", "-2", "abc"),
+        "--dpi": ("0", "-2"),
+        "--whisper-beam": ("0", "-2"),
+        "--whisper-batch": ("-1",),  # 0 = sequenziale, resta valido
+        "--transitions": ("-0.5", "-1"),
+        "--semantic-window": ("0", "-2"),
+        "--semantic-min-duration": ("-0.5",),
+        "--semantic-min-z": ("-0.5",),
+        "--semantic-temperature": ("-0.5",),
+    }
+
+    def test_valori_non_validi_rifiutati_con_exit_2(self) -> None:
+        for flag, valori in self.NON_VALIDI.items():
+            for valore in valori:
+                with (
+                    self.subTest(flag=flag, valore=valore),
+                    contextlib.redirect_stderr(io.StringIO()) as err,
+                    self.assertRaises(SystemExit) as ctx,
+                ):
+                    config.parse_args([flag, valore])
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertIn(flag, err.getvalue())
+
+    def test_zeri_ammessi_ove_documentato(self) -> None:
+        for flag, valore, atteso in (
+            ("--whisper-batch", "0", 0),
+            ("--transitions", "0", 0.0),
+            ("--ocr-workers", "1", 1),
+            ("--semantic-window", "0.5", 0.5),
+        ):
+            with self.subTest(flag=flag, valore=valore):
+                args = config.parse_args([flag, valore])
+                self.assertEqual(getattr(args, flag[2:].replace("-", "_")), atteso)
 
 
 class TestInsiemiFormati(unittest.TestCase):

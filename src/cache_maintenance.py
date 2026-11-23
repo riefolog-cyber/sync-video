@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import shutil
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 # Cartelle con i pesi ML: cancellarle costa GB di re-download. Si scoprono
@@ -98,6 +99,27 @@ def format_bytes(num: int) -> str:
             return f"{valore:.1f} {unita}" if unita != "B" else f"{int(valore)} B"
         valore /= 1024.0
     return f"{valore:.1f} TB"
+
+
+def descrizione_pulizia_cache(esito: Mapping[str, int]) -> str:
+    """Riga di log della pulizia, COMPRESI i parziali vecchi rimossi.
+
+    `clean_cache` restituisce da sempre `esito["parziali"]`, ma il messaggio di
+    `main.py` lo ometteva: sembrava che la quarta voce non fosse stata toccata.
+    Questa funzione e' il testo unico da usare nel log (una sola formulazione,
+    con i conteggi forniti da `clean_cache`).
+    """
+    modelli = (
+        f", modelli rimossi ({format_bytes(esito.get('model_bytes', 0))})"
+        if esito.get("model_bytes", 0)
+        else ""
+    )
+    return (
+        f"Cache pulita: {esito.get('orphan_json', 0)} JSON orfani, "
+        f"{esito.get('embed_npz', 0)} embedding oltre il tetto, "
+        f"{esito.get('verify_frames', 0)} frame di verifica, "
+        f"{esito.get('parziali', 0)} parziali vecchi{modelli}."
+    )
 
 
 def clean_cache(

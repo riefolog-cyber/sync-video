@@ -1719,5 +1719,36 @@ class TestAggiornaPin(unittest.TestCase):
         self.assertEqual(req_reale.read_text(encoding="utf-8"), contenuto_reale)
 
 
+class TestAskYesNo(unittest.TestCase):
+    """La conferma opzionale non deve mai spaccare il programma."""
+
+    def test_ctrl_c_risponde_no(self) -> None:
+        """Ctrl+C come EOF: niente traceback, si prosegue senza aggiornare."""
+        with (
+            mock.patch("updates.sys.stdout.write"),
+            mock.patch("updates.sys.stdout.flush"),
+            mock.patch("builtins.input", side_effect=KeyboardInterrupt),
+        ):
+            self.assertFalse(updates._ask_yes_no("Aggiornare?"))
+
+    def test_eof_risponde_no(self) -> None:
+        with (
+            mock.patch("updates.sys.stdout.write"),
+            mock.patch("updates.sys.stdout.flush"),
+            mock.patch("builtins.input", side_effect=EOFError),
+        ):
+            self.assertFalse(updates._ask_yes_no("Aggiornare?"))
+
+    def test_risposte_affermative(self) -> None:
+        for risposta in ("s", "si", "y", "YES"):
+            with (
+                self.subTest(risposta=risposta),
+                mock.patch("updates.sys.stdout.write"),
+                mock.patch("updates.sys.stdout.flush"),
+                mock.patch("builtins.input", return_value=risposta),
+            ):
+                self.assertTrue(updates._ask_yes_no("Aggiornare?"))
+
+
 if __name__ == "__main__":
     unittest.main()

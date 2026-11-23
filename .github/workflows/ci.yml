@@ -75,18 +75,14 @@ jobs:
           # aggiorna, `apt-get install` esce con il codice 100 e il job cade per
           # un guasto dell'ambiente, non del codice (run 183, 11/11/2026: tutti e
           # quattro i job della matrice rossi sul passo di sistema, mai sui
-          # test). Si ritenta e, se Tesseract resta assente, si avvisa e si
-          # prosegue: la suite non esercita l'OCR vero (i test sono mockati) e
-          # ffmpeg ha un ripiego che non dipende dalla rete.
+          # test). Si ritenta; se non riesce, il KO resta QUI, con la causa in
+          # chiaro, invece di arrivare dopo dai test come se il codice fosse rotto.
           sudo apt-get update -qq \
-            || sudo apt-get update -qq \
-            || echo "::warning::apt-get update fallito: si prosegue con quello che c'e'."
-          # L'italiano e' un pacchetto a parte; se il repo non lo espone non
-          # e' un motivo per fermarsi: il bootstrap scarica ita.traineddata
-          # nella cartella del progetto.
+            || sudo apt-get update -qq
+          # L'italiano e' un pacchetto a parte: se il repo non lo espone si
+          # installa solo il base (il bootstrap scarica ita.traineddata).
           sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-ita \
-            || sudo apt-get install -y --no-install-recommends tesseract-ocr \
-            || echo "::warning::Tesseract non installato (apt indisponibile): l'OCR non sara' esercitato."
+            || sudo apt-get install -y --no-install-recommends tesseract-ocr
 
           # ffmpeg non da apt: il binario statico di imageio-ffmpeg (dipendenza
           # di moviepy, gia' installata da requirements.txt) e' lo stesso che
@@ -101,20 +97,31 @@ jobs:
           fi
 
           # Fermarsi qui, con la causa in chiaro, e' meglio che far fallire
-          # test_disco e test_verifica_pc per un guasto dell'ambiente. ffmpeg
-          # e' obbligatorio (il ripiego qui sopra non dipende dalla rete);
-          # Tesseract no: la suite non lo usa davvero, quindi la sua assenza
-          # e' un avviso, non un KO.
+          # i test per un guasto dell'ambiente. Entrambi gli strumenti sono
+          # obbligatori: ffmpeg per il rendering, Tesseract perche' la suite
+          # (soprattutto il test end-to-end notturno) esercita l'OCR vero.
+          # Con il solo avviso un Tesseract mancante faceva skippare quel test
+          # in silenzio, e la CI passava senza aver verificato niente.
           command -v ffmpeg
-          command -v tesseract || echo "::warning::Tesseract assente dal PATH: l'OCR non sara' esercitato."
+          command -v tesseract
           ffmpeg -version | head -1
-          tesseract --version | head -1 || echo "::warning::Tesseract non eseguibile: l'OCR non sara' esercitato."
+          tesseract --version | head -1
 
       - name: Lint (ruff)
         run: python -m ruff check .
 
       - name: Typecheck (mypy)
         run: python -m mypy .
+
+      # `mypy .` su ubuntu copre solo linux: le diramazioni `sys.platform ==
+      # "win32"` / `"darwin"` restano non analizzate. Aggiungere le due
+      # piattaforme qui, nello stesso job, evita un job extra e tiene
+      # allineata la CI a `controlli.py` (che gia' le esegue tutte e tre).
+      - name: Typecheck (mypy win32)
+        run: python -m mypy --platform win32 .
+
+      - name: Typecheck (mypy darwin)
+        run: python -m mypy --platform darwin .
 
       - name: Test veloci (PR/push; i lenti solo in nightly)
         # I test marcati @slow (download modelli, A/B embedding) girano solo
@@ -186,18 +193,14 @@ jobs:
           # aggiorna, `apt-get install` esce con il codice 100 e il job cade per
           # un guasto dell'ambiente, non del codice (run 183, 11/11/2026: tutti e
           # quattro i job della matrice rossi sul passo di sistema, mai sui
-          # test). Si ritenta e, se Tesseract resta assente, si avvisa e si
-          # prosegue: la suite non esercita l'OCR vero (i test sono mockati) e
-          # ffmpeg ha un ripiego che non dipende dalla rete.
+          # test). Si ritenta; se non riesce, il KO resta QUI, con la causa in
+          # chiaro, invece di arrivare dopo dai test come se il codice fosse rotto.
           sudo apt-get update -qq \
-            || sudo apt-get update -qq \
-            || echo "::warning::apt-get update fallito: si prosegue con quello che c'e'."
-          # L'italiano e' un pacchetto a parte; se il repo non lo espone non
-          # e' un motivo per fermarsi: il bootstrap scarica ita.traineddata
-          # nella cartella del progetto.
+            || sudo apt-get update -qq
+          # L'italiano e' un pacchetto a parte: se il repo non lo espone si
+          # installa solo il base (il bootstrap scarica ita.traineddata).
           sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-ita \
-            || sudo apt-get install -y --no-install-recommends tesseract-ocr \
-            || echo "::warning::Tesseract non installato (apt indisponibile): l'OCR non sara' esercitato."
+            || sudo apt-get install -y --no-install-recommends tesseract-ocr
 
           # ffmpeg non da apt: il binario statico di imageio-ffmpeg (dipendenza
           # di moviepy, gia' installata da requirements.txt) e' lo stesso che
@@ -212,14 +215,15 @@ jobs:
           fi
 
           # Fermarsi qui, con la causa in chiaro, e' meglio che far fallire
-          # test_disco e test_verifica_pc per un guasto dell'ambiente. ffmpeg
-          # e' obbligatorio (il ripiego qui sopra non dipende dalla rete);
-          # Tesseract no: la suite non lo usa davvero, quindi la sua assenza
-          # e' un avviso, non un KO.
+          # i test per un guasto dell'ambiente. Entrambi gli strumenti sono
+          # obbligatori: ffmpeg per il rendering, Tesseract perche' la suite
+          # (soprattutto il test end-to-end notturno) esercita l'OCR vero.
+          # Con il solo avviso un Tesseract mancante faceva skippare quel test
+          # in silenzio, e la CI passava senza aver verificato niente.
           command -v ffmpeg
-          command -v tesseract || echo "::warning::Tesseract assente dal PATH: l'OCR non sara' esercitato."
+          command -v tesseract
           ffmpeg -version | head -1
-          tesseract --version | head -1 || echo "::warning::Tesseract non eseguibile: l'OCR non sara' esercitato."
+          tesseract --version | head -1
 
       - name: Cache modello embedding (2 GB, serve al test end-to-end)
         # La suite notturna include la pipeline INTERA: senza questa cache il

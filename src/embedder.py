@@ -23,7 +23,7 @@ Protocol serve a POTERLO sostituire, non a sostituirlo oggi.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Protocol, runtime_checkable
+from typing import Protocol, cast, runtime_checkable
 
 import numpy as np
 
@@ -66,13 +66,15 @@ class _FastEmbedEmbedder:
         # non e' l'unica fonte possibile: un backend alternativo puo' non
         # normalizzare, e il contratto resterebbe solo scritto. Qui la
         # normalizzazione e' garantita.
+        if not out.flags.writeable:
+            # Un backend puo' restituire un array in sola lettura (es. un
+            # `frombuffer`): in quel caso la copia e' obbligatoria, negli altri
+            # casi si normalizza in place senza duplicare la matrice.
+            out = out.copy()
         norme = np.linalg.norm(out, axis=1, keepdims=True)
-        # Guardia sullo zero: un vettore nullo non ha direzione, dividerlo
-        # produrrebbe NaN e avvelenerebbe la cache dei punteggi.
-        return np.asarray(
-            np.divide(out, norme, out=np.zeros_like(out), where=norme > 0),
-            dtype=np.float32,
-        )
+        # `np.maximum` e' la guardia sullo zero: un vettore nullo non ha
+        # direzione e resta nullo, senza produrre NaN nella cache dei punteggi.
+        return cast(np.ndarray, np.divide(out, np.maximum(norme, 1e-9), out=out))
 
     @property
     def embed_id(self) -> str:
