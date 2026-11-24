@@ -64,7 +64,9 @@ def _parse_transcript_raw(raw_path: Path) -> list[Word] | None:
     if not raw_path.exists():
         return None
     words: list[Word] = []
-    pattern = re.compile(r"^(\S+)\s+\[([\d.]+)s\]")
+    # Whisper puo' emettere token con spazi ("New York [1.0s]"): `\S+`
+    # buttava via l'intera parola. La cattura non-greedy si ferma al tempo.
+    pattern = re.compile(r"^(.+?)\s+\[([\d.]+)s\]\s*$")
     for line in raw_path.read_text(encoding="utf-8").splitlines():
         m = pattern.match(line.strip())
         if m:

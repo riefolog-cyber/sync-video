@@ -51,6 +51,7 @@ from config import (
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
     STOPWORDS_ITA,
 )
+from pipeline_inputs import find_audio_file
 from semantic_sync import _clean_slide_text, _load_embed_model, _make_embed_fn, segment_verdict
 from timeline import extract_slide_anchors
 from video import _extract_frames_batch, _letterbox_references, _reference_matrix, _similarities
@@ -111,14 +112,23 @@ TRANSCRIPT_FILE = _newest("transcript_*.json")
 VIDEO = BASE / "video_finale.mp4"
 FRAMES_DIR = BASE / ".analysis_frames"
 
-# Durata audio: dal file m4a se disponibile, altrimenti dall'ultima parola.
+# Durata audio: dal file della run se disponibile, altrimenti dall'ultima parola.
+# Il nome "podcast.m4a" era scritto a mano e faceva fallire l'import su qualsiasi
+# cartella con un audio diverso: la pipeline usa `find_audio_file`, e qui si fa
+# la stessa cosa. Le parole raw della pipeline hanno solo "start" (nessun "end"):
+# usare w["end"] faceva sollevare KeyError proprio nel ripiego.
 try:
     from pydub import AudioSegment
 
-    AUDIO_DURATION = len(AudioSegment.from_file(BASE / "podcast.m4a")) / 1000.0
+    _audio = find_audio_file(BASE)
+    if _audio is None:
+        raise FileNotFoundError("nessun audio trovato")
+    AUDIO_DURATION = len(AudioSegment.from_file(_audio)) / 1000.0
 except Exception:
     tmp_tc = json.loads(TRANSCRIPT_FILE.read_text(encoding="utf-8"))
-    AUDIO_DURATION = max(float(w["end"]) for w in tmp_tc["words_raw"]) + 5.0
+    AUDIO_DURATION = (
+        max(float(w.get("end") or w.get("start") or 0.0) for w in tmp_tc["words_raw"]) + 5.0
+    )
 WORD_GAP_CUT = 0.4  # secondi: gap < soglia => taglio "a meta frase"
 # Il confronto frame-vs-slide non usa una dimensione propria: riusa
 # `video._reference_matrix` / `_similarities`, così ha lo stesso metro (e lo
@@ -557,9 +567,10 @@ print()
 print("=" * 100)
 print("5. CONFINI: frame subito dopo ogni taglio (attesa slide N+1)")
 print("=" * 100)
-# NB: i confini qui provengono dalla timeline in cache (GREZZA); main.py
-# ri-raffina a ogni run i confini delle slide senza ancora esplicita, quindi
-# un confine segnalato come disallineato puo' essere atteso (video corretto).
+# I confini qui provengono da `timeline_finale.json`: la timeline FINALE
+# validata, non quella grezza pre-raffinamento. Un confine segnalato come
+# disallineato NON e' piu' un effetto atteso del raffinamento: e' un dato da
+# guardare davvero.
 boundary_ok = 0
 _richieste_confine: list[tuple[float, Path]] = []
 for i, seg in enumerate(segs[1:] if slide_paths else [], start=1):

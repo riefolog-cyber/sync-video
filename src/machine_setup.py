@@ -435,15 +435,17 @@ class _TranscriberArgs(Protocol):
 def _video_vendor(gpus: list[str]) -> str:
     """Famiglia della GPU che decide l'encoder video, con la precedenza di
     ``recommend``: NVIDIA prima di Intel (una dGPU dedicata batte un'iGPU
-    anche per l'encoding)."""
+    anche per l'encoding). Su macOS si usa SEMPRE VideoToolbox: QSV e AMF non
+    esistono li', e un Mac Intel verrebbe classificato "intel" dalla GPU e
+    finirebbe su h264_qsv, che ffmpeg non ha, con ripiego silenzioso su CPU."""
+    if sys.platform == "darwin":
+        return "apple"
     if any(_classify_gpu(g) == "nvidia" for g in gpus):
         return "nvidia"
     if any(_classify_gpu(g) == "intel" for g in gpus):
         return "intel"
     if any(_classify_gpu(g) == "amd" for g in gpus):
         return "amd"
-    if sys.platform == "darwin":
-        return "apple"
     return "unknown"
 
 
@@ -529,6 +531,14 @@ def _engine_note(rec: dict) -> str:
     gia' stato il bug che ha fatto leggere a `openvino_usable()` una decisione dal
     file invece di guardare il runtime vero.
     """
+    # Il messaggio e' SPECIFICO per ARM: stamparlo su un x86-64 dove il
+    # bootstrap ha saltato un pacchetto (o su un Mac che trascrive con
+    # OpenVINO) dice una causa falsa proprio a chi cerca il guasto.
+    arm = platform.machine() in ("ARM64", "aarch64")
+    if not arm:
+        return ""
+    if rec.get("transcriber") == "openvino":
+        return ""
     if importlib.util.find_spec("faster_whisper") is None:
         return ("faster-whisper non installabile su questa CPU: CTranslate2 non "
                 "pubblica wheel ARM. La trascrizione audio non sara disponibile.")

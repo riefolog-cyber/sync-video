@@ -148,6 +148,18 @@ class TestRiusoVideo(unittest.TestCase):
         segna_video(self.output, self.chiave, cache_dir=self.base)
         self.assertTrue(video_riutilizzabile(self.output, self.chiave, cache_dir=self.base))
 
+    def test_riuso_riporta_l_encoder_effettivo_non_quello_richiesto(self) -> None:
+        # La prima run aveva chiesto la GPU ma era ripiegata su CPU: la
+        # seconda, che riusa il file, deve dire "libx264", non "h264_nvenc".
+        segna_video(self.output, self.chiave, cache_dir=self.base, encoder="libx264")
+        out_enc: list[str] = ["h264_nvenc"]
+        self.assertTrue(
+            video_riutilizzabile(
+                self.output, self.chiave, cache_dir=self.base, encoder_out=out_enc
+            )
+        )
+        self.assertEqual(out_enc, ["libx264"])
+
     def test_una_chiave_diversa_non_si_riusa(self) -> None:
         segna_video(self.output, self.chiave, cache_dir=self.base)
         self.assertFalse(video_riutilizzabile(self.output, "altra", cache_dir=self.base))

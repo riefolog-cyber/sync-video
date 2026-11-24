@@ -136,6 +136,41 @@ class TestOcrTuttoVuoto(unittest.TestCase):
         self.assertIn("winget", testo)
         self.assertIn("tesseract --list-langs", testo)
 
+    def test_tesseract_mancante_con_pagina_nativa_non_si_zitta(self):
+        """Il caso misto: una pagina ha testo nativo, l'altra serve l'OCR.
+
+        La vecchia guardia (`all slide vuote`) non scattava e la run partiva
+        con la seconda pagina vuota, senza avviso.
+        """
+
+        class TesseractNotFoundErrorFinto(OSError):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            radice = Path(tmp)
+            out = radice / "slide"
+            out.mkdir()
+            doc = fitz.open()
+            try:
+                p0 = doc.new_page(width=1280, height=720)
+                p0.insert_text((50, 80), "Il monopolio delle piattaforme economiche digitali")
+                doc.new_page(width=1280, height=720)  # solo immagine
+                pdf = radice / "misto.pdf"
+                doc.save(str(pdf))
+            finally:
+                doc.close()
+
+            with (
+                mock.patch(
+                    "ocr._ocr_single_slide",
+                    side_effect=TesseractNotFoundErrorFinto("tesseract non trovato"),
+                ),
+                mock.patch("ocr._tesseract", side_effect=RuntimeError("binario assente")),
+                self.assertRaises(RuntimeError) as ctx,
+            ):
+                extract_slides_text_ocr(pdf, out, lang="ita", dpi=72, workers=1)
+        self.assertIn("Tesseract", str(ctx.exception))
+
 
 class TestConvertPresentationToPdf(unittest.TestCase):
     def setUp(self):

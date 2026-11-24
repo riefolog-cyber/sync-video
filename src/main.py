@@ -3199,8 +3199,9 @@ def main(argv: list | None = None) -> None:
     # PRIMA di bootstrap/setup/update-check: e' un comando di ispezione che non
     # deve scaricare nulla né chiedere conferme di aggiornamento. Anche
     # --frozen-report e --review (piu' giu') restano fuori dal blocco run:
-    # --review legge report/trascrizione/video e rigenera SOLO le anteprime in
-    # .cache/review/ (file derivati e idempotenti), non rifa' la pipeline.
+    # --review legge report/trascrizione/video, rigenera le anteprime in
+    # .cache/review/ e aggiorna il report e il riepilogo con i collegamenti:
+    # file DERIVATI e idempotenti, non rifa' la pipeline ne' tocca gli input.
     # --clean-cache, che CANCELLA, sta dopo il blocco.
     if args.cache_du:
         from cache_maintenance import cache_disk_usage, format_bytes

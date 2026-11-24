@@ -648,10 +648,29 @@ class TestResolvedTranscriber(unittest.TestCase):
         # esattamente quel ramo a mandare in crash.
 
         _modello_ir_finto(self.model_dir)
-        with self._runtime(installed=True):
+        # Con None la funzione guarda la cartella DI DEFAULT, che su questa
+        # macchina puo' contenere un modello vero: la si punta a una cartella
+        # vuota per verificare il ramo "nessun modello".
+        col_default = mock.patch.object(
+            transcription, "DEFAULT_OPENVINO_MODEL_DIR", str(self.model_dir / "no")
+        )
+        with self._runtime(installed=True), col_default:
             self.assertEqual(resolved_transcriber("auto", str(self.model_dir)), "openvino")
             self.assertEqual(resolved_transcriber("auto", str(self.model_dir / "no")), "whisper")
             self.assertEqual(resolved_transcriber("auto", None), "whisper")
+
+    def test_auto_con_none_guarda_la_cartella_di_default(self):
+        # `transcribe_audio` ha openvino_model_dir=None come default: senza
+        # questo, 'auto' tornava sempre whisper anche con il modello di default
+        # completo, contraddicendo openvino_usable e download_openvino_model.
+        _modello_ir_finto(self.model_dir)
+        with (
+            self._runtime(installed=True),
+            mock.patch.object(
+                transcription, "DEFAULT_OPENVINO_MODEL_DIR", str(self.model_dir)
+            ),
+        ):
+            self.assertEqual(resolved_transcriber("auto", None), "openvino")
 
     def test_openvino_explicit_without_model_stays_openvino(self):
         # Il modello verrà scaricato da transcribe_audio: la scelta è comunque

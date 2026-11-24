@@ -162,28 +162,26 @@ class TestIlRefertoNonEmenoPermissivoDellaGuardia(unittest.TestCase):
     programma fa, che e' il modo peggiore in cui puo' mentire.
     """
 
-    def _richiesto_dal_referto(self) -> float:
+    def _richiesto_dal_referto(self, byte_modello: int | None = None) -> float:
         """GB che il referto considera sufficienti, con i decimali.
 
-        `_gb()` stampa una cifra dopo il punto ("8.4 GB"): leggerla come
-        intero farebbe sembrare il referto piu' esigente di quanto sia, e il
-        test passerebbe per il motivo sbagliato.
+        Si fingono solo gli INPUT (quanti byte serve il modello, nessuna cache
+        whisper): `_destinazioni_spazio_modelli` e `prova_spazio` girano VERI.
+        Fingere direttamente il risultato rendeva il test tautologico: stampava
+        cio' che gli era stato passato, senza poter scoprire una divergenza
+        fra referto e guardia.
         """
         import re
 
+        byte = config._BYTES_CACHE_EMBEDDING if byte_modello is None else byte_modello
         r = verifica_pc.Relazione()
         with (
             mock.patch.object(
                 config,
-                "_destinazioni_spazio_modelli",
-                lambda *a, **k: [
-                    (
-                        Path("C:/emb"),
-                        "cache dei modelli (cartella del progetto)",
-                        config._BYTES_CACHE_EMBEDDING + config._MARGINE_DISCO,
-                    )
-                ],
+                "_modelli_mancanti_dettagliati",
+                lambda *a, **k: [("modello embedding (finto)", "~finto", byte)],
             ),
+            mock.patch.object(config, "_cache_whisper_faster", lambda *a, **k: None),
             mock.patch.object(verifica_pc, "disk_free_bytes", lambda *a, **k: 50 * GB),
         ):
             verifica_pc.prova_spazio(r, Path("C:/"))
@@ -202,24 +200,7 @@ class TestIlRefertoNonEmenoPermissivoDellaGuardia(unittest.TestCase):
 
     def test_il_referto_e_il_bootstrap_usano_lo_stesso_margine(self) -> None:
         """Se i due numeri divergono di nuovo, qui si vede subito."""
-        with mock.patch.object(
-            config,
-            "_destinazioni_spazio_modelli",
-            lambda *a, **k: [
-                (
-                    Path("C:/emb"),
-                    "cache dei modelli (cartella del progetto)",
-                    1 * GB + config._MARGINE_DISCO,
-                )
-            ],
-        ):
-            r = verifica_pc.Relazione()
-            with mock.patch.object(verifica_pc, "disk_free_bytes", lambda *a, **k: 50 * GB):
-                verifica_pc.prova_spazio(r, Path("C:/"))
-        dettaglio = next(e for e in r.esiti if e.nome == "Spazio disco").dettaglio
-        # 1 GB di modelli + margine deve uscire > 1 GB
-        self.assertIn("ne servono", dettaglio)
-        numero = float(dettaglio.split("ne servono ~")[1].split(" GB")[0].replace(",", "."))
+        numero = self._richiesto_dal_referto(1 * GB)
         atteso = (1 * GB + config._MARGINE_DISCO) / GB
         self.assertAlmostEqual(numero, atteso, delta=0.1)
 

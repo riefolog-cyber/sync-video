@@ -880,13 +880,16 @@ def extract_slides_text_ocr(
     # progetto.
     #
     # Una slide senza testo è legittima (un'immagine, una foto): il segnaposto
-    # è la risposta giusta. TUTTE le slide vuote no: è quasi certamente
-    # Tesseract non installato, e va detto adesso invece di produrre un video
-    # che sembra a posto e non lo è.
-    if _ocr_tutto_vuoto(slide_texts):
+    # è la risposta giusta. TUTTE le slide vuote no. E no anche il caso MISTO:
+    # pagine con testo nativo e pagine da OCR rimaste vuote per Tesseract
+    # assente. Prima la guardia guardava solo `all(...)`: bastava una pagina
+    # di testo nativo per proseguire con le altre vuote, senza avviso.
+    tutte_vuote = _ocr_tutto_vuoto(slide_texts)
+    vuote_da_ocr = [idx for idx in indici_da_ocr if not slide_texts[idx].strip()]
+    if tutte_vuote or (vuote_da_ocr and tesseract_assente_segnalato):
         # Tesseract assente ≠ presentazione solo immagini. Se Tesseract risponde,
-        # il segnaposto su tutte le slide è legittimo (deck fotografico) e si
-        # procede; altrimenti è il caso "non installato" e va detto chiaramente.
+        # il segnaposto è legittimo (deck fotografico) e si procede; altrimenti
+        # è il caso "non installato" e va detto chiaramente.
         tesseract_presente = False
         try:
             _tesseract().get_tesseract_version()
@@ -894,7 +897,7 @@ def extract_slides_text_ocr(
         except Exception:
             tesseract_presente = False
         if tesseract_presente:
-            if lingua_mancante:
+            if tutte_vuote and lingua_mancante:
                 log.warning(
                     "   OCR completato SENZA la lingua '%s' e nessuna slide ha testo "
                     "riconoscibile: il deck puo' essere solo immagini, ma il caso "
@@ -903,10 +906,17 @@ def extract_slides_text_ocr(
                     lang,
                     lang,
                 )
-            else:
+            elif tutte_vuote:
                 log.warning(
                     "   OCR completato ma nessuna slide ha testo riconoscibile "
                     "(presentazione solo immagini?): procedo con i segnaposto."
+                )
+            else:
+                log.warning(
+                    "   OCR non disponibile: %d slide da immagine sono rimaste senza "
+                    "testo (le altre hanno testo nativo). La sincronizzazione su "
+                    "quelle pagine non ha segnale.",
+                    len(vuote_da_ocr),
                 )
         else:
             raise RuntimeError(_MESSAGGIO_OCR_VUOTO.format(n=total_pages))

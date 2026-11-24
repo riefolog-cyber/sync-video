@@ -119,6 +119,27 @@ class TestMotoreReferto(unittest.TestCase):
                 self.assertEqual(self._esito(genai=genai, gpu=gpu).stato, verifica_pc.AVV)
 
 
+class TestOpenvinoSceltoMaInutilizzabile(unittest.TestCase):
+    """Il ripiego su CPU funziona: e' un avviso, non un KO che blocca."""
+
+    def _esito(self) -> verifica_pc.Esito:
+        import transcription
+
+        r = verifica_pc.Relazione()
+        with (
+            mock.patch.object(transcription, "resolved_transcriber", lambda *a, **k: "openvino"),
+            mock.patch.object(transcription, "openvino_usable", lambda *a, **k: False),
+        ):
+            verifica_pc.prova_motore(r)
+        return next(e for e in r.esiti if e.nome == "Motore")
+
+    def test_ripiega_su_cpu_e_un_avviso(self) -> None:
+        e = self._esito()
+        self.assertEqual(e.stato, verifica_pc.AVV)
+        self.assertIn("non utilizzabile", e.dettaglio)
+        self.assertIn("CPU", e.rimedio)
+
+
 class TestDalVeroIngresso(unittest.TestCase):
     """Passa per `prova_motore`, non per l'helper.
 

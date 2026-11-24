@@ -166,6 +166,19 @@ class TestRiusoCompleto(unittest.TestCase):
         )
         np.testing.assert_array_equal(arr[:, 0], np.array([1.0, 2.0, 3.0], dtype=np.float32))
 
+    def test_scrivere_una_voce_non_riapre_tutte_le_altre(self) -> None:
+        # La mtime della cartella va letta PRIMA di np.savez: leggerla dopo
+        # faceva credere che l'indice fosse disallineato e lo ricostruiva
+        # (glob + stat + apertura di TUTTI gli npz) a ogni singola scrittura.
+        _voce(self.cache, "preesistente", ["prima"], [1.0])
+        vettore = np.zeros((1, 4), dtype=np.float32)
+        with mock.patch.object(semantic_sync.np, "load", wraps=np.load) as aperto:
+            semantic_sync._salva_cache_voce("fake|b16", ["uno"], vettore, 1.0)
+            aperto.reset_mock()
+            semantic_sync._salva_cache_voce("fake|b16", ["due"], vettore, 1.0)
+            aperture_seconda = aperto.call_count
+        self.assertEqual(aperture_seconda, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

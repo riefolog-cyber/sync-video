@@ -86,10 +86,16 @@ class TestWriteConcatFile(unittest.TestCase):
         self.assertEqual(lines[-1], lines[-3])  # ultimo file ripetuto senza duration
         self.assertNotIn("duration", lines[-1])
 
-    def test_non_positive_duration_rejected(self):
+    def test_non_positive_duration_diventa_un_frame(self):
+        # Una slide incastrata fra due ancore puo' avere durata zero: il
+        # percorso MoviePy la tollera, e anche ffmpeg deve farlo (un frame in
+        # piu' e' meglio di un video intero non prodotto).
         entries = [(Path("/tmp/a.png"), 0.0)]
-        with tempfile.TemporaryDirectory() as td, self.assertRaises(ValueError):
-            _write_concat_file(entries, Path(td) / "concat.txt")
+        with tempfile.TemporaryDirectory() as td:
+            list_path = Path(td) / "concat.txt"
+            _write_concat_file(entries, list_path, fps=5)
+            lines = list_path.read_text(encoding="utf-8").splitlines()
+        self.assertIn("duration 0.200000", lines)
 
 
 class TestPrepareSlides(unittest.TestCase):
@@ -329,9 +335,11 @@ class TestBuildVideoFfmpeg(unittest.TestCase):
             self.assertEqual(cmd[0], "ffmpeg")
             self.assertIn("concat", cmd)
             self.assertIn(str(audio), cmd)
-            self.assertEqual(cmd[-1], str(out.with_suffix(".tmp.mp4")))
+            # Temporaneo UNICO: due run non devono condividere lo stesso nome.
+            self.assertTrue(cmd[-1].endswith(".tmp.mp4"))
+            self.assertNotEqual(cmd[-1], str(out))
             self.assertTrue(out.exists())
-            self.assertFalse(out.with_suffix(".tmp.mp4").exists())
+            self.assertFalse(any(td_path.glob("*.tmp.mp4")))
             self.assertEqual(captured["total"], 3.5)
             # Il file ffconcat contiene l'ultima slide ripetuta senza duration
             lines = captured["concat_text"].splitlines()
@@ -366,7 +374,7 @@ class TestBuildVideoFfmpeg(unittest.TestCase):
             with patch("video._run_ffmpeg", side_effect=fake_run), self.assertRaises(RuntimeError):
                 _build_video_ffmpeg([str(slide)], [1.0], audio, out, 5, 4)
 
-            self.assertFalse(out.with_suffix(".tmp.mp4").exists())
+            self.assertFalse(any(td_path.glob("*.tmp.mp4")))
             self.assertEqual(out.read_bytes(), b"video buono della run precedente")
             self.assertGreaterEqual(len(tentativi), 2)
 
@@ -624,6 +632,29 @@ class TestFrameConsistencyCheck(unittest.TestCase):
                 tmp / "frames",
             )
             self.assertEqual(check["checked"], 0)
+            # Senza questi, `incomplete` restava False e --strict-sync non
+            # si fermava anche se un segmento non era mai stato verificato.
+            self.assertEqual(check["skipped"], [0])
+            self.assertTrue(check["incomplete"])
+
+    def test_frame_non_estratto_rende_la_verifica_incompleta(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            slide = tmp / "s1.png"
+            _half_image(40, 30, vertical=True).save(slide)
+            with (
+                patch("video._extract_frames_batch", return_value=True),
+                patch("video._extract_frame"),
+            ):
+                check = frame_consistency_check(
+                    tmp / "video.mp4",
+                    [(1, 0.0, 10.0)],
+                    [str(slide)],
+                    tmp / "frames",
+                )
+            self.assertEqual(check["checked"], 0)
+            self.assertEqual(check["skipped"], [0])
+            self.assertTrue(check["incomplete"])
 
 
 class TestMixedAspectRatiosMatch(unittest.TestCase):

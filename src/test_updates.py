@@ -1184,10 +1184,9 @@ _PY_QUALSIASI = ">=3.9"
 
 
 def _file(yanked=False, requires_python=_PY_QUALSIASI, filename="x.whl"):
-    # Le wheel reali dichiarano requires_python: il default dei test e' un vincolo
-    # compatibile, cosi' le asserzioni storiche restano valide con la regola che
-    # esige una wheel non yanked con vincolo compatibile (un file senza vincolo,
-    # da solo, non basta piu').
+    # Il default e' un vincolo compatibile, cosi' le asserzioni storiche restano
+    # valide. Alcune wheel reali (pydub) hanno requires_python=None e vanno
+    # accettate: pip le installa lo stesso. I test dedicati coprono quel caso.
     return {"filename": filename, "yanked": yanked, "requires_python": requires_python}
 
 
@@ -1243,9 +1242,15 @@ class TestLatestCompatible(unittest.TestCase):
         )
         self.assertEqual(updates._latest_compatible(data), "1.0.0")
 
-    def test_wheel_senza_requires_python_non_basta(self):
+    def test_wheel_senza_requires_python_e_installabile(self):
+        """pydub 0.25.1 ha solo una wheel con requires_python=null.
+
+        Era letta come "release non installabile", quindi pydub risultava
+        irraggiungibile a ogni avvio e la cache del controllo aggiornamenti
+        non veniva mai scritta. pip, invece, quella wheel la installa.
+        """
         data = _pypi(**{"1.0.0": [_file()], "2.0.0": [_file(requires_python=None)]})
-        self.assertEqual(updates._latest_compatible(data), "1.0.0")
+        self.assertEqual(updates._latest_compatible(data), "2.0.0")
 
     def test_wheel_compatibile_basta_anche_con_sdist_incompatibile(self):
         data = _pypi(
@@ -1258,7 +1263,7 @@ class TestLatestCompatible(unittest.TestCase):
         )
         self.assertEqual(updates._latest_compatible(data), "2.0.0")
 
-    def test_wheel_yanked_e_solo_file_senza_vincolo_non_basta(self):
+    def test_wheel_yanked_e_solo_file_senza_vincolo_resta_installabile(self):
         data = _pypi(
             **{
                 "2.0.0": [
@@ -1267,7 +1272,7 @@ class TestLatestCompatible(unittest.TestCase):
                 ]
             }
         )
-        self.assertIsNone(updates._latest_compatible(data))
+        self.assertEqual(updates._latest_compatible(data), "2.0.0")
 
     def test_salta_release_senza_file_e_versioni_illeggibili(self):
         data = _pypi(**{"1.0.0": [_file()], "2.0.0": [], "boh": [_file()]})
@@ -1522,6 +1527,7 @@ class _AbFake(types.ModuleType):
         self.cand = cand
         self.venv = venv
         self.candidate_calls = 0
+        self.ultima_venv = None
 
     def collect_real_texts(self):
         return {"slides": ["slide"], "blocks": ["blocco"]}
@@ -1529,9 +1535,13 @@ class _AbFake(types.ModuleType):
     def baseline_embeddings(self, texts, model):
         return "baseline"
 
-    def candidate_embeddings(self, texts, candidate, model, cache_dir):
+    def candidate_embeddings(self, texts, candidate, model, cache_dir, venv_dir=None):
         self.candidate_calls += 1
-        return self.cand, self.venv
+        self.ultima_venv = venv_dir
+        if venv_dir is not None:
+            venv_dir.mkdir(parents=True, exist_ok=True)
+            (venv_dir / "sentinel.txt").write_text("x", encoding="utf-8")
+        return self.cand, venv_dir or self.venv
 
     def compare(self, base, cand, n_slides):
         return {
@@ -1664,28 +1674,24 @@ class TestAbReportCache(_AbTestBase):
 
 
 class TestAbVenvCleanup(_AbTestBase):
-    """La venv temporanea creata da candidate_embeddings va sempre rimossa."""
+    """La venv temporanea va rimossa anche se candidate_embeddings solleva.
 
-    def _venv(self):
-        venv = self.root / "venv_temporanea"
-        venv.mkdir()
-        (venv / "sentinel.txt").write_text("x", encoding="utf-8")
-        return venv
+    La cartella e' creata e posseduta da `_run_pinned_ab_test`: cosi' puo'
+    pulirla anche quando la candidata non fa in tempo a restituirla.
+    """
 
     def test_venv_rimossa_se_candidata_fallisce(self):
-        venv = self._venv()
         self.ab.cand = None
-        self.ab.venv = venv
         with mock.patch("updates.log"):
             self.assertIsNone(updates._run_pinned_ab_test(self.pkg))
-        self.assertFalse(venv.exists())
+        self.assertIsNotNone(self.ab.ultima_venv)
+        self.assertFalse(self.ab.ultima_venv.exists())
 
     def test_venv_rimossa_anche_se_test_riesce(self):
-        venv = self._venv()
-        self.ab.venv = venv
         with mock.patch("updates.log"):
             self.assertEqual(updates._run_pinned_ab_test(self.pkg), "EQUIVALENTE")
-        self.assertFalse(venv.exists())
+        self.assertIsNotNone(self.ab.ultima_venv)
+        self.assertFalse(self.ab.ultima_venv.exists())
 
 
 class TestAggiornaPin(unittest.TestCase):

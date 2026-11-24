@@ -701,6 +701,13 @@ def _salva_cache_voce(embed_id: str, texts: Sequence[str], arr: np.ndarray, save
     try:
         _EMBED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         path = _EMBED_CACHE_DIR / f"emb_{key}.npz"
+        # La mtime VA letta PRIMA di scrivere: `np.savez` crea il file e cambia
+        # la mtime della cartella, quindi leggerla dopo faceva sembrare l'indice
+        # sempre disallineato e lo si ricostruiva intero a ogni voce nuova.
+        try:
+            mtime_cartella_prima = _EMBED_CACHE_DIR.stat().st_mtime
+        except OSError:
+            mtime_cartella_prima = None
         np.savez(
             path,
             emb=arr,
@@ -711,15 +718,9 @@ def _salva_cache_voce(embed_id: str, texts: Sequence[str], arr: np.ndarray, save
         # Indice aggiornato SENZA riaprire il file appena scritto: chiavi e
         # righe sono quelle che abbiamo sotto mano, la mtime si legge una volta.
         mtime = path.stat().st_mtime
-        # `np.savez` ha appena creato un file: la mtime della cartella e'
-        # cambiata, e chiamare `_indice_embedding()` qui rifarebbe l'indice
-        # INTERO a ogni scrittura. Lo si ricostruisce solo se era assente o
-        # gia' disallineato PRIMA di scrivere; nuovo file a parte, l'indice e'
-        # quello giusto e lo si aggiorna in place.
-        try:
-            mtime_cartella_prima = _EMBED_CACHE_DIR.stat().st_mtime
-        except OSError:
-            mtime_cartella_prima = None
+        # Se l'indice era assente o disallineato PRIMA di scrivere lo si
+        # ricostruisce una volta; per le voci nuove dentro una cartella gia'
+        # indicizzata basta aggiungere le chiavi che abbiamo sotto mano.
         if mtime_cartella_prima is None or mtime_cartella_prima != _EMBED_INDEX_DIR_MTIME:
             _indice_embedding()
         per_modello = _EMBED_INDEX.setdefault(embed_id, {})

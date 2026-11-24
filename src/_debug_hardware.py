@@ -46,14 +46,21 @@ def scenario(nome: str, gpus: list[str], vendor: str, ram_gb: float, encoders: f
     with (
         patch.object(ms, "_read_hardware", return_value=gpus),
         patch.object(ms, "_validate", side_effect=lambda rec, d: rec),
-        patch.object(hw, "ffmpeg_encoders", return_value=encoders),
+        # machine_setup importa `ffmpeg_encoders` con `from hardware import`:
+        # va patchato DOVE VIENE USATO (ms), non nel modulo hardware, altrimenti
+        # l'encoder "simulato" resta quello vero della macchina dello sviluppatore.
+        patch.object(ms, "ffmpeg_encoders", return_value=encoders),
         patch.object(hw, "ram_total_bytes", return_value=totale),
     ):
         args = _Args()
         ms.machine_setup(args, force=False)
 
     ok &= _check("famiglia GPU", ms._video_vendor(gpus), vendor)
-    ok &= _check("tier RAM", hw.memory_tier(totale), hw.memory_tier(totale))
+    # Prima si confrontava memory_tier(totale) con se' stesso: non poteva mai
+    # fallire, e il ram_gb dello scenario non veniva verificato. Le soglie sono
+    # quelle reali di hardware.memory_tier (<6 basso, <12 medio, poi alto).
+    atteso_tier = "basso" if ram_gb < 6 else "medio" if ram_gb < 12 else "alto"
+    ok &= _check("tier RAM", hw.memory_tier(totale), atteso_tier)
     print(f"   [   ] RAM: {hw.format_ram(totale)} ({hw.memory_tier(totale)})")
     print(f"   [   ] encoder scelto: {args.video_encoder}")
     return ok

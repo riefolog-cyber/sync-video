@@ -273,7 +273,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1500 test).
+`python -m unittest discover -s src -p "test_*.py"` (1508 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -337,7 +337,59 @@ anche un context manager e conta i proprietari in modo atomico fra thread.
 
 Verifiche: `ruff` e `mypy` puliti, 1500 test verdi (8 nuovi). La verifica su
 questo PC segnala ancora un KO `Motore` per OpenVINO non utilizzabile: è
-l'ambiente della macchina di sviluppo, non una regressione del codice.
+l'ambiente della macchina di sviluppo, non una regressione del codice. Il KO
+è stato riclassificato come AVV nel batch 13 (il ripiego su CPU funziona).
+
+## Batch 13 — revisione degli artefatti e della diagnostica (2026-11)
+
+Una terza revisione ha coperto le aree non toccate dalle due precedenti
+(video, referto, aggiornamenti, OCR, diagnostica hardware) e ha riesaminato il
+batch 12 trovando un'ottimizzazione che in realtà non funzionava.
+
+**L'indice degli embedding non si ricostruisce più davvero a ogni scrittura.**
+Nel batch 12 la mtime della cartella veniva letta DOPO `np.savez`, che l'aveva
+appena cambiata: il confronto con la mtime salvata falliva sempre e l'indice
+veniva rifatto intero. Ora la mtime si legge prima della scrittura, e un test
+verifica che scrivere una seconda voce non riapra gli npz già indicizzati.
+
+**La verifica dei frame non mente più.** Un frame non estratto, o una slide
+fuori dal deck, veniva saltato in silenzio: `incomplete` restava False e
+`--strict-sync` non si fermava, pur con segmenti mai controllati. Ora ogni
+segmento non verificato finisce in `skipped` e la verifica è incompleta.
+
+**Il riuso del video dice l'encoder vero.** La marca di riuso ora salva
+l'encoder EFFETTIVO della run che ha scritto il file: dopo un ripiego da GPU a
+CPU, un rilancio che riusa il video non può più dichiarare "GPU" nel riepilogo.
+
+**Il controllo aggiornamenti non si blocca su pydub.** Le wheel pure-python
+con `requires_python: null` (pydub 0.25.1) venivano scartate: pydub risultava
+"irraggiungibile" a ogni avvio e la cache del controllo non veniva mai scritta.
+Ora una wheel senza vincolo è accettata, come fa pip.
+
+**Il referto non dà più falsi allarmi.** Un PC sano con OpenVINO installato ma non
+utilizzabile ripiega su CPU e produce il video: era segnalato KO ("problema che
+impedisce il video") ed è ora AVV con rimedio esplicito. Analogamente, ffmpeg
+non dice più "accelerazione hardware disponibile" solo perché i tre encoder
+sono compilati: la scelta passa da `choose_video_encoder`, che incrocia la GPU
+vera. Mac Intel usa VideoToolbox (QSV non esiste su macOS).
+
+**Diagnostica e tool affidabili.** `_debug_hardware.py` patchava
+`hardware.ffmpeg_encoders` invece di `machine_setup.ffmpeg_encoders` (gli
+scenari non simulavano niente) e confrontava il tier RAM con se stesso;
+`controlli.py` uccideva il passo a 180s prima dei tre mypy da 300s;
+`--no-update-check` ora dice nell'help che salta anche il bootstrap.
+`analysis_sync.py` non si rompe più all'import con un audio dal nome diverso
+da `podcast.m4a` o con parole raw senza `end`.
+
+**Altre correzioni.** Temporaneo di rendering con nome unico (due run non si
+pestano); durate nulle clampate a un frame invece di abortire l'encoding;
+lettura cache transcript protetta da file che spariscono; token Whisper con
+spazi non più buttati via; OCR misto (pagine native + pagine da immagine) con
+Tesseract assente non passa più in silenzio; riepilogo difensivo su valori
+sporchi; venv A/B sempre rimossa; CI notturna con job di riscaldamento cache
+perché le tre versioni non-3.12 non skippino silenziosamente l'E2E.
+
+Verifiche: `ruff` e `mypy` puliti (anche win32/darwin), 1508 test verdi.
 
 ## Stato delle voci
 

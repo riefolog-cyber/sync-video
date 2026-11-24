@@ -21,6 +21,14 @@ from config import atomic_write_text, log
 from pipeline_report import format_time
 
 
+def _intero_sicuro(valore: object) -> int:
+    """Un valore sporco nel report non deve cancellare l'intero riepilogo."""
+    try:
+        return int(cast("str | int | float", valore))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _numeri(segmenti: list[dict[str, Any]]) -> tuple[int, float, float, dict[str, Any]]:
     """Pagine, durata totale, durata minima e il segmento piu' corto."""
     pagine = len(segmenti)
@@ -83,9 +91,11 @@ def riepilogo_markdown(
 
     pagine, totale, minima, corto = _numeri(segmenti)
     media = totale / pagine if pagine else 0.0
-    transitions = int(anchors.get("transitions") or 0)
-    anchored = int(anchors.get("anchored") or 0)
-    senza = sorted(int(s) for s in cast("list[Any]", anchors.get("unanchored_slides") or []))
+    transitions = _intero_sicuro(anchors.get("transitions") or 0)
+    anchored = _intero_sicuro(anchors.get("anchored") or 0)
+    senza = sorted(
+        _intero_sicuro(s) for s in cast("list[Any]", anchors.get("unanchored_slides") or [])
+    )
 
     righe: list[str] = ["# Riepilogo della lezione", ""]
     if nome_video:

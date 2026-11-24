@@ -239,18 +239,33 @@ def _concat_quote(path: Path) -> str:
     return "'" + str(path.resolve()).replace("\\", "/").replace("'", "'\\''") + "'"
 
 
-def _write_concat_file(entries: Sequence[tuple[Path, float]], list_path: Path) -> None:
+def _write_concat_file(
+    entries: Sequence[tuple[Path, float]], list_path: Path, fps: int = 5
+) -> None:
     """Scrive il file ffconcat: una coppia file+duration per segmento.
 
     Quirk del demuxer: l'ultimo file deve essere ripetuto senza duration,
     altrimenti l'ultimo segmento viene ignorato da alcuni build di ffmpeg.
+
+    Durate nulle o negative non fanno fallire l'encoding: una slide incastrata
+    fra due ancore puo' avere durata zero, e il percorso MoviePy la tollera.
+    Qui si clampa a un frame, con un avviso: meglio un fotogramma in piu' che
+    un video intero non prodotto per un segmento patologico.
     """
+    if not entries:
+        raise ValueError("Nessun segmento da scrivere nel file ffconcat.")
+    minimo = 1.0 / fps if fps > 0 else 0.001
     lines = ["ffconcat version 1.0"]
     for path, duration in entries:
         if duration <= 0:
-            raise ValueError(f"Durata non positiva ({duration:.3f}s) per {path.name}.")
+            log.warning(
+                "   [Video] Durata non positiva (%.3fs) per %s: uso un frame (%.3fs).",
+                duration,
+                path.name,
+                minimo,
+            )
         lines.append(f"file {_concat_quote(path)}")
-        lines.append(f"duration {duration:.6f}")
+        lines.append(f"duration {max(float(duration), minimo):.6f}")
     lines.append(f"file {_concat_quote(entries[-1][0])}")
     list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -467,16 +482,24 @@ def _build_video_ffmpeg(
     l'ultimo valore e' quello che ha prodotto il file. Serve al riepilogo per
     non dire "GPU" quando il ripiego ha usato libx264.
 
-    ffmpeg scrive su ``.tmp.mp4`` nella STESSA cartella e il file buono
+    ffmpeg scrive su un temporaneo UNICO nella STESSA cartella e il file buono
     sostituisce quello vecchio solo a successo: un encoding interrotto non
-    lascia piu' un MP4 corrotto col nome finale.
+    lascia piu' un MP4 corrotto col nome finale. Il nome e' unico perche' due
+    run sulla stessa cartella non devono rinominare il temporaneo dell'altra,
+    e un file lasciato da un hard kill non puo' essere scambiato per fresco.
     """
     audio = Path(audio_path)
     if not audio.exists():
         raise FileNotFoundError(f"File audio non trovato: {audio}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_out = output_path.with_suffix(".tmp.mp4")
+    # Nome unico: il vecchio `.tmp.mp4` fisso era condiviso da due run e da un
+    # hard kill; uno poteva sostituire il video dell'altro con un file parziale.
+    fd_tmp, nome_tmp = tempfile.mkstemp(
+        prefix=output_path.stem + ".", suffix=".tmp.mp4", dir=output_path.parent
+    )
+    os.close(fd_tmp)
+    tmp_out = Path(nome_tmp)
     if encoder_out is not None:
         encoder_out.clear()
     total_duration = sum(durations)
@@ -494,7 +517,7 @@ def _build_video_ffmpeg(
         pngs = _prepare_slides_for_concat(slide_files, workdir)
         entries = list(zip(pngs, durations, strict=True))
         concat_path = workdir / "concat.txt"
-        _write_concat_file(entries, concat_path)
+        _write_concat_file(entries, concat_path, fps=fps)
 
         def _comando(enc: str, copia_audio: bool) -> list[str]:
             return [
@@ -664,7 +687,7 @@ def build_video(
         encoder,
         threads,
     )
-    if reuse and video_riutilizzabile(output_path, _chiave):
+    if reuse and video_riutilizzabile(output_path, _chiave, encoder_out=encoder_out):
         log.info(
             "   Video riusato: slide, tempi, audio e parametri sono gli stessi "
             "della run precedente (nessuna ricodifica)."
@@ -697,7 +720,11 @@ def build_video(
         )
 
     log.info("\n[COMPLETATO] File sincronizzato salvato in: %s", output_path)
-    segna_video(output_path, _chiave)
+    # L'encoder EFFETTIVO e' nell'out-param (puo' essere diverso da quello
+    # richiesto se la GPU ha fallito): va salvato per il riuso, altrimenti la
+    # run successiva direbbe "GPU" leggendo solo la richiesta.
+    encoder_effettivo = encoder_out[0] if encoder_out else encoder
+    segna_video(output_path, _chiave, encoder=encoder_effettivo)
 
 
 def _build_video_moviepy(
@@ -1077,6 +1104,11 @@ def frame_consistency_check(
         candidati: list[tuple[int, int, float, Path]] = []
         for i, (slide, start, end) in enumerate(segments):
             if not 1 <= int(slide) <= len(slide_paths):
+                # Segmento non verificabile: va contato, altrimenti `checked`
+                # puo' sembrare completo e --strict-sync non scatterebbe,
+                # proprio mentre un segmento non e' mai stato guardato.
+                skipped.append(i)
+                log.debug("   [Verifica] Segmento %d: slide %d fuori dal deck, non verificato.", i, int(slide))
                 continue
             if int(slide) in unreadable:
                 log.debug("   [Verifica] Segmento %d: slide %d non leggibile, saltato.", i, int(slide))
@@ -1103,6 +1135,7 @@ def frame_consistency_check(
         for i, slide, t, frame in candidati:
             if not frame.exists() or frame.stat().st_size == 0:
                 log.debug("   [Verifica] Frame non estratto a %.1fs (segmento %d).", t, i)
+                skipped.append(i)
                 continue
             checked += 1
             sims = _similarities(frame, ref_matrix)

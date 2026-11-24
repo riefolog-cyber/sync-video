@@ -471,5 +471,13 @@ class TestValidate(unittest.TestCase):
         self.assertIs(_validate(rec, None), rec)
 
 
+class TestEncoderSuMac(unittest.TestCase):
+    def test_mac_intel_usa_videotoolbox_non_qsv(self) -> None:
+        import machine_setup as ms
+
+        with mock.patch.object(ms.sys, "platform", "darwin"):
+            self.assertEqual(ms._video_vendor(["Intel(R) Iris(R) Xe Graphics"]), "apple")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -124,7 +124,10 @@ def _passi() -> list[Controllo]:
             [py, str(Path(__file__).resolve().parent / "_debug_hardware.py")],
             "encoder reali, ripiego a runtime",
             r"^RISULTATO:",
-            timeout=180,  # probe ffmpeg/encoder: se pende, non e' un risultato
+            # `_debug_hardware.py` lancia mypy 3 volte con un tetto di 300s
+            # ciascuno: un limite di 180s qui uccideva il passo prima che i
+            # type-check cross-platform finissero, su una macchina lenta.
+            timeout=1000,
         ),
     ]
 

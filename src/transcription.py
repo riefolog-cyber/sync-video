@@ -601,7 +601,12 @@ def resolved_transcriber(transcriber: str, openvino_model_dir: Path | str | None
     if transcriber == "openvino":
         # Motore esplicito: se il modello manca, transcribe_audio lo scarica.
         return "openvino"
-    if openvino_model_dir is not None and openvino_model_complete(openvino_model_dir):
+    # `openvino_usable` e `download_openvino_model` usano la cartella di
+    # default quando il percorso e' None (ed e' il default di `transcribe_audio`):
+    # qui prima si tornava sempre a whisper, quindi un chiamante che usava i
+    # valori documentati non usava OpenVINO nemmeno con il modello completo.
+    cartella = Path(openvino_model_dir) if openvino_model_dir is not None else Path(DEFAULT_OPENVINO_MODEL_DIR)
+    if openvino_model_complete(cartella):
         return "openvino"
     return "whisper"
 
@@ -1436,7 +1441,10 @@ def transcribe_with_whisper(
         iniziali, sorgente, offset = _prepara_ripresa(audio_path, _params)
     else:
         iniziali, sorgente, offset = [], audio_path, 0.0
-        log.info("   [Trascrizione] --no-ripresa: decodifico da capo (il parziale resta).")
+        # Il parziale NON resta: `_collect_words` lo rimuove a trascrizione
+        # riuscita. Dire il contrario faceva credere a chi lo cercasse che
+        # fosse ancora li' per un ripiego.
+        log.info("   [Trascrizione] --no-ripresa: ignoro il parziale e decodifico da capo.")
 
 
     # Trascrizione (decoding a batch quando possibile, con ripiego sequenziale)

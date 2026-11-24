@@ -108,9 +108,17 @@ def _percorso_marca(output_path: Path, cache_dir: Path | None = None) -> Path:
 
 
 def video_riutilizzabile(
-    output_path: Path, chiave: str, cache_dir: Path | None = None
+    output_path: Path,
+    chiave: str,
+    cache_dir: Path | None = None,
+    encoder_out: list[str] | None = None,
 ) -> bool:
-    """True se il video gia' scritto e' quello che verrebbe rifatto."""
+    """True se il video gia' scritto e' quello che verrebbe rifatto.
+
+    ``encoder_out`` (se dato) riceve l'encoder EFFETTIVO della run che ha
+    scritto il video: riusandolo, il riepilogo non puo' dire "GPU" quando il
+    file era stato codificato in CPU dopo un ripiego.
+    """
     if not output_path.exists():
         return False
     marca = _percorso_marca(output_path, cache_dir)
@@ -129,6 +137,7 @@ def video_riutilizzabile(
         return False
     # mtime uguale: percorso rapido, e' il caso normale (nessuna lettura del video).
     if int(dati.get("mtime_ns", -1)) == stat.st_mtime_ns:
+        _ripristina_encoder(dati, encoder_out)
         return True
     # mtime diverso ma dimensione uguale: puo' essere un semplice "touch" di
     # antivirus/OneDrive oppure una modifica vera. Decide il contenuto.
@@ -145,17 +154,31 @@ def video_riutilizzabile(
     # Cache in sola lettura: il riuso resta valido lo stesso.
     with suppress(OSError):
         atomic_write_text(marca, json.dumps(dati, ensure_ascii=False))
+    _ripristina_encoder(dati, encoder_out)
     return True
 
 
+def _ripristina_encoder(dati: dict[str, object], encoder_out: list[str] | None) -> None:
+    """Riporta nell'out-param l'encoder con cui il video e' stato SCRITTO."""
+    if encoder_out is None:
+        return
+    encoder = dati.get("encoder")
+    if isinstance(encoder, str) and encoder:
+        encoder_out[:] = [encoder]
+
+
 def segna_video(
-    output_path: Path, chiave: str, cache_dir: Path | None = None
+    output_path: Path,
+    chiave: str,
+    cache_dir: Path | None = None,
+    encoder: str | None = None,
 ) -> None:
     """Ricorda quale video e' stato scritto (e con quali input).
 
     L'hash del contenuto serve a non rifare il video quando cambia solo il
     momento di modifica (touch di antivirus/OneDrive): mtime e dimensione
-    restano come controllo rapido.
+    restano come controllo rapido. ``encoder`` e' quello EFFETTIVO (dopo
+    l'eventuale ripiego da GPU a CPU), non quello richiesto.
     """
     try:
         stat = output_path.stat()
@@ -171,6 +194,7 @@ def segna_video(
                 "mtime_ns": stat.st_mtime_ns,
                 "sha1": _sha1_file(output_path),
                 "output": str(output_path),
+                "encoder": encoder,
             },
             ensure_ascii=False,
         ),

@@ -143,9 +143,15 @@ def latest_transcript_words(cache_dir: Path | None = None, preferred_key: str | 
             words = data.get("words_raw") if isinstance(data, dict) else None
             if isinstance(words, list) and words:
                 return [w for w in words if isinstance(w, dict)]
-    for path in sorted(
-        cd.glob("transcript_*.json"), key=lambda p: p.stat().st_mtime, reverse=True
-    ):
+    def _mtime(p: Path) -> float:
+        # Un file puo' sparire fra glob e stat (antivirus, pulizia concorrente):
+        # la cache non deve mai uccidere --review per una corsa cosi'.
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    for path in sorted(cd.glob("transcript_*.json"), key=_mtime, reverse=True):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:

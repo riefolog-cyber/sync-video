@@ -10,7 +10,8 @@ Vincolo di progettura: questo modulo NON importa, in cima, nessuno dei moduli
 pesanti (ocr, video, transcription). Se lo facesse, andrebbe in crash su un PC dove un
 pacchetto manca — cioè esattamente il caso in cui l'utente ha bisogno di
 questa pagina. Ogni import pesante e dentro la prova che lo usa, con
-try/except, cosi' un pacchetto assente produce "KO, con motivo" e non un
+try/except, cosi' un pacchetto assente produce un esito con motivo (KO solo
+quando impedisce davvero il video, AVV quando il programma ripiega) e non un
 traceback.
 
 Esegui con: python src/verifica_pc.py
@@ -229,19 +230,37 @@ def prova_ffmpeg(r: Relazione) -> None:
     # andare in accelerazione hardware. Un PC con GPU ma senza i suoi encoder
     # produce il video molto piu' lento, e il collega lo scopre come "il
     # programma e' lentissimo" invece che come "manca un encoder".
-    hw = [n for n in ("h264_nvenc", "h264_qsv", "h264_amf") if n in out]
-    dettaglio = f"{Path(exe).name}, " + (", ".join(hw) if hw else "solo encoder software")
-    if not hw:
+    encoder_compilati = [n for n in ("h264_nvenc", "h264_qsv", "h264_amf") if n in out]
+    # Avere i encoder compilati NON vuol dire poterli usare: i build desktop
+    # (compreso Gyan su Windows) li includono tutti, anche su PC senza GPU.
+    # La scelta reale la fa `choose_video_encoder`, che incrocia la famiglia GPU e
+    # encoder disponibili: usare la stessa funzione evita due verita' diverse.
+    try:
+        from hardware import choose_video_encoder
+        from machine_setup import _video_vendor, detect_gpus
+
+        scelto = choose_video_encoder(
+            _video_vendor(detect_gpus()), frozenset(encoder_compilati) | {"libx264"}
+        )
+        utilizzabile = scelto != "libx264"
+    except Exception:  # noqa: BLE001 - il referto non deve morire per un probe
+        scelto = ""
+        utilizzabile = bool(encoder_compilati)
+    dettaglio = f"{Path(exe).name}, " + (
+        ", ".join(encoder_compilati) if encoder_compilati else "solo encoder software"
+    )
+    if not utilizzabile:
         r.aggiungi(
             Esito(
                 "ffmpeg",
                 AVV,
-                dettaglio,
-                "Nessun encoder accelerato: il video si produce, ma molto piu' lentamente.",
+                dettaglio + f" — encoder effettivo: {scelto or 'libx264'}",
+                "Nessun encoder accelerato USABILE su questa GPU: il video si produce, "
+                "ma molto piu' lentamente. Gli encoder compilati non bastano senza la GPU.",
             )
         )
     else:
-        r.aggiungi(Esito("ffmpeg", OK, dettaglio))
+        r.aggiungi(Esito("ffmpeg", OK, dettaglio + f" — encoder effettivo: {scelto}"))
 
 
 def prova_hardware(r: Relazione) -> None:
@@ -433,12 +452,19 @@ def prova_motore(r: Relazione) -> None:
         if openvino_usable(Path(DEFAULT_OPENVINO_MODEL_DIR)):
             r.aggiungi(Esito("Motore", OK, "openvino (iGPU/CPU Intel)"))
         else:
+            # Non e' un KO: il programma ripiega DA SOLO su faster-whisper su
+            # CPU e il video viene prodotto. Un KO qui faceva dire a un PC che
+            # ha già generato video "1 problema che impedisce il video",
+            # contraddicendo l'Esito e facendo fallire il referto su una
+            # macchina perfettamente funzionante. E' un AVV: va letto, non
+            # blocca.
             r.aggiungi(
                 Esito(
                     "Motore",
-                    KO,
-                    "OpenVINO scelto ma non utilizzabile (runtime, modello IR o device GPU manca)",
-                    "Il programma ripiega su faster-whisper su CPU: funziona, ma piu' lento.",
+                    AVV,
+                    "OpenVINO scelto ma non utilizzabile adesso (runtime, modello IR o device GPU manca)",
+                    "Il programma ripiega da solo su faster-whisper su CPU: il video si fa, "
+                    "ma piu' lento. Per riprovare la GPU: genera_video.bat --transcriber openvino.",
                 )
             )
     else:
@@ -553,12 +579,12 @@ def prova_converter(r: Relazione) -> None:
 
 
 def prova_materiali(r: Relazione, radice: Path) -> None:
-    # Stessa regola di main.find_presentation_file (che qui non si importa:
-    # main.py trascina moviepy e gli altri pesi, e questo modulo deve girare
-    # anche a pacchetti mancanti): prima i nomi esatti, poi qualsiasi altra
+    # Stessa regola di pipeline_inputs.find_presentation_file (che qui non si
+    # importa: trascina i moduli pesanti, e questo modulo deve girare anche a
+    # pacchetti mancanti): prima i nomi esatti, poi qualsiasi altra
     # presentazione, la piu' recente. Altrimenti il referto direbbe "manca"
     # dove il programma invece procederebbe. Gli insiemi stanno in UN solo
-    # posto (config): import locale come per ocr qui sotto.
+    # posto (config): import locale come in prova_converter, qui sopra.
     from config import AUDIO_SEARCH_SUFFIXES, PRESENTATION_ACCEPTED_SUFFIXES
 
     nomi_presentazione = ("presentazione.pdf", "presentazione.pptx", "presentazione.ppt")

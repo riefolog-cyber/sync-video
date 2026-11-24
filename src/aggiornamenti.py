@@ -37,7 +37,8 @@ def main() -> None:
     parser.add_argument(
         "--no-update-check",
         action="store_true",
-        help="Non controllare gli aggiornamenti su PyPI",
+        help="Non controllare PyPI e non toccare l'ambiente (bootstrap saltato: "
+        "niente pip, Tesseract, ffmpeg o controllo spazio)",
     )
     parser.add_argument(
         "--frozen-report",

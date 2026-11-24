@@ -30,10 +30,17 @@ _ENCODER_GPU = frozenset({"h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolb
 
 
 def format_time(seconds: float) -> str:
-    """Formatta secondi in formato leggibile."""
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    m, s = divmod(int(seconds), 60)
+    """Formatta secondi in formato leggibile, con un'unica regola di arrotondamento.
+
+    Prima il ramo sotto il minuto arrotondava (`0.5 -> "0s"` per il banker's
+    rounding), quello sopra troncava: due politiche diverse per la stessa
+    cifra. Ora la regola e' UNA, il troncamento, che preserva i tempi storici
+    del referto (16m57s resta 16m57s).
+    """
+    interi = int(seconds)
+    if interi < 60:
+        return f"{interi}s"
+    m, s = divmod(interi, 60)
     return f"{m}m{s:02d}s"
 
 

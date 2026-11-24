@@ -23,10 +23,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from config import _REQUIRED_PACKAGES, BASE_DIR, CACHE_DIR, _installed_version, atomic_write_text, log
@@ -142,17 +144,21 @@ def _installable_releases(data: dict[str, Any]) -> list[tuple[Any, str]]:
     - le pre-release sono escluse (senza ``--pre`` pip non le installa: annunciarle
       darebbe un falso aggiornamento, il report direbbe "X -> Y" e pip non farebbe
       nulla);
-    - deve esserci almeno una WHEEL non yanked con ``requires_python`` compatibile.
+    - deve esserci almeno una WHEEL non yanked, con ``requires_python``
+      compatibile OPPURE senza vincolo (pip la installa lo stesso).
 
     Un sdist senza metadata non dimostra che la release sia installabile: PyPI
     pubblica il file, ma pip potrebbe non riuscire a costruirlo e, senza
     ``requires_python``, non si puo' nemmeno sapere se il Python corrente e'
-    ammesso. Quindi un file senza vincolo, da solo, NON basta: serve una wheel non
-    yanked che dichiari esplicitamente un vincolo compatibile. Guardare solo il
-    primo file utile sbaglierebbe in entrambi i versi: un file con un vincolo
-    troppo stretto puo' far scartare una release che ha anche una wheel perfettamente
-    installabile, e un primo file senza vincolo puo' far accettare una release i cui
-    altri file sono tutti incompatibili.
+    ammesso. La WHEEL, invece, e' gia' costruita: molte wheel pure-python (per
+    esempio `pydub-0.25.1-py2.py3-none-any.whl`) dichiarano
+    ``requires_python: null`` e pip le installa senza problemi. Scartarle faceva
+    dire "PyPI irraggiungibile" per pydub a ogni avvio, senza mai scrivere la
+    cache del controllo aggiornamenti. Guardare solo il primo file utile
+    sbaglierebbe in entrambi i versi: un file con un vincolo troppo stretto puo'
+    far scartare una release che ha anche una wheel perfettamente installabile,
+    e un primo file senza vincolo puo' far accettare una release i cui altri
+    file sono tutti incompatibili.
 
     Il confronto usa la versione COMPLETA del Python (3.10.5, non 3.10): con
     ``>=3.10.3`` un 3.10.5 va ammesso, e ``major.minor`` lo escluderebbe a torto.
@@ -173,15 +179,17 @@ def _installable_releases(data: dict[str, Any]) -> list[tuple[Any, str]]:
             continue
         if version.is_prerelease:
             continue
-        # ALMENO UNA wheel non yanked deve dichiarare un vincolo compatibile:
-        # un file senza requires_python (tipico sdist) non basta da solo.
+        # ALMENO UNA wheel non yanked deve essere installabile: vincolo
+        # compatibile, oppure nessun vincolo (pip la accetta lo stesso).
         compatibile = False
         for file in files_validi:
             if not str(file.get("filename", "")).lower().endswith(".whl"):
                 continue  # sdist/archivio: senza metadata non ne dimostro l'installabilita'
             requires_python = file.get("requires_python")
             if not requires_python:
-                continue  # senza vincolo non si puo' affermare che la wheel sia installabile
+                # Wheel senza vincolo: e' il caso reale di pydub (py2.py3-none-any).
+                compatibile = True
+                break
             try:
                 if SpecifierSet(requires_python).contains(python):
                     compatibile = True
@@ -735,18 +743,17 @@ def _run_pinned_ab_test(pkg: dict) -> str | None:
         log.warning("   ⚠️ Test A/B saltato: baseline non calcolata.")
         return None
 
-    cand = None
-    venv_dir = None
+    # La cartella va creata e posseduta DA QUI: se `candidate_embeddings`
+    # solleva prima di restituire la venv, il chiamante non sapeva dove fosse
+    # e la venv restava sul disco, nonostante il commento promettesse pulizia.
+    venv_dir = Path(tempfile.mkdtemp(prefix="fastembed_ab_"))
     try:
-        cand, venv_dir = ab.candidate_embeddings(
+        cand, _ = ab.candidate_embeddings(
             all_texts, candidate, model=DEFAULT_EMBEDDING_MODEL,
-            cache_dir=DEFAULT_EMBEDDING_CACHE_DIR,
+            cache_dir=DEFAULT_EMBEDDING_CACHE_DIR, venv_dir=venv_dir,
         )
     finally:
-        # `candidate_embeddings` restituisce (embeddings, venv_dir): la venv e'
-        # temporanea e va rimossa anche se il calcolo della candidata fallisce.
-        if venv_dir is not None:
-            shutil.rmtree(venv_dir, ignore_errors=True)
+        shutil.rmtree(venv_dir, ignore_errors=True)
     if cand is None:
         log.warning("   ⚠️ Test A/B saltato: candidata non calcolata.")
         return None
