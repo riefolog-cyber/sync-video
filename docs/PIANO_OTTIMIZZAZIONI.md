@@ -535,6 +535,24 @@ era incompleta).
 
 Verifiche: `ruff` e `mypy` puliti, 1528 test verdi.
 
+## Batch 18 — CI notturna (2026-11)
+
+La CI notturna (`SYNC_VIDEO_RUN_SLOW=1`) era rossa su tutte e quattro le
+versioni Python per due test lenti, mentre i job veloci erano verdi:
+
+- il test E2E `--no-ripresa` cercava ancora il vecchio testo del messaggio
+  ("decodifico da capo"), cambiato nel batch 16 in "ignoro il parziale";
+- il test lento di conversione PPTX→PDF scriveva un PDF finto a byte, che
+  `_pdf_valido()` (PyMuPDF) scartava: il test finiva per invocare il converter
+  vero, assente su CI. Ora scrive un PDF minimo valido;
+- riabilitando il parziale con device/compute nel batch 17 è emerso un
+  doppione al giunto della ripresa (57 → 58 parole): `_collect_words`
+  confrontava solo i timestamp. Ora scarta anche le parole già salvate con
+  stesso testo entro 0.6s.
+
+Verifiche: **1528 test verdi anche con `SYNC_VIDEO_RUN_SLOW=1`** (job nightly),
+oltre ai 6/6 controlli del job veloce.
+
 ## Stato delle voci
 
 | # | Voce | Stato |

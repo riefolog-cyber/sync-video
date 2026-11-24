@@ -221,6 +221,11 @@ class TestPipelineCompleta(unittest.TestCase):
         parametri = {
             "engine": "faster-whisper",
             "model": "small",
+            # Stessi valori della run reale: il parziale ora include device e
+            # compute type e uno scritto con i vecchi parametri verrebbe
+            # scartato come "altra decodifica".
+            "device": "cpu",
+            "compute_type": "int8",
             "beam": int(DEFAULT_WHISPER_BEAM),
             "language": "it",
             "vad": True,
@@ -256,6 +261,11 @@ class TestPipelineCompleta(unittest.TestCase):
         parametri = {
             "engine": "faster-whisper",
             "model": "small",
+            # Stessi valori della run reale: il parziale ora include device e
+            # compute type e uno scritto con i vecchi parametri verrebbe
+            # scartato come "altra decodifica".
+            "device": "cpu",
+            "compute_type": "int8",
             "beam": int(DEFAULT_WHISPER_BEAM),
             "language": "it",
             "vad": True,
@@ -271,7 +281,7 @@ class TestPipelineCompleta(unittest.TestCase):
 
             esito, output, _video = self._esegui(base, cache, "--no-ripresa")
             self.assertEqual(esito.returncode, 0, output[-4000:])
-            self.assertIn("--no-ripresa: decodifico da capo", output, output[-3000:])
+            self.assertIn("--no-ripresa: ignoro il parziale", output, output[-3000:])
             self.assertNotIn("Riprendo da", output)
             # Finita la decodifica intera il parziale viene comunque rimosso.
             self.assertFalse(parziale.exists())

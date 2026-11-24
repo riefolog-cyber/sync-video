@@ -52,6 +52,10 @@ def _parametri() -> dict[str, Any]:
     return {
         "engine": "faster-whisper",
         "model": "small",
+        # Il parziale ora identifica anche il decoder: device/compute devono
+        # essere quelli della run reale, altrimenti viene scartato.
+        "device": "cpu",
+        "compute_type": "int8",
         "beam": int(DEFAULT_WHISPER_BEAM),
         "language": "it",
         "vad": True,

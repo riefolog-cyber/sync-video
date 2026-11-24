@@ -1213,6 +1213,22 @@ def _collect_words(
     # l'ultima parola salvata (le parole salvate coprono l'audio fino al punto
     # di ripresa, quindi non si perde nulla di vero).
     limite = max((float(w["start"]) for w in gia_fatte), default=None)
+    # Indice delle parole salvate per testo: la coda viene riascoltata per
+    # parecchi secondi e una parola puo' essere riconosciuta di nuovo con un
+    # inizio di pochi centesimi successivo a quello gia' salvato (misurato:
+    # 57 -> 58 parole al giunto). Il solo confronto coi timestamp non basta.
+    gia_per_testo: dict[str, list[float]] = {}
+    for w in gia_fatte:
+        gia_per_testo.setdefault(str(w["word"]).strip().lower(), []).append(float(w["start"]))
+
+    def _gia_detto(testo: str, inizio: float) -> bool:
+        for inizio_salvato in gia_per_testo.get(testo.strip().lower(), ()):
+            # Finestra stretta: un vero ripasso della stessa parola a distanza
+            # di secondi e' legittimo, un doppione del giunto si scosta di
+            # pochi centesimi (al massimo qualche decimo).
+            if abs(inizio - inizio_salvato) <= 0.6:
+                return True
+        return False
     for seg in segments:
         segmenti += 1
         fine = offset + float(getattr(seg, "end", 0.0) or 0.0)
@@ -1224,6 +1240,8 @@ def _collect_words(
                 inizio = float(w.start) + offset
                 if limite is not None and inizio <= limite:
                     continue
+                if _gia_detto(w.word, inizio):
+                    continue
                 if w.word.strip():
                     # float(): i timestamp di faster-whisper sono np.float64, e
                     # json.dumps non li sa scrivere (il primo checkpoint su un
@@ -1233,6 +1251,8 @@ def _collect_words(
             for token in seg.text.strip().split():
                 inizio = float(seg.start) + offset
                 if limite is not None and inizio <= limite:
+                    continue
+                if _gia_detto(token, inizio):
                     continue
                 all_words.append({"word": token, "start": inizio})
         if audio_path is not None and segmenti % _CHECKPOINT_OGNI_SEGMENTI == 0:

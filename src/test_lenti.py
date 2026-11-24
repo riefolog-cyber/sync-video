@@ -26,9 +26,22 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest import mock
 
 from test_slow import slow
+
+
+def _pdf_di_prova(testo: str) -> bytes:
+    """PDF minimo ma VALIDO, con una parola che lo identifica."""
+    import pymupdf as fitz
+
+    doc = fitz.open()
+    try:
+        doc.new_page().insert_text((30, 60), testo)
+        return cast("bytes", doc.tobytes())
+    finally:
+        doc.close()
 
 
 class TestPymupdfReale(unittest.TestCase):
@@ -110,12 +123,17 @@ class TestFilesystemReale(unittest.TestCase):
             pdf = out / "presentazione.pdf"
 
             ppt.write_bytes(b"prima versione")
-            pdf.write_bytes(b"PDF VECCHIO")
+            pdf_vecchio = _pdf_di_prova("VECCHIO")
+            pdf_nuovo = _pdf_di_prova("NUOVO")
+            pdf.write_bytes(pdf_vecchio)
             marker = out / "presentazione.src_md5"
             marker.write_text("hash non corrispondente", encoding="ascii")
 
             def _run(*_a: object, **_k: object) -> mock.Mock:
-                pdf.write_bytes(b"PDF NUOVO")
+                # `_pdf_valido()` apre il risultato con PyMuPDF: un PDF finto
+                # a byte veniva scartato e il test arrivava al converter vero
+                # (assente su CI), fallendo per un motivo sbagliato.
+                pdf.write_bytes(pdf_nuovo)
                 return mock.Mock(returncode=0, stderr="", stdout="")
 
             with mock.patch.multiple(
@@ -128,7 +146,7 @@ class TestFilesystemReale(unittest.TestCase):
                 convert_presentation_to_pdf(ppt, out)
 
             # Il punto: non deve essere rimasto il PDF vecchio.
-            self.assertEqual(pdf.read_bytes(), b"PDF NUOVO")
+            self.assertEqual(pdf.read_bytes(), pdf_nuovo)
 
 
 if __name__ == "__main__":
