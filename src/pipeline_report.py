@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
+from pathlib import Path
 
 from config import (
     CACHE_DIR,
@@ -46,12 +47,14 @@ def format_time(seconds: float) -> str:
 
 def append_timing_history(
     t_ocr: float, t_transcribe: float, t_sync: float, t_embed: float, t_video: float, t_total: float,
+    cache_dir: Path | None = None,
 ) -> None:
     """Persiste lo storico tempi in .cache/timing_history.jsonl (mai bloccante)."""
     import json
 
+    cd = cache_dir if cache_dir is not None else CACHE_DIR
     try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cd.mkdir(parents=True, exist_ok=True)
         entry = {
             "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
             "ocr": round(t_ocr, 1),
@@ -61,7 +64,7 @@ def append_timing_history(
             "video": round(t_video, 1),
             "total": round(t_total, 1),
         }
-        with (CACHE_DIR / "timing_history.jsonl").open("a", encoding="utf-8") as f:
+        with (cd / "timing_history.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except OSError:
         log.debug("   Impossibile salvare lo storico tempi (ignorato).")
@@ -84,6 +87,10 @@ def print_timing(
     *,
     history_fn: Callable[..., None] | None = None,
     video_encoder: str | None = None,
+    cache_dir: Path | None = None,
+    ocr_workers: int | None = None,
+    whisper_batch: int | None = None,
+    thread_overrides: bool = False,
 ) -> None:
     """Riepilogo tempi + peso cache + thread auto-tuning + hardware + storico.
 
@@ -95,7 +102,12 @@ def print_timing(
     rendere visibile che la GPU è stata usata davvero (prima l'encoding era
     sempre su CPU). Con ``auto``/valori sconosciuti non si può affermare nulla:
     il riepilogo dice "non verificato" invece di "GPU".
+
+    ``cache_dir``: main.py inietta la PROPRIA CACHE_DIR patchabile, come fa per
+    tutti gli altri shim: senza, i test che la spostano scrivevano lo storico
+    tempi e leggevano il peso nella cache vera.
     """
+    cd = cache_dir if cache_dir is not None else CACHE_DIR
     log.info("\n" + "─" * 50)
     log.info(" ⏱️  RIEPILOGO TEMPI")
     log.info("─" * 50)
@@ -114,7 +126,7 @@ def print_timing(
     with suppress(Exception):
         from cache_maintenance import cache_disk_usage, format_bytes
 
-        righe = cache_disk_usage(CACHE_DIR)
+        righe = cache_disk_usage(cd)
         if righe:
             totale = sum(peso for _, peso in righe)
             dettaglio = ", ".join(f"{nome.rstrip('/')} {format_bytes(peso)}" for nome, peso in righe[:3])
@@ -122,14 +134,14 @@ def print_timing(
     with suppress(Exception):
         fisici = _physical_cpus()
         sorgente = f"{fisici} fisici" if fisici else "logici"
+        origine = "override espliciti" if thread_overrides else f"auto da {sorgente}"
         log.info(
-            "   🧵 Thread: whisper %d, embedding %d, video %d, ocr %d "
-            "(auto da %s; override WHISPER/EMBED/VIDEO_THREADS, OCR_WORKERS)",
+            "   🧵 Thread: whisper %d, embedding %d, video %d, ocr %d (%s)",
             DEFAULT_WHISPER_THREADS,
             DEFAULT_EMBED_THREADS,
             DEFAULT_VIDEO_THREADS,
-            DEFAULT_OCR_WORKERS,
-            sorgente,
+            ocr_workers if ocr_workers is not None else DEFAULT_OCR_WORKERS,
+            origine,
         )
     with suppress(Exception):
         from hardware import memory_tier, ram_total_bytes
@@ -138,13 +150,28 @@ def print_timing(
         righe_hw = [f"RAM {totale_ram / 1024**3:.1f} GB" if totale_ram else "RAM sconosciuta"]
         if totale_ram:
             righe_hw.append(memory_tier(totale_ram))
-        righe_hw.append(f"batch whisper {DEFAULT_WHISPER_BATCH}, embedding {DEFAULT_EMBED_BATCH}")
+        batch = whisper_batch if whisper_batch is not None else DEFAULT_WHISPER_BATCH
+        nota_batch = (
+            " (richiesto: il decoding puo' essere ripiegato su sequenziale)"
+            if whisper_batch is not None
+            else ""
+        )
+        righe_hw.append(f"batch whisper {batch}{nota_batch}, embedding {DEFAULT_EMBED_BATCH}")
         _enc = (video_encoder or "").strip().lower()
         if _enc in _ENCODER_GPU:
             righe_hw.append(f"video {_enc} (GPU)")
         elif _enc == "libx264":
             righe_hw.append("video libx264 (CPU)")
+        elif t_video <= 0:
+            # Dry-run: nessun video scritto, nessun encoder usato.
+            righe_hw.append("video non generato (dry-run)")
         else:
             righe_hw.append(f"video {_enc or 'sconosciuto'} (non verificato)")
         log.info("   🖥️  Hardware: %s", ", ".join(righe_hw))
-    (history_fn or append_timing_history)(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total)
+    if history_fn is None:
+        append_timing_history(
+            t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total, cache_dir=cd
+        )
+    else:
+        # I callback dei test hanno la firma storica a sei argomenti.
+        history_fn(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total)

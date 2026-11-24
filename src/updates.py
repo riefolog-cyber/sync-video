@@ -425,6 +425,11 @@ def _pin_note(pip_name: str) -> str:
     return f"pinnato a {versione}{separatore}{motivo}"
 
 
+# Quanti pacchetti installati non hanno risposto nell'ULTIMO controllo: usato
+# per non trasformare un controllo incompleto in un "tutti aggiornati" certificato.
+_ULTIMO_CHECK_SENZA_RISPOSTA = 0
+
+
 def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
     """Verifica aggiornamenti dei pacchetti usati (con cache TTL).
 
@@ -434,6 +439,7 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
         disponibile. ``blocked`` elenca i vincoli delle dipendenze installate
         che quella versione non soddisfa (vuoto se è installabile).
     """
+    global _ULTIMO_CHECK_SENZA_RISPOSTA
     cache = _read_cache()
     now = time.time()
     if cache and now - cache.get("ts", 0) < ttl_hours * 3600:
@@ -516,6 +522,7 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
             unreachable,
             installati,
         )
+        _ULTIMO_CHECK_SENZA_RISPOSTA = unreachable
         return list(cache.get("outdated", []))
 
     outdated.sort(key=lambda d: d["name"].lower())
@@ -530,9 +537,11 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
             "trovato: cache non scritta per non certificare un controllo incompleto.",
             unreachable,
         )
+        _ULTIMO_CHECK_SENZA_RISPOSTA = unreachable
         return list(cache.get("outdated", []))
     if non_installati:
         log.debug("   %d pacchetti non installati: saltati (non e' un errore di rete).", non_installati)
+    _ULTIMO_CHECK_SENZA_RISPOSTA = 0
     _write_cache({"ts": now, "outdated": outdated})
     return outdated
 
@@ -549,7 +558,14 @@ def print_updates(outdated: list[dict]) -> None:
     nulla e la segnalazione si ripresenta identica alla run successiva.
     """
     if not outdated:
-        log.info("   ✅ Tutti i pacchetti usati sono aggiornati.")
+        if _ULTIMO_CHECK_SENZA_RISPOSTA:
+            log.info(
+                "   ⚠️ Controllo non completato: %d pacchetto/i senza risposta da PyPI; "
+                "non posso dire che siano aggiornati.",
+                _ULTIMO_CHECK_SENZA_RISPOSTA,
+            )
+        else:
+            log.info("   ✅ Tutti i pacchetti usati sono aggiornati.")
         return
     log.info("   📦 Sono disponibili aggiornamenti per %d pacchetto/i:", len(outdated))
     for d in outdated:
@@ -843,7 +859,7 @@ def _health_check(packages: list[str]) -> bool:
                 "   ❌ Health check fallito: import di %s in interprete pulito non riuscito:",
                 ", ".join(moduli),
             )
-            for riga in _tail_lines(res.stderr or res.stdout):
+            for riga in _tail_lines((res.stdout or "") + "\n" + (res.stderr or "")):
                 log.warning("      %s", riga)
             return False
     try:
@@ -861,7 +877,7 @@ def _health_check(packages: list[str]) -> bool:
         log.debug("   ⚠️ pip check non disponibile (conflitti non verificati): %s", e)
         return True
     if res.returncode != 0:
-        righe = _tail_lines(res.stderr or res.stdout)
+        righe = _tail_lines((res.stdout or "") + "\n" + (res.stderr or ""))
         nomi = {re.split(r"[<>=!~]", req, maxsplit=1)[0].strip().lower() for req in packages}
         colpevoli = [
             riga
@@ -917,7 +933,7 @@ def _pip_upgrade(packages: list[str]) -> bool:
 
     if res.returncode != 0:
         log.warning("   ❌ Aggiornamento fallito (pip exit %d):", res.returncode)
-        for riga in _tail_lines(res.stderr or res.stdout):
+        for riga in _tail_lines((res.stdout or "") + "\n" + (res.stderr or "")):
             log.warning("      %s", riga)
         return False
 

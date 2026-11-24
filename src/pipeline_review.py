@@ -96,7 +96,7 @@ def _boundary_doubt_text(item: dict[str, object]) -> str:
     )
 
 
-def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> None:
+def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
     """Rivede i confini dubbi di una run GIÀ fatta, senza rifare la pipeline.
 
     Il report e la trascrizione della run sono già in cache: la revisione
@@ -113,7 +113,7 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> None:
             "una volta, poi ripeti con --review.",
             report_path,
         )
-        return
+        return 1
     segments = cast("list[dict[str, object]]", report.get("segments") or [])
     starts: dict[int, float] = {}
     for seg in segments:
@@ -123,7 +123,7 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> None:
         starts.setdefault(slide, float(cast("float", seg.get("start") or 0.0)))
     if not starts:
         log.error("   [Revisione] Il report non contiene segmenti: niente da rivedere.")
-        return
+        return 1
 
     # N reale del deck = numero di segmenti del report: con --skip-slides la
     # run NON elimina i segmenti ne' li mette a durata 0, sostituisce il
@@ -238,3 +238,4 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> None:
         save_sync_report(report, cache_dir=cache_dir)
         scrivi_riepilogo(report, video_path, video_presente=video_path.exists())
     log.info("=" * 70)
+    return 0

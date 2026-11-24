@@ -551,6 +551,16 @@ def _prune_embed_cache(cache_dir: Path | None = None) -> int:
     cosi' spesso).
     """
     base = _EMBED_CACHE_DIR if cache_dir is None else cache_dir / "embedding_cache"
+    # I temporanei della scrittura atomica (emb_*.npz.<rand>.tmp) non sono
+    # voci e non entrano nell'indice: se un processo muore tra mkstemp e
+    # os.replace restano pero' per sempre. Un giorno e' piu' che sufficiente
+    # per distinguerli da una scrittura in corso.
+    limite_tmp = time.time() - 86400
+    with contextlib.suppress(OSError):
+        for tmp in base.glob("emb_*.npz.*.tmp"):
+            if tmp.stat().st_mtime < limite_tmp:
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
     voci: list[tuple[Path, float, int]] = []
     for p in base.glob("emb_*.npz"):
         try:

@@ -43,6 +43,7 @@ KEEP_STEMS = frozenset(
         "timeline_finale",
         "hardware",
         "openvino_attempt",
+        "pin_overrides",
     }
 )
 

@@ -1104,6 +1104,12 @@ def ultima_ripresa() -> float:
     return _ULTIMA_RIPRESA
 
 
+def azzera_ripresa() -> None:
+    """Azzera il segnale all'inizio di una nuova run nello stesso processo."""
+    global _ULTIMA_RIPRESA
+    _ULTIMA_RIPRESA = 0.0
+
+
 def _prepara_ripresa(
     audio_path: Path, params: dict[str, Any] | None = None
 ) -> tuple[list[Word], Path, float]:
@@ -1483,6 +1489,11 @@ def transcribe_with_whisper(
     _params = {
         "engine": "faster-whisper",
         "model": model_size,
+        # Device e compute_type sono nei parametri della cache completa:
+        # senza, un parziale CUDA/float16 veniva cucito con una coda CPU/int8
+        # dopo un cambio di hardware, con timestamp di due decoder diversi.
+        "device": device,
+        "compute_type": compute_type,
         "beam": int(beam_size),
         "language": whisper_lang,
         "vad": bool(vad_filter),

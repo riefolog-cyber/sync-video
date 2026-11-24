@@ -38,15 +38,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# Deve stare PRIMO: mette la radice nel sys.path. Questo script non importa
-# moduli core al livello superiore, ma i suoi test sì (importano config), e
-# senza il bootstrap non troverebbero nulla da scripts/.
+# Deve stare PRIMO: mette la radice nel sys.path. Solo config (che e' leggero)
+# viene importato subito dopo, per leggere la CACHE_DIR effettiva; senza il
+# bootstrap ne i test ne lo script troverebbero i moduli da scripts/.
 from _bootstrap import RADICE
 
 # La radice la dà il bootstrap: `__file__` sta in scripts/, quindi `parent`
 # qui sarebbe la cartella sbagliata (e la cache finirebbe in scripts/.cache).
 BASE_DIR = RADICE
-CACHE_DIR = BASE_DIR / ".cache"
+# Lo stato segue la cache della pipeline (spostabile con SYNC_VIDEO_CACHE_DIR):
+# scrivere sempre RADICE/".cache" lasciava il monitoraggio convinto che il
+# modello non fosse mai stato controllato su quei PC.
+from config import CACHE_DIR  # noqa: E402 - dopo _bootstrap, come gli altri moduli
+
 STATE_FILE = CACHE_DIR / "embedding_model_check.json"
 REPORT_FILE = CACHE_DIR / "embedding_model_check_report.md"
 

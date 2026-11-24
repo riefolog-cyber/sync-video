@@ -31,6 +31,10 @@ KEEP_CACHE_STEMS = frozenset(
         "timeline_finale",
         "hardware",
         "openvino_attempt",
+        # pin_overrides e' uno stato VIVO: config lo legge a import per
+        # applicare il pin approvato da un A/B. Cancellarlo come orfano
+        # faceva tornare il vecchio pin e disinstallare l'aggiornamento.
+        "pin_overrides",
     }
 )
 

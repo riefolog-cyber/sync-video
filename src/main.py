@@ -223,6 +223,7 @@ from timeline_override import (
 )
 from transcription import (
     _write_raw_transcript,
+    azzera_ripresa,
     correct_transcript_names,
     raw_transcript_path,
     resolved_transcriber,
@@ -348,6 +349,9 @@ def _print_timing(
     t_total: float,
     *,
     video_encoder: str | None = None,
+    ocr_workers: int | None = None,
+    whisper_batch: int | None = None,
+    thread_overrides: bool = False,
 ) -> None:
     """Riepilogo tempi (wrapper su pipeline_report).
 
@@ -360,10 +364,19 @@ def _print_timing(
     ``video_encoder`` rende visibile nel riepilogo che la GPU è stata usata
     anche per l'encoding (prima era sempre libx264 su CPU, senza dirlo).
     """
+    def _storia(ocr: float, tr: float, sync: float, emb: float, vid: float, tot: float) -> None:
+        # Firma a sei argomenti (quella che i test si aspettano) ma con la
+        # CACHE_DIR di QUESTO modulo, come tutti gli altri shim.
+        _append_timing_history(ocr, tr, sync, emb, vid, tot, cache_dir=CACHE_DIR)
+
     _print_timing_impl(
         t_ocr, t_transcribe, t_sync, t_embed, t_model, t_video, t_total,
-        history_fn=_append_timing_history,
+        history_fn=_storia,
         video_encoder=video_encoder,
+        cache_dir=CACHE_DIR,
+        ocr_workers=ocr_workers,
+        whisper_batch=whisper_batch,
+        thread_overrides=thread_overrides,
     )
 
 
@@ -1203,9 +1216,9 @@ def _frame_check_video(
 # (Corpi in pipeline_review, re-esportati sopra con gli import.)
 
 
-def _review_boundary_doubts(video_path: Path) -> None:
+def _review_boundary_doubts(video_path: Path) -> int:
     """Wrapper shim: vedi pipeline_review._review_boundary_doubts (inietta CACHE_DIR)."""
-    _review_boundary_doubts_impl(video_path, cache_dir=CACHE_DIR)
+    return _review_boundary_doubts_impl(video_path, cache_dir=CACHE_DIR)
 
 
 def _repair_durations_from_frames(
@@ -2749,7 +2762,7 @@ def _recovery_attempts_note(recovered: list[int], accurate_beam_tried: bool) -> 
 # =====================================================================
 # MAIN ORCHESTRATOR
 # =====================================================================
-def _prefetch_models(args: Any) -> None:
+def _prefetch_models(args: Any) -> bool:
     """Scarica tutti i modelli ML che la pipeline puo' usare, poi esce.
 
     Senza questo, i modelli (~3 GB: e5-large 2.2 GB, Whisper, OpenVINO IR
@@ -2761,6 +2774,9 @@ def _prefetch_models(args: Any) -> None:
 
     Ogni modello e' indipendente: quello che non e' installabile su questa CPU
     (faster-whisper su Windows ARM) viene saltato con una nota, non e' un errore.
+
+    Returns:
+        True se tutto cio' che doveva essere scaricato e' pronto.
     """
     log.info("⬇️  Download dei modelli in anticipo (una tantum)...")
     falliti: list[str] = []
@@ -2781,8 +2797,9 @@ def _prefetch_models(args: Any) -> None:
                 log.warning("   ⚠️  Modello embedding non caricato: %s", model_name)
             else:
                 log.info("   ✅ Embedding pronto: %s", model_name)
-            break  # il primo che va bene basta
+                break  # il primo che va bene basta; se fallisce si prova l'alternativo
         except ImportError:
+            falliti.append("embedding (fastembed non installato)")
             log.warning("   ⚠️  fastembed non installato: embedding non scaricabile.")
             break
         except Exception as e:  # noqa: BLE001 - rete: non deve bloccare il prefetch
@@ -2819,6 +2836,7 @@ def _prefetch_models(args: Any) -> None:
             snapshot_download(repo, revision=revisione)
             log.info("   ✅ Pesi Whisper pronti: %s", repo)
     except ImportError:
+        falliti.append("pesi Whisper (dipendenze mancanti)")
         log.warning("   ⚠️  faster-whisper/huggingface_hub non installati: pesi Whisper non scaricabili.")
     except Exception as e:  # noqa: BLE001 - rete
         falliti.append(f"whisper {args.whisper_model}")
@@ -2854,6 +2872,7 @@ def _prefetch_models(args: Any) -> None:
         )
     else:
         log.info("\n✅ Tutti i modelli sono pronti. La prima run non scarichera' nulla.")
+    return not falliti
 
 
 # (Helper nomi-file in pipeline_inputs, re-esportati sopra con gli import.)
@@ -2884,14 +2903,22 @@ def _primo_avvio_senza_materiali(
     il testo generico ("manca il materiale") lasciava l'utente con il file li'
     accanto a chiedersi perche' non venisse visto.
     """
-    _prefetch_models(args)
+    modelli_pronti = _prefetch_models(args)
     righe = [
         "",
         "=" * 72,
-        "   Sync Video e' pronto: dipendenze, Tesseract, ffmpeg e modelli sono",
-        "   gia' installati e scaricati. NON e' stato prodotto alcun video.",
-        "",
     ]
+    if modelli_pronti:
+        righe += [
+            "   Sync Video e' pronto: dipendenze, Tesseract, ffmpeg e modelli sono",
+            "   gia' installati e scaricati. NON e' stato prodotto alcun video.",
+        ]
+    else:
+        righe += [
+            "   Dipendenze, Tesseract e ffmpeg sono pronti, ma NON tutti i modelli:",
+            "   vedi gli avvisi qui sopra. Rilancia --prefetch-models per riprovare.",
+        ]
+    righe.append("")
     if manca_presentazione and manca_audio:
         righe.append("   Manca il tuo materiale (entrambi i file). Nella cartella")
     elif manca_presentazione:
@@ -3189,6 +3216,10 @@ def _avvisa_verifica_non_eseguita(args: Any, motivo: str) -> None:
 
 def main(argv: list | None = None) -> None:
     args = parse_args(argv)
+    # Uno stato di processo (ripresa da un parziale) non deve riversarsi in
+    # una SECONDA main() nella stessa interpreter: il report direbbe
+    # "trascrizione ripresa" anche se questa run e' partita da capo.
+    azzera_ripresa()
 
     # Versione subito e senza effetti: deve funzionare anche su un PC rotto.
     # Il numero si calcola UNA volta: `git describe` e' un processo, e la run
@@ -3239,8 +3270,9 @@ def main(argv: list | None = None) -> None:
     # anteprime dei dubbi in .cache/review/ (derive, sovrascritte a ogni run):
     # non sono input della pipeline, quindi il comando resta fuori dal blocco.
     if args.review:
-        _review_boundary_doubts(Path(args.output_video))
-        return
+        # Un errore ("nessun report") non puo' uscire 0: il verdetto stampato
+        # dice che non c'e' niente da rivedere, e il codice deve dirlo anche.
+        sys.exit(_review_boundary_doubts(Path(args.output_video)))
 
     # Le fasi che seguono (OCR, Whisper, embedding, video) usano i moduli
     # pesanti importati in cima: qui si verifica che le dipendenze ci siano,
@@ -3320,6 +3352,10 @@ def main(argv: list | None = None) -> None:
                 attive = {
                     chiave_slide,
                     _transcript_cache_key(hash_audio, args),
+                    # La cache delle zone cieche rilette e' VIVA quanto le altre:
+                    # senza questa chiave `--clean-cache` la cancellava e la run
+                    # dopo ritrascriveva le zone (~25s l'una) da zero.
+                    _transcript_cache_key(hash_audio, args) + "_gap",
                     _transcript_cache_key(hash_audio, args, beam=DEFAULT_WHISPER_BEAM_ACCURATE),
                     _beam_ab_cache_key(chiave_slide, hash_audio, args),
                 }
@@ -3370,6 +3406,9 @@ def main(argv: list | None = None) -> None:
     # Riempito da build_video con l'encoder EFFETTIVO (ultimo tentativo riuscito):
     # se l'accelerato fallisce e si ripiega su libx264, il riepilogo lo dice.
     encoder_video_effettivo: list[str] = [encoder_video_risolto]
+    # True se build_video ha riusato il file: il tempo di encoding non e' stato
+    # speso, e il riepilogo non deve stampare una riga "Encoding Video" falsa.
+    video_riutilizzato: list[bool] = []
 
     # --- Controllo aggiornamenti pacchetti ---
     # Segnala gli aggiornamenti; di default chiede S/N per installare i
@@ -4813,7 +4852,9 @@ def main(argv: list | None = None) -> None:
         sync_notes["tempi"] = {
             "ocr": round(t_ocr, 1),
             "trascrizione": round(t_transcribe, 1),
-            "sincronizzazione": round(t_sync, 1),
+            # Stessa cifra del RIEPILOGO TEMPI e di timing_history.jsonl:
+            # il confronto A/B del beam e' tempo di sincronizzazione anche li'.
+            "sincronizzazione": round(t_sync + beam_ab_seconds, 1),
         }
         sync_report = _build_sync_report(
             durations,
@@ -5066,7 +5107,17 @@ def main(argv: list | None = None) -> None:
                 model_load_seconds(),
                 0.0,
                 t_total,
-                video_encoder=encoder_video_risolto,
+                # Il video NON e' stato generato: dire "h264_nvenc (GPU)"
+                # qui faceva credere che l'encoding accelerato fosse avvenuto.
+                video_encoder=None,
+                ocr_workers=getattr(args, "ocr_workers", None),
+                whisper_batch=getattr(args, "whisper_batch", None),
+                thread_overrides=bool(
+                    getattr(args, "ocr_workers", None)
+                    or os.environ.get("WHISPER_THREADS")
+                    or os.environ.get("EMBED_THREADS")
+                    or os.environ.get("VIDEO_THREADS")
+                ),
             )
             _warn_sync_uncertainty(
                 all_anchored=_all_transitions_anchored(
@@ -5106,6 +5157,7 @@ def main(argv: list | None = None) -> None:
             # --no-cache vuol dire "rifai tutto": quindi niente video riusato.
             reuse=not args.no_cache,
             encoder_out=encoder_video_effettivo,
+            reused_out=video_riutilizzato,
         )
         t_video = time.time() - t_phase_start
 
@@ -5198,6 +5250,7 @@ def main(argv: list | None = None) -> None:
                         engine=args.engine,
                         encoder=encoder_video_risolto,
                         encoder_out=encoder_video_effettivo,
+                        reused_out=video_riutilizzato,
                         # Qui i confini sono cambiati: il video da riusare
                         # sarebbe un altro, ma il riuso lo esclude da se'
                         # (l'impronta cambia coi tempi).
@@ -5274,9 +5327,19 @@ def main(argv: list | None = None) -> None:
             t_sync + beam_ab_seconds,
             embed_seconds(),
             model_load_seconds(),
-            t_video,
+            0.0 if video_riutilizzato and video_riutilizzato[-1] else t_video,
             t_total,
-            video_encoder=encoder_video_effettivo[-1] if encoder_video_effettivo else encoder_video_risolto,
+            video_encoder=None if video_riutilizzato and video_riutilizzato[-1] else (
+                encoder_video_effettivo[-1] if encoder_video_effettivo else encoder_video_risolto
+            ),
+            ocr_workers=getattr(args, "ocr_workers", None),
+            whisper_batch=getattr(args, "whisper_batch", None),
+            thread_overrides=bool(
+                getattr(args, "ocr_workers", None)
+                or os.environ.get("WHISPER_THREADS")
+                or os.environ.get("EMBED_THREADS")
+                or os.environ.get("VIDEO_THREADS")
+            ),
         )
         _warn_sync_uncertainty(
             cast("dict[str, object] | None", sync_report.get("frame_check")),

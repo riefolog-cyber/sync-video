@@ -135,6 +135,7 @@ class TestKeepCacheStems(_CacheTemp):
                     "timeline_finale",
                     "hardware",
                     "openvino_attempt",
+                    "pin_overrides",
                 }
             ),
         )

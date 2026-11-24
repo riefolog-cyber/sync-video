@@ -74,7 +74,7 @@ genera_video.bat
 >   solo i blocchi nuovi, non tutti.
 >
 > Due run sulla stessa cartella non si pestano: la seconda **aspetta fino a
-> 15 minuti** che la prima finisca e poi si ferma con un avviso (il blocco è
+> 15 minuti** che la prima finisca e poi si ferma **con errore e codice 1** (il blocco è
 > del sistema operativo: se la prima muore, il blocco si libera da solo). Se
 > invece il file di blocco non si può creare (cartella in sola lettura, ACL,
 > disco pieno), la run parte lo stesso, con un avviso nel log: fermarsi lì
@@ -82,8 +82,10 @@ genera_video.bat
 >
 > La **verifica del video** (`--verify-video`) lascia in
 > `.cache/verify_frames/` **solo i fotogrammi dei segmenti sbagliati**: sono
-> gli unici da guardare, e una cartella vuota vuol dire che tutti i segmenti
-> erano corretti.
+> gli unici da guardare. Una cartella vuota vuol dire che tutti i segmenti
+> controllati erano corretti: se il log dice "Verifica frame incompleta",
+> qualche segmento non è stato controllato (slide illeggibile o frame non
+> estratto) e la cartella vuota NON è una prova di successo.
 
 ### 🔒 Ambiente dedicato (consigliato)
 

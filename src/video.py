@@ -599,6 +599,7 @@ def build_video(
     encoder: str = "libx264",
     reuse: bool = True,
     encoder_out: list[str] | None = None,
+    reused_out: list[bool] | None = None,
 ) -> None:
     """
     Assembla il video finale:
@@ -699,6 +700,8 @@ def build_video(
         threads,
     )
     if reuse and video_riutilizzabile(output_path, _chiave, encoder_out=encoder_out):
+        if reused_out is not None:
+            reused_out[:] = [True]
         log.info(
             "   Video riusato: slide, tempi, audio e parametri sono gli stessi "
             "della run precedente (nessuna ricodifica)."
@@ -706,6 +709,8 @@ def build_video(
         log.info("\n[COMPLETATO] File sincronizzato salvato in: %s", output_path)
         return
 
+    if reused_out is not None:
+        reused_out[:] = [False]
     # Da qui in poi il file viene riscritto: si conserva il precedente.
     _salva_video_precedente(output_path)
 

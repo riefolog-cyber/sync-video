@@ -160,7 +160,11 @@ class BloccoRun:
             # Disco pieno/mount read-only durante la preparazione: NON e'
             # "occupato da un'altra run". Mandare OCCUPATO farebbe aspettare
             # 15 minuti e poi abortire, contro il contratto del modulo.
-            fh.close()
+            # `flush()` puo' aver lasciato il byte in sospeso: close() lo
+            # riscrive e solleva di nuovo lo stesso OSError (disco pieno),
+            # annullando la degradation a NON_DISPONIBILE.
+            with suppress(OSError):
+                fh.close()
             log.debug("   Blocco run non preparato (%s): proseguo senza blocco.", e)
             return NON_DISPONIBILE
         try:

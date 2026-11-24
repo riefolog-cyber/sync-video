@@ -94,7 +94,9 @@ sono simili e mostra quella slide in quel momento.
 > pronunciati (lì non c'è nessuna stima da mettere in dubbio).
 > Del controllo non resta un archivio di fotogrammi: in `.cache/verify_frames/`
 > vengono conservati **solo quelli dei segmenti sbagliati**, che sono gli unici
-> da guardare. Una cartella vuota vuol dire che tutti i segmenti erano corretti.
+> da guardare. Una cartella vuota vuol dire che tutti i segmenti **controllati**
+> erano corretti: se la verifica è incompleta (slide illeggibile o frame non
+> estratto) qualche segmento non è stato guardato, e il log lo dichiara.
 >
 > Attenzione: `avg_z` è un proxy, e diventa pessimista quando le slide sono
 > **poche e lunghe** (misurato: 8 slide su 30 minuti, ~226 s per slide →

@@ -273,7 +273,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1527 test).
+`python -m unittest discover -s src -p "test_*.py"` (1528 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -501,7 +501,39 @@ Corretti inoltre il fallback pydub per il PCM 8 bit (il silenzio diventava
 un tono a -1.0), i conteggi che rientravano nelle nuove grammatiche di annuncio e
 coda, e diversi test che passavano senza esercitare la correzione.
 
-Verifiche: `ruff` e `mypy` puliti, 1527 test verdi.
+Verifiche: `ruff` e `mypy` puliti, 1527 test verdi (il batch 17 porta la suite a 1528).
+
+## Batch 17 — cache vive e verità dei messaggi (2026-11)
+
+Settima revisione: il codice funzionava, ma diversi messaggi e diverse cache
+non dicevano la verità su cosa fosse successo.
+
+**Cache che andavano perse.** `pin_overrides.json` (il pin aggiornato dopo un
+A/B approvato) non era nella lista delle chiavi housekeeping: la pulizia di
+fine run lo cancellava e il bootstrap successivo rimetteva il vecchio pin,
+disinstallando l'aggiornamento. Stesso destino per la cache delle zone cieche
+in `--clean-cache`, che non era nelle chiavi attive: costava ~25s per zona alla
+run dopo. La parziale di trascrizione, inoltre, non includeva device e compute
+type: un parziale CUDA/float16 poteva essere cucito con una coda CPU/int8.
+
+**Messaggi veritieri.** `--dry-run` non stampa più "GPU" per un encoder mai
+usato; il riepilogo usa la stessa cifra della console per il tempo di
+sincronizzazione (A/B incluso); `--review` senza report esce con codice 1;
+`--prefetch-models` e la pagina di primo avvio non dicono "tutti i modelli
+pronti" se un download è fallito; l'aggiornamenti non dice "tutti aggiornati"
+subito dopo "PyPI irraggiungibile". Il tempo di encoding non appare più quando
+il video è stato riusato, e il riepilogo thread/batch usa i valori CLI reali.
+
+**Altre correzioni.** `pip check` non ignora più un conflitto stampato su
+stdout; la marca di riuso video non può più far fallire una run riuscita per
+una cache in sola lettura; lo stato di ripresa si azzera tra due `main()` nello
+stesso processo; i temporanei degli embedding orfani vengono potati; la chiusura
+del file di blocco non rilancia l'OSError che aveva già fatto degradare la run.
+Documentazione allineata su codici di uscita, blocco concorrente (errore, non
+avviso) e cartella `verify_frames` vuota (non prova di successo se la verifica
+era incompleta).
+
+Verifiche: `ruff` e `mypy` puliti, 1528 test verdi.
 
 ## Stato delle voci
 

@@ -683,7 +683,11 @@ def main() -> int:
         print("   Parti dai problemi marcati KO, sopra.")
     else:
         coda = f" ({avv} da verificare)" if avv else ""
-        print(f"   ESITO: il PC puo' produrre un video{coda}.")
+        ha_converter = any(
+            e.nome == "Converter PPTX" and e.stato == AVV for e in rep.esiti
+        )
+        nota_pptx = "; per un .pptx serve un converter" if ha_converter else ""
+        print(f"   ESITO: il PC puo' produrre un video{nota_pptx}{coda}.")
     print("=" * 74)
     print()
     return 1 if ko else 0

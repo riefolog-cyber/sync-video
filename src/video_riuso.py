@@ -185,17 +185,21 @@ def segna_video(
     except OSError:
         return
     marca = _percorso_marca(output_path, cache_dir)
-    atomic_write_text(
-        marca,
-        json.dumps(
-            {
-                "chiave": chiave,
-                "size": stat.st_size,
-                "mtime_ns": stat.st_mtime_ns,
-                "sha1": _sha1_file(output_path),
-                "output": str(output_path),
-                "encoder": encoder,
-            },
-            ensure_ascii=False,
-        ),
-    )
+    # Il video e' gia' stato scritto: una cache in sola lettura/piena non puo'
+    # trasformare una run riuscita in un errore, ne' lasciare la marca del
+    # video PRECEDENTE (che costringerebbe a ricalcolare tutto dopo).
+    with suppress(OSError):
+        atomic_write_text(
+            marca,
+            json.dumps(
+                {
+                    "chiave": chiave,
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "sha1": _sha1_file(output_path),
+                    "output": str(output_path),
+                    "encoder": encoder,
+                },
+                ensure_ascii=False,
+            ),
+        )

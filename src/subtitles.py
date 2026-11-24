@@ -422,7 +422,7 @@ def build_capitoli(
             gruppo_corrente = []
 
     if fusi:
-        log.info("   Capitoli piu' corti di 10s uniti ai successivi (%d).", fusi)
+        log.info("   Capitoli piu' corti di 10s assorbiti dai successivi (%d).", fusi)
     return "\n".join(
         f"{timestamp_capitolo(gruppo[0][0])} {_titolo_unito([t for _, t in gruppo])}"
         for gruppo in gruppi

@@ -1626,6 +1626,47 @@ class TestLoadAudioPipeRotta(unittest.TestCase):
         self.assertTrue(proc.stdout.chiusa)
 
 
+class TestIndiceCorrezioneNomi(unittest.TestCase):
+    def test_indice_equivalente_all_implementazione_lenta(self) -> None:
+        """L'indice wildcard/cancellazioni deve dare gli stessi vicini.
+
+        `_distanza_le_1` e' l'oracle lento lasciato nel modulo: se l'indice
+        veloce cambia, qui si vede subito senza dover guardingare un deck reale.
+        """
+        import random
+
+        casuale = random.Random(11)
+        alfabeto = "abcde"
+        vocabolario = {
+            "".join(casuale.choice(alfabeto) for _ in range(casuale.randint(4, 8)))
+            for _ in range(150)
+        }
+        parole = ["".join(casuale.choice(alfabeto) for _ in range(casuale.randint(4, 8))) for _ in range(200)]
+
+        for parola in parole:
+            attesi = {
+                c for c in vocabolario if transcription._distanza_le_1(parola, c)
+            }
+            wildcard: dict[str, set[str]] = {}
+            cancellazioni: dict[str, set[str]] = {}
+            for nome in vocabolario:
+                for i in range(len(nome)):
+                    wildcard.setdefault(nome[:i] + "\0" + nome[i + 1 :], set()).add(nome)
+                for i in range(len(nome) + 1):
+                    cancellazioni.setdefault(nome[:i] + nome[i + 1 :], set()).add(nome)
+            veloci: set[str] = set()
+            for i in range(len(parola)):
+                veloci.update(wildcard.get(parola[:i] + "\0" + parola[i + 1 :], ()))
+                corta = parola[:i] + parola[i + 1 :]
+                if corta in vocabolario:
+                    veloci.add(corta)
+            veloci.update(cancellazioni.get(parola, ()))
+            # `_distanza_le_1` esclude il confronto di una parola con se stessa;
+            # in produzione quelle parole sono già saltate prima dell'indice.
+            veloci.discard(parola)
+            self.assertEqual(veloci, attesi, f"vicini diversi per {parola!r}")
+
+
 class TestFallbackPydub8Bit(unittest.TestCase):
     def test_silenzio_8_bit_resta_zero(self) -> None:
         """Il PCM 8 bit e' unsigned: il centro e' 128, non 0.

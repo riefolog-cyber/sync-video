@@ -125,7 +125,7 @@ python -m unittest discover -s src -p "test_*.py"
 | `--require-flow` | — | Interrompi se l'audio non annuncia le slide (nessun "slide N" e nessun "blocco successivo"). Senza questo flag la run **procede** in modalità stimata: flusso assunto `slide-audio`, zero ancore, confini decisi dal contenuto |
 | `--min-anchor-coverage` | `0.5` | Nel flusso slide → podcast, **interrompi prima della sincronizzazione** se la frazione di transizioni con ancora `slide N` è sotto la soglia (default 50%: con `--no-confirm` la pausa interattiva viene saltata e senza gate un podcast condensato generava un video degradato in silenzio). La soglia è anche il metro della decodifica accurata: sotto di essa la trascrizione dell'audio intero col beam accurato viene tentata PRIMA di fermarsi, e il recupero delle zone cieche prima ancora, quindi gate e avviso arrivano solo dopo i rimedi e dicono cosa è stato provato. `0` disattiva. Più morbido di `--require-full-anchors`, che pretende il 100% |
 | `--strict-sync` | — | Modalità "non consegnare un video sospetto". Blocca PRIMA della generazione se un segmento di durata anomala risulta disallineato dal contenuto (il parlato somiglia a un'altra slide); blocca DOPO la generazione (il video resta su disco, ma l'esito è un errore) se la verifica frame vs slide trova segmenti con la slide sbagliata. Attiva automaticamente `--verify-video`. Default: avviso soltanto. Il report dei segmenti è salvato comunque in `.cache/sync_report.json` |
-| `--verify-video` | — | Dopo la generazione estrae un frame a metà di ogni segmento e lo confronta con la slide attesa: è l'unico controllo sull'ARTEFATTO (la timeline può essere coerente e il video comunque sbagliato). In `.cache/verify_frames/` restano **solo i fotogrammi dei segmenti sbagliati** (gli unici da guardare: una cartella vuota vuol dire che tutti i segmenti erano corretti) e l'esito finisce in `sync_report.json`. `genera_video.bat` lo attiva di default (pochi secondi in più) |
+| `--verify-video` | — | Dopo la generazione estrae un frame a metà di ogni segmento e lo confronta con la slide attesa: è l'unico controllo sull'ARTEFATTO (la timeline può essere coerente e il video comunque sbagliato). In `.cache/verify_frames/` restano **solo i fotogrammi dei segmenti sbagliati** (gli unici da guardare) e l'esito finisce in `sync_report.json`. Una cartella vuota significa "tutti i segmenti **controllati** erano corretti": se il log avvisa che la verifica è incompleta, alcuni segmenti non sono stati guardati. `genera_video.bat` lo attiva di default (pochi secondi in più) |
 | `--no-auto-repair` | — | Disattiva la **riparazione automatica**. Quando la verifica del video trova un segmento con la slide sbagliata, la pipeline sposta da sola quel confine (motore embedding, solo nella direzione indicata dall'evidenza) e rigenera il video, poi lo ricontrolla. Con questo flag l'esito resta un avviso e il video non viene rifatto |
 | `--force-setup` | — | Rileva l'hardware da capo e riscrive i fatti in `.cache/machine_setup.json` (utile se hai cambiato GPU o spostato la cartella). La *decisione* sul motore viene comunque ricalcolata a ogni run |
 | `--no-auto-setup` | — | Salta il rilevamento hardware: il motore è solo quello passato con `--transcriber` |
@@ -158,9 +158,11 @@ python -m unittest discover -s src -p "test_*.py"
 
 | Codice | Significato |
 |---|---|
-| `0` | Run completata (video scritto, oppure `--dry-run` arrivato in fondo) |
-| `1` | Esecuzione interrotta: un errore, oppure un gate di qualità (`--require-flow`, `--require-full-anchors`, copertura delle ancore sotto soglia) |
+| `0` | Run completata (video scritto, oppure `--dry-run` arrivato in fondo); anche i comandi di ispezione riusciti (`--cache-du`, `--frozen-report`, `--review` con report presente, `--prefetch-models`, primo avvio senza materiali) |
+| `1` | Esecuzione interrotta: un errore, oppure un gate di qualità (`--require-flow`, `--require-full-anchors`, copertura delle ancore sotto soglia), oppure `--review` senza report, oppure `--solo-riepilogo` senza report |
 | `2` | Solo `src/scripts/prova_materiale_reale.py`: confronto **non verificabile** (materiale diverso da quello del riferimento, o riferimento assente). Non è un guasto del programma: su un altro PC il materiale non c'è |
+
+Una run concorrente sulla stessa cartella **si ferma con errore e codice 1** dopo aver aspettato fino a 15 minuti: non è solo un avviso.
 
 Una run che finisce scrive anche `riepilogo.md` accanto al video: pagine,
 ancore, sezione più corta, sorgenti e cosa guardare a mano. Se una run
