@@ -50,7 +50,7 @@ packaging>=23.0
 # Nativo solo dove CTranslate2 esiste: non pubblica wheel win_arm64, quindi su
 # Windows ARM il pacchetto (e la sua dipendenza) non è installabile. Il marcatore
 # PEP 508 lo esclude senza far fallire `pip install -r` sull'intera riga.
-faster-whisper>=1.2.1; platform_machine != "ARM64" and platform_machine != "aarch64"
+faster-whisper>=1.2.1; platform_machine != "ARM64" and platform_machine != "aarch64" and platform_machine != "arm64"
 
 # Finestra PyAV usata da faster-whisper per decodificare l'audio (stesso
 # marcatore ARM di faster-whisper: senza, `pip install -r` su ARM nativo
@@ -60,7 +60,7 @@ faster-whisper>=1.2.1; platform_machine != "ARM64" and platform_machine != "aarc
 # un av vecchio resta installato e esplode a runtime con TypeError
 # (misurato su PC collega, 10/2026). Sopra, av 19 ha RIMOSSO quel kwarg
 # (changelog v19.0.0) e rompe faster-whisper 1.2.1 allo stesso modo.
-av>=12,<19; platform_machine != "ARM64" and platform_machine != "aarch64"
+av>=12,<19; platform_machine != "ARM64" and platform_machine != "aarch64" and platform_machine != "arm64"
 
 # Trascrizione veloce su iGPU Intel (opzionale ma raccomandato): OpenVINO esiste
 # solo per x86, quindi su ARM non e installabile (e su ARM e comunque inutile:
@@ -68,8 +68,8 @@ av>=12,<19; platform_machine != "ARM64" and platform_machine != "aarch64"
 # Tetto alla major successiva: il codice e la CI sono collaudati sulla serie
 # 2025, e i salti di major di OpenVINO cambiano API. Senza tetto il bootstrap
 # e il controllo aggiornamenti proporrebbero una 2026.x mai provata.
-openvino>=2025.1.0,<2026; platform_machine != "ARM64" and platform_machine != "aarch64"
-openvino-genai>=2025.1.0,<2026; platform_machine != "ARM64" and platform_machine != "aarch64"
+openvino>=2025.1.0,<2026; platform_machine != "ARM64" and platform_machine != "aarch64" and platform_machine != "arm64"
+openvino-genai>=2025.1.0,<2026; platform_machine != "ARM64" and platform_machine != "aarch64" and platform_machine != "arm64"
 
 # Dipendenze di sviluppo: NON qui. Stanno in requirements-dev.txt, cosi' chi
 # usa il programma non installa lint e type-checker (il bootstrap installa

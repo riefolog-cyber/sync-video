@@ -439,6 +439,49 @@ class TestBuildVideoDispatch(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_video(self.SLIDES, [10.0], "audio.m4a", Path("out.mp4"))
 
+    def test_marca_riuso_salva_l_ultimo_encoder_non_il_primo(self):
+        """Con ripiego GPU->CPU la marca deve dire libx264, non h264_nvenc.
+
+        `_build_video_ffmpeg` accoda OGNI tentativo in encoder_out: l'encoder
+        effettivo e' l'ultimo. Prendere il primo faceva mentire il riepilogo
+        a ogni riuso del video.
+        """
+        import video_riuso
+        from video import chiave_video
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            slide = td_path / "slide.png"
+            Image.new("RGB", (64, 32), (10, 20, 30)).save(slide)
+            audio = td_path / "audio.m4a"
+            audio.write_bytes(b"\x00" * 16)
+            out = td_path / "video.mp4"
+
+            def finto(slides, durations, audio_path, output_path, fps, threads, **kw):
+                Path(output_path).write_bytes(b"video finto")
+                encoder_out = kw.get("encoder_out")
+                if encoder_out is not None:
+                    encoder_out.extend(["h264_nvenc", "libx264"])
+
+            with (
+                patch("video._build_video_ffmpeg", side_effect=finto),
+                patch.object(video_riuso, "CACHE_DIR", td_path),
+            ):
+                build_video(
+                    [str(slide)], [1.0], str(audio), out, 5, 4,
+                    encoder="h264_nvenc", reuse=False, encoder_out=[],
+                )
+                out_enc: list[str] = ["h264_nvenc"]
+                chiave = chiave_video(
+                    [str(slide)], [1.0], audio, 5, 0.0, "ffmpeg", "h264_nvenc", 4
+                )
+                self.assertTrue(
+                    video_riuso.video_riutilizzabile(
+                        out, chiave, cache_dir=td_path, encoder_out=out_enc
+                    )
+                )
+        self.assertEqual(out_enc, ["libx264"])
+
     def test_transitions_force_moviepy(self):
         with patch("video._build_video_moviepy") as mov, patch("video._build_video_ffmpeg") as ffm:
             build_video(

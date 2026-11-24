@@ -273,7 +273,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1508 test).
+`python -m unittest discover -s src -p "test_*.py"` (1512 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -390,6 +390,45 @@ sporchi; venv A/B sempre rimossa; CI notturna con job di riscaldamento cache
 perché le tre versioni non-3.12 non skippino silenziosamente l'E2E.
 
 Verifiche: `ruff` e `mypy` puliti (anche win32/darwin), 1508 test verdi.
+Il batch 14 porta la suite a 1512 test.
+
+## Batch 14 — contratti e diagnostica (2026-11)
+
+Quarta revisione: nessun difetto spettacolare, ma diversi contratti scritti
+che non venivano rispettati.
+
+**Il riuso del video diceva ancora l'encoder sbagliato.** Il batch 13 salvava
+`encoder_out[0]`, ma `_build_video_ffmpeg` accoda OGNI tentativo: con un
+ripiego GPU→CPU il primo e' quello fallito. Ora si legge l'ULTIMO, come fa il
+riepilogo, e un test percorre la catena completa build→marca→riuso.
+
+**Mapping automatico e dubbi sui confini.** Dopo la correzione automatica del
+numero di slide (copertina non numerata) il controllo annunci/confini usava
+ancora offset 0: segnalava come sbagliate tutte le slide appena corrette. Ora
+si calcola lo spostamento applicato (accoppiando le ancore per tempo) e lo si
+passa al controllo; se la correzione non e' un offset unico il controllo viene
+saltato invece di mentire.
+
+**Offset negativo.** Le ancore venivano estratte e filtrate nello spazio PDF
+prima di applicare `--slide-offset`: con il relatore che conta una pagina in
+piu' (offset -1), l'ultimo annuncio "slide 15" veniva buttato e la slide finale
+restava stimata. Ora estrazione e filtro usano lo spazio parlato.
+
+**Dipendenze e diagnostica.** I minimi di requirements.txt (pymupdf, pytesseract,
+pydub, moviepy, tqdm) ora sono dichiarati anche nel bootstrap, altrimenti un
+pacchetto vecchio ma importabile non veniva mai aggiornato; i marker ARM
+coprono anche `arm64` minuscolo di Apple Silicon; il rimedio CUDA non ha piu'
+un punto attaccato al comando copiabile; il referto non da' piu' un KO falso
+quando OpenVINO ripiega su CPU.
+
+**Tool e documentazione.** `_debug_hardware.py` non pretende piu' di trovare
+una NVIDIA su macOS; `controlli.py` lascia finire i mypy cross-platform;
+`prova.bat` rispetta `--no-pause` anche sul fallimento; l'help di
+`--no-update-check` dice che salta il bootstrap; la CI Windows verifica il
+binario Tesseract e la CI notturna ha un job di warmup della cache. I documenti
+che ancora parlavano di MoviePy, di 40 voci di cache, di `--review` come
+comando di sola lettura e di `WHISPER_MODEL=tiny` come alleggerimento dei pesi
+sono stati allineati al codice.
 
 ## Stato delle voci
 
@@ -487,4 +526,4 @@ valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
 Stato all'ultimo lancio: ruff pulito, mypy pulito, test verdi,
-`_debug_hardware.py` 16/16.
+`_debug_hardware.py` 17/17.

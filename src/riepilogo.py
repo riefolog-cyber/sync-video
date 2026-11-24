@@ -22,11 +22,23 @@ from pipeline_report import format_time
 
 
 def _intero_sicuro(valore: object) -> int:
-    """Un valore sporco nel report non deve cancellare l'intero riepilogo."""
+    """Un valore sporco nel report non deve cancellare l'intero riepilogo.
+
+    `json.loads` accetta `Infinity`, e `int(float("inf"))` solleva
+    OverflowError: va catturato insieme a TypeError/ValueError.
+    """
     try:
         return int(cast("str | int | float", valore))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
+
+
+def _float_sicuro(valore: object) -> float:
+    """Come `_intero_sicuro`, per i secondi dei segmenti e dei dubbi."""
+    try:
+        return float(cast("str | int | float", valore))
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
 
 
 def _numeri(segmenti: list[dict[str, Any]]) -> tuple[int, float, float, dict[str, Any]]:
@@ -34,9 +46,9 @@ def _numeri(segmenti: list[dict[str, Any]]) -> tuple[int, float, float, dict[str
     pagine = len(segmenti)
     if not pagine:
         return 0, 0.0, 0.0, {}
-    totale = max(float(seg.get("end") or 0.0) for seg in segmenti)
-    corto = min(segmenti, key=lambda s: float(s.get("duration") or 0.0))
-    return pagine, totale, float(corto.get("duration") or 0.0), corto
+    totale = max(_float_sicuro(seg.get("end")) for seg in segmenti)
+    corto = min(segmenti, key=lambda s: _float_sicuro(s.get("duration")))
+    return pagine, totale, _float_sicuro(corto.get("duration")), corto
 
 
 def _dubbi(anchors: dict[str, Any]) -> list[str]:
@@ -45,9 +57,9 @@ def _dubbi(anchors: dict[str, Any]) -> list[str]:
     for item in cast("list[dict[str, Any]]", anchors.get("mentions_off") or []):
         if not isinstance(item, dict):
             continue
-        slide = int(item.get("slide") or 0)
-        mention = float(item.get("mention") or 0.0)
-        declared = float(item.get("declared") or 0.0)
+        slide = _intero_sicuro(item.get("slide"))
+        mention = _float_sicuro(item.get("mention"))
+        declared = _float_sicuro(item.get("declared"))
         verso = "in ritardo" if mention < declared else "in anticipo"
         riga = (
             f"- slide {slide}: annunciata a {format_time(mention)} ma mostrata da "

@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 import sys
 import unittest
+from typing import ClassVar
 
 import config
 from hardware import project_root
@@ -126,6 +127,38 @@ class TestPinDipendenze(unittest.TestCase):
             _specifica(_riga_requirements("audioop-lts")),
             "audioop-lts: config.py e requirements.txt non dichiarano lo stesso requisito",
         )
+
+
+class TestSpecificheCondivise(unittest.TestCase):
+    """Ogni requisito dichiarato in requirements.txt va rispecchiato nel bootstrap.
+
+    I minimi non sono decorazioni: `_missing_or_old()` reinstalla solo quando
+    la specifica di config non e' soddisfatta. Un pacchetto vecchio ma
+    importabile resterebbe li', e il guasto arriverebbe dopo da un modulo che
+    lo usa (es. moviepy 1.x con il codice scritto per 2.x).
+    """
+
+    PACCHETTI: ClassVar[dict[str, str]] = {
+        "pymupdf": "pymupdf",
+        "PIL": "pillow",
+        "pytesseract": "pytesseract",
+        "pydub": "pydub",
+        "moviepy": "moviepy",
+        "numpy": "numpy",
+        "tqdm": "tqdm",
+        "faster_whisper": "faster-whisper",
+        "av": "av",
+        "packaging": "packaging",
+    }
+
+    def test_minimi_coincidono(self) -> None:
+        for chiave, nome in self.PACCHETTI.items():
+            with self.subTest(pacchetto=nome):
+                self.assertEqual(
+                    _specifica(_voce_config(chiave)),
+                    _specifica(_riga_requirements(nome)),
+                    f"{nome}: config.py e requirements.txt dichiarano versioni diverse",
+                )
 
 
 if __name__ == "__main__":

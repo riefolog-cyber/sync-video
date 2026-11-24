@@ -561,21 +561,25 @@ except ImportError:
 # il messaggio sarebbe quello sbagliato ("X manca") invece di quello giusto
 # ("X è troppo vecchio").
 _REQUIRED_PACKAGES = {
-    "pymupdf": "pymupdf",
+    # I minimi rispecchiano requirements.txt: il bootstrap è il percorso che
+    # usano gli utenti, e senza i vincoli un pacchetto vecchio ma importabile
+    # non verrebbe mai aggiornato (il guasto arriverebbe dopo, da un altro
+    # modulo). `test_pin_dipendenze` confronta le specifiche delle due fonti.
+    "pymupdf": "pymupdf>=1.23.0",
     # Tetto esplicito: fastembed 0.5.1 richiede pillow<11. Finche' il pin su
     # fastembed c'e', il resolver lo imporrebbe comunque, ma il bootstrap
     # installava "pillow" senza versione: una major nuova passava se qualcosa
     # nell'ambiente non tirava il vincolo. Qui e' dichiarato dove il pacchetto
     # viene installato davvero, non solo in requirements.txt.
     "PIL": "pillow>=10.0.0,<11",
-    "pytesseract": "pytesseract",
-    "pydub": "pydub",
-    "moviepy": "moviepy",
+    "pytesseract": "pytesseract>=0.3.10",
+    "pydub": "pydub>=0.25.0",
+    "moviepy": "moviepy>=2.0.0",
     # Soglia imposta da pandas (dipendenza di pytesseract) e da moviepy 2.x.
     # Con numpy 1.24.3, misurato il 16/09/2026: "ImportError: Please upgrade
     # numpy to >= 1.26.0" dentro pandas, che sembra un guasto di pytesseract.
     "numpy": "numpy>=1.26.0",
-    "tqdm": "tqdm",
+    "tqdm": "tqdm>=4.66.0",
     # Pinned come in requirements.txt: dalla 0.6 il pooling passa da CLS a mean
     # e invalida la baseline degli embedding (vedi check_fastembed_upgrade.py).
     # Il bootstrap legge QUESTA tabella, non requirements.txt: senza il pin
@@ -803,8 +807,10 @@ _CUDA_RUNTIME_LIBS = {
 # l'interprete CHE STA GIRANDO, con le virgolette per i percorsi con spazi.
 _PIP_CUDA_LIBS = 'nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"'
 CUDA_LIBS_REMEDY = (
-    "Installa cuBLAS 12 e cuDNN 9 con: "
-    f'"{sys.executable}" -m pip install --upgrade {_PIP_CUDA_LIBS}. '
+    "Installa cuBLAS 12 e cuDNN 9 con:\n"
+    # Nessun punto dopo il comando: copiandolo, pip riceverebbe un '.' come
+    # argomento ("install from current directory") e l'installazione fallirebbe.
+    f'"{sys.executable}" -m pip install --upgrade {_PIP_CUDA_LIBS}\n'
     "Su Windows puoi anche lanciare installa_cuda.bat, che li installa e "
     "aggiorna il PATH. Poi riapri la finestra di comando "
     "(vedi docs/troubleshooting.md)."

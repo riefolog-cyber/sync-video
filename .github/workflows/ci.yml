@@ -314,7 +314,17 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Tesseract (OCR)
-        run: choco install tesseract -y --no-progress
+        # `choco` esce 0 anche quando il feed non ha installato niente (504):
+        # senza questo controllo i test E2E dell'OCR si skippano e il job resta
+        # verde senza aver verificato niente, come succedeva su Linux.
+        shell: pwsh
+        run: |
+          choco install tesseract -y --no-progress
+          if (-not (Get-Command tesseract -ErrorAction SilentlyContinue)) {
+            Write-Error "Tesseract non disponibile dopo choco: i test OCR si skipperebbero."
+            exit 1
+          }
+          tesseract --version | Select-Object -First 1
 
       - name: ffmpeg nel PATH, verificato
         # Misurato il 19/10/2026: il feed di Chocolatey ha risposto 504 sul

@@ -11,7 +11,7 @@
 6. **Sincronizzazione semantica** — Embedding (e5-large via fastembed, offline ONNX) + programmazione dinamica monotona. Assegna ogni blocco audio alla slide semanticamente più vicina, con competizione softmax (temperatura 0.15). I vettori sono **riutilizzati dalla cache anche quando la lista dei blocchi cambia di poco**: la cache è per testo (stesso testo + stesso modello = stesso vettore), quindi una trascrizione rifatta che cambia poche parole ricalcola solo i blocchi davvero nuovi invece di tutti. **Se tutti i cambi di slide sono annunciati a voce**, la timeline la fa il podcast e l'embedding dei blocchi viene saltato (la timeline è la stessa: i confini sono i tempi pronunciati).
 7. **Anti-flicker** — Garanzia di durata minima (default `max(8s, 2×--semantic-min-duration)`) su ogni slide della timeline ordinata: le slide troppo corte (tipiche di quelle senza ancora, posizionate a ridosso dell'ancora successiva) vengono allungate spostando **solo i confini non ancorati**. Le ancore "slide N" pronunciate restano esatte al decimo di secondo; se nessun confine è spostabile la slide resta corta e viene segnalata, senza inventare posizioni.
 8. **Riconciliazione** — Validazione: tempi crescenti, durate positive, ultima slide entro fine audio. Se invalida → interruzione.
-9. **Video** — Slide ridimensionate a 1080p, assemblate con MoviePy (fps=5, buffer 3.0s anti-troncamento). L'audio viene **copiato** nel video quando la sorgente è già un MP4/AAC (niente ricodifica lossy, e 10-25 s in meno). Se slide, tempi, audio e parametri sono gli stessi di una run precedente, il **video già renderizzato viene riusato** invece di rifatto (71 s risparmiati a ogni rilancio senza modifiche).
+9. **Video** — Slide ridimensionate a 1080p, assemblate con il **concat demuxer di ffmpeg** (fps=5, buffer 3.0s anti-troncamento; MoviePy resta per le dissolvenze richieste). L'audio viene **copiato** nel video quando la sorgente è già un MP4/AAC (niente ricodifica lossy, e 10-25 s in meno). Se slide, tempi, audio e parametri sono gli stessi di una run precedente, il **video già renderizzato viene riusato** invece di rifatto (71 s risparmiati a ogni rilancio senza modifiche).
 10. **Pulizia** — File temporanei e cache orfana rimossi automaticamente.
 
 **File prodotti accanto al video.** `video_finale.srt` (sottotitoli, dai tempi di ogni parola) e `video_finale.capitoli.txt` (un capitolo per slide, nel formato che accetta YouTube, con il suo vincolo reale: ogni capitolo dura **almeno 10 secondi**, quindi i capitoli più corti vengono uniti al successivo od omessi se non si possono unire): nessuna analisi in più, usano la trascrizione e la timeline già calcolate. La fine di ogni sottotitolo è l'inizio della parola successiva, così due righe non si sovrappongono mai; una riga lunga va su **due righe bilanciate** (42 caratteri l'una) e un **silenzio oltre 0,4 s chiude il sottotitolo**, perché una riga che resta mentre nessuno parla si legge come un errore. Un cue che resterebbe a schermo **meno di un secondo** viene unito al successivo (se il testo unito ci sta), invece di lampeggiare: sul materiale di prova i cue sotto il secondo scendono da 30 a 4. La densità di lettura, invece, non si corregge qui: dipende da quanto parla il relatore, e spezzare un cue in proporzione lascia il rapporto identico. L'ultimo sottotitolo non supera mai la durata dell'audio. I capitoli partono sempre da 0:00 e il titolo è la **riga della slide che sembra un titolo**, non la prima: su una slide con un grafico in cima la prima riga è rumore (`+ ———-__ 87% 7`), e in quel caso si ripiega su `Slide N`.
@@ -43,8 +43,10 @@ sincronizzazione vivono in `chunks.py` (`build_windows`).
 **In tutte le strade**: timeline → durate → ffmpeg concat demuxer (slide 1080p,
 fps 5, buffer 3s; MoviePy resta per le transizioni richieste) →
 `video_finale.mp4`, con pulizia finale della cache orfana.
-Se il segnale è insufficiente il programma **si interrompe con avviso**,
-mai inventando distribuzioni uniformi.
+Se manca il segnale il programma **non inventa distribuzioni uniformi**: di
+default assume il flusso `slide-audio`, stima i confini dal contenuto e avvisa
+nel log e nel report. `--require-flow` ripristina l'interruzione per chi
+preferisce fermarsi invece di degradare (batch/CI).
 
 ### 🧠 Che cos'è un embedding (in parole semplici)
 

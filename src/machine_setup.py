@@ -534,7 +534,10 @@ def _engine_note(rec: dict) -> str:
     # Il messaggio e' SPECIFICO per ARM: stamparlo su un x86-64 dove il
     # bootstrap ha saltato un pacchetto (o su un Mac che trascrive con
     # OpenVINO) dice una causa falsa proprio a chi cerca il guasto.
-    arm = platform.machine() in ("ARM64", "aarch64")
+    # `platform.machine()` su Apple Silicon e' "arm64" minuscolo: il controllo
+    # case-sensitive faceva tacere proprio l'avviso sul Mac ARM, dove nessun
+    # motore di trascrizione e' installabile. config.py usa gia' .upper().
+    arm = platform.machine().upper() in ("ARM64", "AARCH64")
     if not arm:
         return ""
     if rec.get("transcriber") == "openvino":

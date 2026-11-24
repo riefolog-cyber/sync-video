@@ -172,7 +172,7 @@ class TestEnsurePipPackages(unittest.TestCase):
             mock.patch("config.log"),
         ):
             config._ensure_pip_packages()
-        pip.assert_called_once_with("pymupdf", upgrade=True)
+        pip.assert_called_once_with("pymupdf>=1.23.0", upgrade=True)
 
     def test_niente_da_fare_se_tutto_a_posto(self):
         with (

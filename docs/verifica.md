@@ -359,9 +359,11 @@ esiste (dry-run) il dubbio resta scritto senza anteprima.
 
 I dubbi si rileggono senza rifare niente: `python src/main.py --review` legge
 `sync_report.json`, la trascrizione in `.cache/` e il video che esiste, e
-ristampa i confini da controllare con le loro anteprime. È un comando di sola
-lettura come `--cache-du` (nessun download, nessun modello caricato) e funziona
-anche sui report scritti prima del controllo incrociato: lì `mentions_off` non
+ristampa i confini da controllare con le loro anteprime. **Non rifà la
+pipeline** (nessun download, nessun modello caricato), ma non è di sola lettura:
+aggiorna `.cache/sync_report.json`, le anteprime e `riepilogo.md` con i
+collegamenti ai file creati. Funziona anche sui report scritti prima del
+controllo incrociato: lì `mentions_off` non
 esiste e viene ricalcolato dalle parole in cache. Sul report del 14/10 dice
 "confini ancorati 8 su 9, confini stimati dal contenuto: la slide 10, nessuna
 contraddizione fra annunci e confini", che è la verità di quella cache: nella

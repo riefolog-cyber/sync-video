@@ -471,6 +471,18 @@ class TestValidate(unittest.TestCase):
         self.assertIs(_validate(rec, None), rec)
 
 
+class TestAvvisoMotoreArm(unittest.TestCase):
+    def test_arm64_minuscolo_di_apple_silicon(self) -> None:
+        import machine_setup as ms
+
+        with (
+            mock.patch.object(ms.platform, "machine", return_value="arm64"),
+            mock.patch.object(ms.importlib.util, "find_spec", return_value=None),
+        ):
+            messaggio = ms._engine_note({"transcriber": "whisper"})
+        self.assertIn("faster-whisper non installabile", messaggio)
+
+
 class TestEncoderSuMac(unittest.TestCase):
     def test_mac_intel_usa_videotoolbox_non_qsv(self) -> None:
         import machine_setup as ms

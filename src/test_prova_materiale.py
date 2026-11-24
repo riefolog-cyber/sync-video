@@ -28,6 +28,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
 import prova_materiale_reale as prova
 
 
+class TestPercorsoCache(unittest.TestCase):
+    def test_la_prova_legge_la_stessa_cache_della_pipeline(self) -> None:
+        # Con SYNC_VIDEO_CACHE_DIR la pipeline scrive altrove: uno script che
+        # si ostina a leggere RADICE/".cache" confronta una timeline vecchia
+        # (o non trova niente) senza dirlo.
+        import config
+
+        self.assertEqual(prova.CACHE, config.CACHE_DIR)
+
+
 class TestConfrontoConIlRiferimento(unittest.TestCase):
     """Il confronto deve dire la verita' su due cose: uguale o diversa."""
 

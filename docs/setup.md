@@ -141,7 +141,7 @@ installazione: **non** fallisce con un errore incomprensibile.
 
 | Componente | Dimensione | Metodo |
 |---|---|---|
-| Pacchetti pip (12 su x86-64) | ~250 MB | `pip install` |
+| Pacchetti pip (13 su x86-64 con Python 3.12; 14 con la 3.13, che aggiunge `audioop-lts`) | ~250 MB | `pip install` |
 | Tesseract OCR | ~40 MB | `winget` / `apt-get` / `brew` |
 | ffmpeg | ~80 MB | `winget` / `apt-get` / `brew` |
 | Modello embedding e5-large | **~2.1 GB** di disco | fastembed (download automatico) |
@@ -384,7 +384,8 @@ installazione: **non** fallisce con un errore incomprensibile.
 > la run: le slide embeddate per la verifica ancore e per il confronto fra
 > trascrizioni sono le stesse della sincronizzazione, e il raffinamento dei
 > confini le riusa. I file sono `.npz` (invisibili alla pulizia delle cache
-> orfane, che guarda i `.json`) con un tetto di 40 voci (~1 MB l'una). Senza
+> orfane, che guarda i `.json`) con potatura per **byte (300 MB)** e per
+> **età (30 giorni)**, non per numero di file. Senza
 > identità del modello la cache **non** viene usata: meglio ricalcolare che
 > rischiare i vettori di un modello diverso.
 >

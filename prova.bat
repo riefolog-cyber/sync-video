@@ -26,7 +26,9 @@ rem esce con 1 se non riesce: ha gia' spiegato cosa fare.
 call "%~dp0_python.bat"
 if errorlevel 1 (
     echo.
-    pause
+    rem Anche sul fallimento --no-pause deve rispettarsi: e' il caso in cui
+    rem l'automazione ha piu' bisogno di procedere senza fermarsi.
+    if "!PAUSE_IT!"=="1" pause
     exit /b 9009
 )
 echo Python scelto: !PY_CMD!

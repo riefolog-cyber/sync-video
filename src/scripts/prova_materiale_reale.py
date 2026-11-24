@@ -44,10 +44,13 @@ from _bootstrap import CODICE, RADICE
 
 sys.path.insert(0, str(CODICE))
 
-from config import DEFAULT_PDF, atomic_write_text
+from config import CACHE_DIR, DEFAULT_PDF, atomic_write_text
 from pipeline_cache import file_hash
 
-CACHE = RADICE / ".cache"
+# La pipeline scrive in config.CACHE_DIR, che puo' essere spostato con
+# SYNC_VIDEO_CACHE_DIR. Hardcodare RADICE/".cache" faceva leggere la timeline
+# (e scrivere il riferimento) nella cartella sbagliata su quei PC.
+CACHE = CACHE_DIR
 RIFERIMENTO = Path(__file__).resolve().parent / "materiale_riferimento.json"
 
 # Tolleranza sul confronto dei confini (secondi): le ancore sono esatte, ma un

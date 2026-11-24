@@ -66,8 +66,14 @@ Doppio clic su **`genera_video.bat`** e aspetta il riepilogo finale.
   per tenere aggiornati i pacchetti Python.
 
 > Se il tuo PC ha poca RAM (< 12 GB) vedrai un avviso che i modelli di
-> default sono pesanti. Il batch si riduce da solo; per alleggerire anche
-> i pesi metti `WHISPER_MODEL=tiny` in un file `.env` accanto al `.bat`.
+> default sono pesanti. Il batch si riduce da solo. Il peso vero è però
+> quello del modello di embedding (~4,3 GB), non di Whisper (~500 MB):
+> `WHISPER_MODEL=tiny` non lo tocca. Se proprio serve alleggerire, metti
+> `EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-mpnet-base-v2`
+> in un file `.env` accanto al `.bat`,
+> sapendo che la similarità media scende da 0.791 a 0.421 sulla prova reale:
+> la sincronizzazione peggiora parecchio. Il programma non abbassa nulla
+> di nascosto.
 
 ## 5. Come capire se è andato bene
 

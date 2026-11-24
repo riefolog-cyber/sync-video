@@ -493,13 +493,6 @@ def _build_video_ffmpeg(
         raise FileNotFoundError(f"File audio non trovato: {audio}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    # Nome unico: il vecchio `.tmp.mp4` fisso era condiviso da due run e da un
-    # hard kill; uno poteva sostituire il video dell'altro con un file parziale.
-    fd_tmp, nome_tmp = tempfile.mkstemp(
-        prefix=output_path.stem + ".", suffix=".tmp.mp4", dir=output_path.parent
-    )
-    os.close(fd_tmp)
-    tmp_out = Path(nome_tmp)
     if encoder_out is not None:
         encoder_out.clear()
     total_duration = sum(durations)
@@ -518,6 +511,14 @@ def _build_video_ffmpeg(
         entries = list(zip(pngs, durations, strict=True))
         concat_path = workdir / "concat.txt"
         _write_concat_file(entries, concat_path, fps=fps)
+        # Il temporaneo va creato DOPO la preparazione delle slide: se una PNG
+        # e' corrotta e `_prepare_slides_for_concat` solleva, non resta un file
+        # vuoto nella cartella dell'utente. Nome unico: due run non si pestano.
+        fd_tmp, nome_tmp = tempfile.mkstemp(
+            prefix=output_path.stem + ".", suffix=".tmp.mp4", dir=output_path.parent
+        )
+        os.close(fd_tmp)
+        tmp_out = Path(nome_tmp)
 
         def _comando(enc: str, copia_audio: bool) -> list[str]:
             return [
@@ -723,7 +724,10 @@ def build_video(
     # L'encoder EFFETTIVO e' nell'out-param (puo' essere diverso da quello
     # richiesto se la GPU ha fallito): va salvato per il riuso, altrimenti la
     # run successiva direbbe "GPU" leggendo solo la richiesta.
-    encoder_effettivo = encoder_out[0] if encoder_out else encoder
+    # `_build_video_ffmpeg` ACCENDA ogni tentativo: con un ripiego GPU->CPU
+    # l'encoder buono e' l'ULTIMO, non il primo (main.py usa [-1] per il
+    # riepilogo). Prendere [0] rimetteva "GPU" nella marca di riuso.
+    encoder_effettivo = encoder_out[-1] if encoder_out else encoder
     segna_video(output_path, _chiave, encoder=encoder_effettivo)
 
 

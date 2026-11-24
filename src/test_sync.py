@@ -6487,6 +6487,9 @@ class TestTracceOffset(unittest.TestCase):
 
         self.assertEqual(_offset_targets({1: 5.0}, -1, ["Copertina", "Due"], 2), [])
         self.assertEqual(_offset_targets({2: 9.0}, 5, ["Copertina", "Due"], 2), [])
+        # La pagina 1 non e' una transizione: `_apply_slide_offset` la scarta,
+        # e il log non deve fare credere che l'offset sia stato applicato.
+        self.assertEqual(_offset_targets({2: 9.0}, -1, ["Copertina", "Due"], 2), [])
 
     def test_titolo_lungo_non_allunga_la_riga(self):
         from main import _short_title

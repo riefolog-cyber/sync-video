@@ -39,13 +39,23 @@ def _check(label: str, ottenuto: object, atteso: object) -> bool:
     return ok
 
 
-def scenario(nome: str, gpus: list[str], vendor: str, ram_gb: float, encoders: frozenset[str]) -> bool:
+def scenario(
+    nome: str,
+    gpus: list[str],
+    vendor: str,
+    ram_gb: float,
+    encoders: frozenset[str],
+    piattaforma: str = "linux",
+) -> bool:
     print(f"\n{'=' * 66}\n{nome}\n{'=' * 66}")
     ok = True
     totale = int(ram_gb * GB)
     with (
         patch.object(ms, "_read_hardware", return_value=gpus),
         patch.object(ms, "_validate", side_effect=lambda rec, d: rec),
+        # `_video_vendor` ora privilegia macOS: senza patchare la piattaforma,
+        # questo tool girato su un Mac darebbe KO su tutti gli scenari GPU.
+        patch.object(ms.sys, "platform", piattaforma),
         # machine_setup importa `ffmpeg_encoders` con `from hardware import`:
         # va patchato DOVE VIENE USATO (ms), non nel modulo hardware, altrimenti
         # l'encoder "simulato" resta quello vero della macchina dello sviluppatore.
@@ -54,8 +64,9 @@ def scenario(nome: str, gpus: list[str], vendor: str, ram_gb: float, encoders: f
     ):
         args = _Args()
         ms.machine_setup(args, force=False)
-
-    ok &= _check("famiglia GPU", ms._video_vendor(gpus), vendor)
+        # Il controllo DA' star dentro il patch di sys.platform: fuori, su un
+        # Mac reale, `_video_vendor` tornerebbe "apple" per tutti gli scenari.
+        ok &= _check("famiglia GPU", ms._video_vendor(gpus), vendor)
     # Prima si confrontava memory_tier(totale) con se' stesso: non poteva mai
     # fallire, e il ram_gb dello scenario non veniva verificato. Le soglie sono
     # quelle reali di hardware.memory_tier (<6 basso, <12 medio, poi alto).
@@ -155,13 +166,41 @@ def main() -> int:
     print("3. MACHINE SETUP SU MACCHINE DIVERSE")
     print("=" * 66)
     risultati += [
-        ("NVIDIA + 32 GB", scenario("NVIDIA desktop, 32 GB", ["NVIDIA GeForce RTX 4060"], "nvidia", 32, completo)),
+        (
+            "NVIDIA + 32 GB",
+            scenario(
+                "NVIDIA desktop, 32 GB", ["NVIDIA GeForce RTX 4060"],
+                "nvidia", 32, completo, "win32",
+            ),
+        ),
         (
             "Intel iGPU + 8 GB",
-            scenario("Notebook Intel Iris Xe, 8 GB", ["Intel(R) Iris(R) Xe Graphics"], "intel", 8, completo),
+            scenario(
+                "Notebook Intel Iris Xe, 8 GB", ["Intel(R) Iris(R) Xe Graphics"],
+                "intel", 8, completo, "win32",
+            ),
         ),
-        ("AMD + 16 GB", scenario("Desktop AMD Radeon RX 6600, 16 GB", ["AMD Radeon RX 6600"], "amd", 16, completo)),
-        ("Senza GPU + 4 GB", scenario("Portatile UMA, 4 GB, nessuna GPU", [], "unknown", 4, solo_software)),
+        (
+            "AMD + 16 GB",
+            scenario(
+                "Desktop AMD Radeon RX 6600, 16 GB", ["AMD Radeon RX 6600"],
+                "amd", 16, completo, "win32",
+            ),
+        ),
+        (
+            "Senza GPU + 4 GB",
+            scenario(
+                "Portatile UMA, 4 GB, nessuna GPU", [],
+                "unknown", 4, solo_software, "win32",
+            ),
+        ),
+        (
+            "Mac con iGPU",
+            scenario(
+                "Mac Intel, 16 GB", ["Intel(R) Iris(R) Xe Graphics"],
+                "apple", 16, completo, "darwin",
+            ),
+        ),
     ]
 
     print("\n" + "=" * 66)

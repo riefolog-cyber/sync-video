@@ -66,7 +66,7 @@ class TestNuovoFlagVideoEncoder(unittest.TestCase):
 
 
 class TestFlagReview(unittest.TestCase):
-    """`--review`: comando di sola lettura, spento di default."""
+    """`--review`: non rifà la pipeline (ma aggiorna report e anteprime), spento di default."""
 
     def test_spenta_di_default(self) -> None:
         # Se partisse accesa, una run normale si fermerebbe a ristampare un

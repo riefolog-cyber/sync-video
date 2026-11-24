@@ -2983,7 +2983,10 @@ def _offset_targets(
     righe: list[tuple[int, float, int, str]] = []
     for s in sorted(anchors):
         target = s + offset
-        if not 1 <= target <= total_slides:
+        # Stesso criterio di `_apply_slide_offset`: la pagina 1 non e' una
+        # transizione e verrebbe scartata. Loggare "slide 2 -> pagina 1"
+        # faceva credere che la correzione fosse stata applicata.
+        if not 1 < target <= total_slides:
             continue
         titolo = ""
         if 1 <= target <= len(slide_texts):
@@ -3771,8 +3774,14 @@ def main(argv: list | None = None) -> None:
         # --- Ancore deterministiche disponibili ---
         # Calcolate una volta: servono al recupero delle zone cieche, alla scelta
         # automatica del beam e ai gate sulle ancore.
+        # Con --slide-offset le ancore vanno estratte nello spazio PARLATO:
+        # se il relatore conta una pagina in piu' (offset negativo), l'ultimo
+        # annuncio "slide 15" su un deck da 14 verrebbe scartato qui come
+        # fuori portata e non si sarebbe potuto riportare a pagina 14.
+        _offset_utente = int(getattr(args, "slide_offset", 0) or 0)
+        _limite_parlato = max(2, total_slides - _offset_utente)
         flow_anchors: dict[int, float] = (
-            extract_slide_anchors(words_raw, total_slides, flow) if words_raw else {}
+            extract_slide_anchors(words_raw, _limite_parlato, flow) if words_raw else {}
         )
 
         # Stato del recupero delle zone cieche e della decodifica accurata:
@@ -3923,7 +3932,7 @@ def main(argv: list | None = None) -> None:
             # accurata può riconoscere annunci che la decodifica veloce aveva
             # perso, e allora la timeline torna vincolata (gratis).
             rechecked = (
-                extract_slide_anchors(words_raw, total_slides, flow) if words_raw else {}
+                extract_slide_anchors(words_raw, _limite_parlato, flow) if words_raw else {}
             )
             if rechecked and not flow_anchors:
                 log.info(
@@ -4180,9 +4189,13 @@ def main(argv: list | None = None) -> None:
         # Scarta ancore fuori portata: un "slide 15" su 14 pagine, o un tempo oltre
         # la durata dell'audio, non e' un vincolo valido e romperebbe la
         # riconciliazione con un messaggio fuorviante.
+        # PRIMA dell'offset le ancore sono in spazio PARLATO: con un offset
+        # negativo il deck parlato ha PIU' pagine del PDF, e filtrare qui con
+        # `total_slides` butterebbe l'ultimo annuncio ("slide 15" su 14 pagine)
+        # che invece e' perfettamente valido e va riportato a pagina 14.
         _fuori_portata = [
             s for s, t in semantic_anchors.items()
-            if s < 2 or s > total_slides or t < 0.0 or t >= total_duration
+            if s < 2 or s > _limite_parlato or t < 0.0 or t >= total_duration
         ]
         if _fuori_portata:
             log.warning("   [Ancore] Scartate ancore fuori portata: %s", _fuori_portata)
@@ -4262,6 +4275,12 @@ def main(argv: list | None = None) -> None:
         _anchor_report: dict[str, Any] = {}
         _mapping_corrected = False
         _mapping_checked = False
+        # La correzione del mapping lavora in spazio "numero parlato -> pagina
+        # PDF": il controllo incrociato annunci/confini (piu' giu') deve usare
+        # lo STESSO offset, altrimenti segnala come contraddizioni tutte le
+        # slide appena corrette (copertina non numerata: caso canonico).
+        _offset_mapping = 0
+        _mapping_non_uniform = False
         # Euristica DETERMINISTICA (embeddings locali, offline):
         # se la numerazione parlata è sistematicamente sfasata (es.
         # copertina esclusa: "slide 1" -> slide 2 del PDF) la corregge
@@ -4291,6 +4310,18 @@ def main(argv: list | None = None) -> None:
                 )
                 semantic_anchors = verified
                 _mapping_corrected = True
+                # I tempi NON cambiano: si accoppia per tempo per capire di
+                # quanto e' stato spostato il numero della slide. Se lo spostamento
+                # non e' uniforme non esiste un offset singolo che lo descriva:
+                # in quel caso il controllo incrociato verra' saltato.
+                _per_tempo = {round(float(t), 3): s for s, t in verify_anchors.items()}
+                _deltas = {
+                    int(s) - _per_tempo[round(float(t), 3)]
+                    for s, t in verified.items()
+                    if round(float(t), 3) in _per_tempo
+                }
+                _mapping_non_uniform = len(_deltas) != 1
+                _offset_mapping = next(iter(_deltas)) if _deltas else 0
 
         # Ultima transizione detta con un numero più grande del deck ("slide 15"
         # su un PDF da 14): la menzione è fuori portata, quindi la verifica del
@@ -4971,15 +5002,28 @@ def main(argv: list | None = None) -> None:
             for _sid, _dur in zip(slide_ids, durations, strict=True):
                 _declared.setdefault(int(_sid), _cursor)
                 _cursor += float(_dur)
-            cast("dict[str, object]", sync_notes["anchors"])["mentions_off"] = [
-                {"slide": s, "mention": m, "declared": d}
-                for s, m, d in announcements_off_timeline(
-                    list(words_raw),
-                    _declared,
-                    total_slides,
-                    slide_offset=_offset_utente,
+            # L'offset utente e' solo la correzione dichiarata a mano: quella
+            # automatica del mapping va sommata, altrimenti ogni annuncio
+            # corretto sembra contraddire il confine della pagina sbagliata.
+            # Se la correzione non e' un offset unico, il confronto con un solo
+            # numero sarebbe falso: meglio non segnalare nulla (e dirlo).
+            if _mapping_non_uniform:
+                _dubbi: list[dict[str, object]] = []
+                log.debug(
+                    "   [Mapping] Correzione non uniforme: salto il controllo "
+                    "annunci/confini per evitare falsi dubbi."
                 )
-            ]
+            else:
+                _dubbi = [
+                    {"slide": s, "mention": m, "declared": d}
+                    for s, m, d in announcements_off_timeline(
+                        list(words_raw),
+                        _declared,
+                        total_slides,
+                        slide_offset=_offset_utente + _offset_mapping,
+                    )
+                ]
+            cast("dict[str, object]", sync_notes["anchors"])["mentions_off"] = _dubbi
 
         # Il report in memoria è lo STESSO dict di sync_notes["anchors"], quindi
         # il controllo incrociato appena aggiunto a `mentions_off` deve finire

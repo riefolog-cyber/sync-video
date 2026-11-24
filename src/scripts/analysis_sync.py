@@ -40,12 +40,12 @@ from pathlib import Path
 from _bootstrap import RADICE
 
 BASE = RADICE
-CACHE = BASE / ".cache"
 
 import numpy as np
 
 from chunks import build_windows
 from config import (
+    CACHE_DIR,
     DEFAULT_EMBEDDING_CACHE_DIR,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
@@ -55,6 +55,10 @@ from pipeline_inputs import find_audio_file
 from semantic_sync import _clean_slide_text, _load_embed_model, _make_embed_fn, segment_verdict
 from timeline import extract_slide_anchors
 from video import _extract_frames_batch, _letterbox_references, _reference_matrix, _similarities
+
+# La pipeline usa config.CACHE_DIR (spostabile con SYNC_VIDEO_CACHE_DIR):
+# leggere sempre RADICE/".cache" analizzava una run vecchia, o nessuna.
+CACHE = CACHE_DIR
 
 
 def slide_di_altro_deck(elementi: list, n_slide: int) -> list[int]:

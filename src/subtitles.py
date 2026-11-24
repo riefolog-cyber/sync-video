@@ -10,9 +10,9 @@ importare moviepy.
 La fine di un sottotitolo e' l'inizio della parola successiva, che e' anche
 il punto in cui il parlato riprende: meglio una pausa a schermo che due righe
 sovrapposte. Quando la trascrizione porta anche la ``end`` della parola la si
-usa per MISURARE il silenzio e per decidere dove SPEZZARE una riga troppo
-lunga: il sottotitolo resta visibile fino alla parola dopo, anche attraverso
-una pausa lunga (e' il comportamento coperto dai test).
+usa per MISURARE il silenzio: un silenzio lungo chiude la riga (il testo resta
+pero' visibile fino alla parola dopo, non si accorcia al primo istante di
+silenzio).
 """
 
 from __future__ import annotations
