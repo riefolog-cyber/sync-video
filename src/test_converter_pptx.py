@@ -257,7 +257,7 @@ class _ConverterCommune(unittest.TestCase):
             self.pdf.write_bytes(_pdf_minimo())
             return mock.Mock(returncode=0, stderr="", stdout="")
 
-        return mock.patch("ocr.subprocess.run", side_effect=_run)
+        return mock.patch("ocr._esegui_converter", side_effect=_run)
 
     def _nessun_converter(self) -> Any:
         """Tutti i converter dichiarati assenti, tranne quello sotto test."""

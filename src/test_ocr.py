@@ -193,7 +193,7 @@ class TestConvertPresentationToPdf(unittest.TestCase):
 
         marker.write_text(_file_md5(self.ppt), encoding="ascii")
         with mock.patch("ocr._find_soffice", return_value="soffice"), mock.patch(
-            "ocr.subprocess.run"
+            "ocr._esegui_converter"
         ) as run:
             result = convert_presentation_to_pdf(self.ppt, self.out_dir)
             run.assert_not_called()
@@ -214,7 +214,7 @@ class TestConvertPresentationToPdf(unittest.TestCase):
             self.pdf.write_bytes(content)
             return mock.Mock(returncode=returncode, stderr="", stdout="")
 
-        return mock.patch("ocr.subprocess.run", side_effect=_run)
+        return mock.patch("ocr._esegui_converter", side_effect=_run)
 
     def test_reconvert_when_source_changed(self):
         self.pdf.write_bytes(b"pdf stantio")
@@ -285,7 +285,7 @@ class TestConvertPresentationToPdf(unittest.TestCase):
             mock.patch("ocr._find_genoffice", return_value=None),
             mock.patch("ocr._find_powerpoint", return_value=False),
             mock.patch("ocr._find_onlyoffice", return_value=None),
-            mock.patch("ocr.subprocess.run", side_effect=_failing_run),
+            mock.patch("ocr._esegui_converter", side_effect=_failing_run),
             mock.patch("ocr._pptx_fallback_to_pdf", return_value=False),
             # Prima questa riga era `...,self.assertRaises(RuntimeError)` dentro
             # la tupla: creava il context manager e non lo entrava mai, quindi
@@ -444,7 +444,7 @@ class TestNessunaGraficaNonPassaSilenziosamente(unittest.TestCase):
             mock.patch("ocr._find_genoffice", return_value=None),
             mock.patch("ocr._find_powerpoint", return_value=False),
             mock.patch("ocr._find_onlyoffice", return_value=None),
-            mock.patch("ocr.subprocess.run", return_value=mock.Mock(returncode=1, stderr="rotto", stdout="")),
+            mock.patch("ocr._esegui_converter", return_value=mock.Mock(returncode=1, stderr="rotto", stdout="")),
             mock.patch("ocr._pptx_fallback_to_pdf", return_value=True),
             self.assertRaises(RuntimeError),
         ):

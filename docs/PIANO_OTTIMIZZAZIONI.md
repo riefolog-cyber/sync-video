@@ -273,7 +273,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1523 test).
+`python -m unittest discover -s src -p "test_*.py"` (1527 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -466,6 +466,42 @@ pagine del deck, non l'ultima ancora nota. Decimali e intervalli ("1.5", "3-4")
 non diventano più slide 15 e 34.
 
 Verifiche: `ruff` e `mypy` puliti, 1523 test verdi.
+
+## Batch 16 — sicurezza delle risorse e piattaforme (2026-11)
+
+Sesta revisione trasversale: gestione delle eccezioni, costi ripetuti e
+portabilità. Nessun difetto spettacolare, ma diversi modi in cui un errore
+poteva lasciare il PC in uno stato peggiore di prima.
+
+**Niente più processi orfani.** Il converter PPTX→PDF ora nasce in un gruppo
+di processi nuovo e, su timeout, uccide l'intero albero (PowerPoint COM,
+Electron, x2t), non solo il figlio diretto; il drenaggio dei pipe ha un tetto.
+Gli stessi guardi sono arrivati a `_run_ffmpeg`, al drain di `controlli.py`
+e al `taskkill` su Windows (prima un exit !=0 non attivava il ripiego).
+La venv temporanea del test A/B, infine, viene rimossa in un `finally` anche
+se il confronto o la scrittura del report falliscono.
+
+**Scritture atomiche e cleanup.** Anche i `.npz` degli embedding ora usano
+un temporaneo unico + `os.replace`, come tutte le altre cache: un crash non
+lascia più un file troncato al nome canonico. `audio_clip.close()` è protetto
+in entrambi i `finally`, così un errore di chiusura non maschera quello della
+run né salta la potatura cache. Il documento PyMuPDF usa `with`, e la
+preparazione del file di blocco non viene più scambiata per "run occupata".
+
+**Portabilità.** Rilevamento GPU con `powershell`/`pwsh` come in OCR, output
+dei subprocess decodificato come UTF-8 esplicito, pip con `text=True`, probe
+Tesseract che cattura ogni `OSError`. Il fallback `.ppt/.pptx` usa
+`Path.with_suffix()` invece di `rsplit(".")`, che su percorsi con un punto in
+una cartella (`C:\Users\m.rossi\...`) cercava nel posto sbagliato.
+
+**Costi e regressioni.** La correzione dei nomi propri ora costruisce un
+indice delle modifiche a un carattere una volta per vocabolario invece di
+confrontare ogni parola con ogni nome (2.6s → molto meno su 20k parole).
+Corretti inoltre il fallback pydub per il PCM 8 bit (il silenzio diventava
+un tono a -1.0), i conteggi che rientravano nelle nuove grammatiche di annuncio e
+coda, e diversi test che passavano senza esercitare la correzione.
+
+Verifiche: `ruff` e `mypy` puliti, 1527 test verdi.
 
 ## Stato delle voci
 

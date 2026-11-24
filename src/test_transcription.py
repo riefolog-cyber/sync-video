@@ -8,6 +8,7 @@ Esegui con: python -m unittest test_transcription -v
 import sys
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 from typing import cast
 from unittest import mock
@@ -1623,6 +1624,28 @@ class TestLoadAudioPipeRotta(unittest.TestCase):
         self.assertTrue(proc.killato)
         self.assertEqual(proc.attese, 1)
         self.assertTrue(proc.stdout.chiusa)
+
+
+class TestFallbackPydub8Bit(unittest.TestCase):
+    def test_silenzio_8_bit_resta_zero(self) -> None:
+        """Il PCM 8 bit e' unsigned: il centro e' 128, non 0.
+
+        `set_sample_width(2)` lo mappa a -32768, e il vecchio fallback
+        restituiva -1.0 per il silenzio (il modello sentiva un tono pieno).
+        """
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as td:
+            audio = Path(td) / "silenzio.wav"
+            with wave.open(str(audio), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(1)
+                wav.setframerate(16000)
+                wav.writeframes(b"\x80" * 160)
+            with mock.patch("shutil.which", return_value=None):
+                samples, sr = transcription._load_audio_16k(audio)
+        self.assertEqual(sr, 16000)
+        self.assertLess(float(np.max(np.abs(samples))), 0.01)
 
 
 if __name__ == "__main__":

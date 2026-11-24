@@ -68,7 +68,7 @@ class TestValidazionePdf(unittest.TestCase):
             mock.patch.object(ocr_module, "_find_genoffice", return_value=None),
             mock.patch.object(ocr_module, "_find_onlyoffice", return_value=None),
             mock.patch.object(ocr_module, "_find_powerpoint", return_value=None),
-            mock.patch.object(ocr_module.subprocess, "run", side_effect=_run_finto),self.assertRaises(RuntimeError)
+            mock.patch.object(ocr_module, "_esegui_converter", side_effect=_run_finto),self.assertRaises(RuntimeError)
         ):
             ocr_module.convert_presentation_to_pdf(sorgente, out_dir)
 
@@ -97,7 +97,7 @@ class TestValidazionePdf(unittest.TestCase):
             mock.patch.object(ocr_module, "_find_genoffice", return_value=None),
             mock.patch.object(ocr_module, "_find_onlyoffice", return_value="x2t"),
             mock.patch.object(ocr_module, "_find_powerpoint", return_value=None),
-            mock.patch.object(ocr_module.subprocess, "run", side_effect=_run_finto),
+            mock.patch.object(ocr_module, "_esegui_converter", side_effect=_run_finto),
         ):
             risultato = ocr_module.convert_presentation_to_pdf(sorgente, out_dir)
 

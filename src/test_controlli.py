@@ -135,6 +135,19 @@ class TestTimeoutFigli(unittest.TestCase):
         self.assertIn("7s", esito.output)
         self.assertIn("output parziale", esito.output)
 
+    def test_taskkill_fallito_uccide_almeno_il_figlio(self) -> None:
+        import subprocess
+
+        figlio = mock.MagicMock()
+        figlio.pid = 1234
+        fallito: subprocess.CompletedProcess[str] = subprocess.CompletedProcess([], 1)
+        with (
+            mock.patch.object(controlli.os, "name", "nt"),
+            mock.patch("controlli.subprocess.run", return_value=fallito),
+        ):
+            controlli._uccidi_gruppo(figlio)
+        figlio.kill.assert_called_once()
+
     def test_il_timeout_viene_passato_al_figlio(self) -> None:
         controllo = controlli.Controllo("finto", ["finto"], "prova", timeout=42)
         figlio = mock.MagicMock()

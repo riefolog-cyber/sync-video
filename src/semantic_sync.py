@@ -30,7 +30,9 @@ import bisect
 import contextlib
 import hashlib
 import math
+import os
 import re
+import tempfile
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -712,13 +714,28 @@ def _salva_cache_voce(embed_id: str, texts: Sequence[str], arr: np.ndarray, save
             mtime_cartella_prima = _EMBED_CACHE_DIR.stat().st_mtime
         except OSError:
             mtime_cartella_prima = None
-        np.savez(
-            path,
-            emb=arr,
-            seconds=np.float32(saved),
-            keys=np.array([_chiave_testo(t) for t in texts], dtype="U16"),
-            model=np.array(embed_id),
+        # Scrittura atomica come tutte le altre cache: `np.savez` diretto sul
+        # nome finale lasciava un .npz troncato in caso di crash/disco pieno,
+        # e un altro processo poteva leggerlo a meta'. Il readers self-heal,
+        # ma la finestra non serve.
+        fd_tmp, nome_tmp = tempfile.mkstemp(
+            dir=_EMBED_CACHE_DIR, prefix=path.name + ".", suffix=".tmp"
         )
+        tmp = Path(nome_tmp)
+        try:
+            with os.fdopen(fd_tmp, "wb") as fh:
+                np.savez(
+                    fh,
+                    emb=arr,
+                    seconds=np.float32(saved),
+                    keys=np.array([_chiave_testo(t) for t in texts], dtype="U16"),
+                    model=np.array(embed_id),
+                )
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            raise
         # Indice aggiornato SENZA riaprire il file appena scritto: chiavi e
         # righe sono quelle che abbiamo sotto mano, la mtime si legge una volta.
         mtime = path.stat().st_mtime

@@ -52,6 +52,7 @@ import importlib.util
 import json
 import os
 import platform
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -85,7 +86,17 @@ _CPU_FALLBACK = {
 
 def _run(cmd: list[str], timeout: int = 30) -> str:
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        # Senza encoding esplicito, su Windows si usa la codepage della console
+        # (cp1252): un nome GPU con caratteri non ASCII sollevava
+        # UnicodeDecodeError, qui silenziosamente trasformato in "nessuna GPU".
+        res = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
         return res.stdout or ""
     except Exception:
         return ""
@@ -159,9 +170,13 @@ def _gpus_linux() -> list[str]:
 def detect_gpus() -> list[str]:
     """Restituisce la lista delle GPU rilevate (nomi/descrizioni)."""
     if sys.platform == "win32":
+        # Stessa ricerca di ocr.py: su alcune installazioni Windows resta solo
+        # PowerShell 7 (`pwsh`). Il nome fisso sollevava FileNotFoundError,
+        # `_run` lo inghiottiva e la GPU sembrava assente (CPU 5-10x piu' lenta).
+        ps = shutil.which("powershell") or shutil.which("pwsh") or "powershell"
         out = _run(
             [
-                "powershell",
+                ps,
                 "-NoProfile",
                 "-Command",
                 "(Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name)",

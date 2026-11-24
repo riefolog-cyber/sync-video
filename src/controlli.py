@@ -166,12 +166,17 @@ def _uccidi_gruppo(proc: subprocess.Popen[str]) -> None:
     try:
         if os.name == "nt":
             # Su Windows non c'e' killpg: taskkill /T segue l'albero dei figli.
-            subprocess.run(
+            esito = subprocess.run(
                 ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                 capture_output=True,
                 timeout=10,
+                check=False,
             )
-            return
+            # `run` senza check NON solleva quando taskkill fallisce: senza
+            # questo controllo il return verteva sempre e il ripiego su
+            # `proc.kill()` non partiva mai, lasciando i nipoti vivi.
+            if esito.returncode == 0:
+                return
         uccidi_gruppo = getattr(os, "killpg", None)  # Windows non ce l'ha
         if uccidi_gruppo is not None:
             # Con start_new_session=True il PID del figlio e' anche il PGID.
@@ -211,7 +216,19 @@ def _esegui(controllo: Controllo) -> Esito:
             _uccidi_gruppo(proc)
             # Dopo la kill il communicate() finale drena i pipe e raccoglie
             # l'output che il figlio aveva già scritto prima di bloccarsi.
-            stdout, stderr = proc.communicate()
+            # Se l'albero non e' morto tutto (taskkill fallito, killpg non
+            # disponibile) un nipote puo' tenere i pipe aperti: anche QUI
+            # serve un tetto, altrimenti il "timeout" diventerebbe un hang.
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+                with contextlib.suppress(OSError):
+                    if proc.stdout is not None:
+                        proc.stdout.close()
+                with contextlib.suppress(OSError):
+                    if proc.stderr is not None:
+                        proc.stderr.close()
             secondi = time.monotonic() - avvio
             parziale = _testo_parziale(stdout) + _testo_parziale(stderr)
             output = (

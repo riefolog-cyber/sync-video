@@ -10,6 +10,7 @@ import io
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -303,6 +304,63 @@ def _pdf_valido(pdf_path: Path) -> bool:
                 doc.close()
 
 
+def _uccidi_albero_conversione(proc: subprocess.Popen[str]) -> None:
+    """Uccide il converter e i suoi figli (PowerPoint COM, Electron, x2t...).
+
+    `subprocess.run(timeout=...)` su timeout uccide solo il figlio diretto:
+    i nipoti restano a tenere CPU, file e GUI aperta. Qui il processo nasce
+    in un gruppo nuovo, quindi si puo' chiudere l'intero albero.
+    """
+    if os.name == "nt":
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=10,
+            )
+    else:
+        uccidi_gruppo = getattr(os, "killpg", None)  # Windows non ce l'ha
+        if uccidi_gruppo is not None:
+            with contextlib.suppress(OSError):
+                uccidi_gruppo(proc.pid, getattr(signal, "SIGKILL", 9))
+    with contextlib.suppress(OSError):
+        proc.kill()
+
+
+def _esegui_converter(
+    cmd: list[str], *, timeout: int, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Esegue un converter, uccidendo l'intero albero in caso di timeout.
+
+    Funzione dedicata (e non Popen inline) perche' i test la patchano come
+    prima patchavano `subprocess.run`: stessa firma, stessa forma di call_args.
+    """
+    flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+    if os.name == "nt":
+        flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={**os.environ, **env} if env else None,
+        creationflags=flags,
+        start_new_session=os.name != "nt",
+    ) as proc:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _uccidi_albero_conversione(proc)
+            try:
+                out, err = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                out, err = "", ""
+            raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
 def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza_grafica: bool = False) -> Path:
     """Converte una presentazione PPT/PPTX in PDF usando un converter nativo.
 
@@ -441,17 +499,7 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza
             log.info("   Conversione %s -> PDF (%s)...", ext_upper, converter)
             proc = None
             try:
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    check=False,
-                    encoding="utf-8",
-                    errors="replace",
-                    env={**os.environ, **env_extra} if env_extra else None,
-                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-                )
+                proc = _esegui_converter(cmd, timeout=timeout, env=env_extra)
             except subprocess.TimeoutExpired:
                 log.warning("   Conversione %s->PDF timeout (%ds)", ext_upper, timeout)
                 log.warning("   Provo il prossimo converter...")
@@ -744,16 +792,16 @@ def extract_slides_text_ocr(
     """Converte ogni pagina del PDF in PNG ed estrae il testo via OCR."""
     log.info("1. Analisi del PDF: Estrazione OCR dei testi per l'IA...")
     output_dir.mkdir(parents=True, exist_ok=True)
-    doc = fitz.open(str(pdf_path))
-    if doc.needs_pass:
-        doc.close()
-        raise RuntimeError(f"Il PDF è protetto da password: {pdf_path}")
-    total_pages = len(doc)
-    if total_pages == 0:
-        doc.close()
-        raise RuntimeError(f"Il PDF non contiene pagine: {pdf_path}")
-    testi_nativi = _testo_nativo(doc)
-    doc.close()
+    # `with` chiude il documento anche se needs_pass/len/_testo_nativo
+    # sollevano: prima le close erano manuali, e su Windows un PDF lasciato
+    # aperto resta bloccato per tutta la run (e oltre).
+    with fitz.open(str(pdf_path)) as doc:
+        if doc.needs_pass:
+            raise RuntimeError(f"Il PDF è protetto da password: {pdf_path}")
+        total_pages = len(doc)
+        if total_pages == 0:
+            raise RuntimeError(f"Il PDF non contiene pagine: {pdf_path}")
+        testi_nativi = _testo_nativo(doc)
 
     # Pagine con testo digitale sufficiente: li' l'OCR e' solo lavoro in piu'
     # (e una fonte di errori). Sul deck esportato come immagini non se ne usa

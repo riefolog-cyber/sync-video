@@ -352,9 +352,19 @@ def _run_ffmpeg(cmd: list[str], total_duration: float) -> None:
             elif line and not line.startswith(_FFMPEG_PROGRESS_PREFIXES) and not line.startswith("stream_"):
                 output_lines.append(line)
     finally:
-        done.set()
         proc.stdout.close()
-        returncode = proc.wait()
+        try:
+            # Il watchdog va fermato DOPO wait(): fermandolo prima, un'attesa
+            # senza tetto poteva pendere per sempre (es. KeyboardInterrupt
+            # durante il loop con ffmpeg ancora vivo su un device lento).
+            returncode = proc.wait(timeout=_FFMPEG_STALL_SECONDS)
+        except subprocess.TimeoutExpired:
+            with suppress(OSError):
+                proc.kill()
+            returncode = proc.wait()
+        finally:
+            done.set()
+            watcher.join(timeout=1.0)
     if returncode != 0:
         tail = "\n".join(output_lines[-20:])
         raise RuntimeError(f"ffmpeg è fallito (exit code {returncode}). Ultimo output:\n{tail}")

@@ -124,7 +124,7 @@ class TestFilesystemReale(unittest.TestCase):
                 _find_genoffice=mock.Mock(return_value=None),
                 _find_onlyoffice=mock.Mock(return_value=None),
                 _find_powerpoint=mock.Mock(return_value=False),
-            ), mock.patch("ocr.subprocess.run", side_effect=_run):
+            ), mock.patch("ocr._esegui_converter", side_effect=_run):
                 convert_presentation_to_pdf(ppt, out)
 
             # Il punto: non deve essere rimasto il PDF vecchio.

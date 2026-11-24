@@ -3393,8 +3393,11 @@ def main(argv: list | None = None) -> None:
     # --- Validazione input ---
     pdf_path = args.pdf_path
     if not pdf_path.exists():
-        # Il file indicato non esiste: prova il .ppt/.pptx con lo stesso nome
-        ppt_tries = [Path(str(pdf_path).rsplit(".", 1)[0] + ext) for ext in (".pptx", ".ppt")]
+        # Il file indicato non esiste: prova il .ppt/.pptx con lo stesso nome.
+        # `rsplit(".")` sull'intera stringa tagliava al primo punto della
+        # CARTELLA (C:\Users\m.rossi\presentazione -> C:\Users\m.pptx): la
+        # ricerca guardava nel posto sbagliato e diceva "materiale mancante".
+        ppt_tries = [pdf_path.with_suffix(ext) for ext in (".pptx", ".ppt")]
         found = next((p for p in ppt_tries if p.exists()), None)
         if found:
             pdf_path = found
@@ -3611,8 +3614,10 @@ def main(argv: list | None = None) -> None:
             _abort(f"Impossibile leggere l'audio '{audio_path}': {e}")
         finally:
             if audio_clip is not None:
-                audio_clip.close()
-                audio_clip = None
+                clip = audio_clip
+                audio_clip = None  # prima di close(): se close solleva, il finally esterno non riprova
+                with suppress(Exception):
+                    clip.close()
         log.info("   Durata audio: %.1f secondi", total_duration)
 
         # --- Fase 2: Trascrizione (con cache) ---
@@ -5326,10 +5331,15 @@ def main(argv: list | None = None) -> None:
         )
 
     finally:
-        # Cleanup garantito dell'audio_clip
+        # Cleanup garantito dell'audio_clip. `close()` puo' sollevare su una
+        # clip corrotta: un errore qui non deve mascherare l'eccezione della
+        # run ne' saltare la potatura della cache qui sotto.
         if audio_clip is not None:
-            audio_clip.close()
-            log.debug("   audio_clip cleanup eseguito.")
+            clip = audio_clip
+            audio_clip = None
+            with suppress(Exception):
+                clip.close()
+                log.debug("   audio_clip cleanup eseguito.")
         # Potatura esplicita a fine run. La soglia di 20 scritture dentro
         # `_salva_cache_voce` non scatta quasi mai (una run ancorata scrive ~3
         # voci, una senza ancore ~18), quindi senza questa chiamata i tetti di

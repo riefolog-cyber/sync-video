@@ -203,10 +203,13 @@ class TestChiaviERobustezza(unittest.TestCase):
             {"word": "prima", "start": 5.0},
             {"word": "seconda", "start": 1.0},
         ]
+        # Finestra stretta: con le parole fuori ordine il vecchio bisect
+        # prendeva entrambe le parole (indici 0..1) anche se solo "seconda"
+        # (1.0s) cade in [0,3).
         testo = semantic_sync._window_words(
-            words, [w["start"] for w in words], 0.0, 10.0
+            words, [w["start"] for w in words], 0.0, 3.0
         )
-        self.assertEqual(testo, "prima seconda")
+        self.assertEqual(testo, "seconda")
 
 
 if __name__ == "__main__":

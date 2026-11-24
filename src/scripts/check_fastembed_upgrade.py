@@ -286,7 +286,18 @@ def _venv_python(venv_dir: Path) -> Path:
 def setup_candidate_venv(candidate: str, venv_dir: Path) -> Path | None:
     """Crea venv e installa fastembed==candidate. Restituisce il python, o None."""
     if not (_venv_python(venv_dir)).exists():
-        subprocess.check_call([sys.executable, "-m", "venv", str(venv_dir)])
+        # Anche la creazione della venv puo' fallire (ensurepip mancante, disco
+        # pieno, ACL) o pendere: senza controllo l'eccezione usciva prima che
+        # il chiamante potesse ripulire la cartella temporanea.
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "venv", str(venv_dir)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=600,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            return None
     py = _venv_python(venv_dir)
     try:
         subprocess.check_call(
@@ -315,39 +326,48 @@ def candidate_embeddings(
     """
     own_venv = venv_dir is None
     venv_dir = venv_dir or Path(tempfile.mkdtemp(prefix="fastembed_ab_"))
-    cache_dir = _embedding_cache_dir(cache_dir)
-    batch = DEFAULT_EMBED_BATCH if batch_size is None else batch_size
-
-    texts_path = venv_dir / "texts.json"
-    texts_path.write_text(json.dumps({"slides": texts}), encoding="utf-8")
-    out = venv_dir / "emb.npy"
-
-    py = setup_candidate_venv(candidate, venv_dir)
-    if py is None:
-        return None, (venv_dir if own_venv else None)
-
     try:
-        subprocess.check_call(
-            [
-                str(py),
-                str(WORKER),
-                str(texts_path),
-                model,
-                cache_dir,
-                str(out),
-                str(batch),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=1800,
-        )
-        emb = np.load(out)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        return None, (venv_dir if own_venv else None)
+        cache_dir = _embedding_cache_dir(cache_dir)
+        batch = DEFAULT_EMBED_BATCH if batch_size is None else batch_size
 
-    if not own_venv:
-        return emb, None
-    return emb, venv_dir
+        texts_path = venv_dir / "texts.json"
+        texts_path.write_text(json.dumps({"slides": texts}), encoding="utf-8")
+        out = venv_dir / "emb.npy"
+
+        py = setup_candidate_venv(candidate, venv_dir)
+        if py is None:
+            return None, (venv_dir if own_venv else None)
+
+        try:
+            subprocess.check_call(
+                [
+                    str(py),
+                    str(WORKER),
+                    str(texts_path),
+                    model,
+                    cache_dir,
+                    str(out),
+                    str(batch),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1800,
+            )
+            emb = np.load(out)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            return None, (venv_dir if own_venv else None)
+
+        if not own_venv:
+            return emb, None
+        return emb, venv_dir
+    except BaseException:
+        # Qualsiasi eccezione NON gestita qui (un .npy corrotto, un errore nel
+        # write dei testi, KeyboardInterrupt) non deve lasciare una venv da
+        # centinaia di MB sul disco. Il percorso di errore "gestito" restituisce
+        # la cartella al chiamante, che la rimuove a sua volta.
+        if own_venv:
+            shutil.rmtree(venv_dir, ignore_errors=True)
+        raise
 
 
 # =====================================================================
@@ -570,40 +590,44 @@ def main(argv: list | None = None) -> int:
         return 5
     print(f"  Baseline ({base.shape[0]}x{base.shape[1]}) OK")
 
-    cand, venv_dir = candidate_embeddings(
-        all_texts, args.candidate, model=args.model, cache_dir=embedding_cache, batch_size=batch
-    )
-    if cand is None:
-        print("ERRORE: candidata non calcolata (venv/install o embedding falliti).", file=sys.stderr)
-        return 6
-    print(f"  Candidata {args.candidate} ({cand.shape[0]}x{cand.shape[1]}) OK")
+    venv_dir: Path | None = None
+    try:
+        cand, venv_dir = candidate_embeddings(
+            all_texts, args.candidate, model=args.model, cache_dir=embedding_cache, batch_size=batch
+        )
+        if cand is None:
+            print("ERRORE: candidata non calcolata (venv/install o embedding falliti).", file=sys.stderr)
+            return 6
+        print(f"  Candidata {args.candidate} ({cand.shape[0]}x{cand.shape[1]}) OK")
 
-    result = compare(base, cand, n_slides=len(texts["slides"]), sim_mean_threshold=args.sim_mean,
-                     decision_match_threshold=args.decision_match)
-    result.update({
-        "candidate": args.candidate,
-        "model": args.model,
-        "batch_size": batch,
-        "cache_dir": embedding_cache,
-    })
+        result = compare(base, cand, n_slides=len(texts["slides"]), sim_mean_threshold=args.sim_mean,
+                         decision_match_threshold=args.decision_match)
+        result.update({
+            "candidate": args.candidate,
+            "model": args.model,
+            "batch_size": batch,
+            "cache_dir": embedding_cache,
+        })
 
-    report = Path(args.report)
-    report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        report = Path(args.report)
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"\n  Riepilogo: {len(texts['slides'])} slide, {len(texts['blocks'])} blocchi")
-    print(f"  coseno medio  : {result['cosine_mean']:.4f} (min {result['cosine_min']:.4f})")
-    print(f"  decision match: {result['decision_match']:.3f} ({result['n_blocks']:.0f} blocchi)")
-    print(f"  argmax match  : {result['argmax_match']:.3f} (segnale grezzo per blocco)")
-    if not result["alignment_valid"]:
-        print("  allineamento  : FALLITO -> DIVERGENTE (match forzato a 0)")
-    print(f"\n  VERDETTO: {result['verdict']}")
-    print(f"  Report: {report}")
+        print(f"\n  Riepilogo: {len(texts['slides'])} slide, {len(texts['blocks'])} blocchi")
+        print(f"  coseno medio  : {result['cosine_mean']:.4f} (min {result['cosine_min']:.4f})")
+        print(f"  decision match: {result['decision_match']:.3f} ({result['n_blocks']:.0f} blocchi)")
+        print(f"  argmax match  : {result['argmax_match']:.3f} (segnale grezzo per blocco)")
+        if not result["alignment_valid"]:
+            print("  allineamento  : FALLITO -> DIVERGENTE (match forzato a 0)")
+        print(f"\n  VERDETTO: {result['verdict']}")
+        print(f"  Report: {report}")
 
-    if venv_dir is not None and not args.keep_venv:
-        shutil.rmtree(venv_dir, ignore_errors=True)
-
-    return 0 if result["verdict"] == "EQUIVALENTE" else 1
+        return 0 if result["verdict"] == "EQUIVALENTE" else 1
+    finally:
+        # La venv temporanea va rimossa anche se `compare` o la scrittura del
+        # report sollevano: prima era l'ultima riga del solo percorso felice.
+        if venv_dir is not None and not args.keep_venv:
+            shutil.rmtree(venv_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

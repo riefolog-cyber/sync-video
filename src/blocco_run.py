@@ -156,6 +156,14 @@ class BloccoRun:
                 fh.write(" ")
                 fh.flush()
             fh.seek(0)
+        except OSError as e:
+            # Disco pieno/mount read-only durante la preparazione: NON e'
+            # "occupato da un'altra run". Mandare OCCUPATO farebbe aspettare
+            # 15 minuti e poi abortire, contro il contratto del modulo.
+            fh.close()
+            log.debug("   Blocco run non preparato (%s): proseguo senza blocco.", e)
+            return NON_DISPONIBILE
+        try:
             if fcntl is not None:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             elif msvcrt is not None:

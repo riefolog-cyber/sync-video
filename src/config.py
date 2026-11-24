@@ -1581,6 +1581,13 @@ def _try_pip_install(package: str, upgrade: bool = False) -> bool:
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            # Senza text/encoding, su una console cp1252 i messaggi di errore
+            # di pip con caratteri accentati arrivano come bytes e vengono
+            # poi decodificati come UTF-8: la diagnosi si legge male proprio
+            # quando serve.
+            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=300,
             check=True,
         )
@@ -1936,7 +1943,10 @@ def bootstrap(*, ignora_spazio: bool = False, whisper_model: str | None = None) 
             )
             log.debug("   Tesseract trovato nel PATH.")
             tesseract_found = True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired):
+            # OSError include FileNotFoundError ma anche PermissionError e
+            # "è una cartella" (PATH sporco): prima il bootstrap moriva con
+            # un traceback invece di provisionare Tesseract da solo.
             pass
 
     if not tesseract_found:
@@ -1965,7 +1975,7 @@ def bootstrap(*, ignora_spazio: bool = False, whisper_model: str | None = None) 
                 )
                 tesseract_found = True
                 log.info("   ✅ Tesseract installato nel PATH.")
-            except (FileNotFoundError, subprocess.TimeoutExpired):
+            except (OSError, subprocess.TimeoutExpired):
                 pass
 
     # Il vecchio re-scan delle due directory Windows standard è stato rimosso:

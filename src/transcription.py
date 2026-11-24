@@ -264,7 +264,18 @@ def correct_transcript_names(
     # Indice inverso per il vocabolario: parola trascritta -> nome del deck.
     correzioni_deck: dict[str, str] = {}
     if vocabolario:
-        candidati = sorted(vocabolario)
+        # Costruisce l'indice delle modifiche a 1 carattere UNA volta per
+        # vocabolario invece di confrontare ogni parola del parlato con ogni
+        # nome del deck (misurato: 2.6s per 20k parole x 200 nomi, e la
+        # correzione gira 2-3 volte a run). La forma con wildcard e' la stessa
+        # regola di `_distanza_le_1`, solo indicizzata.
+        wildcard: dict[str, set[str]] = {}
+        cancellazioni: dict[str, set[str]] = {}
+        for nome in vocabolario:
+            for i in range(len(nome)):
+                wildcard.setdefault(nome[:i] + "\0" + nome[i + 1 :], set()).add(nome)
+            for i in range(len(nome) + 1):
+                cancellazioni.setdefault(nome[:i] + nome[i + 1 :], set()).add(nome)
         for w in words:
             parola = _norm_word(w["word"])
             if len(parola) < 4:
@@ -272,9 +283,17 @@ def correct_transcript_names(
             # Una parola gia' nel deck e' gia' giusta: non si tocca.
             if parola in vocabolario:
                 continue
-            vicini = [c for c in candidati if _distanza_le_1(parola, c)]
+            vicini: set[str] = set()
+            for i in range(len(parola)):
+                vicini.update(wildcard.get(parola[:i] + "\0" + parola[i + 1 :], ()))
+                corta = parola[:i] + parola[i + 1 :]
+                if corta in vocabolario:
+                    vicini.add(corta)
+            # Candidati di UNA lettera piu' lunghi: la cancellazione di una
+            # loro lettera da' esattamente la parola trascritta.
+            vicini.update(cancellazioni.get(parola, ()))
             if len(vicini) == 1:
-                correzioni_deck.setdefault(parola, vicini[0])
+                correzioni_deck.setdefault(parola, next(iter(vicini)))
     out: list[Word] = []
     i = 0
     n = len(words)
@@ -486,14 +505,18 @@ def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
     # Fallback (ffmpeg assente): pydub, che carica tutto in RAM.
     from pydub import AudioSegment
 
-    seg = AudioSegment.from_file(str(audio_path))
-    seg = seg.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-    # Dividere per 32768 e' corretto SOLO per PCM a 16 bit: senza forzare
-    # `sample_width=2`, un sorgente a 32 bit satura (valori ~65536) e uno a
-    # 8 bit resta senza centro. La via ffmpeg restituisce sempre float32 in
-    # [-1,1]: il fallback deve dare la stessa cosa.
-    samples = seg.get_array_of_samples()
-    return (np.array(samples, dtype=np.float32) / 32768.0), 16000
+    seg = AudioSegment.from_file(str(audio_path)).set_frame_rate(16000).set_channels(1)
+    if seg.sample_width == 1:
+        # pydub restituisce gia' il byte 8 bit CENTRATO (0x80 -> 0): 128 e' il
+        # centro del file WAV, non del suo array. Sottrarre 128 (o passare per
+        # set_sample_width(2), che mappa 0x80 a -32768) faceva diventare il
+        # silenzio un tono a -1.0.
+        samples = np.array(seg.get_array_of_samples(), dtype=np.float32)
+        return (samples / 128.0), 16000
+    # 24/32 bit: portare a 16 bit e dividere per 32768 da' lo stesso float32
+    # in [-1,1] che restituisce la via ffmpeg.
+    samples = np.array(seg.set_sample_width(2).get_array_of_samples(), dtype=np.float32)
+    return (samples / 32768.0), 16000
 
 
 def _ov_lang_token(language: str) -> str:
@@ -729,12 +752,15 @@ def decide_transcriber(
 
     Ritorna ``(motore, motivo)``: motivo None = via libera alla GPU. Il ripiego
     scatta solo con scelta ``auto`` (un ``--transcriber openvino`` esplicito non
-    si discute: chi lo chiede sa cosa fa). Due salvagenti, in quest'ordine:
+    si discute: chi lo chiede sa cosa fa). Tre salvagenti, in quest'ordine:
 
     1. poca RAM libera *adesso* per caricare il modello sulla GPU;
     2. un tentativo GPU precedente sullo stesso audio mai finito (il processo
        e' morto dentro il codice nativo: nessun traceback allora, e sarebbe
-       inutile riprovare identico).
+       inutile riprovare identico);
+    3. il device OpenVINO richiesto non e' disponibile adesso (modello IR
+       presente ma iGPU disattivata: provare a usarla morirebbe con
+       "device not found").
 
     La chiave di cache della trascrizione resta calcolata sul motore risolto da
     ``resolved_transcriber`` (main.py): in caso di ripiego il testo CPU finisce

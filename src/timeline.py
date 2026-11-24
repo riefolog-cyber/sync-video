@@ -1029,6 +1029,11 @@ def announcements_off_timeline(
                 num = _number_from_word(_normalize(words[j]["word"]))
                 if num is None:
                     continue
+                # "ora le 13 slide del documento" e' un CONTEGGIO, non un
+                # annuncio: senza questa qualifica la nuova grammatica creava
+                # falsi dubbi, contraddicendo la docstring della funzione.
+                if _preceded_by_determiner(words, j):
+                    break
                 candidata = num + slide_offset
                 if 1 < candidata <= total_slides:
                     slide_num, pagina, mention_idx = num, candidata, i
@@ -1229,8 +1234,9 @@ def out_of_range_tail_anchor(
     confini che il motore può spostare di decine di secondi.
 
     La si riammette solo quando non può essere altro che l'ultima slide: numero
-    di uno o due oltre l'ultimo annuncio valido, pronunciato DOPO tutte le
-    ancore già note, e ultima slide ancora senza ancora. La verifica del
+    di uno o due oltre il NUMERO DI PAGINE DEL DECK (non oltre l'ultima ancora
+    nota), pronunciato DOPO tutte le ancore già note, non classificato come
+    conteggio, e ultima slide ancora senza ancora. La verifica del
     mapping resta il posto giusto per correggere i NUMERI: qui si recupera il
     solo TEMPO, che è la misura reale dello speaker.
 
@@ -1240,15 +1246,17 @@ def out_of_range_tail_anchor(
     if total_slides < 2 or total_slides in anchors or not anchors:
         return {}
     last_known = max(anchors.values())
-    for n, times in _collect_slide_mentions(words, total_slides + 2).items():
+    # `kinds` conserva la qualifica conteggio: "_collect_slide_mentions" la
+    # butta via, e con il tetto allargato al deck un "le 15 slide del documento"
+    # poteva diventare l'ancora dell'ultima pagina.
+    for n, items in _collect_slide_mention_kinds(words, total_slides + 2).items():
         # Il limite e' il NUMERO DI PAGINE DEL DECK, non l'ultima ancora nota:
         # con poche ancore (es. sola slide 4 su 14) la menzione finale "slide
         # 15" era scartata da `top_announced + 2` (= 6), perdendo l'ultimo
-        # confine pronunciato. Il controllo sul tempo qui sotto basta a
-        # distinguerla da un conteggio iniziale ("le 20 slide").
+        # confine pronunciato.
         if n <= total_slides or n > total_slides + 2:
             continue
-        after = [t for t in times if t > last_known]
+        after = [t for t, is_count in items if t > last_known and not is_count]
         if after:
             return {total_slides: min(after)}
     return {}
