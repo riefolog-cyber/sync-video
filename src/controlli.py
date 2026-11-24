@@ -117,7 +117,11 @@ def _passi() -> list[Controllo]:
         ),
         Controllo(
             "debug hardware",
-            [py, str(Path(__file__).parent / "_debug_hardware.py")],
+            # resolve(): il modulo e' invocabile "da ovunque" (anche
+            # `cd src && python controlli.py`); con __file__ relativo il
+            # figlio cercava `_debug_hardware.py` nella RADICE con
+            # cwd=RADICE e il passo falliva sempre.
+            [py, str(Path(__file__).resolve().parent / "_debug_hardware.py")],
             "encoder reali, ripiego a runtime",
             r"^RISULTATO:",
             timeout=180,  # probe ffmpeg/encoder: se pende, non e' un risultato

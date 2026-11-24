@@ -200,15 +200,25 @@ class TestBloccoSuBootstrapReale(unittest.TestCase):
     """
 
     def _esegui(self, *, ignora_spazio: bool) -> None:
-        # `_spazio_modelli_necessario` va finto insieme a `_modelli_mancanti`:
-        # il controllo del disco ricalcola da solo se i modelli mancano, e su
-        # questa macchina sono gia' scaricati (senza il finto restituirebbe 0
-        # e nonFermerebbe mai niente, con un test che passerebbe per il
-        # motivo sbagliato).
+        # La guardia usa `_destinazioni_spazio_modelli` come unica fonte di
+        # "quanti byte servono e dove": va finta insieme a `_modelli_mancanti`.
+        # Su questa macchina i modelli sono gia' scaricati, quindi senza il
+        # finto il controllo non fermerebbe niente e il test passerebbe per il
+        # motivo sbagliato.
         with (
             patch.object(config, "disk_free_bytes", return_value=3 * GB),
             patch.object(config, "_modelli_mancanti", return_value=[("modello embedding", "~2.1 GB")]),
-            patch.object(config, "_spazio_modelli_necessario", return_value=8 * GB),
+            patch.object(
+                config,
+                "_destinazioni_spazio_modelli",
+                return_value=[
+                    (
+                        Path("C:/emb"),
+                        "cache dei modelli (cartella del progetto)",
+                        8 * GB + config._MARGINE_DISCO,
+                    )
+                ],
+            ),
             patch.object(config, "_cache_whisper_faster", return_value=None),
             patch.object(config, "_ensure_pip_packages"),
         ):

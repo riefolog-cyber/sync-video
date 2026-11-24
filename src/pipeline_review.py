@@ -125,10 +125,11 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> None:
         log.error("   [Revisione] Il report non contiene segmenti: niente da rivedere.")
         return
 
-    # N reale del deck = numero di segmenti del report (le slide saltate restano
-    # nel report come segmenti con durata 0 o sono escluse: usare max(starts)
-    # faceva sparire le menzioni delle slide fuori dal range).
-    total_slides_review = len(segments) if segments else max(starts)
+    # N reale del deck = numero di segmenti del report: con --skip-slides la
+    # run NON elimina i segmenti ne' li mette a durata 0, sostituisce il
+    # numero di slide con quello valido precedente (vedi main.py). Il vecchio
+    # commento parlava di segmenti a durata 0 che in realta' non esistono.
+    total_slides_review = len(segments)
 
     anchors = cast("dict[str, object]", report.get("anchors") or {})
     # `mentions_off=[]` e' un dato: la run ha confrontato gli annunci e non ne
@@ -143,11 +144,22 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> None:
     ]
     ricalcolati = False
     if not mentions_salvati:
+        # `main()` mette la chiave della trascrizione EFFETTIVA in cima al
+        # report (tramite `report.update(notes)`), non dentro `anchors`.
+        # Leggerla solo da li' faceva cadere sempre su None e rileggere la
+        # trascrizione piu' recente per mtime, che dopo un escalation beam non
+        # e' necessariamente quella su cui e' stata costruita la timeline.
+        # Il fallback annidato serve solo ai report vecchi che la salvavano
+        # dentro `anchors`.
+        preferita = cast(
+            "str | None",
+            report.get("transcript_cache_key") or anchors.get("transcript_cache_key"),
+        )
         words = cast(
             "list[Word]",
             latest_transcript_words(
                 cache_dir=cache_dir,
-                preferred_key=cast("str | None", anchors.get("transcript_cache_key")),
+                preferred_key=preferita,
             ),
         )
         if words:

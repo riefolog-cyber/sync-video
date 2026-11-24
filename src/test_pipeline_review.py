@@ -13,6 +13,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from pipeline_cache import latest_transcript_words, save_sync_report
@@ -26,16 +27,18 @@ def _report(
         "transitions": 1,
         "anchored": 1,
         "unanchored_slides": [2],
-        "transcript_cache_key": chiave,
     }
     if mentions_off is not None:
         anchors["mentions_off"] = mentions_off
+    # `main()` scrive la chiave in cima al report (`report.update(notes)`),
+    # non dentro `anchors`: il test deve riprodurre il formato reale.
     return {
         "segments": [
             {"slide": 1, "start": 0.0, "end": 60.0, "duration": 60.0},
             {"slide": 2, "start": 60.0, "end": 120.0, "duration": 60.0},
         ],
         "anchors": anchors,
+        "transcript_cache_key": chiave,
     }
 
 
@@ -102,6 +105,21 @@ class TestReviewMenzioniSalvate(unittest.TestCase):
 
 
 class TestChiaveTrascrizioneEffettiva(unittest.TestCase):
+    def test_report_vecchio_con_chiave_annidata(self) -> None:
+        """I report scritti prima lasciavano la chiave dentro `anchors`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            report = _report()
+            report.pop("transcript_cache_key")
+            cast("dict[str, object]", report["anchors"])["transcript_cache_key"] = "transcript_annidato"
+            cache = _cache(td, report)
+            with (
+                patch("pipeline_review.latest_transcript_words", return_value=[]) as prese,
+                self.assertLogs("slide2video", level="INFO"),
+            ):
+                _review_boundary_doubts(cache / "video_assente.mp4", cache_dir=cache)
+        self.assertEqual(prese.call_args.kwargs["preferred_key"], "transcript_annidato")
+
     def test_preferred_key_batte_la_trascrizione_piu_recente(self) -> None:
         """Se la run ha usato il beam accurato, --review deve leggere quello.
 

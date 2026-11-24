@@ -248,5 +248,19 @@ class TestDueIstanzeStessoProcesso(unittest.TestCase):
             self.assertAlmostEqual(dorme.call_args.args[0], 0.5)
 
 
+class TestContesto(unittest.TestCase):
+    def test_with_rilascia_anche_se_la_run_solleva(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            blocco = BloccoRun(base)
+            with self.assertRaises(RuntimeError), blocco:
+                self.assertEqual(blocco.tenta(), PRESO)  # non si conta due volte
+                raise RuntimeError("run interrotta")
+            # Uscito dal `with`, un nuovo blocco sulla stessa cartella passa.
+            altro = BloccoRun(base)
+            self.assertEqual(altro.tenta(), PRESO)
+            altro.release()
+
+
 if __name__ == "__main__":
     unittest.main()

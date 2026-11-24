@@ -263,30 +263,21 @@ def prova_hardware(r: Relazione) -> None:
 
 def prova_spazio(r: Relazione, radice: Path) -> None:
     from config import (
-        _MARGINE_DISCO,
         DEFAULT_EMBEDDING_CACHE_DIR,
         DEFAULT_EMBEDDING_MODEL,
         DEFAULT_WHISPER_MODEL,
-        _spazio_modelli_necessario,
+        _destinazioni_spazio_modelli,
     )
 
-    # Si passa il modello ESPLICITAMENTE come fa il bootstrap: con il
-    # parametro vuoto la funzione non trovava la dimensione, restituiva None,
-    # e `if not necessario` leggeva quel None come "modelli gia' in cache".
-    # Usiamo DEFAULT_WHISPER_MODEL (che rispetta WHISPER_MODEL dal .env) così
-    # il referto non e' piu' permissivo della guardia reale del bootstrap:
-    # con WHISPER_MODEL=large dire "small" faceva passare il controllo su un
-    # disco dove i ~3 GB del modello grande non ci stanno.
-    necessario = _spazio_modelli_necessario(
+    # Stessa fonte della guardia vera del bootstrap (`_avvisa_spazio_insufficiente`):
+    # qui prima si usava "small" fisso e la radice del progetto come destinazione
+    # embedding, quindi il referto poteva dire "ok" su un disco dove la guardia
+    # blocca (o il contrario). Ora percorso, modelli e ripartizione dei byte
+    # fra dischi sono esattamente gli stessi.
+    destinazioni = _destinazioni_spazio_modelli(
         Path(DEFAULT_EMBEDDING_CACHE_DIR), DEFAULT_WHISPER_MODEL, DEFAULT_EMBEDDING_MODEL
     )
-    if necessario == 0:
-        r.aggiungi(Esito("Spazio disco", OK, "modelli gia' in cache"))
-        return
-    if necessario is None:
-        # 0 e None non sono la stessa cosa: 0 = tutto scaricato, None = non si
-        # riesce a calcolare. Dire "gia' in cache" davanti a un None e'
-        # inventare una certezza, ed e' il motivo per cui la riga si chiude qui.
+    if destinazioni is None:
         r.aggiungi(
             Esito(
                 "Spazio disco",
@@ -297,18 +288,10 @@ def prova_spazio(r: Relazione, radice: Path) -> None:
             )
         )
         return
-    richiesto = necessario + _MARGINE_DISCO
-    # Due destinazioni come la guardia vera (_avvisa_spazio_insufficiente in
-    # config.py): la cache embedding segue il progetto, quella whisper segue
-    # la home dell'utente, e possono stare su dischi diversi. Controllarne una
-    # sola dava "ok" qui e blocco all'avvio (o viceversa).
-    from config import _cache_whisper_faster
-
-    destinazioni = [(radice, "cartella del progetto")]
-    cache_whisper = _cache_whisper_faster("small")
-    if cache_whisper is not None:
-        destinazioni.append((cache_whisper, "cache HuggingFace (whisper)"))
-    for percorso, etichetta in destinazioni:
+    if not destinazioni:
+        r.aggiungi(Esito("Spazio disco", OK, "modelli gia' in cache"))
+        return
+    for percorso, etichetta, richiesto in destinazioni:
         libero = disk_free_bytes(percorso)
         if libero is None:
             r.aggiungi(Esito("Spazio disco", AVV, f"{etichetta}: non interrogabile"))
@@ -369,10 +352,14 @@ def prova_rete(r: Relazione) -> None:
 
 
 def prova_modelli(r: Relazione) -> None:
-    from config import DEFAULT_EMBEDDING_CACHE_DIR
+    from config import DEFAULT_EMBEDDING_CACHE_DIR, _gia_scaricato
 
     cache = Path(DEFAULT_EMBEDDING_CACHE_DIR)
-    if not cache.exists() or not any(p.is_file() for p in cache.rglob("*")):
+    # Lo stesso criterio del guardiano del download: un file .part/.incomplete
+    # lasciato da un download interrotto NON e' un modello pronto. Contare
+    # "qualunque file non vuoto" faceva dire [ ok ] qui e annunciare il modello
+    # mancante all'avvio, proprio sul controllo che serve a spiegare il guasto.
+    if not _gia_scaricato(cache):
         r.aggiungi(
             Esito(
                 "Modelli",

@@ -9,6 +9,7 @@ import contextlib
 import importlib.metadata
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -155,6 +156,23 @@ def _env_int_positivo(name: str, default: int) -> int:
     return valore
 
 
+def _env_int_non_negativo(name: str, default: int) -> int:
+    """Come `_env_int`, ma scarta i negativi (lo zero e' ammesso)."""
+    valore = _env_int(name, default)
+    if valore < 0:
+        log.warning(
+            "   Variabile %s non valida ('%s'): deve essere un intero >= 0 "
+            "(es. %s=%d); uso default %d.",
+            name,
+            os.environ.get(name),
+            name,
+            default,
+            default,
+        )
+        return default
+    return valore
+
+
 # Classe di memoria della macchina: 'basso' (< 6 GB), 'medio' (< 12 GB),
 # 'alto', 'ignoto'. Governa i batch size (whisper ed embedding), che sono
 # memoria di picco: il modello di embedding da solo tiene ~4,3 GB residenti.
@@ -171,10 +189,28 @@ def _env_float(name: str, default: float) -> float:
     if value is None or value == "":
         return default
     try:
-        return float(value)
+        numero = float(value)
     except ValueError:
         log.warning("   Variabile %s non numerica ('%s'), uso default %s.", name, value, default)
         return default
+    if not math.isfinite(numero):
+        log.warning("   Variabile %s non finita ('%s'), uso default %s.", name, value, default)
+        return default
+    return numero
+
+
+def _env_float_positivo(name: str, default: float) -> float:
+    """Come `_env_float`, ma scarta zero e negativi (serve a SEMANTIC_WINDOW)."""
+    valore = _env_float(name, default)
+    if valore <= 0:
+        log.warning(
+            "   Variabile %s non valida ('%s'): deve essere > 0; uso default %s.",
+            name,
+            os.environ.get(name),
+            default,
+        )
+        return default
+    return valore
 
 
 def _logical_cpus() -> int:
@@ -236,15 +272,25 @@ def _physical_cpus() -> int | None:
 
             socket_e_core: set[tuple[str, str]] = set()
             socket = core = ""
+            def fine_blocco() -> None:
+                nonlocal socket, core
+                if socket and core:
+                    socket_e_core.add((socket, core))
+                    socket = core = ""
+
             for riga in pathlib.Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace").splitlines():
                 if ":" not in riga:
-                    if socket and core:  # fine del blocco di un processore
-                        socket_e_core.add((socket, core))
-                        socket = core = ""
+                    fine_blocco()  # fine del blocco con riga vuota (formato usuale)
                     continue
                 chiave, _, valore = riga.partition(":")
                 chiave = chiave.strip().lower()
                 valore = valore.strip()
+                if chiave == "processor" and (socket or core):
+                    # Alcune varianti di /proc/cpuinfo non separano i blocchi
+                    # con righe vuote: senza questo, la coppia (socket, core)
+                    # del processore precedente veniva sovrascritta e il
+                    # conteggio dei core fisici restava basso.
+                    fine_blocco()
                 if chiave == "physical id":
                     socket = valore
                 elif chiave == "core id":
@@ -1184,6 +1230,61 @@ def _gb(byte: int) -> str:
     return f"{byte / 1024**3:.1f} GB"
 
 
+def _stesso_disco(a: Path, b: Path) -> bool:
+    """True se due percorsi stanno sullo stesso disco (dubbio = True).
+
+    In caso di dubbio si dice "stesso disco": e' la scelta conservativa,
+    perche' richiede lo spazio somma dei due modelli invece di quello del
+    solo modello che li scarica.
+    """
+    if os.name == "nt":
+        return os.path.splitdrive(os.path.abspath(a))[0].lower() == os.path.splitdrive(os.path.abspath(b))[0].lower()
+    try:
+        return a.stat().st_dev == b.stat().st_dev
+    except OSError:
+        # Directory non ancora create: non si puo' sapere, si presume uguale.
+        return True
+
+
+def _destinazioni_spazio_modelli(
+    cache_embedding: Path,
+    modello_whisper: str,
+    modello_embedding: str,
+) -> list[tuple[Path, str, int]] | None:
+    """Dove controllare lo spazio e quanti byte servono per ogni destinazione.
+
+    Restituisce ``(percorso, etichetta, byte_richiesti)``; None se una
+    dimensione non e' nota (meglio nessun controllo che una cifra inventata).
+
+    Il totale dei modelli mancanti NON va preteso su entrambi i dischi quando
+    embedding e whisper stanno su dischi diversi: ciascuno deve ospitare solo
+    il PROPRIO modello. Sullo stesso disco si conserva il totale (serve a
+    entrambi) e il comportamento di prima, compresi i due messaggi di log.
+    """
+    dettagli = _modelli_mancanti_dettagliati(cache_embedding, modello_whisper, modello_embedding)
+    if any(byte is None for _, _, byte in dettagli):
+        return None
+    byte_embedding = sum(byte or 0 for nome, _, byte in dettagli if nome.startswith("modello embedding"))
+    byte_whisper = sum(byte or 0 for nome, _, byte in dettagli if nome.startswith("modello di trascrizione"))
+    totale = byte_embedding + byte_whisper
+    if totale == 0:
+        return []
+    etichetta_emb = "cache dei modelli (cartella del progetto)"
+    cache_whisper = _cache_whisper_faster(modello_whisper)
+    if cache_whisper is None:
+        return [(cache_embedding, etichetta_emb, totale + _MARGINE_DISCO)]
+    if _stesso_disco(cache_embedding, cache_whisper):
+        richiesto = totale + _MARGINE_DISCO
+        return [
+            (cache_embedding, etichetta_emb, richiesto),
+            (cache_whisper, "cache HuggingFace (whisper)", richiesto),
+        ]
+    return [
+        (cache_embedding, etichetta_emb, byte_embedding + _MARGINE_DISCO),
+        (cache_whisper, "cache HuggingFace (whisper)", byte_whisper + _MARGINE_DISCO),
+    ]
+
+
 def _avvisa_spazio_insufficiente(
     embedding_cache: Path | None = None,
     whisper_model: str | None = None,
@@ -1206,36 +1307,34 @@ def _avvisa_spazio_insufficiente(
     Si controllano DUE destinazioni perche' possono stare su dischi diversi:
     la cache embedding segue il progetto, quella whisper segue la home
     dell'utente. Un progetto su D: e la home su C: hanno spazi distinti, e
-    controllare solo il primo darebbe un falso ok.
+    controllare solo il primo darebbe un falso ok. Su dischi diversi ogni
+    disco deve ospitare SOLO il proprio modello: pretendere il totale su
+    entrambi faceva bloccare run che avevano spazio sufficiente.
     """
     cache_embedding = Path(embedding_cache if embedding_cache is not None else DEFAULT_EMBEDDING_CACHE_DIR)
     modello_whisper = whisper_model or DEFAULT_WHISPER_MODEL
     modello_embedding = embedding_model if embedding_model is not None else DEFAULT_EMBEDDING_MODEL
 
-    necessario = _spazio_modelli_necessario(cache_embedding, modello_whisper, modello_embedding)
-    if not necessario:
+    destinazioni = _destinazioni_spazio_modelli(
+        cache_embedding, modello_whisper, modello_embedding
+    )
+    if not destinazioni:
         # Tutti in cache, o dimensioni ignote: niente da controllare. Meglio
         # nessun avviso che un avviso con una cifra inventata.
         return
 
-    destinazioni = [(cache_embedding, "cache dei modelli (cartella del progetto)")]
-    cache_whisper = _cache_whisper_faster(modello_whisper)
-    if cache_whisper is not None:
-        destinazioni.append((cache_whisper, "cache HuggingFace (whisper)"))
-
-    insufficienti: list[tuple[str, int]] = []
-    for percorso, etichetta in destinazioni:
+    insufficienti: list[tuple[str, int, int]] = []
+    for percorso, etichetta, richiesto in destinazioni:
         libero = disk_free_bytes(percorso)
         if libero is None:
             continue
-        if libero < necessario + _MARGINE_DISCO:
-            insufficienti.append((etichetta, libero))
+        if libero < richiesto:
+            insufficienti.append((etichetta, libero, richiesto))
 
     if not insufficienti:
         return
 
-    richiesto = necessario + _MARGINE_DISCO
-    for etichetta, libero in insufficienti:
+    for etichetta, libero, richiesto in insufficienti:
         log.error(
             "   Spazio disco insufficiente su %s: %s liberi, ne servono ~%s "
             "(modelli + margine per video e slide).",
@@ -1247,7 +1346,7 @@ def _avvisa_spazio_insufficiente(
     if ignora:
         log.warning(
             "   Continuo lo stesso perche' hai chiesto di ignorare il controllo "
-            "(--ignora-spazio): se il download si interrompe, la cache va rrifatta."
+            "(--ignora-spazio): se il download si interrompe, la cache va rifatta."
         )
         return
 
@@ -1689,7 +1788,7 @@ PYTHON_MAX = _PYTHON_MAX
 def _rifiuta_python_troppo_recente() -> None:
     """Si ferma se Python e' piu' nuovo di quanto il progetso regga.
 
-    Il limite inferiore (3.10) e' una condaizione ovvia. Questo no, e serve
+    Il limite inferiore (3.10) e' una condizione ovvia. Questo no, e serve
     perche' il fallimento senza guardia e' il peggiore possibile: arriva
     DENTRO pip, dopo che il programma ha gia' scaricato 2,7 GB di modelli.
 
@@ -1782,7 +1881,8 @@ def _download_traineddata(url: str, dest: Path) -> None:
 def bootstrap(*, ignora_spazio: bool = False, whisper_model: str | None = None) -> None:
     """
     Verifica e installa automaticamente tutte le dipendenze.
-    - Python >= 3.10
+    - Python 3.10..3.13 (il limite superiore e' reale: vedi
+      `_rifiuta_python_troppo_recente`, non e' solo documentazione)
     - Pacchetti pip (auto-install)
     - Tesseract OCR (auto-install via winget/apt/brew)
     - ffmpeg (auto-install via winget/apt/brew, SEMPRE riverificato)
@@ -2002,9 +2102,9 @@ DEFAULT_EMBED_THREADS = auto_thread_budget("embed")
 # run e la cache embedding verrebbe invalidata ogni volta. Lo stesso vale per
 # un override manuale: cambiarlo invalida la cache (e va rifatto).
 # Override con EMBED_BATCH.
-DEFAULT_EMBED_BATCH = _env_int("EMBED_BATCH", {"basso": 16, "medio": 32}.get(_RAM_TIER, 64))
+DEFAULT_EMBED_BATCH = _env_int_positivo("EMBED_BATCH", {"basso": 16, "medio": 32}.get(_RAM_TIER, 64))
 
-DEFAULT_SEMANTIC_WINDOW = _env_float("SEMANTIC_WINDOW", 4.0)  # secondi per blocco
+DEFAULT_SEMANTIC_WINDOW = _env_float_positivo("SEMANTIC_WINDOW", 4.0)  # secondi per blocco
 DEFAULT_SEMANTIC_MIN_DURATION = _env_float("SEMANTIC_MIN_DURATION", 3.0)  # durata minima slide
 # Pavimento di leggibilità dell'anti-flicker: sotto questi secondi una slide
 # a video è un lampo illeggibile. La soglia effettiva è max(fondo, 2x durata
@@ -2064,7 +2164,7 @@ DEFAULT_FALLBACK_FLOW = "slide-audio"
 # budget di 12 parole copre anche le frasi lunghe senza toccare la soglia delle
 # ripetizioni: 6 ripetizioni identiche di 12 parole non sono parlato).
 # Override con MAX_LOOP_CYCLE_WORDS.
-DEFAULT_MAX_LOOP_CYCLE_WORDS = _env_int("MAX_LOOP_CYCLE_WORDS", 12)
+DEFAULT_MAX_LOOP_CYCLE_WORDS = _env_int_positivo("MAX_LOOP_CYCLE_WORDS", 12)
 
 # Di quanto si allunga la zona di coda quando l'annuncio dell'ultima slide è
 # stato distrutto dal beam greedy e non c'è un'ancora a destra a delimitarlo.
@@ -2105,7 +2205,7 @@ DEFAULT_RECOVERY_MAX_ZONE_SHARE = _env_float("RECOVERY_MAX_ZONE_SHARE", 0.5)
 # --- Parametri tecnici (sovrascrivibili da .env) ---
 DEFAULT_TRANSCRIPT_WINDOW = 3.0  # secondi per raggruppamento parole
 DEFAULT_MIN_WORD_LENGTH = 2  # ignora parole più corte
-DEFAULT_VIDEO_FPS = _env_int("VIDEO_FPS", 5)  # fps > 1 evita che l'ultimo frame tagli l'audio finale
+DEFAULT_VIDEO_FPS = _env_int_positivo("VIDEO_FPS", 5)  # fps > 1 evita che l'ultimo frame tagli l'audio finale
 DEFAULT_VIDEO_BUFFER_SEC = _env_float("VIDEO_BUFFER_SEC", 3.0)  # secondi extra sul video per proteggere l'audio finale
 # Risoluzione massima video (larghezza, altezza) — sovrascrivibile con VIDEO_RES="WxH"
 def _video_res_da_env(valore: str) -> tuple[int, int]:
@@ -2171,7 +2271,7 @@ DEFAULT_WHISPER_THREADS = auto_thread_budget("whisper")
 #   persa o aggiunta. Il drift e' 20x sotto la durata minima di una slide
 #   (DEFAULT_SEMANTIC_MIN_DURATION = 3s), quindi non sposta alcun confine.
 # Override con WHISPER_BEAM (5 = massima accuratezza del testo).
-DEFAULT_WHISPER_BEAM = _env_int("WHISPER_BEAM", 1)
+DEFAULT_WHISPER_BEAM = _env_int_positivo("WHISPER_BEAM", 1)
 # Decoding a batch (BatchedInferencePipeline di faster-whisper): stesso modello,
 # stessi pesi, stessa decodifica -> nessuna perdita di qualita', solo throughput.
 # 8 = batch ottimale misurato (16 non migliora, 40.1s vs 40.1s).
@@ -2181,14 +2281,14 @@ DEFAULT_WHISPER_BEAM = _env_int("WHISPER_BEAM", 1)
 # Sotto i ~6 GB di RAM il batch scende a 4: il batch e' memoria di picco,
 # e su un portatile da 4-8 GB conviene sprecare un po' di velocita' per
 # non rischiare l'OutOfMemory, che uccide la run.
-DEFAULT_WHISPER_BATCH = _env_int(
+DEFAULT_WHISPER_BATCH = _env_int_non_negativo(
     "WHISPER_BATCH", 4 if _RAM_TIER == "basso" else 8
 )
 # Beam size della decodifica ACCURATA: usato quando la timeline NON è vincolata
 # dalle ancore 'slide N', cioè quando il testo è l'unico segnale di
 # sincronizzazione (nessuna ancora, o quasi nessuna slide annunciata).
 # Override con WHISPER_BEAM_ACCURATE.
-DEFAULT_WHISPER_BEAM_ACCURATE = _env_int("WHISPER_BEAM_ACCURATE", 5)
+DEFAULT_WHISPER_BEAM_ACCURATE = _env_int_positivo("WHISPER_BEAM_ACCURATE", 5)
 # Scelta automatica del beam (vedi main._needs_accurate_beam). La decisione non
 # può essere presa prima di trascrivere: le ancore si conoscono solo dal testo.
 # Quindi si trascrive veloce (greedy) e, SOLO se le ancore vincolano meno di
@@ -2483,7 +2583,10 @@ def _float_cli(nome: str, minimo: float = 0.0, incluso: bool = True) -> Callable
             raise argparse.ArgumentTypeError(
                 f"{nome} vuole un numero (es. {nome}={esempio}), ricevuto {valore!r}"
             ) from None
-        valido = numero >= minimo if incluso else numero > minimo
+        # `float("inf")` passava ogni confronto >= e arrivava a build_windows
+        # o al rendering come durata infinita: i numeri non finiti si
+        # rifiutano qui, dove l'errore nomina il flag.
+        valido = math.isfinite(numero) and (numero >= minimo if incluso else numero > minimo)
         if not valido:
             operatore = ">=" if incluso else ">"
             raise argparse.ArgumentTypeError(f"{nome} deve essere {operatore} {minimo}, ricevuto {valore!r}")

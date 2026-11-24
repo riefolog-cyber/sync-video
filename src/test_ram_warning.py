@@ -16,6 +16,7 @@ import unittest
 from io import StringIO
 from unittest.mock import patch
 
+import config
 import machine_setup as ms
 
 GB = 1024**3
@@ -31,10 +32,16 @@ class _Args:
     openvino_model_dir = "x"
     video_encoder = "auto"
     whisper_model = "small"
+    semantic_model = config.DEFAULT_EMBEDDING_MODEL
 
 
 class TestWarnRamBassa(unittest.TestCase):
-    def _cattura(self, ram_gb: float | None, modello: str) -> list[str]:
+    def _cattura(
+        self,
+        ram_gb: float | None,
+        modello: str,
+        modello_embedding: str | None = None,
+    ) -> list[str]:
         buf = StringIO()
         handler = logging.StreamHandler(buf)
         logger = logging.getLogger()
@@ -47,6 +54,8 @@ class TestWarnRamBassa(unittest.TestCase):
         try:
             args = _Args()
             args.whisper_model = modello
+            if modello_embedding is not None:
+                args.semantic_model = modello_embedding
             with patch("hardware.ram_total_bytes", return_value=ram_gb):
                 ms._warn_ram_bassa(args)
         finally:
@@ -73,9 +82,23 @@ class TestWarnRamBassa(unittest.TestCase):
         self.assertEqual(self._cattura(None, "small"), [])
 
     def test_non_avvisa_se_ha_gia_scelto_un_modello_piccolo(self) -> None:
-        # Dirgli di scendere quando ci e' gia' sceso sarebbe rumore.
-        self.assertEqual(self._cattura(4 * GB, "tiny"), [])
-        self.assertEqual(self._cattura(4 * GB, "base"), [])
+        # Dirgli di scendere quando ci e' gia' sceso sarebbe rumore. Il
+        # modello che pesa e' quello di embedding: e' lui da 4,3 GB, non
+        # whisper. Abbassare solo whisper NON giustifica il silenzio.
+        self.assertEqual(
+            self._cattura(
+                4 * GB, "tiny", config.DEFAULT_EMBEDDING_MODEL_ALTERNATE
+            ),
+            [],
+        )
+
+    def test_avvisa_con_whisper_piccolo_e_embedding_grande(self) -> None:
+        # Il caso pericoloso: 4 GB, WHISPER_MODEL=tiny e l'embedding grande
+        # di default. Prima l'avviso taceva e l'utente scopriva l'OOM a run
+        # avviata, senza sapere che restava il modello da 4,3 GB.
+        righe = self._cattura(4 * GB, "tiny")
+        self.assertTrue(righe)
+        self.assertIn("4,3 GB", "\n".join(righe))
 
     def test_dice_sempre_cosa_mettere_in_env(self) -> None:
         testo = "\n".join(self._cattura(4 * GB, "small"))

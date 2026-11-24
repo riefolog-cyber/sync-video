@@ -60,6 +60,7 @@ from typing import Protocol
 from config import (
     CACHE_DIR,
     CUDA_LIBS_REMEDY,
+    DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
     atomic_write_text,
     cuda_available,
@@ -555,8 +556,11 @@ def _warn_ram_bassa(args: _TranscriberArgs) -> None:
     del confronto misurato scritti sotto, non un consiglio travisto da "per
     alleggerire".
 
-    Non avvisa se l'utente ha gia' scelto un modello piccolo: dirgli che deve
-    scendere quando ci e' gia' sceso sarebbe rumore.
+    Non avvisa solo se l'utente ha gia' scelto il modello di embedding PICCOLO:
+    e' quello da ~4,3 GB che occupa la RAM, non whisper (~500 MB). Guardare
+    `whisper_model` faceva tacere l'avviso proprio nel caso pericoloso: PC da
+    4 GB con WHISPER_MODEL=tiny e l'embedding grande di default, che resta
+    residente e puo' ancora esaurire la memoria.
     """
     from hardware import format_ram, memory_tier, ram_total_bytes
 
@@ -565,8 +569,9 @@ def _warn_ram_bassa(args: _TranscriberArgs) -> None:
     if tier == "ignoto" or tier == "alto":
         return
 
-    modello = str(getattr(args, "whisper_model", "") or "")
-    if modello in ("tiny", "base"):
+    modello_embedding = str(getattr(args, "semantic_model", "") or DEFAULT_EMBEDDING_MODEL)
+    modello_whisper = str(getattr(args, "whisper_model", "") or "")
+    if modello_embedding == DEFAULT_EMBEDDING_MODEL_ALTERNATE:
         return
 
     log.warning(
@@ -579,7 +584,7 @@ def _warn_ram_bassa(args: _TranscriberArgs) -> None:
         "      multilingual-e5-large tiene ~4,3 GB residenti, whisper %s altri ~500 MB. "
         "Il batch e' gia' ridotto automaticamente: la run sara' piu' lenta, "
         "non meno precisa.",
-        modello or "small",
+        modello_whisper or "small",
     )
     log.info(
         "      Se il PC non regge (memoria esaurita, PC che si blocca), il modo "

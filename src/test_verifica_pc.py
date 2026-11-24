@@ -247,11 +247,15 @@ class TestProvaSpazioModello(unittest.TestCase):
         rep = Relazione()
         with (
             mock.patch.object(config, "DEFAULT_WHISPER_MODEL", "medium"),
-            mock.patch.object(config, "_spazio_modelli_necessario", return_value=0) as spazio,
+            mock.patch.object(
+                config,
+                "_destinazioni_spazio_modelli",
+                return_value=[],
+            ) as destinazioni,
         ):
             verifica_pc.prova_spazio(rep, Path("."))
-        spazio.assert_called_once()
-        self.assertEqual(spazio.call_args.args[1], "medium")
+        destinazioni.assert_called_once()
+        self.assertEqual(destinazioni.call_args.args[1], "medium")
 
 
 class TestRete(unittest.TestCase):

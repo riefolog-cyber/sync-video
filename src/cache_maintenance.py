@@ -174,10 +174,14 @@ def clean_cache(
         # Il report dell'ultima run cita quei frame nei mismatches (tempo + slide):
         # cancellati i file, il riferimento resterebbe appeso a un file inesistente.
         # Azzeriamo il campo: la verifica successiva lo riscrive con i frame nuovi.
-        report = _load_sync_report(cache_dir=cache_dir)
-        if report and report.get("frame_check") is not None:
-            report["frame_check"] = None
-            _save_sync_report(report, cache_dir=cache_dir)
+        # Anche questa scrittura e' manutenzione: se il disco non collabora
+        # non deve interrompere i passi 4 e 5 (parziali e modelli), come non
+        # li interrompono le unlink protette qui sopra.
+        with contextlib.suppress(OSError):
+            report = _load_sync_report(cache_dir=cache_dir)
+            if report and report.get("frame_check") is not None:
+                report["frame_check"] = None
+                _save_sync_report(report, cache_dir=cache_dir)
     # 4. parziali di trascrizioni interrotte, vecchi: dopo una settimana non
     #    servono piu' a nessuno (se l'audio non e' stato rifatto, la run e'
     #    finita comunque). I recenti RESTANO: sono il punto della ripresa.

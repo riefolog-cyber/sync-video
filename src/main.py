@@ -6,6 +6,7 @@ Gestisce cache/resume, dry-run, e coordina tutte le fasi.
 
 import bisect
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -69,25 +70,43 @@ from config import (
 # I comandi di sola ispezione pero' devono essere innocui: "versione subito e
 # senza effetti" vale anche per pip, che puo' installare e arrivare fino a
 # sys.exit(1) solo a FORZA di importare questo modulo. Per loro il wrapper qui
-# sotto non passa nulla a config. La chiamata che resta in cima (prima degli
-# import pesanti, come impone il primo avvio su un PC vuoto) serve quindi solo
-# a garantire quegli import; la decisione sulla run vera e' dentro main(),
-# dopo i fast-path, con l'argv effettivo passato dal chiamante.
+# sotto non passa nulla a config... MA solo se i moduli pesanti importati
+# subito dopo ci sono gia': su un PC vuoto saltare l'installazione faceva
+# morire --version/--help con ModuleNotFoundError prima di arrivare a main().
+# La decisione sulla run vera e' dentro main(), dopo i fast-path, con l'argv
+# effettivo passato dal chiamante.
 _FLAG_SENZA_EFFETTI = frozenset({
     "--version",
     "--help",
     "-h",
     "--cache-du",
     "--frozen-report",
-    "--review",
     "--solo-riepilogo",
+    # --review NON e' qui: scrive il report e le anteprime e ha bisogno di
+    # ffmpeg, quindi non e' un'ispezione innocua come le altre.
 })
+# Moduli di terze parti senza cui gli import in cima a questo file muoiono
+# con ModuleNotFoundError. `find_spec` non li esegue: e' solo un controllo
+# di presenza, economico quanto la lettura di metadata gia' fatta dal
+# bootstrap.
+_MODULI_IMPORTATI_SUBITO = ("moviepy", "numpy", "PIL", "pymupdf")
 _dipendenze_verificate = False
 
 
 def _comando_senza_effetti(argv: Sequence[str]) -> bool:
-    """True se argv chiede solo informazioni/anteprime, senza toccare l'ambiente."""
+    """True se argv chiede solo informazioni, senza toccare l'ambiente."""
     return any(flag in argv for flag in _FLAG_SENZA_EFFETTI)
+
+
+def _moduli_gia_presenti() -> bool:
+    """True se i moduli importati subito dopo sono installabili.
+
+    Serve perche' saltare l'installazione su un PC vuoto faceva morire
+    ``--version``/``--help`` con ModuleNotFoundError prima di arrivare a
+    ``main()``: i moduli pesanti vengono importati subito dopo questa riga.
+    Se mancano, l'installazione va fatta anche per un comando di ispezione.
+    """
+    return all(importlib.util.find_spec(nome) is not None for nome in _MODULI_IMPORTATI_SUBITO)
 
 
 def installa_dipendenze_se_mancano(argv: Sequence[str] | None = None) -> bool:
@@ -97,12 +116,16 @@ def installa_dipendenze_se_mancano(argv: Sequence[str] | None = None) -> bool:
     fasi che seguono i fast-path): il flag evita di ripetere la scansione dei
     metadata quando in cima ha gia' fatto. Con ``argv=None`` si legge sys.argv,
     com'e' giusto per l'import del modulo.
+
+    Un comando senza effetti salta pip SOLO se i moduli necessari agli import
+    in cima ci sono gia': altrimenti il comando morirebbe durante l'import,
+    molto prima di poter stampare la versione o l'aiuto.
     """
     global _dipendenze_verificate
     if _dipendenze_verificate:
         return False
     argomenti = list(sys.argv[1:] if argv is None else argv)
-    if _comando_senza_effetti(argomenti):
+    if _comando_senza_effetti(argomenti) and _moduli_gia_presenti():
         return False
     _dipendenze_verificate = True
     return _config.installa_dipendenze_se_mancano()
@@ -166,6 +189,7 @@ from semantic_sync import (
     embed_seconds,
     last_quality,
     model_load_seconds,
+    potatura_cache_embedding,
     refine_diagnostics,
     refine_timeline_from_words,
     repair_segments_from_frames_from_words,
@@ -2205,9 +2229,14 @@ def _transcribe_with_accurate_beam(
     """
     beam = DEFAULT_WHISPER_BEAM_ACCURATE
     cached = None if args.no_cache else _load_cache(cache_key_accurate)
-    if cached and "transcript" in cached:
+    # Una voce vecchia (scritta prima che `words_raw` venisse salvato) può
+    # contenere il testo ma non le parole: riusarla farebbe sostituire il testo
+    # veloce senza aggiornare i tempi, e il confronto A/B finirebbe per
+    # confrontare la trascrizione veloce con se' stessa. Trattarla come miss.
+    parole_cached = cast("list[Word] | None", cached.get("words_raw")) if cached else None
+    if cached and "transcript" in cached and parole_cached:
         log.info("   [Beam] Trascrizione accurata (beam %d) recuperata dalla cache.", beam)
-        return cast(str, cached["transcript"]), cast("list[Word]", cached.get("words_raw") or []), {
+        return cast(str, cached["transcript"]), parole_cached, {
             "accurate_beam": beam,
             "accurate_from_cache": True,
         }
@@ -3135,6 +3164,17 @@ def _risolvi_encoder_video(args: Any) -> str:
     return risolto
 
 
+def _avvisa_verifica_non_eseguita(args: Any, motivo: str) -> None:
+    """--verify-video richiesto ma la verifica dei frame non e' raggiungibile."""
+    if getattr(args, "verify_video", False):
+        log.warning(
+            "   [Avviso] Hai chiesto --verify-video (o --strict-sync) con %s: "
+            "la verifica dei frame non viene eseguita perche' il video non e' "
+            "stato generato.",
+            motivo,
+        )
+
+
 def main(argv: list | None = None) -> None:
     args = parse_args(argv)
 
@@ -3738,7 +3778,11 @@ def main(argv: list | None = None) -> None:
         # li leggono sia le decisioni qui sotto sia i messaggi all'utente, e
         # devono esistere in OGNI ramo. Per questo la soglia dichiarata si
         # legge qui e non dentro il recupero.
-        _min_cov = float(getattr(args, "min_anchor_coverage", 0.0) or 0.0)
+        # Unica fonte della soglia: i due punti che la leggevano avevano
+        # default diversi (0.0 qui, 0.5 al gate), quindi un Namespace scritto
+        # a mano poteva prendere due decisioni contraddittorie nella stessa
+        # run. Il default e' quello della CLI (0.5).
+        _min_cov = float(getattr(args, "min_anchor_coverage", 0.5) or 0.0)
         _gap_seconds = 0.0
         _gap_recovered: list[int] = []
         _gap_deferred = False
@@ -3858,11 +3902,15 @@ def main(argv: list | None = None) -> None:
                 f"{_beam_escalation_threshold(_min_cov):.0%}",
                 DEFAULT_WHISPER_BEAM_ACCURATE,
             )
-            transcript, accurate_words, beam_note = _transcribe_with_accurate_beam(
+            accurate_transcript, accurate_words, beam_note = _transcribe_with_accurate_beam(
                 audio_path, args, cache_key_transcript_accurate
             )
             t_transcribe += float(cast("float", beam_note.pop("accurate_seconds", 0.0)) or 0.0)
             if accurate_words:
+                # Testo e parole si scambiano INSIEME: se le parole mancano,
+                # tenere il testo accurato darebbe un report che descrive una
+                # trascrizione diversa da quella su cui girano le ancore.
+                transcript = accurate_transcript
                 # Stesso vocabolario e stessa lista di correzioni della veloce:
                 # cosi' il confronto A/B misura il beam, non un trattamento
                 # diverso delle due trascrizioni.
@@ -4026,16 +4074,22 @@ def main(argv: list | None = None) -> None:
             # non annuncia (tutte) le slide NON genera un video degradato (slide
             # stimate + micro-segmenti). Meglio fermarsi e rigenerare l'audio: il
             # prompt NotebookLM richiede l'annuncio di ogni slide.
+            # Con una sola slide non esiste NESSUNA transizione da annunciare:
+            # `not early_anchors` era True e faceva abortire un deck di una
+            # pagina con --require-full-anchors, pur non mancando nulla.
+            # Il gate va sulle transizioni attese, non sul dict grezzo.
+            transizioni_attese = max(total_slides - 1, 0)
             if (
                 args.require_full_anchors
-                and (not early_anchors or early_missing)
+                and transizioni_attese > 0
+                and early_missing
             ):
                 _abort(
                     "Ancore 'slide N' incomplete: "
                     + (
                         "nessuna ancora trovata nella trascrizione"
                         if not early_anchors
-                        else f"{len(early_anchors)} su {total_slides - 1} annunciate "
+                        else f"{len(early_anchors)} su {transizioni_attese} annunciate "
                         f"(mancanti: {', '.join(str(s) for s in early_missing)})"
                     )
                     + ".\n"
@@ -4059,7 +4113,7 @@ def main(argv: list | None = None) -> None:
             # qualitativo, quindi sotto soglia la decodifica accurata viene
             # provata PRIMA di fermarsi. Fermarsi al primo tentativo, quando ne
             # restava uno tarato esattamente su questo caso, era il vero difetto.
-            min_cov = float(getattr(args, "min_anchor_coverage", 0.5) or 0)
+            min_cov = _min_cov
             if flow_assumed:
                 log.info(
                     "   [Ancore] Soglia di copertura non applicata: l'audio "
@@ -4901,6 +4955,7 @@ def main(argv: list | None = None) -> None:
                 "Rimuovi --preview per creare il video (--dry-run, invece, "
                 "si ferma prima di questa anteprima)."
             )
+            _avvisa_verifica_non_eseguita(args, "--preview")
             return
 
         # --- Controllo incrociato annunci / confini dichiarati ---
@@ -4938,6 +4993,7 @@ def main(argv: list | None = None) -> None:
 
         # --- Dry-run: fermati qui ---
         if args.dry_run:
+            _avvisa_verifica_non_eseguita(args, "--dry-run")
             t_total = time.time() - t_total_start
             _print_timing(
                 t_ocr,
@@ -5216,6 +5272,13 @@ def main(argv: list | None = None) -> None:
         if audio_clip is not None:
             audio_clip.close()
             log.debug("   audio_clip cleanup eseguito.")
+        # Potatura esplicita a fine run. La soglia di 20 scritture dentro
+        # `_salva_cache_voce` non scatta quasi mai (una run ancorata scrive ~3
+        # voci, una senza ancore ~18), quindi senza questa chiamata i tetti di
+        # 300 MB / 30 giorni resterebbero codice morto e la cache crescerebbe
+        # a ogni run. Best-effort: e' manutenzione, non risultato della run.
+        with suppress(Exception):
+            potatura_cache_embedding(cache_dir=CACHE_DIR)
 
 
 # =====================================================================

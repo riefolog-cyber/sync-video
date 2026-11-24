@@ -24,6 +24,7 @@ un'eccezione. Stessa natura dei probe in ``config._physical_cpus``.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import json
 import os
@@ -31,6 +32,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -372,13 +374,23 @@ def _read_encoder_cache() -> frozenset[str] | None:
 def _write_encoder_cache(encoders: frozenset[str]) -> None:
     # Non-fattibile e' un caso normale (cache in sola lettura, progetto su
     # share di rete): la mancanza del file costa un probe in piu', niente di grave.
+    tmp_name: str | None = None
     try:
         payload = {"fingerprint": _cache_fingerprint(), "ts": time.time(), "encoders": sorted(encoders)}
         HARDWARE_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = HARDWARE_CACHE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, HARDWARE_CACHE)
+        # Nome UNICO: il vecchio `.json.tmp` fisso era condiviso da due
+        # processi, che potevano troncare lo stesso file a vicenda (e su
+        # Windows non riuscivano nemmeno a sostituirlo).
+        fd, tmp_name = tempfile.mkstemp(
+            dir=HARDWARE_CACHE.parent, prefix=HARDWARE_CACHE.name + ".", suffix=".tmp"
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False))
+        os.replace(tmp_name, HARDWARE_CACHE)
     except OSError:
+        if tmp_name is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_name)
         return
 
 

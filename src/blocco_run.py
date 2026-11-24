@@ -24,6 +24,7 @@ Tre esiti (``tenta``), perche' "occupato" e "non creabile" sono cose diverse:
 from __future__ import annotations
 
 import os
+import threading
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -69,6 +70,11 @@ class _BloccoCondiviso:
 
 
 _proprietari: dict[Path, _BloccoCondiviso] = {}
+# Il controllo su `_proprietari` e la presa del lock del SO devono essere
+# atomici fra thread dello stesso processo: senza, due thread potevano
+# entrambi non trovare la chiave, creare due lock distinti e finish per
+# aspettare 15 minuti uno contro l'altro.
+_proprietari_lock = threading.Lock()
 
 
 class BloccoRun:
@@ -92,22 +98,32 @@ class BloccoRun:
         Con ``attesa_secondi`` si aspetta che l'altra run finisca: di solito e'
         un rilancio mentre la prima lavora, non due run in competizione.
         """
-        if self._stato is not None:
-            # Questo oggetto ha gia' preso (o ereditato) il blocco: un secondo
-            # `tenta`/`acquired` non deve contarlo due volte.
-            return PRESO
-        stato = _proprietari.get(self._chiave)
-        if stato is not None:
-            # Non e' un nuovo lock del SO: ci si aggrega a quello gia' preso,
-            # ma il proprietario va contato, altrimenti il `__del__` del primo
-            # toglierebbe la chiave e chiuderebbe il file sotto il secondo.
-            stato.utenti += 1
-            self._stato = stato
-            return PRESO
+        with _proprietari_lock:
+            if self._stato is not None:
+                # Questo oggetto ha gia' preso (o ereditato) il blocco: un
+                # secondo `tenta`/`acquired` non deve contarlo due volte.
+                return PRESO
+            stato = _proprietari.get(self._chiave)
+            if stato is not None:
+                # Non e' un nuovo lock del SO: ci si aggrega a quello gia'
+                # preso, ma il proprietario va contato, altrimenti il
+                # `__del__` del primo toglierebbe la chiave e chiuderebbe
+                # il file sotto il secondo.
+                stato.utenti += 1
+                self._stato = stato
+                return PRESO
         deadline = time.time() + max(0.0, attesa_secondi)
         avvisato = False
         while True:
-            esito = self._prova()
+            with _proprietari_lock:
+                # Un altro thread dello stesso processo può averlo preso
+                # mentre dormivamo: non serve un lock del SO nuovo.
+                stato = _proprietari.get(self._chiave)
+                if stato is not None:
+                    stato.utenti += 1
+                    self._stato = stato
+                    return PRESO
+                esito = self._prova()
             if esito != OCCUPATO:
                 return esito
             if time.time() >= deadline:
@@ -155,19 +171,24 @@ class BloccoRun:
 
     def release(self) -> None:
         """Rilascia il blocco (il SO lo rilascia comunque alla fine del processo)."""
-        stato = self._stato
-        if stato is None:
-            # Questo oggetto non ha mai preso (o ha gia' rilasciato) il blocco.
-            return
-        self._stato = None
-        self._file = None
-        stato.utenti -= 1
-        if stato.utenti > 0:
-            # Un altro oggetto crede ancora di tenere il blocco: il file resta
-            # aperto (e' referenziato dallo stato condiviso), quindi il lock del
-            # SO resta attivo anche se questo e' il proprietario originale.
-            return
-        _proprietari.pop(self._chiave, None)
+        with _proprietari_lock:
+            stato = self._stato
+            if stato is None:
+                # Questo oggetto non ha mai preso (o ha gia' rilasciato) il blocco.
+                return
+            self._stato = None
+            self._file = None
+            stato.utenti -= 1
+            if stato.utenti > 0:
+                # Un altro oggetto crede ancora di tenere il blocco: il file
+                # resta aperto (e' referenziato dallo stato condiviso), quindi
+                # il lock del SO resta attivo anche se questo era il
+                # proprietario originale.
+                return
+            # Non togliere lo stato di un altro oggetto: dopo una
+            # riacquisizione la chiave può puntare a un nuovo _BloccoCondiviso.
+            if _proprietari.get(self._chiave) is stato:
+                _proprietari.pop(self._chiave, None)
         fh = stato.file
         try:
             fh.seek(0)
@@ -179,6 +200,17 @@ class BloccoRun:
             pass
         finally:
             fh.close()
+
+    def __enter__(self) -> BloccoRun:
+        """Uso con `with`: il blocco si rilascia anche se la run solleva."""
+        if self.tenta() == OCCUPATO:
+            raise RuntimeError(
+                f"Un'altra run tiene il blocco su {self.path}: riprova quando e' finita."
+            )
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
 
     def __del__(self) -> None:
         # main() non ha un `finally` attorno a tutta la run: se il blocco non

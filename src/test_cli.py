@@ -439,6 +439,43 @@ class TestCorrezioneNomiTutteLeTrascrizioni(unittest.TestCase):
         self.assertTrue(correzioni, "la correzione va annotata per il report")
 
 
+class TestDipendenzeSoloSeServonoCompleta(unittest.TestCase):
+    def test_comando_senza_effetti_su_pc_vuoto_installa_comunque(self) -> None:
+        """--version non puo' morire con ModuleNotFoundError durante l'import.
+
+        I moduli pesanti sono importati subito dopo la scansione: se non ci
+        sono, l'installazione va fatta anche per un comando di ispezione.
+        """
+        import main
+
+        with (
+            mock.patch.object(config, "installa_dipendenze_se_mancano", return_value=True) as installa,
+            mock.patch.object(main, "_dipendenze_verificate", False),
+            mock.patch.object(main, "_moduli_gia_presenti", return_value=False),
+        ):
+            self.assertTrue(main.installa_dipendenze_se_mancano(["--version"]))
+        installa.assert_called_once_with()
+
+    def test_review_non_e_senza_effetti(self) -> None:
+        """--review scrive report e anteprime: ha bisogno delle dipendenze."""
+        import main
+
+        self.assertNotIn("--review", main._FLAG_SENZA_EFFETTI)
+        with (
+            mock.patch.object(config, "installa_dipendenze_se_mancano", return_value=True) as installa,
+            mock.patch.object(main, "_dipendenze_verificate", False),
+        ):
+            main.installa_dipendenze_se_mancano(["--review"])
+        installa.assert_called_once_with()
+
+    def test_float_infinito_rifiutato(self) -> None:
+        """float('inf') passava il controllo >= 0 e arrivava al rendering."""
+        with self.assertRaises(SystemExit):
+            config.parse_args(["--semantic-window", "inf"])
+        with self.assertRaises(SystemExit):
+            config.parse_args(["--semantic-window", "nan"])
+
+
 class TestParametriTrascrizioneUnicaFonte(unittest.TestCase):
     def test_chiave_e_params_usano_la_stessa_funzione(self) -> None:
         import main

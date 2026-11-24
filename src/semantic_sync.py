@@ -167,8 +167,15 @@ def weak_signal_seen() -> bool:
 
 
 def last_quality() -> dict[str, float]:
-    """Qualità dell'ultimo allineamento: ``avg_sim`` (cosine grezza), ``avg_z``
-    (picco medio normalizzato) e la soglia usata ``min_avg_z``.
+    """Qualità dell'ultimo allineamento (chiavi presenti in base al percorso).
+
+    Nel percorso DP ci sono ``avg_sim`` (cosine grezza), ``avg_z`` (picco medio
+    normalizzato) e la soglia ``min_avg_z``. Nel percorso tutto-ancorato i
+    blocchi non vengono embeddati, quindi ``avg_sim``/``avg_z`` NON esistono:
+    ci sono solo ``min_avg_z`` e ``confusability`` (e ``concordance`` quando
+    calcolabile). Se l'embedding delle slide fallisce il dict puo' essere
+    vuoto. I chiamanti usano sempre ``.get()``: il contratto e' "il più
+    possibile", non "queste chiavi ci sono sempre".
 
     Esposta al chiamante per il report (``sync_report.json``) e il riepilogo
     finale: così una run può essere riesaminata senza rifare l'embedding.
@@ -547,15 +554,23 @@ def _prune_embed_cache(cache_dir: Path | None = None) -> int:
             # rinunciare a potare TUTTO il resto.
             continue
         voci.append((p, info.st_mtime, info.st_size))
-    voci.sort(key=lambda v: v[1], reverse=True)
+    voci.sort(key=lambda v: v[1], reverse=True)  # dal piu' recente al piu' vecchio
     totale = 0
     rimosse = 0
+    # Superato il tetto byte, si cancellano la voce corrente E TUTTE le
+    # restanti (che sono piu' vecchie): tenere una vecchia piccola e aver
+    # buttato una nuova piu' grande era l'effetto del vecchio ciclo, che
+    # non aggiornava `totale` dopo un taglio e poi tornava a tenere voci.
+    taglio_byte = False
     for path, mtime, size in voci:
         troppo_vecchia = (time.time() - mtime) > _EMBED_CACHE_MAX_ETA_GIORNI * 86400
-        if troppo_vecchia or totale + size > _EMBED_CACHE_MAX_BYTES:
+        supera_tetto = totale + size > _EMBED_CACHE_MAX_BYTES
+        if troppo_vecchia or supera_tetto or taglio_byte:
             with contextlib.suppress(OSError):
                 path.unlink()
                 rimosse += 1
+            if supera_tetto:
+                taglio_byte = True
             continue
         totale += size
     if rimosse:
@@ -696,9 +711,18 @@ def _salva_cache_voce(embed_id: str, texts: Sequence[str], arr: np.ndarray, save
         # Indice aggiornato SENZA riaprire il file appena scritto: chiavi e
         # righe sono quelle che abbiamo sotto mano, la mtime si legge una volta.
         mtime = path.stat().st_mtime
-        # Se l'indice non era ancora stato costruito (o e' cambiato un altro
-        # processo) lo si aggiorna una volta, poi si aggiunge la voce nuova.
-        per_modello = _indice_embedding().setdefault(embed_id, {})
+        # `np.savez` ha appena creato un file: la mtime della cartella e'
+        # cambiata, e chiamare `_indice_embedding()` qui rifarebbe l'indice
+        # INTERO a ogni scrittura. Lo si ricostruisce solo se era assente o
+        # gia' disallineato PRIMA di scrivere; nuovo file a parte, l'indice e'
+        # quello giusto e lo si aggiorna in place.
+        try:
+            mtime_cartella_prima = _EMBED_CACHE_DIR.stat().st_mtime
+        except OSError:
+            mtime_cartella_prima = None
+        if mtime_cartella_prima is None or mtime_cartella_prima != _EMBED_INDEX_DIR_MTIME:
+            _indice_embedding()
+        per_modello = _EMBED_INDEX.setdefault(embed_id, {})
         for riga, testo in enumerate(texts):
             per_modello[_chiave_testo(testo)] = (path, riga, mtime)
         _EMBED_INDEX_DIR_MTIME = _EMBED_CACHE_DIR.stat().st_mtime
@@ -734,6 +758,23 @@ def _embed_list(embed_fn: EmbedFn, texts: Sequence[str], context: str) -> np.nda
     embed_id = str(getattr(embed_fn, "embed_id", "") or "")
     if embed_id and _EMBED_CACHE_ENABLED and texts:
         riusati, mancanti = _riuso_parziale(embed_id, texts)
+        # Tutti i testi sono gia' in cache, ma NON come questa lista esatta
+        # (altrimenti `_embed_list_cached` avrebbe gia' risposto): non
+        # ricalcolare niente. Il vecchio branch richiedeva `mancanti` non
+        # vuoto, quindi il caso "tutto riusato" finiva a embeddare di nuovo
+        # tutti i testi, cio' che il riuso parziale doveva evitare.
+        if riusati and not mancanti:
+            dimensioni = {vec.shape[0] for vec in riusati.values()}
+            if len(dimensioni) == 1:
+                arr = np.stack([riusati[i] for i in range(len(texts))])
+                _salva_cache_voce(embed_id, texts, arr, 0.0)
+                log.info(
+                    "   [%s] Embedding riusato per tutti i %d testi (stessi testi, "
+                    "stesso modello): nessun vettore ricalcolato.",
+                    context,
+                    len(texts),
+                )
+                return arr
         if riusati and mancanti and len(mancanti) < len(texts):
             t0 = time.time()
             try:
@@ -1419,12 +1460,8 @@ def semantic_timeline_from_texts(
     min_avg_z = opts.min_avg_z
     temperature = opts.temperature
 
-    if total_slides < 2 or len(blocks) < total_slides:
-        log.warning(
-            "   [Semantico] %d blocchi < %d slide: segnale insufficiente.",
-            len(blocks),
-            total_slides,
-        )
+    if total_slides < 2:
+        log.warning("   [Semantico] Serve piu' di una slide per sincronizzare.")
         return None
 
     # Filtro unico, prima dei due rami (tutto ancorato / DP): cosi' l'avviso
@@ -1439,6 +1476,13 @@ def semantic_timeline_from_texts(
     # slide annunciata RESTA (e' un'altra catena, molto piu' piccola: le slide
     # e gli estratti). Non si rinuncia a nulla sulla timeline: e' la stessa,
     # costruita dagli stessi tempi.
+    #
+    # Questo ramo va PRIMA del controllo sui blocchi: con una trascrizione
+    # breve i blocchi possono essere meno delle slide, ma se il relatore ha
+    # annunciato OGNI transizione i tempi pronunciati bastano, e i blocchi non
+    # servono (e' tutto cio' che `_timeline_solo_ancore` fa). Mettere il
+    # controllo sui blocchi prima faceva fallire proprio il caso che il
+    # percorso tutto-ancorato doveva risolvere.
     if anchors and len(anchors) == total_slides - 1:
         return _timeline_solo_ancore(
             anchors,
@@ -1448,6 +1492,14 @@ def semantic_timeline_from_texts(
             slide_texts,
             min_avg_z,
         )
+
+    if len(blocks) < total_slides:
+        log.warning(
+            "   [Semantico] %d blocchi < %d slide: segnale insufficiente.",
+            len(blocks),
+            total_slides,
+        )
+        return None
 
     embedded = _embed_and_report(slide_texts, blocks, total_slides, embed_fn, "Semantico")
     if embedded is None:
@@ -1632,7 +1684,12 @@ def semantic_timeline_from_words(
     log.info("   Sincronizzazione semantica: embedding slide-trascrizione...")
 
     blocks = build_semantic_blocks(words_raw, total_duration, opts.window_seconds)
-    if len(blocks) < total_slides:
+    # con OGNI transizione annunciata i blocchi non servono: la timeline viene
+    # dai soli tempi delle ancore (vedi `_timeline_solo_ancore`). Non fermarsi
+    # qui anche se la trascrizione e' troppo breve per riempire le slide.
+    valide = _ancore_valide(anchors, total_slides, total_duration)
+    tutto_ancorato = bool(valide) and len(valide) == total_slides - 1
+    if not tutto_ancorato and len(blocks) < total_slides:
         log.warning(
             "   [Semantico] Blocchi trascrizione insufficienti (%d < %d slide).",
             len(blocks),
@@ -1962,7 +2019,11 @@ def verify_anchor_mapping_embedding(
         # Con similarità tutte nulle (vettore degenere: testo fuori dal lessico
         # delle slide, embedding vuoto) non c'è un rumore da misurare: l'argmax
         # è un caso, non un parere, e il comportamento resta quello di prima.
-        if off != 0 and 1 <= s <= total_slides and float(np.max(sims)) > 0.0:
+        # `sims` ha una riga per slide EMBEDDATA, non per slide dichiarata:
+        # `slide_clean` e' troncato a `total_slides`, quindi con slide_texts
+        # piu' corti un'ancora oltre quella lunghezza faceva `sims[s-1]`
+        # fuori limite. Il controllo va sulla forma reale della matrice.
+        if off != 0 and 1 <= s <= sims.shape[0] and float(np.max(sims)) > 0.0:
             # Il margine è la distanza fra la pagina annunciata e la migliore:
             # va confrontato col rumore della STESSA finestra, perché su un deck
             # monotematico tutte le similarità stanno nella stessa banda (run del

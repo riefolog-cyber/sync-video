@@ -83,12 +83,26 @@ class TestDimensioneCoerenteColNome(unittest.TestCase):
 class TestSpazioZeroNonEIgnoto(unittest.TestCase):
     """0 e None non sono la stessa cosa, e il referto non li scambia."""
 
+    def _destinazioni(self, necessario: int | None) -> list[tuple[Path, str, int]] | None:
+        """0 = tutto in cache, None = non calcolabile, altrimenti una destinazione."""
+        if necessario is None:
+            return None
+        if necessario == 0:
+            return []
+        return [
+            (
+                Path("C:/emb"),
+                "cache dei modelli (cartella del progetto)",
+                necessario + config._MARGINE_DISCO,
+            )
+        ]
+
     def _esito(self, necessario: int | None) -> verifica_pc.Esito:
         r = verifica_pc.Relazione()
         with mock.patch.object(
             config,
-            "_spazio_modelli_necessario",
-            lambda *a, **k: necessario,
+            "_destinazioni_spazio_modelli",
+            lambda *a, **k: self._destinazioni(necessario),
         ), mock.patch.object(verifica_pc, "disk_free_bytes", lambda *a, **k: 100 * GB):
             verifica_pc.prova_spazio(r, Path("C:/"))
         return next(e for e in r.esiti if e.nome == "Spazio disco")
@@ -161,8 +175,14 @@ class TestIlRefertoNonEmenoPermissivoDellaGuardia(unittest.TestCase):
         with (
             mock.patch.object(
                 config,
-                "_spazio_modelli_necessario",
-                lambda *a, **k: config._BYTES_CACHE_EMBEDDING,
+                "_destinazioni_spazio_modelli",
+                lambda *a, **k: [
+                    (
+                        Path("C:/emb"),
+                        "cache dei modelli (cartella del progetto)",
+                        config._BYTES_CACHE_EMBEDDING + config._MARGINE_DISCO,
+                    )
+                ],
             ),
             mock.patch.object(verifica_pc, "disk_free_bytes", lambda *a, **k: 50 * GB),
         ):
@@ -184,8 +204,14 @@ class TestIlRefertoNonEmenoPermissivoDellaGuardia(unittest.TestCase):
         """Se i due numeri divergono di nuovo, qui si vede subito."""
         with mock.patch.object(
             config,
-            "_spazio_modelli_necessario",
-            lambda *a, **k: 1 * GB,
+            "_destinazioni_spazio_modelli",
+            lambda *a, **k: [
+                (
+                    Path("C:/emb"),
+                    "cache dei modelli (cartella del progetto)",
+                    1 * GB + config._MARGINE_DISCO,
+                )
+            ],
         ):
             r = verifica_pc.Relazione()
             with mock.patch.object(verifica_pc, "disk_free_bytes", lambda *a, **k: 50 * GB):

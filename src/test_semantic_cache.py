@@ -93,6 +93,25 @@ class TestHelperCondivisi(unittest.TestCase):
         self.assertEqual(valide, {2: 10.0})
         self.assertIn("Scartate 2 ancore", "\n".join(catturati.output))
 
+    def test_tutto_ancorato_non_ha_bisogno_dei_blocchi(self) -> None:
+        # Con una trascrizione breve i blocchi possono essere meno delle
+        # slide, ma se OGNI transizione e' annunciata la timeline viene dai
+        # tempi pronunciati: il guard-rail sui blocchi non deve impedirlo.
+        con_timeline = mock.patch.object(
+            semantic_sync, "_timeline_solo_ancore", return_value={1: 0.0, 2: 10.0, 3: 20.0}
+        )
+        with con_timeline as solo:
+            esito = semantic_sync.semantic_timeline_from_texts(
+                ["a", "b", "c"],
+                [{"time": 0.0, "text": "solo un blocco"}],
+                total_slides=3,
+                total_duration=60.0,
+                embed_fn=lambda texts: np.zeros((len(list(texts)), 4), dtype=np.float32),
+                anchors={2: 10.0, 3: 20.0},
+            )
+        solo.assert_called_once()
+        self.assertEqual(esito, {1: 0.0, 2: 10.0, 3: 20.0})
+
     def test_avviso_arriva_anche_nel_ramo_tutto_ancorato(self) -> None:
         # Il ramo "tutte le ancore" non embedda i blocchi: per questo prima
         # l'avviso mancava. Basta che il filtro venga chiamato prima del ramo.
@@ -117,6 +136,35 @@ class TestHelperCondivisi(unittest.TestCase):
         atteso = [(blk, s - 1) for s in range(1, 4) for blk in range(starts[s - 1], 10 if s == 3 else starts[s])]
         self.assertEqual(semantic_sync._assigned_pairs(starts, 3, 10), atteso)
         self.assertIn((9, 2), atteso)  # l'ultima slide prende i blocchi finali
+
+
+class TestRiusoCompleto(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.cache = Path(self._tmp.name)
+        semantic_sync.reset_embed_cache()
+        self.addCleanup(semantic_sync.reset_embed_cache)
+        patch = mock.patch.object(semantic_sync, "_EMBED_CACHE_DIR", self.cache)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_tutti_i_testi_riusati_non_ricalcola_niente(self) -> None:
+        # I tre testi sono in cache ma NON come lista identica: la cache per
+        # lista non risponde, il riuso parziale li trova tutti. Il vecchio
+        # ramo richiedeva `mancanti` non vuoto e finiva per embeddare tutto.
+        _voce(self.cache, "ab", ["alfa", "beta"], [1.0, 2.0])
+        _voce(self.cache, "c", ["gamma"], [3.0])
+
+        def non_chiamare(texts: object) -> np.ndarray:
+            raise AssertionError("nessun embedding doveva essere ricalcolato")
+
+        arr = semantic_sync._embed_list(
+            mock.Mock(embed_id="fake|b16", side_effect=non_chiamare),
+            ["alfa", "beta", "gamma"],
+            "Test",
+        )
+        np.testing.assert_array_equal(arr[:, 0], np.array([1.0, 2.0, 3.0], dtype=np.float32))
 
 
 if __name__ == "__main__":

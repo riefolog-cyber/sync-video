@@ -273,7 +273,71 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1492 test).
+`python -m unittest discover -s src -p "test_*.py"` (1500 test).
+
+## Batch 12 — revisione delle revisioni (2026-11)
+
+Una seconda revisione del codice appena scritto ha trovato un difetto che
+rompeva la suite (il conteggio dei test nelle doc, che non era stato aggiornato)
+e una quindicina di problemi di comportamento. Ognuno ha un test che lo copre;
+le correzioni più importanti sono quelle che facevano leggere dati sbagliati
+senza avvisare.
+
+**La cache degli embedding non perde più i vettori riusati.** Il riuso parziale
+funzionava solo se mancava almeno un testo: quando la lista era cambiata ma
+TUTTI i testi erano già in cache, il `mancanti=[]` (falso) faceva ricalcolare
+tutto da zero. Inoltre la potatura a fine run non veniva mai chiamata (la
+soglia di 20 scritture non scatta con le 3-18 voci di una run), quindi i tetti
+di 300 MB e 30 giorni erano codice morto; ora `main()` la chiama una volta in
+`finally`. L'indice del riuso non si ricostruisce più a ogni scrittura, e il
+taglio per byte non butta una voce recente per tenere una vecchia piccola.
+
+**L'ancoraggio completo non dipende più dal numero di blocchi.** Se OGNI
+transizione è annunciata, la timeline viene dai tempi pronunciati e i blocchi
+non servono; il vecchio controllo "blocchi < slide" bloccava proprio il caso
+che il percorso tutto-ancorato doveva risolvere (trascrizione breve).
+
+**`--review` rilegge la trascrizione giusta.** `main()` salva la chiave
+effettiva in cima al report, ma `--review` la cercava dentro `anchors`:
+trovava sempre `None` e prendeva la trascrizione più recente per mtime, che
+dopo un escalation del beam non è quella della timeline. Il formato del test
+è stato allineato a quello reale; i report vecchi restano leggibili grazie al
+fallback annidato.
+
+**L'aggiornamento accurato non scambia testo e parole disallineati.** Una
+voce di cache vecchia poteva contenere il testo senza `words_raw`: il testo
+veniva sostituito mentre i tempi restavano quelli veloci, e il confronto A/B
+finiva per confrontare la trascrizione veloce con se stessa. Ora quella voce
+viene trattata come mancante e testo e parole si scambiano insieme.
+
+**Il PC piccolo viene avvisato anche con Whisper tiny.** L'avviso di RAM
+taceva se l'utente aveva scelto `WHISPER_MODEL=tiny`, ma il modello da 4,3 GB
+che occupa la RAM è quello di embedding, che resta invariato. Ora il silenzio
+scatta solo se si è scelto il modello di embedding leggero.
+
+**Spazio disco e referto usano la stessa fonte.** `verifica_pc` controllava
+"small" scritto a mano e la radice del progetto come destinazione embedding;
+ora usa `DEFAULT_WHISPER_MODEL`, la vera cartella dei modelli e la stessa
+ripartizione per disco della guardia di bootstrap. Su dischi diversi ciascuno
+deve ospitare solo il proprio modello, non il totale di entrambi.
+
+**I comandi di ispezione funzionano su un PC vuoto.** Saltare pip per
+`--version`/`--help` faceva morire l'import con `ModuleNotFoundError` prima di
+poter stampare la versione: ora l'installazione viene saltata solo se i moduli
+pesanti sono già presenti. `--review` non è più classificato come comando
+senza effetti (scrive report e anteprime e usa ffmpeg).
+
+**Altre correzioni.** `--require-full-anchors` non ferma più un deck di una
+slide (zero transizioni da annunciare); `--strict-sync` con `--dry-run` o
+`--preview` avvisa che la verifica dei frame non gira; i valori non finiti e
+quelli fuori range arrivano rifiutati dall'argparse e dal `.env` invece che
+dopo il bootstrap; `controlli.py` trova `_debug_hardware.py` anche se lanciato
+da `src/`; la cache dell'encoder usa un file temporaneo unico; il blocco run è
+anche un context manager e conta i proprietari in modo atomico fra thread.
+
+Verifiche: `ruff` e `mypy` puliti, 1500 test verdi (8 nuovi). La verifica su
+questo PC segnala ancora un KO `Motore` per OpenVINO non utilizzabile: è
+l'ambiente della macchina di sviluppo, non una regressione del codice.
 
 ## Stato delle voci
 
