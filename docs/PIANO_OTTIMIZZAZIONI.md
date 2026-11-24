@@ -273,7 +273,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1512 test).
+`python -m unittest discover -s src -p "test_*.py"` (1523 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -429,6 +429,43 @@ binario Tesseract e la CI notturna ha un job di warmup della cache. I documenti
 che ancora parlavano di MoviePy, di 40 voci di cache, di `--review` come
 comando di sola lettura e di `WHISPER_MODEL=tiny` come alleggerimento dei pesi
 sono stati allineati al codice.
+
+## Batch 15 — motori e casi limite (2026-11)
+
+Quinta revisione, concentrata sulle parti mai lette riga per riga: motore
+semantico, trascrizione, ancore e finestratura.
+
+**Le chiavi di cache non collidono più.** `_embed_cache_key` usava un semplice
+separatore: `["a", "b"]` e `["a\x01b"]` producevano la stessa chiave. Ora ogni
+testo è preceduto dalla sua lunghezza. La riusata integrale, inoltre, non
+riscrive più la voce con `seconds=0` (che faceva dire "0s risparmiati" su una
+cache che aveva fatto risparmiare minuti).
+
+**Verifica ancore più onesta.** Un'ancora con numero oltre le slide effettivamente
+embeddate non può essere verificata: prima produceva comunque un offset negativo
+dall'argmax di una matrice di zeri, avvelenando `unconfirmed` e l'inferenza del
+derive. Ora viene saltata; con similarità tutte nulle resta nel conteggio ma non
+propone spostamenti. `segment_verdict`, `_window_words`, `_clamp_monotono` e la
+finestratura delle parole hanno ricevuto gli stessi guardi difensivi di
+`TimeIndex` (parole non ordinate, indici fuori deck, slide 1 non a zero).
+
+**Trascrizione.** Le due prove (veloce/accurata) ora hanno chiavi di cache
+distinte anche con OpenVINO, che ignora il beam: prima la "accurata" rileggeva
+il testo greedy e il report mentiva. `auto` verifica che il device OpenVINO
+esista davvero prima di sceglierlo, invece di morire con "device not found" su
+un PC con il modello IR ma senza iGPU. ffmpeg non eredita più la console
+(`-nostdin` + stdin devnull), il fallback pydub forza il PCM a 16 bit e
+`--no-ripresa` vale anche per la seconda decodifica.
+
+**Ancore e annunci.** Il controllo annunci/confini applica l'offset PRIMA del
+filtro di portata (prima "slide 15" con offset -1 su 14 pagine veniva scartata),
+riconosce anche la forma "quattro ... alla slide" e deduplica gli annunci ripetuti.
+I conteggi ("le 2 slide del documento") non alzano più il numero massimo e non
+rubano la transizione vera. Il recupero dell'ultima transizione usa il numero di
+pagine del deck, non l'ultima ancora nota. Decimali e intervalli ("1.5", "3-4")
+non diventano più slide 15 e 34.
+
+Verifiche: `ruff` e `mypy` puliti, 1523 test verdi.
 
 ## Stato delle voci
 

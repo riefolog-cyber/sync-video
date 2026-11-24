@@ -180,5 +180,34 @@ class TestRiusoCompleto(unittest.TestCase):
         self.assertEqual(aperture_seconda, 0)
 
 
+class TestChiaviERobustezza(unittest.TestCase):
+    def test_chiave_lista_non_collide_con_testo_con_separatore(self) -> None:
+        # ["a", "b"] e ["a\x01b"] producevano gli stessi byte con il
+        # separatore semplice: due liste diverse, una chiave di cache sola.
+        a = semantic_sync._embed_cache_key("m", ["a", "b"])
+        b = semantic_sync._embed_cache_key("m", ["a\x01b"])
+        self.assertNotEqual(a, b)
+
+    def test_segment_verdict_con_shown_fuori_deck(self) -> None:
+        import numpy as np
+
+        sim = np.eye(3, dtype=np.float32)
+        verdicts = semantic_sync.segment_verdict(sim, shown=[99])
+        self.assertEqual(len(verdicts), 3)
+        self.assertTrue(all(1 <= v["rank"] <= 3 for v in verdicts))
+
+    def test_finestra_parole_non_ordinate(self) -> None:
+        from chunks import Word
+
+        words: list[Word] = [
+            {"word": "prima", "start": 5.0},
+            {"word": "seconda", "start": 1.0},
+        ]
+        testo = semantic_sync._window_words(
+            words, [w["start"] for w in words], 0.0, 10.0
+        )
+        self.assertEqual(testo, "prima seconda")
+
+
 if __name__ == "__main__":
     unittest.main()

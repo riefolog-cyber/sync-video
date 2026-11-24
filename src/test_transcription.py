@@ -1271,6 +1271,7 @@ class TestDecideTranscriber(unittest.TestCase):
         with (
             mock.patch.object(transcription, "resolved_transcriber", return_value=resolved),
             mock.patch.object(transcription, "ram_available_bytes", return_value=ram),
+            mock.patch.object(transcription, "openvino_device_available", return_value=True),
         ):
             return transcription.decide_transcriber(transcriber, self.modelli, self.audio)
 
@@ -1285,6 +1286,17 @@ class TestDecideTranscriber(unittest.TestCase):
 
     def test_via_libera_senza_marker_e_con_ram(self) -> None:
         self.assertEqual(self._decidi(), ("openvino", None))
+
+    def test_device_assente_manda_su_cpu(self) -> None:
+        """Modello IR presente ma iGPU disattivata: ripiega, non muore."""
+        with (
+            mock.patch.object(transcription, "resolved_transcriber", return_value="openvino"),
+            mock.patch.object(transcription, "ram_available_bytes", return_value=self.GIUSTA),
+            mock.patch.object(transcription, "openvino_device_available", return_value=False),
+        ):
+            motore, motivo = transcription.decide_transcriber("auto", self.modelli, self.audio)
+        self.assertEqual(motore, "whisper")
+        self.assertIn("device", cast(str, motivo))
 
     def test_poca_ram_manda_su_cpu(self) -> None:
         motore, motivo = self._decidi(ram=self.POCA)
@@ -1335,6 +1347,12 @@ class TestFallbackIntegrazione(unittest.TestCase):
         patch_cache = mock.patch.object(transcription, "CACHE_DIR", self.radice)
         patch_cache.start()
         self.addCleanup(patch_cache.stop)
+        # Questi test simulano una GPU presente: senza il device iGPU il nuovo
+        # guard di `decide_transcriber` ripiegherebbe su CPU e non raggiungerebbe
+        # il percorso OpenVINO che qui si vuole esercitare.
+        patch_dev = mock.patch.object(transcription, "openvino_device_available", return_value=True)
+        patch_dev.start()
+        self.addCleanup(patch_dev.stop)
 
     def test_modello_mancante_usa_soglia_fissa(self) -> None:
         """Senza cartella modello non si misura: 2 GiB fissi, qui sufficienti."""

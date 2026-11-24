@@ -392,8 +392,12 @@ def _embed_cache_key(embed_id: str, texts: Sequence[str]) -> str:
     h.update(embed_id.encode("utf-8"))
     h.update(b"\x00")
     for t in texts:
-        h.update(t.encode("utf-8"))
-        h.update(b"\x01")
+        # Lunghezza PRIMA del testo: con un semplice separatore, ["a", "b"] e
+        # ["a\x01b"] producevano gli stessi byte e quindi la stessa chiave di
+        # cache per due liste diverse.
+        raw = t.encode("utf-8")
+        h.update(len(raw).to_bytes(8, "big"))
+        h.update(raw)
     return h.hexdigest()[:16]
 
 
@@ -768,7 +772,11 @@ def _embed_list(embed_fn: EmbedFn, texts: Sequence[str], context: str) -> np.nda
             dimensioni = {vec.shape[0] for vec in riusati.values()}
             if len(dimensioni) == 1:
                 arr = np.stack([riusati[i] for i in range(len(texts))])
-                _salva_cache_voce(embed_id, texts, arr, 0.0)
+                # Non riscrivere la voce con `saved=0`: azzererebbe il tempo
+                # misurato nelle voci da cui questi vettori vengono, e il
+                # riepilogo direbbe "0s risparmiati" su una cache che invece
+                # ha fatto risparmiare minuti. Solo memo di processo.
+                _EMBED_MEMO[_embed_cache_key(embed_id, texts)] = (arr, 0.0)
                 log.info(
                     "   [%s] Embedding riusato per tutti i %d testi (stessi testi, "
                     "stesso modello): nessun vettore ricalcolato.",
@@ -928,7 +936,15 @@ def segment_verdict(
     for i, row in enumerate(z):
         best = int(np.argmax(row)) + 1
         best_z = float(row.max())
-        shown_slide = int(shown[i]) if shown is not None else best
+        try:
+            shown_slide = int(shown[i]) if shown is not None else best
+        except (TypeError, ValueError, IndexError):
+            shown_slide = best
+        # `shown` e' 1-based e puo' venire da un report sporco: 0 leggerebbe
+        # l'ultima riga per errore e un numero fuori dal deck solleverebbe
+        # IndexError, buttando via il verdetto dell'intero segmento.
+        if not 1 <= shown_slide <= z.shape[1]:
+            shown_slide = best
         shown_z = float(row[shown_slide - 1])
         rank = int((row > row[shown_slide - 1]).sum()) + 1
         verdicts.append({"best": best, "best_z": best_z, "shown_z": shown_z, "rank": rank})
@@ -1314,7 +1330,10 @@ def _clamp_monotono(
     mostrera' la slide al timestamp pronunciato. Non e' silenzioso: va
     segnalato (analysis_sync.py ricontrolla la timeline).
     """
-    prev_t = 0.0
+    # La slide 1 e' di norma a 0.0, ma un caller puo' passare una timeline
+    # con un offset (override/analisi): partire da 0.0 permetterebbe alla
+    # slide 2 di finire PRIMA della slide 1.
+    prev_t = float(timeline.get(1, 0.0))
     displaced: list[int] = []
     for s in range(2, total_slides + 1):
         clamped = max(timeline[s], prev_t + 0.5)
@@ -2015,16 +2034,22 @@ def verify_anchor_mapping_embedding(
                 log.warning("   [Ancore] Embedding del parlato a %.1fs non riuscito: %s", t, e)
                 continue
         sims = slide_emb @ excerpt_emb
+        # Un'ancora che non puo' essere VERIFICATA non deve influenzare
+        # l'inferenza: `sims` ha una riga per slide EMBEDDATA, non per slide
+        # dichiarata. Con slide_texts piu' corti di total_slides, un'ancora
+        # oltre quella lunghezza produceva un offset sempre negativo (best e'
+        # comunque <= righe embeddate) che finiva nei pairs, in `unconfirmed`
+        # e nella stima del derive.
+        if not (1 <= s <= sims.shape[0]):
+            continue
         best = int(np.argmax(sims)) + 1  # 1-based: slide del PDF più simile
         off = best - s
-        # Con similarità tutte nulle (vettore degenere: testo fuori dal lessico
-        # delle slide, embedding vuoto) non c'è un rumore da misurare: l'argmax
-        # è un caso, non un parere, e il comportamento resta quello di prima.
-        # `sims` ha una riga per slide EMBEDDATA, non per slide dichiarata:
-        # `slide_clean` e' troncato a `total_slides`, quindi con slide_texts
-        # piu' corti un'ancora oltre quella lunghezza faceva `sims[s-1]`
-        # fuori limite. Il controllo va sulla forma reale della matrice.
-        if off != 0 and 1 <= s <= sims.shape[0] and float(np.max(sims)) > 0.0:
+        # Con similarita' tutte nulle l'argmax e' un caso, non un parere:
+        # l'ancora resta nei pairs (per non cambiare il conteggio del segnale)
+        # ma NON propone uno spostamento.
+        if float(np.max(sims)) <= 0.0:
+            off = 0
+        if off != 0:
             # Il margine è la distanza fra la pagina annunciata e la migliore:
             # va confrontato col rumore della STESSA finestra, perché su un deck
             # monotematico tutte le similarità stanno nella stessa banda (run del
@@ -2707,7 +2732,17 @@ def refine_segment_boundaries(
 
 
 def _window_words(words: Sequence[Word], word_times: Sequence[float], start: float, end: float) -> str:
-    """Testo parlato nell'intervallo [start, end), via bisect (le parole sono ordinate)."""
+    """Testo parlato nell'intervallo [start, end), via bisect.
+
+    `TimeIndex` in chunks.py verifica l'ordine e ripiega su scansione lineare:
+    qui prima si dava per ordinato, e un solo timestamp fuori posto (puo'
+    succedere dopo correzioni ASR) faceva finire parole sbagliate in ogni
+    finestra di raffinamento, falsando la scelta del confine.
+    """
+    if any(word_times[k] > word_times[k + 1] for k in range(len(word_times) - 1)):
+        return " ".join(
+            w["word"] for w, t in zip(words, word_times, strict=False) if start <= float(t) < end
+        )
     lo_i = bisect.bisect_left(word_times, start)
     hi_i = bisect.bisect_left(word_times, end)
     return " ".join(words[k]["word"] for k in range(lo_i, hi_i))

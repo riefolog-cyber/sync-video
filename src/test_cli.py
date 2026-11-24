@@ -477,6 +477,26 @@ class TestDipendenzeSoloSeServonoCompleta(unittest.TestCase):
 
 
 class TestParametriTrascrizioneUnicaFonte(unittest.TestCase):
+    def test_openvino_chiave_accurata_diversa_da_quella_veloce(self) -> None:
+        """Senza beam nella chiave, l'escalation rileggeva il testo greedy.
+
+        OpenVINO ignora il beam, ma la cache delle due prove deve restare
+        distinta: altrimenti il report dice "trascrizione accurata" per un
+        testo che non e' mai stato ri-decodificato.
+        """
+        import main
+
+        args = config.parse_args(["--transcriber", "openvino"])
+        with (
+            mock.patch.object(main, "resolved_transcriber", return_value="openvino"),
+            mock.patch.object(main, "_openvino_model_fingerprint", return_value="fp"),
+        ):
+            veloce = main._transcript_cache_key("a" * 32, args)
+            accurata = main._transcript_cache_key(
+                "a" * 32, args, beam=main.DEFAULT_WHISPER_BEAM_ACCURATE
+            )
+        self.assertNotEqual(veloce, accurata)
+
     def test_chiave_e_params_usano_la_stessa_funzione(self) -> None:
         import main
 

@@ -68,6 +68,12 @@ def build_windows(
     # comunque una timeline, mentre l'eccezione uccide la run su un refuso.
     step = max(min_window_seconds, float(window_seconds))
     windows: list[WordWindow] = []
+    # `TimeIndex` tollera parole non ordinate e ripiega su scansione lineare:
+    # qui il puntatore `idx` dava per scontato l'ordine, e un solo timestamp
+    # fuori posto (correzione ASR/OCR) risucchiava tutte le parole seguenti
+    # nella finestra sbagliata. Ordinare una volta e' equivalente nel caso
+    # normale e corretto in quello patologico.
+    words = sorted(words, key=lambda w: float(w["start"]))
     idx = 0
     n = len(words)
     start = 0.0

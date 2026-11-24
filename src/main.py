@@ -1778,6 +1778,11 @@ def _transcript_engine_params(args: Any, beam: int | None = None) -> tuple[str, 
             args.openvino_device,
             "decode-ffmpeg-f32le",
             _openvino_model_fingerprint(args),
+            # OpenVINO ignora il beam, MA la chiave di cache deve distinguere
+            # la prova veloce da quella "accurata": senza, la seconda rilegge
+            # la trascrizione greedy e il report dice "accurata da cache" per
+            # un testo mai ri-decodificato.
+            f"beam{args.whisper_beam if beam is None else beam}",
         ]
     else:
         engine_params = [
@@ -2254,6 +2259,10 @@ def _transcribe_with_accurate_beam(
         whisper_beam=beam,
         whisper_batch=args.whisper_batch,
         whisper_device_explicit=getattr(args, "whisper_device_explicit", False),
+        # La seconda decodifica deve rispettare --no-ripresa come la prima:
+        # senza, l'utente che ha disattivato il parziale lo vedeva riapparire
+        # proprio nella prova accurata.
+        no_ripresa=getattr(args, "no_ripresa", False),
     )
     seconds = time.time() - t0
     if not args.no_cache:
@@ -4320,8 +4329,12 @@ def main(argv: list | None = None) -> None:
                     for s, t in verified.items()
                     if round(float(t), 3) in _per_tempo
                 }
+                # Nessun delta ricavabile (tempi cambiati, ancore tutte
+                # filtrate, collisioni sullo stesso timestamp arrotondato):
+                # non indovinare uno spostamento, salta il controllo invece
+                # di riportare il vecchio falso allarme.
                 _mapping_non_uniform = len(_deltas) != 1
-                _offset_mapping = next(iter(_deltas)) if _deltas else 0
+                _offset_mapping = next(iter(_deltas)) if len(_deltas) == 1 else 0
 
         # Ultima transizione detta con un numero più grande del deck ("slide 15"
         # su un PDF da 14): la menzione è fuori portata, quindi la verifica del

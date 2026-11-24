@@ -402,6 +402,10 @@ def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
         cmd = [
             ffmpeg,
             "-v", "error",
+            # Senza -nostdin un tasto premuto nella console (una 'q' durante
+            # una trascrizione di ore) ferma ffmpeg: esce 0 e il PCM e'
+            # troncato, quindi la run continua con un audio piu' corto.
+            "-nostdin",
             "-i", str(audio_path),
             "-ac", "1",
             "-ar", "16000",
@@ -410,6 +414,7 @@ def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
         ]
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -433,6 +438,7 @@ def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
         t_stderr = threading.Thread(target=_leggi_stderr, daemon=True)
         t_stderr.start()
         returncode = 0
+        lettura_ok = False
         try:
             try:
                 while True:
@@ -440,22 +446,30 @@ def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
                     if not block:
                         break
                     buf.extend(block)
+                lettura_ok = True
             finally:
                 # stdout va chiuso SEMPRE: se la lettura del PCM solleva, il
                 # processo e il pipe restano aperti.
                 proc.stdout.close()
         finally:
-            if proc.poll() is None:
+            if lettura_ok:
+                # EOF su stdout NON vuol dire che ffmpeg sia già uscito: tra
+                # la chiusura del pipe e l'exit c'e' una finestra in cui
+                # ucciderlo lo fa finire con un codice d'errore, trasformando
+                # una decodifica riuscita in "Decodifica audio fallita".
+                try:
+                    returncode = proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    returncode = proc.wait()
+            else:
                 proc.kill()
-            # Join dopo la kill e prima di wait(): se la lettura PCM solleva,
-            # il processo può ancora scrivere e il thread resterebbe in attesa
-            # di EOF. Cosi' stderr_bytes e' completo quando serve.
-            t_stderr.join()
-            # wait() DENTRO il finally, non dopo: se `stdout.read()` solleva,
-            # l'eccezione saltava il wait() lasciando il figlio zombie finché
-            # non usciva il processo. Il returncode resta disponibile qui sotto
-            # per il controllo sul risultato della decodifica.
-            returncode = proc.wait()
+                returncode = proc.wait()
+            # Join con tetto: un figlio che tiene stderr aperto non deve
+            # bloccare la run per sempre.
+            t_stderr.join(timeout=10)
+            if t_stderr.is_alive():
+                log.warning("   [Audio] Lettura stderr non terminata: proseguo senza il log ffmpeg.")
         if returncode != 0:
             raise RuntimeError(
                 f"Decodifica audio fallita (ffmpeg exit {returncode}): "
@@ -473,7 +487,11 @@ def _load_audio_16k(audio_path: Path) -> tuple[Any, int]:
     from pydub import AudioSegment
 
     seg = AudioSegment.from_file(str(audio_path))
-    seg = seg.set_frame_rate(16000).set_channels(1)
+    seg = seg.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+    # Dividere per 32768 e' corretto SOLO per PCM a 16 bit: senza forzare
+    # `sample_width=2`, un sorgente a 32 bit satura (valori ~65536) e uno a
+    # 8 bit resta senza centro. La via ffmpeg restituisce sempre float32 in
+    # [-1,1]: il fallback deve dare la stessa cosa.
     samples = seg.get_array_of_samples()
     return (np.array(samples, dtype=np.float32) / 32768.0), 16000
 
@@ -742,6 +760,13 @@ def decide_transcriber(
             "l'ultimo tentativo OpenVINO su questo audio non e' finito "
             "(il processo e' morto dentro la GPU, senza traceback)",
         )
+    # Runtime e modello IR bastano a `resolved_transcriber` per la chiave di
+    # cache, ma NON bastano a trascrivere: il device richiesto (GPU di default)
+    # deve esistere ADESSO. Senza questo controllo, un PC con il modello gia'
+    # scaricato e la iGPU disattivata moriva con "device not found" invece di
+    # ripiegare su faster-whisper come fa `openvino_usable`.
+    if not openvino_device_available():
+        return "whisper", "nessun device OpenVINO disponibile adesso"
     return "openvino", None
 
 
@@ -1574,11 +1599,12 @@ def retranscribe_zone(
             clip = Path(tmp) / "zona.m4a"
             res = subprocess.run(
                 [
-                    "ffmpeg", "-y", "-v", "error",
+                    "ffmpeg", "-y", "-v", "error", "-nostdin",
                     "-ss", f"{start:.1f}", "-t", f"{t1 - start + pad_seconds:.1f}",
                     "-i", str(audio_path), str(clip),
                 ],
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 timeout=180,
             )
             if res.returncode != 0 or not clip.exists():

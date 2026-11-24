@@ -5411,7 +5411,11 @@ class TestVerifyAnchorMappingEmbedding(unittest.TestCase):
     def test_report_suspicious_when_single_shifted_anchor(self):
         # Una sola ancora sfasata: niente correzione (run di 1), ma il mapping
         # è SOSPETTO: il chiamante deve poter chiedere la verifica.
-        slides = [f"tema{i} slide" for i in range(1, 5)]
+        # La slide 5 deve esistere nel deck: se manca, il parlato che punta a
+        # tema5 non ha alcun embedding con cui essere verificato e il vecchio
+        # codice inventava un offset dall'argmax di uno array di zeri (suspicious
+        # True per caso). Con la slide presente, lo sfasamento e' misurato.
+        slides = [f"tema{i} slide" for i in range(1, 6)]
         words = [
             {"word": "tema2", "start": 200.0},
             {"word": "tema3", "start": 300.0},

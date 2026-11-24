@@ -367,9 +367,10 @@ def _first_transition_per_slide(
     l'avviso sulle slide senza ancora deve restare leggibile.
 
     La passeggiata segue l'ordine dei numeri di slide e ogni transizione deve
-    cadere dopo l'ancora già accettata per la slide precedente: il risultato è
-    quindi monotono crescente per costruzione (il LIS resta rete di sicurezza e non
-    dovrebbe più scartare nulla).
+    cadere dopo l'ancora già accettata per la slide precedente. Quando una
+    slide ha SOLO conteggi il ripiego `max(usable)` puo' pero' tornare indietro:
+    la monotonicita' NON e' garantita qui, e il LIS del chiamante resta la rete
+    di sicurezza (non e' più una semplice precauzione).
 
     Args:
         candidates: ``{slide: [(tempo, e_conteggio), ...]}`` in ordine
@@ -439,6 +440,7 @@ def split_ordered_mentions(
         (``{slide: [tempi in ordine cronologico]}``).
     """
     in_order: dict[int, list[tuple[float, bool]]] = {}
+    solo_conteggi: dict[int, list[tuple[float, bool]]] = {}
     deferred: dict[int, list[float]] = {}
     highest = 0
     for t, s, is_count in sorted(
@@ -446,12 +448,25 @@ def split_ordered_mentions(
         for s, items in mentions.items()
         for t, is_count in items
     ):
+        if is_count:
+            # Un conteggio NON e' una transizione e non puo' alzare `highest`:
+            # "le 2 slide del documento" a 5s faceva classificare come
+            # "fuori ordine" il vero "passiamo slide 2" a 100s, e l'ancora
+            # restava inchiodata a 5s perche' la slide era gia' presente.
+            solo_conteggi.setdefault(s, []).append((t, True))
+            continue
         if s >= highest:
             highest = s
-            in_order.setdefault(s, []).append((t, is_count))
+            in_order.setdefault(s, []).append((t, False))
         else:
             deferred.setdefault(s, []).append(t)
-    return _first_transition_per_slide(in_order), deferred
+    ancore = _first_transition_per_slide(in_order)
+    # Solo le slide che NON hanno una transizione ne' un richiamo recuperabile
+    # prendono l'ultimo conteggio, come ripiego (mai un confine inventato).
+    for s, items in solo_conteggi.items():
+        if s not in ancore and s not in deferred:
+            ancore[s] = items[-1][0]
+    return ancore, deferred
 
 
 # =====================================================================
@@ -982,25 +997,44 @@ def announcements_off_timeline(
         if not (_is_slide_word(w["word"]) or _is_page_word(w["word"])):
             continue
         slide_num: int | None = None
+        pagina: int | None = None
         mention_idx = i
         boundary: float | None = None
+        # Il numero detto e' in spazio PARLATO, quello del deck e' in spazio PDF:
+        # l'offset va applicato PRIMA del controllo di portata. Filtrare il
+        # numero parlato con `total_slides` (il conteggio del PDF) faceva sparire
+        # proprio gli annunci che l'offset serve a correggere: "slide 15" con
+        # offset -1 su un deck da 14 e' la pagina 14, non un numero fuori range.
         embedded = _embedded_slide_number(_normalize(w["word"]))
-        if embedded is not None and 2 <= embedded <= total_slides:
-            slide_num, boundary = embedded, _reference_boundary(words, i)
-        else:
+        if embedded is not None:
+            candidata = embedded + slide_offset
+            if 1 < candidata <= total_slides:
+                slide_num, pagina, boundary = embedded, candidata, _reference_boundary(words, i)
+        if slide_num is None:
             for j in range(i + 1, min(i + 8, len(words))):
                 num = _number_from_word(_normalize(words[j]["word"]))
                 if num is None:
                     continue
-                if 2 <= num <= total_slides:
-                    slide_num, mention_idx = num, j
+                candidata = num + slide_offset
+                if 1 < candidata <= total_slides:
+                    slide_num, pagina, mention_idx = num, candidata, j
                     boundary = _reference_boundary(words, j)
                 break
-        if slide_num is None or boundary is None:
-            continue
-        # Il numero detto parla della pagina sfasata: si riporta al deck.
-        pagina = slide_num + slide_offset
-        if pagina <= 1 or pagina > total_slides:
+        if slide_num is None:
+            # Pattern "quattro ... alla slide", documentato nella docstring ma
+            # mai implementato qui: `_collect_slide_mention_kinds` lo riconosce
+            # e lo usa come ancora, mentre il controllo incrociato non vedeva
+            # nessun annuncio e non poteva segnalare un confine sbagliato.
+            for j in range(i - 1, max(-1, i - 7), -1):
+                num = _number_from_word(_normalize(words[j]["word"]))
+                if num is None:
+                    continue
+                candidata = num + slide_offset
+                if 1 < candidata <= total_slides:
+                    slide_num, pagina, mention_idx = num, candidata, i
+                    boundary = _reference_boundary(words, i)
+                break
+        if slide_num is None or boundary is None or pagina is None:
             continue
         declared = starts.get(pagina)
         if declared is None:
@@ -1012,7 +1046,11 @@ def announcements_off_timeline(
         if abs(boundary - float(declared)) <= tolerance:
             continue
         found.append((pagina, boundary, float(declared)))
-    return sorted(found, key=lambda item: item[1])
+    # Un "slide slide 10" o un richiamo voluto produceva voci duplicate:
+    # il riepilogo contava due dubbi per lo stesso confine. `discarded_citations`
+    # deduplica allo stesso modo; qui si usano pagina e tempo arrotondato.
+    unici = {(pagina, round(t, 1)): (pagina, t, d) for pagina, t, d in found}
+    return sorted(unici.values(), key=lambda item: item[1])
 
 
 def _collect_page_mentions(
@@ -1202,9 +1240,13 @@ def out_of_range_tail_anchor(
     if total_slides < 2 or total_slides in anchors or not anchors:
         return {}
     last_known = max(anchors.values())
-    top_announced = max(anchors)
     for n, times in _collect_slide_mentions(words, total_slides + 2).items():
-        if n <= total_slides or n > top_announced + 2:
+        # Il limite e' il NUMERO DI PAGINE DEL DECK, non l'ultima ancora nota:
+        # con poche ancore (es. sola slide 4 su 14) la menzione finale "slide
+        # 15" era scartata da `top_announced + 2` (= 6), perdendo l'ultimo
+        # confine pronunciato. Il controllo sul tempo qui sotto basta a
+        # distinguerla da un conteggio iniziale ("le 20 slide").
+        if n <= total_slides or n > total_slides + 2:
             continue
         after = [t for t in times if t > last_known]
         if after:
@@ -1573,6 +1615,11 @@ def _number_from_word(word: str) -> int | None:
     cifre ("3", "3,") oppure cardinali italiani ("tre", "undici").
     Restituisce None se non è un numero.
     """
+    # "1.5" e' un decimale, "3-4" un intervallo, "2/3" una frazione:
+    # buttare via i separatori li trasformava in slide 15, 34, 23 e poteva
+    # creare ancore lontanissime da qualunque transizione reale.
+    if re.search(r"\d[.,/\-]\d", word):
+        return None
     num_clean = re.sub(r"[^\d]", "", word)
     if num_clean and num_clean.isdigit():
         return int(num_clean)
@@ -1581,8 +1628,10 @@ def _number_from_word(word: str) -> int | None:
 
 def _normalize(word: str) -> str:
     """Normalizza una parola: lowercase, senza accenti, senza punteggiatura."""
-    # Rimuovi punteggiatura
-    w = re.sub(r"[^\w\s]", "", word.lower().strip())
+    # Rimuovi punteggiatura, MA conserva cio' che sta FRAMMA DUE CIFRE:
+    # "1.5"/"3-4" devono arrivare a `_number_from_word` come numeri non validi,
+    # non diventare "15"/"34" gia' qui.
+    w = re.sub(r"(?<!\d)[^\w\s](?!\d)", "", word.lower().strip())
     # Rimuovi accenti comuni italiani
     replacements = {
         "à": "a",
