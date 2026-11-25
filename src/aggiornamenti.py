@@ -23,7 +23,7 @@ from config import bootstrap, log
 from updates import run_frozen_report, run_update_check
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Controllo e aggiornamento dei pacchetti del progetto."
     )
@@ -53,7 +53,7 @@ def main() -> None:
     # aggiornamenti spiegato: chi lo chiede vuole quella risposta lì.
     if args.frozen_report:
         run_frozen_report()
-        return
+        return 0
 
     # --no-update-check dice esplicitamente di NON controllare nulla: in quel
     # caso deve saltare anche il bootstrap, che e' la parte che tocca pip,
@@ -63,15 +63,19 @@ def main() -> None:
     # il controllo PyPI gira davvero e gli strumenti come packaging servono).
     if args.no_update_check:
         log.info("Controllo aggiornamenti saltato (--no-update-check): ambiente non toccato.")
-        return
+        return 0
 
     bootstrap()
     log.info("=" * 40)
     # Come in main.py: --no-update-check non è un parametro di run_update_check,
     # e' proprio l'assenza della chiamata. Senza questo, l'interruttore
     # accetterebbe il flag e non cambierebbe nulla.
-    run_update_check(ask_to_update=not args.no_update)
+    esito = run_update_check(ask_to_update=not args.no_update)
+    # Lo script ha come UNICO scopo controllare e aggiornare: se l'utente ha
+    # accettato e l'installazione e' fallita, uscire 0 faceva credere a .bat e
+    # job schedulati che fosse andato tutto bene.
+    return 0 if esito else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

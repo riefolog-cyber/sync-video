@@ -26,13 +26,14 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from config import CACHE_DIR, DEFAULT_VIDEO_BUFFER_SEC, DEFAULT_VIDEO_RES, atomic_write_text
+from config import CACHE_DIR, DEFAULT_VIDEO_BUFFER_SEC, DEFAULT_VIDEO_RES, atomic_write_text, log
 
 _CARTELLA = "video_riuso"
 # VERSIONE: se la chiave cambia senso (nuovi parametri nel video), la versione
 # cambia e le chiavi vecchie non valgono piu'. v2: aggiunti i thread; v3:
-# risoluzione e buffer entrano nell'impronta, il percorso delle slide ne esce.
-_VERSIONE = "v3"
+# risoluzione e buffer entrano nell'impronta, il percorso delle slide ne esce;
+# v4: entra anche il FORMATO dell'audio (decide copia vs ricodifica).
+_VERSIONE = "v4"
 
 
 def _hash_file(path: Path, h: Any) -> None:
@@ -97,7 +98,14 @@ def chiave_video(
         h.update(f"{float(d):.4f}".encode())
         h.update(b"\x00")
     if audio_path is not None:
-        _hash_file(Path(audio_path), h)
+        audio = Path(audio_path)
+        # Lo STESSO contenuto con un'estensione diversa produce un video
+        # diverso: `video._audio_si_puo_copiare` decide `-c:a copy` per .m4a
+        # e `-c:a aac` per .wav. Senza il suffisso, rinominare l'audio faceva
+        # riusare il vecchio video con lo stream sbagliato.
+        h.update(audio.suffix.lower().encode("utf-8"))
+        h.update(b"\x00")
+        _hash_file(audio, h)
     return h.hexdigest()
 
 
@@ -186,9 +194,12 @@ def segna_video(
         return
     marca = _percorso_marca(output_path, cache_dir)
     # Il video e' gia' stato scritto: una cache in sola lettura/piena non puo'
-    # trasformare una run riuscita in un errore, ne' lasciare la marca del
-    # video PRECEDENTE (che costringerebbe a ricalcolare tutto dopo).
-    with suppress(OSError):
+    # trasformare una run riuscita in un errore, ma NON deve lasciare la marca
+    # del video PRECEDENTE: il suppress silenzioso faceva riusare all'infinito
+    # un video diverso da quello appena prodotto (o rifare tutto per una
+    # chiave mai aggiornata). Si rimuove e si avvisa: la run successiva rifa'
+    # il video una volta, poi torna a riusarlo.
+    try:
         atomic_write_text(
             marca,
             json.dumps(
@@ -203,3 +214,9 @@ def segna_video(
                 ensure_ascii=False,
             ),
         )
+    except OSError as e:
+        log.warning(
+            "   ⚠️ Marca di riuso del video non scritta (%s): la prossima run rifara' il video.", e
+        )
+        with suppress(OSError):
+            marca.unlink(missing_ok=True)

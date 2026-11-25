@@ -176,15 +176,18 @@ def clean_cache(
                     esito["verify_frames"] += 1
         # Il report dell'ultima run cita quei frame nei mismatches (tempo + slide):
         # cancellati i file, il riferimento resterebbe appeso a un file inesistente.
-        # Azzeriamo il campo: la verifica successiva lo riscrive con i frame nuovi.
+        # Azzeriamo il campo SOLO se abbiamo davvero rimosso qualcosa: il
+        # verificatore conserva i PNG dei SOLI segmenti sbagliati, quindi una
+        # verifica riuscita lascia la cartella vuota. Senza questo, --clean-cache
+        # cancellava l'unica prova che il video era stato controllato.
         # Anche questa scrittura e' manutenzione: se il disco non collabora
-        # non deve interrompere i passi 4 e 5 (parziali e modelli), come non
-        # li interrompono le unlink protette qui sopra.
-        with contextlib.suppress(OSError):
-            report = _load_sync_report(cache_dir=cache_dir)
-            if report and report.get("frame_check") is not None:
-                report["frame_check"] = None
-                _save_sync_report(report, cache_dir=cache_dir)
+        # non deve interrompere i passi 4 e 5 (parziali e modelli).
+        if esito["verify_frames"]:
+            with contextlib.suppress(OSError):
+                report = _load_sync_report(cache_dir=cache_dir)
+                if report and report.get("frame_check") is not None:
+                    report["frame_check"] = None
+                    _save_sync_report(report, cache_dir=cache_dir)
     # 4. parziali di trascrizioni interrotte, vecchi: dopo una settimana non
     #    servono piu' a nessuno (se l'audio non e' stato rifatto, la run e'
     #    finita comunque). I recenti RESTANO: sono il punto della ripresa.
@@ -195,7 +198,11 @@ def clean_cache(
             with contextlib.suppress(OSError):
                 if f.is_file() and f.stat().st_mtime < scadenza:
                     f.unlink()
-                    esito["parziali"] += 1
+                    # Ogni parziale e' una coppia .json + _resto.flac: contare
+                    # tutti i file faceva dire "2 parziali" per UNA trascrizione
+                    # interrotta (e "1" quando il flac mancava).
+                    if f.suffix.lower() == ".json":
+                        esito["parziali"] += 1
     # 5. modelli pesanti SOLO su richiesta esplicita.
     if include_models:
         for nome in _model_dirs(cache_dir):

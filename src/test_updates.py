@@ -1424,7 +1424,10 @@ class TestHealthCheck(unittest.TestCase):
         self.assertTrue(log.warning.called)
 
     def test_conflitto_preesistente_non_fa_fallire(self):
-        check = self._res(1, stdout="altro 1.0 requires numpy<2, but you have numpy 2.0")
+        # Conflitto DA VERO preesistente: nessun pacchetto aggiornato compare
+        # nella riga. Se l'aggiornato fosse numpy, il conflitto sarebbe stato
+        # causato proprio dall'upgrade e il health check dovrebbe fallire.
+        check = self._res(1, stdout="altro 1.0 requires foo<2, but you have foo 3.0")
         with mock.patch(
             "updates.subprocess.run", side_effect=[self._res(0), check]
         ) as run, mock.patch.object(updates, "log") as log:

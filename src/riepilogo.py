@@ -13,6 +13,7 @@ lezione, quindi non serve un nome per lezione.
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -34,11 +35,17 @@ def _intero_sicuro(valore: object) -> int:
 
 
 def _float_sicuro(valore: object) -> float:
-    """Come `_intero_sicuro`, per i secondi dei segmenti e dei dubbi."""
+    """Come `_intero_sicuro`, per i secondi dei segmenti e dei dubbi.
+
+    `float("Infinity")` non solleva: restituisce inf, che poi `format_time`
+    stampa come "inf" o solleva. Un valore non finito e' sporco quanto una
+    stringa, quindi va scartato qui.
+    """
     try:
-        return float(cast("str | int | float", valore))
+        numero = float(cast("str | int | float", valore))
     except (TypeError, ValueError, OverflowError):
         return 0.0
+    return numero if math.isfinite(numero) else 0.0
 
 
 def _numeri(segmenti: list[dict[str, Any]]) -> tuple[int, float, float, dict[str, Any]]:
@@ -139,7 +146,7 @@ def riepilogo_markdown(
     if pagine:
         righe.append(f"| Durata media per pagina | {format_time(media)} |")
         righe.append(
-            f"| Pagina più breve | {int(corto.get('slide') or 0)} ({format_time(minima)}) |"
+            f"| Pagina più breve | {_intero_sicuro(corto.get('slide'))} ({format_time(minima)}) |"
         )
     if transitions:
         righe.append(f"| Ancore usate | {anchored} su {transitions} |")
@@ -149,7 +156,9 @@ def riepilogo_markdown(
         righe.append(f"| DPI effettivo | {dpi} |")
     ripresa = notes.get("ripresa_da")
     if ripresa:
-        righe.append(f"| Trascrizione ripresa da | {format_time(float(ripresa))} |")
+        righe.append(
+            f"| Trascrizione ripresa da | {format_time(_float_sicuro(ripresa))} |"
+        )
     if dry_run:
         righe.append("| Video | **non creato** (dry-run) |")
 

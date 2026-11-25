@@ -62,6 +62,10 @@ def scenario(
         # l'encoder "simulato" resta quello vero della macchina dello sviluppatore.
         patch.object(ms, "ffmpeg_encoders", return_value=encoders),
         patch.object(hw, "ram_total_bytes", return_value=totale),
+        # La macchina SIMULATA non ha override: VIDEO_ENCODER nel .env della
+        # macchina reale e' una scelta documentata, non un guasto di machine_setup.
+        # Senza questo, ogni scenario GPU dava KO con un override "libx264".
+        patch.dict(os.environ, {"VIDEO_ENCODER": ""}),
     ):
         args = _Args()
         ms.machine_setup(args, force=False)

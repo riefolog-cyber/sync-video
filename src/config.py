@@ -773,11 +773,28 @@ def _mirror_system_tessdata(system_dir: Path, local_dir: Path) -> int:
         dst = local_dir / src.name
         if dst.exists():
             continue
+        tmp: Path | None = None
         try:
-            shutil.copy2(src, dst)
+            # Copia atomica come tutte le altre cache: `copy2` diretto su dst
+            # tronca il file di destinazione e, se fallisce a meta' (disco
+            # pieno, ACL), lascia un `.traineddata` troncato che `dst.exists()`
+            # considera valido per sempre. TESSDATA_PREFIX pointed alla cartella
+            # locale, quindi un modello di sistema sano verrebbe sostituito da
+            # uno corrotto senza alcun avviso.
+            fd, nome_tmp = tempfile.mkstemp(dir=local_dir, prefix=src.name + ".", suffix=".part")
+            os.close(fd)
+            tmp = Path(nome_tmp)
+            shutil.copy2(src, tmp)
+            if tmp.stat().st_size == 0:
+                raise OSError("copia vuota")
+            os.replace(tmp, dst)
             copied += 1
         except OSError as e:
             log.debug("   Copia di %s non riuscita: %s", src.name, e)
+        finally:
+            if tmp is not None:
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
     return copied
 
 
@@ -1727,21 +1744,24 @@ def _ensure_pip_packages() -> None:
         log.info("🔧 Pacchetti da installare/aggiornare: %s", ", ".join(p[0] for p in to_install))
         log.info("   Installazione automatica in corso...")
 
-        all_ok = True
+        falliti: list[str] = []
         for pip_req, reason in to_install:
             log.info("   %s (%s) ...", pip_req, reason)
             if _try_pip_install(pip_req, upgrade=True):
                 log.info("   ✅ %s ok.", pip_req)
             else:
                 log.warning("   ❌ %s NON installato.", pip_req)
-                all_ok = False
+                falliti.append(pip_req)
 
-        if not all_ok:
+        if falliti:
+            # Solo i falliti: dire "installa manualmente" elencando anche i
+            # pacchetti appena installati con ✅ indicava l'utente a reinstallare
+            # cose gia' corrette (e a nascondere il vero colpevole).
             log.error(
                 "\nAlcuni pacchetti non sono stati installati. Installa manualmente:\n"
                 "   pip install -U %s\n"
                 "Oppure: pip install -r requirements.txt",
-                " ".join(p[0] for p in to_install),
+                " ".join(falliti),
             )
             sys.exit(1)
 

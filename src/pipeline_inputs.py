@@ -23,13 +23,19 @@ def find_audio_file(directory: Path) -> Path | None:
     Se più file audio presenti, sceglie il più recente per data di modifica.
     Anche una cartella puo' finire per .m4a/.mp3: senza `is_file()` verrebbe
     scelta come audio e la pipeline aprirebbe una directory al suo posto."""
-    candidates = [
-        f for f in directory.iterdir() if f.is_file() and f.suffix.lower() in AUDIO_SEARCH_SUFFIXES
-    ]
-    if not candidates:
+    # Stessa difesa di `find_presentation_file`: una cartella sparita o non
+    # leggibile deve dire "nessun audio", non morire con un traceback. Anche
+    # `stat()` puo' fallire se un file sparisce fra iterdir e la lettura.
+    try:
+        candidates = [
+            f for f in directory.iterdir() if f.is_file() and f.suffix.lower() in AUDIO_SEARCH_SUFFIXES
+        ]
+        if not candidates:
+            return None
+        # Ordina per data di modifica (più recente prima)
+        return max(candidates, key=lambda f: f.stat().st_mtime)
+    except OSError:
         return None
-    # Ordina per data di modifica (più recente prima)
-    return max(candidates, key=lambda f: f.stat().st_mtime)
 
 
 def find_presentation_file(directory: Path) -> Path | None:
@@ -47,15 +53,15 @@ def find_presentation_file(directory: Path) -> Path | None:
             for f in directory.iterdir()
             if f.is_file() and f.suffix.lower() in PRESENTATION_ACCEPTED_SUFFIXES
         ]
+        if not files:
+            return None
+        for nome in ("presentazione.pdf", "presentazione.pptx", "presentazione.ppt"):
+            for f in files:
+                if f.name.lower() == nome:
+                    return f
+        return max(files, key=lambda f: f.stat().st_mtime)
     except OSError:
         return None
-    if not files:
-        return None
-    for nome in ("presentazione.pdf", "presentazione.pptx", "presentazione.ppt"):
-        for f in files:
-            if f.name.lower() == nome:
-                return f
-    return max(files, key=lambda f: f.stat().st_mtime)
 
 
 def _parse_transcript_raw(raw_path: Path) -> list[Word] | None:

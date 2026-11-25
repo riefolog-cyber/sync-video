@@ -130,7 +130,13 @@ class TestRiepilogo(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             video = Path(tmp) / "video_finale.mp4"
             video.write_bytes(b"x")
-            self.assertIsNone(scrivi_riepilogo(rotto, video))
+            # Un campo sporco NON deve cancellare l'intero referto: le parti
+            # leggibili vengono scritte, con i valori invalidi convertiti in
+            # modo difensivo (prima la funzione esplodeva e non scriveva niente).
+            path = scrivi_riepilogo(rotto, video)
+            self.assertIsNotNone(path)
+            assert path is not None
+            self.assertIn("| Pagine | 1 |", path.read_text(encoding="utf-8"))
 
     def test_scrive_il_file_accanto_al_video(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

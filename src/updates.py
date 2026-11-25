@@ -857,9 +857,12 @@ def _health_check(packages: list[str]) -> bool:
 
     ``pip check`` e' GLOBALE: puo' segnalare conflitti preesistenti, colpa di
     pacchetti che non abbiamo toccato. E' quindi uno smoke test informativo: fa
-    fallire solo se la dipendenza rotta e' dichiarata da uno dei pacchetti appena
-    aggiornati (la riga comincia col suo nome); altrimenti il conflitto viene
-    solo segnalato in debug.
+    fallire solo se nella riga compare UN pacchetto appena aggiornato. Guardare
+    solo l'INIZIO della riga (il requirer) era sbagliato in entrambi i sensi:
+    ``fastembed ... requires pillow<11`` dopo un upgrade di pillow era creduto
+    preesistente, e ``numpy ... requires mkl`` dopo un upgrade di mkl era
+    creduto colpa nostra. Il conflitto riguarda l'ambiente che abbiamo appena
+    cambiato: va segnalato, non archiviato in debug.
     """
     moduli: list[str] = []
     for req in packages:
@@ -906,10 +909,16 @@ def _health_check(packages: list[str]) -> bool:
     if res.returncode != 0:
         righe = _tail_lines((res.stdout or "") + "\n" + (res.stderr or ""))
         nomi = {re.split(r"[<>=!~]", req, maxsplit=1)[0].strip().lower() for req in packages}
+        # Ricerca in tutta la riga, non solo all'inizio: pip check nomina chi
+        # RICHIEDE e chi e' in conflitto, e un aggiornato puo' stare da una
+        # parte o dall'altra. I confini evitano che "pillow" matchi "pillowfoo".
         colpevoli = [
             riga
             for riga in righe
-            if any(re.match(rf"{re.escape(nome)}(?:\s|$)", riga.lower()) for nome in nomi)
+            if any(
+                re.search(rf"(?<![a-z0-9_.-]){re.escape(nome)}(?![a-z0-9_.-])", riga.lower())
+                for nome in nomi
+            )
         ]
         if colpevoli:
             log.warning("   ❌ Health check fallito (pip check): dipendenze rotte dei pacchetti aggiornati:")
@@ -965,10 +974,13 @@ def _pip_upgrade(packages: list[str]) -> bool:
         return False
 
     esito = _tail_lines(res.stdout, 1)
-    log.info("   ✅ Installati: %s%s", ", ".join(packages), f" — {esito[0]}" if esito else "")
+    # "✅ Installati" solo DOPO il health check: prima veniva stampato anche
+    # quando la verifica falliva, e chi leggeva il log vedeva un successo
+    # seguito da un "Upgrade non confermato" (o peggio, solo il successo).
     if not _health_check(packages):
         log.warning("   ❌ Upgrade non confermato dal health check: cache e pin restano invariati.")
         return False
+    log.info("   ✅ Installati: %s%s", ", ".join(packages), f" — {esito[0]}" if esito else "")
     return True
 
 
@@ -1033,12 +1045,16 @@ def _ask_yes_no(prompt: str) -> bool:
 def run_update_check(
     ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS,
     ask_to_update: bool = True,
-) -> None:
+) -> bool:
     """Entry point: check + notifica; se richiesto chiede S/N e aggiorna.
 
     Se ``ask_to_update`` è True e ci sono aggiornamenti NON pinnati, NON major e
     NON bloccati dalle dipendenze installate, chiede all'utente se installarli in
     automatico. Non si chiede mai di una cosa che pip non risolverebbe.
+
+    Ritorna False SOLO se l'utente ha accettato un aggiornamento e l'installazione
+    (o il health check) e' fallita: il programma principale ignora il valore,
+    ma lo script `aggiornamenti.py` ne fa il suo codice di uscita.
     """
     log.info("🔍 Controllo aggiornamenti pacchetti (PyPI)...")
     outdated = check_updates(ttl_hours=ttl_hours)
@@ -1047,11 +1063,11 @@ def run_update_check(
     upgradable = _upgradable(outdated)
     pinned_upd = _pinned_with_update(outdated)
     if not upgradable and not pinned_upd:
-        return
+        return True
 
     if not ask_to_update:
         log.info("   Aggiornamento automatico disabilitato (--no-update).")
-        return
+        return True
 
     # I bloccati restano fuori anche da qui: "da aggiornare a mano" e' un invito,
     # e per loro non esiste la versione che li sblocca.
@@ -1090,7 +1106,7 @@ def run_update_check(
 
     if not names:
         log.info("   Nessun pacchetto da aggiornare.")
-        return
+        return True
 
     if _ask_yes_no(f"Aggiornare {len(names)} pacchetto/i ({', '.join(names)})?"):
         esito = _pip_upgrade(names)
@@ -1109,8 +1125,9 @@ def run_update_check(
                 UPDATES_CACHE.unlink(missing_ok=True)
         else:
             log.info("   ⚠️ Cache mantenuta: al prossimo avvio il controllo verra' ripetuto.")
-    else:
-        log.info("   Ok, nessun aggiornamento installato.")
+        return esito
+    log.info("   Ok, nessun aggiornamento installato.")
+    return True
 
 
 # =====================================================================

@@ -17,6 +17,7 @@ silenzio).
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -140,7 +141,21 @@ def costruisci_cue(
     silenzio lungo ``pausa``, e chiudere a fine frase quando la riga e' gia'
     abbastanza piena (chiudere ogni punto produrrebbe sottotitoli di tre
     parole).
+
+    Le parole vengono ORDINATE per tempo: un solo timestamp fuori posto
+    (correzione ASR/OCR, vedi `chunks`) faceva chiudere l'ultima riga con la
+    fine della parola sbagliata, produceva un cue con tempi invertiti e
+    `build_srt` lo scartava: l'intero file .srt spariva senza avviso.
     """
+
+    def _tempo(w: Mapping[str, Any]) -> float:
+        try:
+            valore = float(w.get("start", 0.0))
+        except (TypeError, ValueError):
+            return float("inf")
+        return valore if math.isfinite(valore) else float("inf")
+
+    words = sorted(words, key=_tempo)
     cue: list[tuple[float, float, str]] = []
     corrente: list[str] = []
     inizio = 0.0
@@ -443,16 +458,21 @@ def scrivi_sottotitoli(
     Un errore di scrittura non ferma la run: il video e' il prodotto, questi
     sono un contorno, e perdere il contorno non giustifica perdere il video.
     """
-    base = output_path.with_suffix("")
+    # `with_suffix("")` su "video.v2.mp4" da' "video.v2", e il `with_suffix
+    # (".srt")` successivo cambia l'ULTIMO suffisso: "video.srt". Due video
+    # v2/v3 nella stessa cartella si sovrascrivevano i sottotitoli a vicenda.
+    # `.stem` toglie SOLO l'ultima estensione: "video.v2.mp4" -> "video.v2",
+    # e il nome consueto "video_finale.mp4" resta "video_finale.srt".
+    base = output_path.with_name(output_path.stem)
     srt: Path | None = None
     capitoli: Path | None = None
     try:
         contenuto = build_srt(words, durata=durata)
         if contenuto:
-            srt = base.with_suffix(".srt")
+            srt = base.with_name(base.name + ".srt")
             atomic_write_text(srt, contenuto)
         if timeline:
-            capitoli = Path(f"{base}.capitoli.txt")
+            capitoli = base.with_name(base.name + ".capitoli.txt")
             atomic_write_text(
                 capitoli, build_capitoli(timeline, slide_texts, numeri_slide) + "\n"
             )

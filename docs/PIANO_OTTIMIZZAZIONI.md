@@ -5,10 +5,10 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 19 (revisione trasversale di cache, CLI, video,
-timeline e diagnostica), dopo il batch 18 (CI notturna) e il batch 11 (la
-revisione del codice). Il piano resta un registro delle decisioni: i dettagli
-di ogni cambiamento sono nei messaggi di commit e nei test.
+Ultimo aggiornamento: batch 20 (revisione delle revisioni e delle aree mai
+lette riga per riga), dopo il batch 19 (cache, CLI, video, timeline e
+diagnostica). Il piano resta un registro delle decisioni: i dettagli di ogni
+cambiamento sono nei messaggi di commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -273,7 +273,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1549 test).
+`python -m unittest discover -s src -p "test_*.py"` (1564 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -612,6 +612,54 @@ leggono la configurazione e le scelte reali.
 Verifiche: `ruff` e `mypy` puliti (90 file, win32/linux/darwin), 1549 test
 verdi (21 nuovi), `_debug_hardware.py` e controlli 6/6.
 
+## Batch 20 — revisione delle revisioni (2026-11)
+
+Quarta revisione incrociata: prima si e' guardato cio' che il batch 19 aveva
+lasciato indietro, poi le aree mai lette riga per riga (aggiornamenti,
+sottotitoli, riuso video, pulizia cache). Quattordici difetti, quindici test
+nuovi. Nessun cambiamento nella qualita' del riconoscimento.
+
+**Aggiornamenti che raccontano la verita'.** `pip check` nomina chi RICHIEDE
+una dipendenza, non il pacchetto aggiornato: guardare solo l'inizio della riga
+faceva passare come sano un upgrade di pillow che rompeva fastembed, e
+dichiarava fallito un conflitto senza pacchetti aggiornati. Ora conta ogni
+pacchetto aggiornato che compare nella riga. "✅ Installati" veniva stampato
+PRIMA del health check, quindi un upgrade fallito mostrava un successo verde:
+ora si stampa solo dopo. Lo script `aggiornamenti.py` usciva 0 anche quando
+l'utente accettava un aggiornamento e pip falliva: ora ritorna 1 (la pipeline
+principale, che non deve mai fermarsi per un aggiornamento, ignora il valore).
+Il messaggio di bootstrap elencava TUTTI i pacchetti, compresi quelli appena
+installati con ✅: ora solo i falliti veri.
+
+**File prodotti e materiali.** `--output video.v2.mp4` scriveva `video.srt`
+invece di `video.v2.srt`: due video con lo stesso nome a parte si
+sovrascrivevano i sottotitoli. Ora si toglie solo l'ultima estensione. Un solo
+timestamp fuori ordine faceva invertire un cue e `build_srt` lo scartava:
+l'intero file .srt spariva senza avviso; le parole vengono ordinate per tempo.
+Due campi sporchi nel report (`slide: "x"`, `ripresa_da: "n/d"` o `Infinity`)
+cancellavano l'intero riepilogo: ora usano gli stessi convertitori difensivi
+gia' usati altrove. `find_audio_file` e `find_presentation_file` non avevano
+il guard `OSError` degli altri helper: una cartella sparita faceva morire gli
+script diagnostici.
+
+**Riuso e pulizia.** L'impronta del video hashava i byte dell'audio ma non
+l'estensione: rinominare `podcast.m4a` in `.wav` (stessi byte, ma copia AAC
+contro ricodifica) riusava il video sbagliato (versione v4 dell'impronta).
+`segna_video` sopprimeva l'errore di scrittura e lasciava la marca del video
+precedente: ora la rimuove e avvisa. `--clean-cache` azzerava `frame_check`
+anche quando NON aveva rimosso frame (il verificatore conserva solo i PNG dei
+segmenti sbagliati): l'unica prova che il video era stato controllato spariva.
+Il conteggio "parziali vecchi" contava i file della coppia `.json` +
+`_resto.flac` come due parziali. La copia dei modelli Tesseract di sistema non
+era atomica: un taglio a meta' lasciava un `.traineddata` troncato che non
+veniva mai riscritto. Infine il controllo encoder del `_debug_hardware.py`
+del batch 19 dava KO su ogni GPU quando `VIDEO_ENCODER` era impostato nel
+`.env` (scelta documentata, non regressione): la macchina simulata ora non ha
+override.
+
+Verifiche: `ruff` e `mypy` puliti (91 file, win32/linux/darwin), 1564 test
+verdi (15 nuovi), `controlli.py` 6/6 e debug hardware 17/17.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -707,5 +755,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio (batch 19): ruff pulito, mypy pulito su tre
-piattaforme, 1549 test verdi, `_debug_hardware.py` e controlli 6/6.
+Stato all'ultimo lancio (batch 20): ruff pulito, mypy pulito su tre
+piattaforme, 1564 test verdi, `_debug_hardware.py` e controlli 6/6.
