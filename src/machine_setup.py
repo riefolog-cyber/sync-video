@@ -275,7 +275,12 @@ def _provision_openvino(model_dir: Path) -> bool:
         if importlib.util.find_spec("openvino_genai") is None:
             log.warning("   ⚠️ openvino-genai installato ma non importabile in questa run.")
             return False
-    if not openvino_model_complete(model_dir):
+    from config import DEFAULT_OPENVINO_MODEL_ID
+    from transcription import openvino_model_id_ok
+
+    if not openvino_model_complete(model_dir) or not openvino_model_id_ok(
+        model_dir, DEFAULT_OPENVINO_MODEL_ID
+    ):
         from transcription import download_openvino_model
 
         try:

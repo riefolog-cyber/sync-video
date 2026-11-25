@@ -307,11 +307,25 @@ def _qualita_titolo(riga: str) -> float:
     punteggio = (lettere + 0.6 * cifre) / len(visibili)
     if re.search(r"[^\w\s]{3,}", riga):
         punteggio *= 0.5
-    parole = riga.split()
+    parole = [p.strip(" .,:;!?()[]{}\"'") for p in riga.split() if p.strip(" .,:;!?()[]{}\"'")]
     if parole:
         isolate = sum(len(p) == 1 for p in parole) / len(parole)
         punteggio *= 1.0 - 0.6 * isolate
-    return punteggio
+        # Tuoni di lettere maiuscole ("IEEARSI DIRLA", "SFFSITE") e frammenti
+        # tutti maiuscoli di 2-4 lettere ("ST", "INTE", "RRAR") non sono
+        # titoli: sono OCR che ha letto male un carattere decorativo.
+        maiuscole = sum(
+            1 for p in parole if len(p) >= 2 and p.isalpha() and p.isupper() and p != "IO"
+        )
+        punteggio *= 1.0 - 0.7 * (maiuscole / len(parole))
+        # Tre consonanti consecutive in una parola italiana sono quasi sempre
+        # un errore di lettura (inggtanno, cunosita' e' piu' sottile ma almeno
+        # le sequenze rumorose vengono penalizzate).
+        rumorose = sum(
+            1 for p in parole if re.search(r"[bcdfghjklmnpqrstvwxyz]{4,}", p.lower())
+        )
+        punteggio *= 1.0 - 0.35 * (rumorose / len(parole))
+    return max(0.0, min(1.0, punteggio))
 
 
 def _miglior_riga(testo: str) -> str:
@@ -388,10 +402,30 @@ def _titolo_unito(titoli: Sequence[str]) -> str:
     return tagliato.rstrip(" /") + "…"
 
 
+def _titolo_dal_parlato(
+    words: Sequence[Mapping[str, Any]], inizio: float, fine: float
+) -> str:
+    """Titolo candidato dalle parole DETTE durante una slide.
+
+    Il deck e' generato dal podcast: chi parla legge quasi sempre il titolo
+    della pagina. L'OCR di slide infografiche restituisce invece spesso
+    frammenti ("IEEARSI DIRLA", "SFFSITE", "lu F cunosita'"): la trascrizione
+    e' un controllo indipendente, non un altro passaggio della stessa catena
+    che ha gia' sbagliato.
+    """
+    dette = [
+        str(w.get("word", ""))
+        for w in words
+        if inizio <= float(w.get("start", -1.0)) < fine
+    ]
+    return " ".join(dette)
+
+
 def build_capitoli(
     timeline: Mapping[int, float],
     slide_texts: Sequence[str],
     numeri_slide: Sequence[int] | None = None,
+    words: Sequence[Mapping[str, Any]] | None = None,
 ) -> str:
     """Capitoli in formato YouTube: ``0:00 Titolo``, in ordine.
 
@@ -411,13 +445,52 @@ def build_capitoli(
     il fallback "Slide N" deve usare il numero vero della slide li' mostrata.
     """
     capitoli: list[tuple[float, str]] = []
+    inizi = [float(timeline[s]) for s in sorted(timeline)]
+    if inizi:
+        inizi[0] = 0.0
     for pos, slide in enumerate(sorted(timeline)):
-        inizio = float(timeline[slide])
-        if pos == 0:
-            inizio = 0.0
+        inizio = inizi[pos]
         testo = slide_texts[slide - 1] if 0 <= slide - 1 < len(slide_texts) else ""
         numero = int(numeri_slide[pos]) if numeri_slide is not None and pos < len(numeri_slide) else slide
-        capitoli.append((inizio, _titolo_capitolo(testo, numero)))
+        titolo_ocr = _titolo_capitolo(testo, numero)
+        titolo = titolo_ocr
+        if words is not None:
+            # L'ultimo capitolo non ha una fine nota: si leggono le parole
+            # fino a fine trascrizione, altrimenti rimarrebbe il titolo OCR
+            # sbagliato proprio sull'ultima slide.
+            fine = inizi[pos + 1] if pos + 1 < len(inizi) else float("inf")
+            parlato = _titolo_capitolo(_titolo_dal_parlato(words, inizio, fine), numero)
+            # Il deck nasce dal podcast: quando l'OCR e' palesemente rumoroso
+            # (o ha rinunciato a "Slide N") ma il parlato e' leggibile, il
+            # titolo detTO e' la fonte affidabile. Con OCR buono si lascia
+            # quello, che e' il titolo ufficiale della pagina.
+            q_ocr = _qualita_titolo(titolo_ocr)
+            q_parlato = _qualita_titolo(parlato)
+            # Preferire il parlato quando e' leggibile: l'OCR di slide
+            # infografiche produce testo "plausibile" (tutte lettere) ma
+            # sbagliato, quindi un confronto solo numerico non basta.
+            # Un titolo OCR breve e' affidabile ("Prima"): non si sostituisce
+            # con le prime parole della narrazione solo perche' sono piu'
+            # lunghe. Si richiedono almeno 3 parole per parte e almeno una
+            # radice in comune (gli errori OCR lasciano di solito lo stemma:
+            # "inggtanno"/"inganno", "cunosita'"/"curiosita'").
+            radici_ocr = {p[:4].lower() for p in titolo_ocr.split() if len(p) > 3}
+            radici_parlato = {p[:4].lower() for p in parlato.split() if len(p) > 3}
+            if (
+                q_parlato >= 0.6
+                and q_parlato >= q_ocr - 0.05
+                and not parlato.startswith("Slide ")
+                and (
+                    titolo_ocr.startswith("Slide ")
+                    or (
+                        len(titolo_ocr.split()) >= 3
+                        and len(parlato.split()) >= 3
+                        and radici_ocr & radici_parlato
+                    )
+                )
+            ):
+                titolo = parlato
+        capitoli.append((inizio, titolo))
 
     # Unisce i gruppi di capitoli troppo corti: si chiude un gruppo solo quando
     # il capitolo corrente ha raggiunto il minimo (o e' l'ultimo, la cui fine
@@ -474,7 +547,7 @@ def scrivi_sottotitoli(
         if timeline:
             capitoli = base.with_name(base.name + ".capitoli.txt")
             atomic_write_text(
-                capitoli, build_capitoli(timeline, slide_texts, numeri_slide) + "\n"
+                capitoli, build_capitoli(timeline, slide_texts, numeri_slide, words=words) + "\n"
             )
     except OSError as e:
         log.warning("   Sottotitoli/capitoli non scritti (%s).", e)

@@ -222,11 +222,17 @@ class TestSetupEDiagnostica(unittest.TestCase):
             mock.patch.object(config, "DEFAULT_TRANSCRIBER", "whisper"),
             mock.patch("transcription.resolved_transcriber", side_effect=lambda m, _d: m),
             mock.patch("transcription.openvino_usable", return_value=False),
+            mock.patch.object(
+                verifica_pc,
+                "_motore_senza_openvino",
+                return_value=verifica_pc.Esito("Motore", verifica_pc.AVV, "esito finto"),
+            ) as causa,
         ):
             verifica_pc.prova_motore(relazione)
-        testo = " ".join(e.dettaglio + " " + e.rimedio for e in relazione.esiti)
-        self.assertNotIn("OpenVINO scelto", testo)
-        self.assertNotIn("--transcriber openvino", testo)
+        # Le vecchie asserzioni negative passavano anche ripristinando
+        # l'hardcodare "auto": la prova vera e' che la diagnostica riceve il
+        # motore CONFIGURATO, non un valore fisso.
+        causa.assert_called_once_with("whisper")
 
     def test_un_solo_stato_per_motore(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -322,11 +328,16 @@ class TestScriptELauncher(unittest.TestCase):
 
         produttore = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
         self.assertIn("somiglianza media ", produttore)
+        # La regex e' quella VERA estratta dallo script, non una riscritta
+        # nel test; la riga e' costruita con la format string attuale di main.
+        motif = re.search(r"Get-Sim.*?'([^']*somiglianza[^']*)'", testo, re.DOTALL)
+        self.assertIsNotNone(motif)
+        assert motif is not None
         riga = (
             "ALTO — il parlato somiglia chiaramente alla sua slide "
             "(punteggio 1.477 contro una soglia di 0.450; somiglianza media 0.836)"
         )
-        trovato = re.search(r"somiglianza media\s+([\d]+\.[\d]+)", riga)
+        trovato = re.search(motif.group(1), riga)
         self.assertIsNotNone(trovato)
         assert trovato is not None
         self.assertEqual(trovato.group(1), "0.836")

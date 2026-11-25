@@ -558,6 +558,7 @@ def _risolvi_mentioni_implicite(
         eventi.append((t, None, is_count))
     eventi.sort(key=lambda e: e[0])
     ultima: int | None = None
+    ultimo_t_esplicito: float | None = None
     for t, numero, is_count in eventi:
         if is_count:
             # Un conteggio ("le 13 slide") non e' una transizione: non sposta
@@ -571,6 +572,19 @@ def _risolvi_mentioni_implicite(
                 continue
         else:
             candidata = numero
+            ultimo_t_esplicito = t
+        if (
+            numero is None
+            and ultimo_t_esplicito is not None
+            and abs(t - ultimo_t_esplicito) < 1e-6
+            and ultima is not None
+            and candidata == ultima + 1
+        ):
+            # "passiamo alla prossima slide 4" con il 4 come ULTIMA parola:
+            # implicita ed esplicita hanno lo stesso istante (fine parola).
+            # Risolvere l'implicita inventava la slide 5 nello stesso punto,
+            # che il clamp monotono trasformava in un lampo da 0,5s.
+            continue
         if ultima is not None and candidata <= ultima:
             continue  # richiamo di una slide gia' detta
         if numero is None:
@@ -874,6 +888,17 @@ def _collect_slide_mention_kinds(
                     "   [Deterministico] Trovato '%s' con numero incorporato a %.1fs",
                     w["word"],
                     w["start"],
+                )
+                continue
+            if embedded is not None:
+                # Numero FUSO ma fuori dal deck ("slaidiciannove" su 14 slide):
+                # cadere nel Pattern 1 agganciava il PRIMO numero successivo,
+                # anche se apparteneva a un'altra frase, creando un'ancora
+                # fantasma in anticipo. Si scarta la parola, non il numero dopo.
+                log.debug(
+                    "   [Deterministico] Numero incorporato %d fuori dal deck (1..%d): scartato.",
+                    embedded,
+                    total_slides,
                 )
                 continue
             for j in range(i + 1, min(i + 8, len(words))):

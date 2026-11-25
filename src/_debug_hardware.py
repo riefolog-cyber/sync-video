@@ -224,7 +224,8 @@ def main() -> int:
     try:
         from video import _build_video_ffmpeg
 
-        tmp = Path(tempfile.mkdtemp(prefix="dbg_hw_"))
+        tmp_ctx = tempfile.TemporaryDirectory(prefix="dbg_hw_")
+        tmp = Path(tmp_ctx.name)
         png, aud = tmp / "s.png", tmp / "a.wav"
         subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
@@ -250,6 +251,11 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         print(f"   [KO ] encoding reale: {type(e).__name__}: {e}")
         risultati.append(("encoding reale", False))
+    finally:
+        # Ogni `controlli.py` creava due cartelle in %TEMP% e non le
+        # rimuoveva mai: la diagnostica non puo' essere la causa di crescita
+        # infinita del disco.
+        tmp_ctx.cleanup()
 
     print("\n" + "=" * 66)
     print("5. RIPIEGO SE L'ENCODER ACCELERATO FALLISCE A RUNTIME")
@@ -257,7 +263,8 @@ def main() -> int:
     try:
         import video
 
-        tmp2 = Path(tempfile.mkdtemp(prefix="dbg_fb_"))
+        tmp2_ctx = tempfile.TemporaryDirectory(prefix="dbg_fb_")
+        tmp2 = Path(tmp2_ctx.name)
         png2, aud2 = tmp2 / "s.png", tmp2 / "a.wav"
         subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
@@ -293,6 +300,8 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         print(f"   [KO ] ripiego: {type(e).__name__}: {e}")
         risultati.append(("ripiego su libx264", False))
+    finally:
+        tmp2_ctx.cleanup()
 
     print("\n" + "=" * 66)
     risultati.append(("mypy cross-platform", _mypy_cross_platform()))

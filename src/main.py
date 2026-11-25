@@ -193,6 +193,7 @@ from semantic_sync import (
     refine_diagnostics,
     refine_timeline_from_words,
     repair_segments_from_frames_from_words,
+    reset_refine_diagnostics,
     reset_weak_signal_flag,
     semantic_timeline_from_words,
     set_embed_cache_enabled,
@@ -2867,7 +2868,11 @@ def _prefetch_models(args: Any) -> bool:
             # successive dichiarerebbero pronto (e la trascrizione partirebbe
             # con un modello corrotto). Usa lo stesso criterio di completezza
             # del provisioning e della selezione del motore.
-            if openvino_model_complete(_ovino_dir):
+            from transcription import openvino_model_id_ok
+
+            if openvino_model_complete(_ovino_dir) and openvino_model_id_ok(
+                _ovino_dir, DEFAULT_OPENVINO_MODEL_ID
+            ):
                 log.info("   · Modello OpenVINO gia' presente in %s", _ovino_dir)
             else:
                 from transcription import download_openvino_model
@@ -3398,7 +3403,9 @@ def main(argv: list | None = None) -> None:
                     _transcript_cache_key(hash_audio, args, beam=DEFAULT_WHISPER_BEAM_ACCURATE),
                     _beam_ab_cache_key(chiave_slide, hash_audio, args),
                 }
-        except (OSError, TypeError, ValueError, AttributeError):
+        except (OSError, TypeError, ValueError, AttributeError, RuntimeError):
+            # Nessun converter installato: `--clean-cache` non deve morire con
+            # un traceback, torna alla pulizia piena come prima del batch 22.
             attive = set()
         if not attive:
             # Senza gli input non si sa quali cache siano di questa coppia: la
@@ -4517,6 +4524,9 @@ def main(argv: list | None = None) -> None:
         # SOLO su questa chiamata (altrimenti una rilevazione precedente
         # della stessa run lo falserebbe).
         reset_weak_signal_flag()
+        # Due main() nello stesso processo non devono ereditare le decisioni
+        # sul raffinamento della run precedente.
+        reset_refine_diagnostics()
         log.info("   Sincronizzazione semantica (embeddings offline)...")
         timeline: dict[int, float] | None = semantic_timeline_from_words(
             slide_texts,
@@ -5140,6 +5150,10 @@ def main(argv: list | None = None) -> None:
             # memoria e il giorno dopo --review ricalcolava su dati stale.
             if isinstance(sync_notes.get("anchors"), dict):
                 cast("dict[str, object]", sync_notes["anchors"])["mentions_off"] = _dubbi_annunci()
+            # `--review` considera `mentions_off` salvato come autoritativo:
+            # senza questo marchio farebbe estrarre i frame di T2 da un video
+            # che invece segue la timeline vecchia T1.
+            sync_report["anteprima"] = True
             _save_sync_report(sync_report)
             from riepilogo import scrivi_riepilogo
 

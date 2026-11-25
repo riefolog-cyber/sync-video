@@ -116,10 +116,16 @@ def _stato_run(radice: Path) -> dict[str, object]:
         materiali = []
     stato["file_in_cartella"] = materiali
     try:
-        video = radice / "video_finale.mp4"
-        stato["video"] = (
-            {"byte": video.stat().st_size} if video.is_file() else None
+        # `--output lezione.mp4` e' una scelta supportata: il bundle non puo'
+        # cercare solo il nome di default e dire "video assente" quando il
+        # video prodotto e' li' accanto. Si prende l'MP4 piu' recente, senza
+        # le copie "(precedente)" del backup.
+        video = max(
+            (p for p in radice.glob("*.mp4") if "precedente" not in p.name),
+            key=lambda p: p.stat().st_mtime,
+            default=None,
         )
+        stato["video"] = {"byte": video.stat().st_size} if video is not None else None
     except OSError:
         stato["video"] = None
     try:

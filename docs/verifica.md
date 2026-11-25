@@ -17,9 +17,10 @@ si è spostato (e dice di quanto), con **2** se il confronto non si può fare
 caso non è un errore del programma: il riferimento va riallineato con `--aggiorna`.
 
 La pipeline INTERA (PDF vero → OCR → voce vera → Whisper → ancore → MP4) gira
-in `test_end_to_end_minimo.py`: costa circa un minuto ed è marcata lenta, quindi
-parte con `SYNC_VIDEO_RUN_SLOW=1` (job notturno). È l'unico test che si accorge
-di un collegamento rotto fra le fasi. **Delimitazione:** il test forza
+in tre test lenti di `test_end_to_end_minimo.py` (annunci, ripresa a metà,
+disattivazione della ripresa): costano circa un minuto e partono con
+`SYNC_VIDEO_RUN_SLOW=1` (job notturno). Anche `prova_materiale_reale.py`
+esegue la pipeline intera e ne confronta la timeline con il riferimento. **Delimitazione:** il test forza
 `--transcriber whisper`, `--no-auto-setup` e `--no-update-check`, quindi NON
 copre la scelta automatica del motore (CUDA/OpenVINO), il controllo
 aggiornamenti su PyPI né il test A/B dei pacchetti pinnati: quelle strade vanno

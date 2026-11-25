@@ -1643,28 +1643,24 @@ class TestIndiceCorrezioneNomi(unittest.TestCase):
         }
         parole = ["".join(casuale.choice(alfabeto) for _ in range(casuale.randint(4, 8))) for _ in range(200)]
 
+        # Occorre passare per LA FUNZIONE DI PRODUZIONE: ricostruire l'indice
+        # dentro il test lo rendeva vacuo (un bug nell'indice veloce non si
+        # vedeva, perche' il test usava il suo indice, non quello del modulo).
+        words = [{"word": p, "start": float(i)} for i, p in enumerate(parole)]
+        correzioni: list[str] = []
+        transcription.correct_transcript_names(
+            words, vocabolario={p: 2 for p in vocabolario}, correzioni=correzioni
+        )
+        corrette = {c.split(" -> ")[0] for c in correzioni}
         for parola in parole:
             attesi = {
                 c for c in vocabolario if transcription._distanza_le_1(parola, c)
             }
-            wildcard: dict[str, set[str]] = {}
-            cancellazioni: dict[str, set[str]] = {}
-            for nome in vocabolario:
-                for i in range(len(nome)):
-                    wildcard.setdefault(nome[:i] + "\0" + nome[i + 1 :], set()).add(nome)
-                for i in range(len(nome) + 1):
-                    cancellazioni.setdefault(nome[:i] + nome[i + 1 :], set()).add(nome)
-            veloci: set[str] = set()
-            for i in range(len(parola)):
-                veloci.update(wildcard.get(parola[:i] + "\0" + parola[i + 1 :], ()))
-                corta = parola[:i] + parola[i + 1 :]
-                if corta in vocabolario:
-                    veloci.add(corta)
-            veloci.update(cancellazioni.get(parola, ()))
-            # `_distanza_le_1` esclude il confronto di una parola con se stessa;
-            # in produzione quelle parole sono già saltate prima dell'indice.
-            veloci.discard(parola)
-            self.assertEqual(veloci, attesi, f"vicini diversi per {parola!r}")
+            # Un vicino solo -> correzione; zero o due -> la parola resta.
+            if len(attesi) == 1 and parola not in vocabolario:
+                self.assertIn(parola, corrette, f"mancata correzione di {parola!r}")
+            else:
+                self.assertNotIn(parola, corrette, f"correzione indebita di {parola!r}")
 
 
 class TestFallbackPydub8Bit(unittest.TestCase):

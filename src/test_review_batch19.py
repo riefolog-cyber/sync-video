@@ -272,6 +272,9 @@ class TestVideoEReview(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "video_finale.mp4"
             output.write_bytes(b"video-buono")
+            # Il backup DEVE esistere: senza di esso il test passava anche se
+            # `_ripristina_video_precedente` non venisse mai chiamato.
+            video._salva_video_precedente(output)
 
             def scrivi_parziale(percorso: str, **_kw: object) -> None:
                 Path(percorso).write_bytes(b"parziale")
@@ -295,6 +298,17 @@ class TestVideoEReview(unittest.TestCase):
                 self.assertRaises(RuntimeError),
             ):
                 video._build_video_moviepy(["s.png"], [1.0], "a.wav", output, 5, 1, 0.0)
+            self.assertEqual(output.read_bytes(), b"video-buono")
+            self.assertEqual(list(Path(tmp).glob("*.tmp.mp4")), [])
+
+    def test_backup_ripristina_output_sparito(self) -> None:
+        """Il ripristino vero si esercita solo con il file finale mancante."""
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "video_finale.mp4"
+            output.write_bytes(b"video-buono")
+            video._salva_video_precedente(output)
+            output.unlink()
+            video._ripristina_video_precedente(output)
             self.assertEqual(output.read_bytes(), b"video-buono")
 
     def test_anteprime_stali_vengono_rimosse(self) -> None:

@@ -241,7 +241,8 @@ class TestReviewVeritiero(unittest.TestCase):
         testo = (ROOT / "src" / "scripts" / "check_fastembed_upgrade.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("os.replace(tmp_report, report)", testo)
+        self.assertIn("tempfile.mkstemp", testo)
+        self.assertIn("os.replace(nome_tmp, report)", testo)
 
 
 if __name__ == "__main__":

@@ -2203,11 +2203,19 @@ def verify_anchor_mapping_embedding(
     #    intermittenza) il mapping è AMBIGUO ma SOSPETTO: resta il segnale per
     #    il report e il riepilogo (da controllare a mano).
     runs: list[tuple[int, list[tuple[int, float]]]] = []  # (offset, ancore)
+    ultimo_off: int | None = None
     for s, t, off in pairs:
-        if off != 0 and runs and runs[-1][0] == off:
+        if off == 0:
+            # Un'ancora CONFERMATA dal contenuto spezza la run: due ancore
+            # sfasate separate da una confermata NON sono uno spostamento
+            # continuo, e correggerle come tale sposta slide sbagliate.
+            ultimo_off = None
+            continue
+        if ultimo_off == off and runs:
             runs[-1][1].append((s, t))
-        elif off != 0:
+        else:
             runs.append((off, [(s, t)]))
+        ultimo_off = off
     shifted_runs = [r for r in runs if len(r[1]) >= 2]
     if len(shifted_runs) != 1:
         # 3) Mapping per CONTENUTO (drift progressivo): la numerazione parlata
@@ -2411,7 +2419,15 @@ def _record_refine(key: int, slide: int, **fields: object) -> None:
     da mostrare in ``refine_diagnostics()``, che non cambia rispetto al caso
     normale.
     """
-    _REFINE_DIAGNOSTICS[key] = {"slide": slide, **fields}
+    # La chiave di lavoro (indice del segmento nel ripiego post-video) e
+    # QUELLA DEL NUMERO SLIDE (nel raffinamento normale) collidevano: un
+    # indice 3 sovrascriveva la voce della slide 3 con la decisione della
+    # slide 4. Si indicizza SEMPRE per numero di slide, che e' cio' che il
+    # report mostra, tenendo l'indice come campo informativo.
+    voce: dict[str, object] = {"slide": slide, **fields}
+    if key != slide:
+        voce["indice"] = key
+    _REFINE_DIAGNOSTICS[slide] = voce
 
 
 def _refine_wins_under_perturbation(

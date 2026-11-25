@@ -5,10 +5,10 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 22 (segnali GPU, prefetch, `--review` e qualita'
-della suite), dopo il batch 21 (orchestrazione e launcher). Il piano resta un
-registro delle decisioni: i dettagli di ogni cambiamento sono nei messaggi di
-commit e nei test.
+Ultimo aggiornamento: batch 23 (capitoli leggibili, regressioni del batch 22,
+mapping ancore e audit dei test), dopo il batch 22. Il piano resta un registro
+delle decisioni: i dettagli di ogni cambiamento sono nei messaggi di commit e
+nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -273,7 +273,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1593 test).
+`python -m unittest discover -s src -p "test_*.py"` (1608 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -716,7 +716,7 @@ verdi (16 nuovi), `controlli.py` 6/6 e debug hardware 17/17.
 ## Batch 22 — segnali, storico e qualita' dei test (2026-11)
 
 Quinta revisione incrociata: il segnale di crash GPU, il prefetch, lo storico
-tempi, `--review` e i test stessi. Venti difetti, dodici test nuovi. Uno era
+tempi, `--review` e i test stessi. Venti difetti, tredici test nuovi (12 qui + 1 nel batch 21). Uno era
 stato INTRODOTTO dal batch 21 e trovato subito dal controllo della suite.
 
 **Il segnale di crash GPU e' di nuovo affidabile.** Il `finally` aggiunto nel
@@ -761,6 +761,57 @@ che il produttore del log emettesse ancora la frase che sa leggere.
 
 Verifiche: `ruff` e `mypy` puliti (93 file, win32/linux/darwin), 1592 test
 verdi (13 nuovi), `controlli.py` 6/6 e debug hardware 17/17.
+
+## Batch 23 — capitoli e qualita' della prova (2026-11)
+
+Sesta revisione incrociata, con un caso reale segnalato dall'utente: i titoli
+dei capitoli dell'ultimo video erano pieni di errori ("L'inggtanno",
+"cunosita'", "IEEARSI DIRLA", "SFFSITE"). Ventuno difetti, quattordici test
+nuovi; tre test vecchi sono stati rafforzati perche' non esercitavano cio' che
+dicevano.
+
+**I capitoli non sono piu' solo l'OCR.** `build_capitoli` prendeva il titolo
+dalla sola OCR della slide: su pagine infografiche l'OCR restituisce testo
+"plausibile" ma sbagliato, e il vecchio filtro di qualita' lo lasciava passare.
+Ora, quando c'e' la trascrizione, si usa la prima frase DETTA nella slide come
+sorgente alternativa: il deck nasce dal podcast, quindi chi parla legge il
+titolo vero. L'OCR buono resta prioritario; quello rumoroso (maiuscole a
+tuoni, lettere isolate) viene scartato dal punteggio piu' severo. Il caso
+"Slide N" rimane come ripiego perche' non c'e' un titolo leggibile.
+
+**Regressioni del batch 22.** `--clean-cache` su un .pptx senza converter
+sollevava `RuntimeError` non gestito e non puliva nulla; l'ID del modello
+OpenVINO veniva controllato solo dentro il download, che i chiamanti saltano
+quando la cartella e' completa, quindi il modello vecchio restava in uso con
+il report che annunciava quello nuovo; il segnale di crash GPU veniva scritto
+senza guardia e sovrascriveva quello di un altro audio; il ripiego CPU lo
+cancellava anche quando la decodifica falliva. `--preview` ora marchia il
+report e `--review` rifiuta di estrarre frame da un video vecchio seguendo
+quei tempi; quando il controllo non gira dice la ragione vera.
+
+**Mapping e diagnostica.** Due ancore sfasate separate da una confermata
+venivano fuse in un'unica "run" e corrette come spostamento continuo; le
+ancore con numero fuori dal deck rubavano il primo numero della frase dopo;
+"prossima slide 4" con il 4 come ultima parola inventava la slide 5 nello
+stesso istante. La diagnostica del refine usava come chiave ora il numero
+slide ora l'indice di segmento: le due voci collidevano e il report perdeva
+una slide. Lo script A/B scriveva nello stesso file di `updates.py` senza i
+campi che lo validano, distruggendo il report buono e facendo ripartire il
+test a ogni avvio; usava anche un `.tmp` condiviso. `_debug_hardware` lasciava
+due cartelle in %TEMP% a ogni controllo, e il bundle diagnostico cercava solo
+`video_finale.mp4` anche dopo `--output lezione.mp4`.
+
+**I test si controllano da soli.** Tre test "di regressione" erano vacui:
+quello della correzione dei nomi ricostruiva l'indice dentro il test quello
+del motore faceva asserzioni negative su frasi che il codice non emette
+quello del confronto embedding usava una riga inventata. Ora passano dalla
+funzione di produzione. Il test del backup MoviePy non creava il backup, e
+quello del riepilogo si aspettava l'assenza della data. Le doc dicevano che
+tutti i test fossero finti e che `--prefetch-models` scaricasse anche l'IR
+OpenVINO su ogni macchina: corretti.
+
+Verifiche: `ruff` e `mypy` puliti (93 file, win32/linux/darwin), 1607 test
+verdi (14 nuovi), `controlli.py` 6/6 e debug hardware 17/17.
 
 ## Stato delle voci
 
@@ -857,5 +908,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio (batch 22): ruff pulito, mypy pulito su tre
-piattaforme, 1593 test verdi, `_debug_hardware.py` e controlli 6/6.
+Stato all'ultimo lancio (batch 23): ruff pulito, mypy pulito su tre
+piattaforme, 1608 test verdi, `_debug_hardware.py` e controlli 6/6.

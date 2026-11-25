@@ -126,6 +126,15 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
             report_path,
         )
         return 1
+    if report.get("anteprima"):
+        # `--preview` ha aggiornato il report ma NON ha generato il video:
+        # estrarre frame da un video vecchio seguendo i tempi nuovi darebbe
+        # anteprime e giudizi sbagliati.
+        log.error(
+            "\n   [Revisione] Il report in cache viene da --preview: nessun video "
+            "e' stato generato con quella timeline. Rilancia senza --preview."
+        )
+        return 3
     segments = cast("list[dict[str, object]]", report.get("segments") or [])
     starts: dict[int, float] = {}
     for seg in segments:
@@ -148,6 +157,7 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
     # controllo NON e' mai stato fatto: dirlo e' obbligatorio, altrimenti
     # "niente da rivedere" e' una falsa rassicurazione.
     controllo_non_fatto = False
+    motivo_non_fatto = ""
 
     anchors = cast("dict[str, object]", report.get("anchors") or {})
     # `mentions_off=[]` e' un dato: la run ha confrontato gli annunci e non ne
@@ -193,6 +203,7 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
                     "   Report vecchio con correzione automatica del mapping: "
                     "offset non noto, non ricalcolo i dubbi per non falsarli."
                 )
+                motivo_non_fatto = "offset del mapping automatico non noto"
                 controllo_non_fatto = True
             else:
                 offset = int(cast("int", effective if effective is not None else (anchors.get("spoken_offset") or 0)))
@@ -244,9 +255,9 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
         # senza la chiave e trascrizione assente/illeggibile). Dirlo evita
         # che l'utente creda che i confini siano stati verificati.
         log.warning(
-            "   [Revisione] Controllo annunci/confini NON eseguito: report senza "
-            "'mentions_off' e nessuna trascrizione leggibile in cache. "
-            "Rilancia la pipeline per ricostruire il referto."
+            "   [Revisione] Controllo annunci/confini NON eseguito: %s. "
+            "Rilancia la pipeline per ricostruire il referto.",
+            motivo_non_fatto or "report senza 'mentions_off' e nessuna trascrizione leggibile in cache",
         )
         return 3
     if not items:

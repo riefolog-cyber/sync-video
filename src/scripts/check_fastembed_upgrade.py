@@ -49,6 +49,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -603,21 +604,33 @@ def main(argv: list | None = None) -> int:
 
         result = compare(base, cand, n_slides=len(texts["slides"]), sim_mean_threshold=args.sim_mean,
                          decision_match_threshold=args.decision_match)
+        # Lo script scrive nello STESSO file usato da updates.py: senza i
+        # campi che `_ab_report_valido` richiede, il report appena prodotto
+        # veniva sempre rifiutato e il test A/B (venv + 200 embedding) girava
+        # di nuovo a ogni avvio, dopo aver distrutto quello valido.
+        from config import _installed_version
+        from updates import _hash_texts
+
         result.update({
             "candidate": args.candidate,
+            "installed": str(_installed_version("fastembed") or ""),
             "model": args.model,
+            "texts_hash": _hash_texts(all_texts),
             "batch_size": batch,
+            "threshold_sim_mean": args.sim_mean,
+            "threshold_decision_match": args.decision_match,
+            "ts": time.time(),
             "cache_dir": embedding_cache,
         })
 
         report = Path(args.report)
         report.parent.mkdir(parents=True, exist_ok=True)
-        # Scrittura atomica come in updates.py: un taglio durante write_text
-        # lasciava un JSON troncato al nome canonico, e il controllo A/B
-        # veniva ripetuto (venv temporanea + 200 embedding) a ogni avvio.
-        tmp_report = report.with_name(report.name + ".tmp")
-        tmp_report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp_report, report)
+        # Nome temporaneo UNICO (mkstemp), non `<report>.tmp`: due controlli
+        # concorrenti con lo stesso report si troncavano a vicenda il file.
+        fd, nome_tmp = tempfile.mkstemp(dir=report.parent, prefix=report.name + ".", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(result, ensure_ascii=False, indent=2))
+        os.replace(nome_tmp, report)
 
         print(f"\n  Riepilogo: {len(texts['slides'])} slide, {len(texts['blocks'])} blocchi")
         print(f"  coseno medio  : {result['cosine_mean']:.4f} (min {result['cosine_min']:.4f})")
