@@ -210,6 +210,11 @@ def scrivi_riepilogo(
     try:
         path = output_path.parent / "riepilogo.md"
         giorno = _data_lezione(output_path) if data is None else data
+        if not giorno:
+            # La run normale scrive il riepilogo PRIMA del video: stat fallisce
+            # e il file restava senza data per sempre (nessuna scrittura dopo,
+            # in assenza di dubbi/riparazioni). La data della run e' oggi.
+            giorno = time.strftime("%d/%m/%Y")
         atomic_write_text(
             path,
             riepilogo_markdown(

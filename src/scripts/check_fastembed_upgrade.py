@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -611,7 +612,12 @@ def main(argv: list | None = None) -> int:
 
         report = Path(args.report)
         report.parent.mkdir(parents=True, exist_ok=True)
-        report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        # Scrittura atomica come in updates.py: un taglio durante write_text
+        # lasciava un JSON troncato al nome canonico, e il controllo A/B
+        # veniva ripetuto (venv temporanea + 200 embedding) a ogni avvio.
+        tmp_report = report.with_name(report.name + ".tmp")
+        tmp_report.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp_report, report)
 
         print(f"\n  Riepilogo: {len(texts['slides'])} slide, {len(texts['blocks'])} blocchi")
         print(f"  coseno medio  : {result['cosine_mean']:.4f} (min {result['cosine_min']:.4f})")

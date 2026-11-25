@@ -79,11 +79,17 @@ class TestCacheNonUccideLaRun(unittest.TestCase):
             with (
                 mock.patch.object(updates, "CACHE_DIR", Path(tmp)),
                 mock.patch.object(updates, "UPDATES_CACHE", Path(tmp) / "updates_check.json"),
-                mock.patch.object(updates, "atomic_write_text", side_effect=OSError("readonly")),
-                mock.patch.object(updates, "_latest_version_pypi", return_value=None),
+                mock.patch.object(
+                    updates, "atomic_write_text", side_effect=OSError("readonly")
+                ) as scrittura,
+                # Con PyPI irraggiungibile `check_updates` torna prima di
+                # scrivere: il test non esercitava affatto la correzione.
+                mock.patch.object(updates, "_latest_version_pypi", return_value="9.9.9"),
+                mock.patch.object(updates, "_installed_version", return_value="1.0.0"),
             ):
                 esito = updates.check_updates()
             self.assertIsInstance(esito, list)
+            self.assertGreater(scrittura.call_count, 0, "la scrittura della cache non e' stata provata")
 
     def test_cache_scaduta_non_riporta_versione_gia_installata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -205,7 +211,7 @@ class TestVeritaDiagnostica(unittest.TestCase):
                 1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 6.0,
                 video_encoder=None,
                 video_presente=True,
-                history_fn=lambda *_a: None,
+                history_fn=lambda *_a, **_k: None,
             )
         testo = "\n".join(log.output)
         self.assertNotIn("dry-run", testo)
@@ -217,7 +223,7 @@ class TestVeritaDiagnostica(unittest.TestCase):
                 1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 6.0,
                 video_encoder=None,
                 video_presente=False,
-                history_fn=lambda *_a: None,
+                history_fn=lambda *_a, **_k: None,
             )
         self.assertIn("non generato (dry-run)", "\n".join(log.output))
 

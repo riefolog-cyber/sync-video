@@ -366,10 +366,14 @@ def _print_timing(
     ``video_encoder`` rende visibile nel riepilogo che la GPU è stata usata
     anche per l'encoding (prima era sempre libx264 su CPU, senza dirlo).
     """
-    def _storia(ocr: float, tr: float, sync: float, emb: float, vid: float, tot: float) -> None:
-        # Firma a sei argomenti (quella che i test si aspettano) ma con la
-        # CACHE_DIR di QUESTO modulo, come tutti gli altri shim.
-        _append_timing_history(ocr, tr, sync, emb, vid, tot, cache_dir=CACHE_DIR)
+    def _storia(
+        ocr: float, tr: float, sync: float, emb: float, vid: float, tot: float,
+        *, t_verify: float = 0.0,
+    ) -> None:
+        # Firma storica a sei argomenti + il tempo di verifica (parametro
+        # opzionale): la CACHE_DIR e' quella di QUESTO modulo, come gli altri
+        # shim, e i test che patchano `_append_timing_history` vedono il mock.
+        _append_timing_history(ocr, tr, sync, emb, vid, tot, cache_dir=CACHE_DIR, t_verify=t_verify)
 
     _print_timing_impl(
         t_ocr, t_transcribe, t_sync, t_embed, t_model, t_video, t_total,
@@ -2790,6 +2794,8 @@ def _prefetch_models(args: Any) -> bool:
     _candidates = [args.semantic_model]
     if DEFAULT_EMBEDDING_MODEL_ALTERNATE not in _candidates:
         _candidates.append(DEFAULT_EMBEDDING_MODEL_ALTERNATE)
+    falliti_embedding: list[str] = []
+    embedding_pronto = False
     for model_name in _candidates:
         if not model_name:
             continue
@@ -2797,18 +2803,24 @@ def _prefetch_models(args: Any) -> bool:
             from semantic_sync import _load_embed_model
 
             if _load_embed_model(model_name, args.semantic_cache_dir) is None:
-                falliti.append(f"embedding {model_name}")
+                falliti_embedding.append(f"embedding {model_name}")
                 log.warning("   ⚠️  Modello embedding non caricato: %s", model_name)
             else:
                 log.info("   ✅ Embedding pronto: %s", model_name)
+                embedding_pronto = True
                 break  # il primo che va bene basta; se fallisce si prova l'alternativo
         except ImportError:
-            falliti.append("embedding (fastembed non installato)")
+            falliti_embedding.append("embedding (fastembed non installato)")
             log.warning("   ⚠️  fastembed non installato: embedding non scaricabile.")
             break
         except Exception as e:  # noqa: BLE001 - rete: non deve bloccare il prefetch
-            falliti.append(f"embedding {model_name}")
+            falliti_embedding.append(f"embedding {model_name}")
             log.warning("   ⚠️  Download embedding fallito (%s): %s", model_name, e)
+
+    # Il fallback e' un SUCCESSO: se l'alternativo e' pronto la pipeline puo'
+    # girare, e uscire 1 dopo aver stampato "Embedding pronto" era una bugia
+    # che faceva abortire l'automazione.
+    falliti.extend(falliti_embedding if not embedding_pronto else [])
 
     # 2) faster-whisper: i pesi stanno su HuggingFace come
     #    Systran/faster-whisper-<size>. Si scarica il pacchetto senza caricarlo
@@ -3351,6 +3363,16 @@ def main(argv: list | None = None) -> None:
             elif not audio_qui.is_absolute():
                 audio_qui = BASE_DIR / audio_qui
             if pdf_qui.exists() and audio_qui is not None and audio_qui.exists():
+                if pdf_qui.suffix.lower() in PRESENTATION_SUFFIXES:
+                    # La run vera converte PRIMA e fa l'hash del PDF convertito:
+                    # hashare il .pptx dava una chiave che non esiste, e la
+                    # cache OCR viva veniva cancellata come orfana. La
+                    # conversione e' cache herself, quindi costa poco.
+                    pdf_qui = convert_presentation_to_pdf(
+                        pdf_qui,
+                        CACHE_DIR / "ppt_pdf",
+                        fallback_senza_grafica=args.fallback_senza_grafica,
+                    )
                 chiave_slide = _cache_key_slides(_file_hash(pdf_qui), args.dpi, args.lang)
                 hash_audio = _file_hash(audio_qui)
                 # `--clean-cache` torna PRIMA di bootstrap/machine_setup, quindi
@@ -5058,8 +5080,18 @@ def main(argv: list | None = None) -> None:
             _declared: dict[int, float] = {}
             _cursor = 0.0
             for _sid, _dur in zip(slide_ids, durations, strict=True):
-                _declared.setdefault(int(_sid), _cursor)
+                # Con --skip-slides una slide puo' comparire piu' volte: tenere
+                # la PRIMA occorrenza faceva dire "il video e' in anticipo"
+                # quando l'annuncio parlava della seconda. Si conserva l'ultima.
+                _declared[int(_sid)] = _cursor
                 _cursor += float(_dur)
+            # `--review` ricalcola i dubbi su report vecchi: senza l'offset
+            # EFFETTIVO (utente + correzione automatica del mapping) non puo'
+            # riprodurre il controllo fatto qui.
+            if isinstance(sync_notes.get("anchors"), dict):
+                cast("dict[str, object]", sync_notes["anchors"])["effective_offset"] = (
+                    _offset_utente + _offset_mapping
+                )
             # L'offset utente e' solo la correzione dichiarata a mano: quella
             # automatica del mapping va sommata, altrimenti ogni annuncio
             # corretto sembra contraddire il confine della pagina sbagliata.
@@ -5111,7 +5143,16 @@ def main(argv: list | None = None) -> None:
             _save_sync_report(sync_report)
             from riepilogo import scrivi_riepilogo
 
-            scrivi_riepilogo(sync_report, Path(args.output_video), dry_run=args.dry_run)
+            # `--preview` e `--dry-run` sono mutualmente esclusivi, quindi
+            # args.dry_run e' False: passarlo al riepilogo faceva scrivere
+            # "Video: lezione.mp4" mentre il video NON viene generato, e la
+            # data veniva presa dal mtime di un vecchio file. Si dichiara
+            # esplicitamente "non creato".
+            scrivi_riepilogo(sync_report, Path(args.output_video), dry_run=True)
+            # Con zero dubbi si puliscono comunque le anteprime della run
+            # precedente: il return non deve saltare la pulizia come fa la
+            # strada normale.
+            _write_boundary_previews(args.output_video, [], CACHE_DIR / "review")
             _avvisa_verifica_non_eseguita(args, "--preview")
             return
 
@@ -5201,6 +5242,7 @@ def main(argv: list | None = None) -> None:
             reused_out=video_riutilizzato,
         )
         t_video = time.time() - t_phase_start
+        t_verify = 0.0  # definito anche senza --verify-video
 
         # --- Verifica durata output (anti-troncamento) ---
         try:
@@ -5237,7 +5279,6 @@ def main(argv: list | None = None) -> None:
         # La verifica frame NON e' encoding: prima non era cronometrata e, con
         # riparazione, il suo tempo finiva nella riga "Encoding Video" (insieme
         # al secondo build), facendo sembrare lento l'encoder.
-        t_verify = 0.0
         if args.verify_video:
             inizio_verifica = time.time()
             frame_check = _frame_check_video(
@@ -5314,9 +5355,10 @@ def main(argv: list | None = None) -> None:
                         # (l'impronta cambia coi tempi).
                         reuse=not args.no_cache,
                     )
-                    # Solo il SECONDO encoding: verifica e riparazione hanno
-                    # il loro bucket, non gonfiano "Encoding Video".
-                    t_video = time.time() - inizio_secondo_encoding
+                    # SOMMA dei due encoding: con riparazione il secondo
+                    # costrutto sostituiva il tempo del primo, e la tabella
+                    # nonspiegava piu' il TOTALE.
+                    t_video += time.time() - inizio_secondo_encoding
                     # I frame del video precedente li rimuove la verifica stessa
                     # (``video.frame_consistency_check`` svuota la cartella prima
                     # di scrivere): qui non serve un secondo punto di pulizia.
@@ -5331,9 +5373,13 @@ def main(argv: list | None = None) -> None:
                             repaired_timeline[int(slide)] = t_cursor
                             t_cursor += float(d)
                         _save_final_timeline(repaired_timeline, total_duration)
+                    # Anche la SECONDA verifica (sul video rigenerato) va nel
+                    # bucket: prima non era cronometrata e il tempo spariva.
+                    inizio_seconda_verifica = time.time()
                     frame_check = _frame_check_video(
                         args.output_video, slide_ids, durations, all_slide_files
                     )
+                    t_verify += time.time() - inizio_seconda_verifica
                     mismatches = cast("list[dict[str, object]]", frame_check["mismatches"])
             sync_report["frame_check"] = frame_check
             if repairs:

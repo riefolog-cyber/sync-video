@@ -163,8 +163,11 @@ def _gather(api: Any, known: set[str] | None = None) -> dict:
     network_errors: list[str] = []
     for mid in TRACKED_MODELS:
         try:
-            # Timeout finito: senza, una connessione half-open faceva girare
-            # per sempre lo script (che promette uscita 3 = non verificabile).
+            # `model_info` accetta timeout; `list_models` NO (verificato su
+            # huggingface_hub 0.36): passarglielo faceva sollevare TypeError,
+            # classificato come errore di rete e lo script usciva SEMPRE 3.
+            # Timeout finito qui: senza, una connessione half-open faceva
+            # girare per sempre lo script.
             info = api.model_info(mid, files_metadata=False, timeout=_HF_TIMEOUT)
             tracked[mid] = {
                 "lastModified": info.lastModified.isoformat() if info.lastModified else None,
@@ -183,7 +186,6 @@ def _gather(api: Any, known: set[str] | None = None) -> dict:
             sort="lastModified",
             direction=-1,
             limit=SEARCH_LIMIT,
-            timeout=_HF_TIMEOUT,
         )
         for m in models:
             mid = m.modelId

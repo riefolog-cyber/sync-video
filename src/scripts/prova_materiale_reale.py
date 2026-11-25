@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Prova sul MATERIALE REALE: la timeline prodotta e' quella giusta?
 
-Tutti i test della suite sono finti: l'OCR di un PDF finto, la trascrizione di
-un audio finto, un video costruito al volo. Le cose che contano — le ancore,
-i confini, il riconoscimento — si verificano solo sul materiale vero. Questo
+I test VELOCI della suite usano materiale finto (PDF, audio e video costruiti
+al volo); le cose che contano — ancore, confini, riconoscimento — si verificano
+nei test lenti (`SYNC_VIDEO_RUN_SLOW=1`) e qui, sul materiale vero. Questo
 script lancia la pipeline sul PDF e sull'audio della cartella e confronta la
 timeline con un RIFERIMENTO (il file golden): e' il controllo che dice "il
 programma ancora produce quello che produceva".

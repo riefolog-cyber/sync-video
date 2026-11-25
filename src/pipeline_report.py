@@ -48,6 +48,8 @@ def format_time(seconds: float) -> str:
 def append_timing_history(
     t_ocr: float, t_transcribe: float, t_sync: float, t_embed: float, t_video: float, t_total: float,
     cache_dir: Path | None = None,
+    *,
+    t_verify: float = 0.0,
 ) -> None:
     """Persiste lo storico tempi in .cache/timing_history.jsonl (mai bloccante)."""
     import json
@@ -62,6 +64,9 @@ def append_timing_history(
             "sync": round(t_sync, 1),
             "embed": round(t_embed, 1),
             "video": round(t_video, 1),
+            # La riga "Verifica frame" stampata in console deve esistere anche
+            # nello storico, altrimenti i due strumenti di diagnosi divergono.
+            "verify": round(t_verify, 1),
             "total": round(t_total, 1),
         }
         with (cd / "timing_history.jsonl").open("a", encoding="utf-8") as f:
@@ -187,8 +192,7 @@ def print_timing(
         log.info("   🖥️  Hardware: %s", ", ".join(righe_hw))
     if history_fn is None:
         append_timing_history(
-            t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total, cache_dir=cd
+            t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total, cache_dir=cd, t_verify=t_verify
         )
     else:
-        # I callback dei test hanno la firma storica a sei argomenti.
-        history_fn(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total)
+        history_fn(t_ocr, t_transcribe, t_sync, t_embed, t_video, t_total, t_verify=t_verify)

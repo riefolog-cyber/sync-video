@@ -343,6 +343,9 @@ def correct_transcript_names(
 # =====================================================================
 # TRASCRIZIONE CON OPENVINO GENAI (iGPU/CPU, più veloce su Intel)
 # =====================================================================
+_OPENVINO_ID_FILE = "openvino_model_id.json"
+
+
 def download_openvino_model(model_dir: Path, model_id: str = DEFAULT_OPENVINO_MODEL_ID) -> Path:
     """Scarica il modello Whisper OpenVINO IR da HuggingFace (una tantum).
 
@@ -354,7 +357,26 @@ def download_openvino_model(model_dir: Path, model_id: str = DEFAULT_OPENVINO_MO
     machine_setup e in openvino_usable) consideravano buono per sempre.
     """
     if openvino_model_complete(model_dir):
-        return model_dir
+        # `OPENVINO_MODEL_ID` e' una scelta dell'utente: se cambia ID tenendo
+        # la stessa cartella, il vecchio IR "sembra completo" e veniva riusato
+        # mentre il report annunciava il nuovo modello. Si registra QUALE ID ha
+        # prodotto la cartella e si riscarica se non corrisponde.
+        try:
+            salvato = json.loads((model_dir / _OPENVINO_ID_FILE).read_text(encoding="utf-8"))
+            marcatore_presente = True
+        except (OSError, ValueError):
+            salvato, marcatore_presente = {}, False
+        # Cartella scritta prima che il marcatore esistesse: e' il modello di
+        # default, non un ID diverso. Riscaricarla farebbe perdere ore di
+        # download a ogni aggiornamento su installazioni gia' funzionanti.
+        if not marcatore_presente or salvato.get("model_id") == model_id:
+            return model_dir
+        log.warning(
+            "   ⚠️ Modello OpenVINO in %s non e' %s (e' %s): lo sostituisco.",
+            model_dir,
+            model_id,
+            salvato.get("model_id") or "di origine sconosciuta",
+        )
     if model_dir.exists():
         # Parziale o vuota: non la si riusa, neppure come " gia' presente".
         log.warning("   ⚠️ Modello OpenVINO incompleto in %s: lo scarico di nuovo.", model_dir)
@@ -381,6 +403,9 @@ def download_openvino_model(model_dir: Path, model_id: str = DEFAULT_OPENVINO_MO
             raise RuntimeError(
                 f"Download OpenVINO incompleto in {tmp}: manca config.json o un file IR (.xml/.bin)."
             )
+        # L'identita' si scrive DENTRO la temporanea: se os.replace fallisce
+        # non resta una cartella "completa" con l'ID sbagliato.
+        atomic_write_text(tmp / _OPENVINO_ID_FILE, json.dumps({"model_id": model_id}))
         os.replace(tmp, model_dir)
     except BaseException:
         # Nessuna parziale deve restare vicino alla destinazione: verra'
@@ -722,8 +747,17 @@ def _write_attempt(audio_path: Path) -> None:
         )
 
 
-def _clear_attempt() -> None:
-    """Cancella il file-segnale (trascrizione riuscita o fallita con eccezione)."""
+def _clear_attempt(audio_path: Path | None = None) -> None:
+    """Cancella il file-segnale, ma solo se parla dell'audio corrente.
+
+    Il segnale e' un file UNICO in cache, e `decide_transcriber` lo onora
+    solo quando `_same_audio` corrisponde. Cancellarlo senza controllare
+    l'identita' faceva sparire il segnale di un crash su un ALTRO audio:
+    il proprietario perdeva la protezione e al prossimo run ripeteva il
+    segfault. Con `audio_path=None` si mantiene il vecchio comportamento.
+    """
+    if audio_path is not None and not _same_audio(_read_attempt(), audio_path):
+        return
     with contextlib.suppress(OSError):
         _openvino_attempt_path().unlink(missing_ok=True)
 
@@ -867,18 +901,25 @@ def transcribe_audio(
                     "   Per forzare comunque la GPU: --transcriber openvino.",
                     motivo or "motivo non registrato",
                 )
-                return transcribe_with_whisper(
-                    audio_path,
-                    model_size=model_size,
-                    language=language,
-                    device=whisper_device,
-                    compute_type=whisper_compute_type,
-                    openvino_available=openvino_usable(openvino_model_dir),
-                    beam_size=whisper_beam,
-                    batch_size=whisper_batch,
-                    device_explicit=whisper_device_explicit,
-                    riprendi=not no_ripresa,
-                )
+                try:
+                    return transcribe_with_whisper(
+                        audio_path,
+                        model_size=model_size,
+                        language=language,
+                        device=whisper_device,
+                        compute_type=whisper_compute_type,
+                        openvino_available=openvino_usable(openvino_model_dir),
+                        beam_size=whisper_beam,
+                        batch_size=whisper_batch,
+                        device_explicit=whisper_device_explicit,
+                        riprendi=not no_ripresa,
+                    )
+                finally:
+                    # Anche il ripiego deciso DA UN SEGNALE DI CRASH deve
+                    # cancellarlo a fine run: prima questo `return` saltava il
+                    # cleanup del percorso whisper diretto e l'audio restava
+                    # condannato alla CPU per sempre.
+                    _clear_attempt(audio_path)
             _avvisa_modello_ignorato(model_size, model_dir)
             _write_attempt(audio_path)
             try:
@@ -892,14 +933,22 @@ def transcribe_audio(
                 # Resta solo se il processo muore dentro il nativo (segfault,
                 # OOM-killer, chiusura forzata): su successo o eccezione Python
                 # si cancella, e la prossima run rivaluta da zero.
-                _clear_attempt()
+                _clear_attempt(audio_path)
         _avvisa_modello_ignorato(model_size, model_dir)
-        return transcribe_with_openvino(
-            audio_path,
-            model_dir=model_dir,
-            language=language,
-            device=openvino_device,
-        )
+        # `--transcriber openvino` e' il modo in cui l'utente FORZA la GPU:
+        # e' proprio qui che un segfault lascerebbe il segnale. Senza scriverlo
+        # anche su questo ramo, il crash restava invisibile e il prossimo auto
+        # ripartiva con la GPU suicida.
+        _write_attempt(audio_path)
+        try:
+            return transcribe_with_openvino(
+                audio_path,
+                model_dir=model_dir,
+                language=language,
+                device=openvino_device,
+            )
+        finally:
+            _clear_attempt(audio_path)
 
     if transcriber == "openvino":
         raise RuntimeError(
@@ -944,7 +993,7 @@ def transcribe_audio(
         # driver o cambio macchina: non c'era piu' nulla che lo cancellasse.
         # Una trascrizione arrivata in fondo (con qualsiasi esito Python)
         # dimostra che la macchina e' utilizzabile: si rivaluta alla run dopo.
-        _clear_attempt()
+        _clear_attempt(audio_path)
 
 
 # --- Salvataggio a pezzi della trascrizione --------------------------------

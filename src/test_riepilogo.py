@@ -207,7 +207,7 @@ class TestEncoderNelRiepilogo(unittest.TestCase):
         with self.assertLogs("slide2video", level="INFO") as logs:
             print_timing(
                 1.0, 2.0, 3.0, 0.0, 0.0, 5.0, 11.0,
-                history_fn=lambda *_a: None,
+                history_fn=lambda *_a, **_k: None,
                 video_encoder=encoder,
             )
         # assertLogs restituisce righe GIÀ formattate (str), non LogRecord.

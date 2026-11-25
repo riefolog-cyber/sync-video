@@ -130,9 +130,11 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
     starts: dict[int, float] = {}
     for seg in segments:
         slide = int(cast("int", seg.get("slide") or 0))
-        # Prima occorrenza, come la run (setdefault): con slide ripetute l'ultima
-        # sovrascriveva la prima e `--skip-slides` divergeva dal calcolo reale.
-        starts.setdefault(slide, float(cast("float", seg.get("start") or 0.0)))
+        # Ultima occorrenza: con --skip-slides la stessa slide puo' comparire
+        # piu' volte, e l'annuncio Pronunciato piu' tardi parla dell'ultima.
+        # Tenere la prima faceva dire "video in anticipo" e piazzava
+        # l'anteprima sul confine sbagliato.
+        starts[slide] = float(cast("float", seg.get("start") or 0.0))
     if not starts:
         log.error("   [Revisione] Il report non contiene segmenti: niente da rivedere.")
         return 1
@@ -142,6 +144,10 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
     # numero di slide con quello valido precedente (vedi main.py). Il vecchio
     # commento parlava di segmenti a durata 0 che in realta' non esistono.
     total_slides_review = len(segments)
+    # Se il report non ha `mentions_off` e la trascrizione non c'e', il
+    # controllo NON e' mai stato fatto: dirlo e' obbligatorio, altrimenti
+    # "niente da rivedere" e' una falsa rassicurazione.
+    controllo_non_fatto = False
 
     anchors = cast("dict[str, object]", report.get("anchors") or {})
     # `mentions_off=[]` e' un dato: la run ha confrontato gli annunci e non ne
@@ -156,6 +162,7 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
     ]
     ricalcolati = False
     if not mentions_salvati:
+        controllo_non_fatto = True
         # `main()` mette la chiave della trascrizione EFFETTIVA in cima al
         # report (tramite `report.update(notes)`), non dentro `anchors`.
         # Leggerla solo da li' faceva cadere sempre su None e rileggere la
@@ -175,16 +182,30 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
             ),
         )
         if words:
-            items = [
-                {"slide": s, "mention": m, "declared": d}
-                for s, m, d in announcements_off_timeline(
-                    words,
-                    starts,
-                    total_slides_review,
-                    slide_offset=int(cast(int, anchors.get("spoken_offset") or 0)),
+            controllo_non_fatto = False
+            # Usare solo lo `spoken_offset` (correzione manuale) ignorava
+            # quella automatica del mapping: i dubbi veri venivano azzerati.
+            # Il report nuovo salva l'offset EFFETTIVO; sui vecchi, con
+            # mapping corretto, meglio non dichiarare "tutto a posto".
+            effective = anchors.get("effective_offset")
+            if effective is None and anchors.get("mapping_corrected"):
+                log.warning(
+                    "   Report vecchio con correzione automatica del mapping: "
+                    "offset non noto, non ricalcolo i dubbi per non falsarli."
                 )
-            ]
-            ricalcolati = True
+                controllo_non_fatto = True
+            else:
+                offset = int(cast("int", effective if effective is not None else (anchors.get("spoken_offset") or 0)))
+                items = [
+                    {"slide": s, "mention": m, "declared": d}
+                    for s, m, d in announcements_off_timeline(
+                        words,
+                        starts,
+                        total_slides_review,
+                        slide_offset=offset,
+                    )
+                ]
+                ricalcolati = True
 
     quando = ""
     with suppress(OSError):
@@ -218,6 +239,16 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
             "   Confini stimati dal contenuto (nessun annuncio 'slide N'): %s.",
             _slide_list_text(senza_ancora),
         )
+    if not items and controllo_non_fatto:
+        # NON e' un esito pulito: il controllo non e' girato (report vecchio
+        # senza la chiave e trascrizione assente/illeggibile). Dirlo evita
+        # che l'utente creda che i confini siano stati verificati.
+        log.warning(
+            "   [Revisione] Controllo annunci/confini NON eseguito: report senza "
+            "'mentions_off' e nessuna trascrizione leggibile in cache. "
+            "Rilancia la pipeline per ricostruire il referto."
+        )
+        return 3
     if not items:
         log.info(
             "   Nessuna contraddizione fra gli annunci 'slide N' e i confini "

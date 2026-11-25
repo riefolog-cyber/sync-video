@@ -5,10 +5,10 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 21 (orchestrazione, trascrizione/gap, diagnostica
-hardware e launcher), dopo il batch 20 (revisione delle revisioni). Il piano
-resta un registro delle decisioni: i dettagli di ogni cambiamento sono nei
-messaggi di commit e nei test.
+Ultimo aggiornamento: batch 22 (segnali GPU, prefetch, `--review` e qualita'
+della suite), dopo il batch 21 (orchestrazione e launcher). Il piano resta un
+registro delle decisioni: i dettagli di ogni cambiamento sono nei messaggi di
+commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -273,7 +273,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1580 test).
+`python -m unittest discover -s src -p "test_*.py"` (1593 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -713,6 +713,55 @@ modello valutabile".
 Verifiche: `ruff` e `mypy` puliti (92 file, win32/linux/darwin), 1580 test
 verdi (16 nuovi), `controlli.py` 6/6 e debug hardware 17/17.
 
+## Batch 22 — segnali, storico e qualita' dei test (2026-11)
+
+Quinta revisione incrociata: il segnale di crash GPU, il prefetch, lo storico
+tempi, `--review` e i test stessi. Venti difetti, dodici test nuovi. Uno era
+stato INTRODOTTO dal batch 21 e trovato subito dal controllo della suite.
+
+**Il segnale di crash GPU e' di nuovo affidabile.** Il `finally` aggiunto nel
+batch 21 cancellava il segnale di un ALTRO audio (il file e' unico in cache):
+ora `_clear_attempt(audio_path)` lo tocca solo se l'identita' corrisponde. Il
+ripiego deciso proprio da un segnale di crash tornava prima del cleanup e
+condannava l'audio alla CPU per sempre: anche li' si pulisce a fine run.
+`--transcriber openvino` (la modalita' in cui si forza la GPU) non scriveva
+affatto il segnale: ora lo scrive. Cambiando `OPENVINO_MODEL_ID` nella stessa
+cartella si riusava il vecchio IR con il nome del nuovo: la cartella ora
+registra quale ID l'ha prodotta.
+
+**Prefetch e tempi veritieri.** Se il modello principale manca ma il fallback
+carica, il prefetch stampava "Embedding pronto" e usciva 1: ora il fallback
+e' un successo. Con riparazione, il tempo del primo encoding e della seconda
+verifica sparivano dalla tabella (il secondo valore SOSTITUIVA il primo): ora
+si sommano, e il nuovo bucket "Verifica frame" finisce anche in
+`timing_history.jsonl`. `--preview` scriveva un riepilogo che dichiarava un
+video mai generato e saltava la pulizia delle anteprime a zero dubbi: ora
+dice "non creato" e pulisce. `--clean-cache` con .pptx faceva l'hash del
+PPTX invece del PDF convertito e cancellava la cache OCR viva.
+
+**`--review` non rassicura a vuoto.** Con report vecchio e trascrizione
+assente diceva "niente da rivedere" senza aver controllato: ora avvisa ed
+esce 3. Il ricalcolo usava solo l'offset manuale, azzerando dubbi veri dopo
+una correzione automatica del mapping: ora usa l'offset EFFETTIVO salvato
+dalla run (e sui report vecchi con mapping corretto non dichiara un esito
+pulito). Con slide ripetute takeva la prima occorrenza e piazzava l'anteprima
+sul confine sbagliato: ora usa l'ultima. Il riepilogo scritto prima del video
+restava senza data: ora usa quella della run.
+
+**La suite si controlla da sola.** Il batch 21 aveva passato `timeout=` a
+`HfApi.list_models()`, che non lo accetta: il watcher e5 usciva SEMPRE 3 e
+nessun test lo vedeva perche' usavano API finte. Ora il timeout e' solo su
+`model_info` e un test usa la firma reale. Un test del batch 19 era vacuo
+(PyPI irraggiungibile faceva tornare prima della scrittura che doveva
+provare): ora esercita davvero la correzione. `docs/verifica.md`, il
+docstring di `prova_materiale_reale.py` e il commento della CI dicevano che
+i test reali non esistevano: corretti. Il report A/B dello script standalone
+era l'unica copia non atomica. Infine il confronto PowerShell non verificava
+che il produttore del log emettesse ancora la frase che sa leggere.
+
+Verifiche: `ruff` e `mypy` puliti (93 file, win32/linux/darwin), 1592 test
+verdi (13 nuovi), `controlli.py` 6/6 e debug hardware 17/17.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -808,5 +857,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio (batch 21): ruff pulito, mypy pulito su tre
-piattaforme, 1580 test verdi, `_debug_hardware.py` e controlli 6/6.
+Stato all'ultimo lancio (batch 22): ruff pulito, mypy pulito su tre
+piattaforme, 1593 test verdi, `_debug_hardware.py` e controlli 6/6.

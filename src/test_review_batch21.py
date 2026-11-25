@@ -261,8 +261,29 @@ class TestScriptELauncher(unittest.TestCase):
         import check_embedding_models as cm
 
         testo = (ROOT / "src" / "scripts" / "check_embedding_models.py").read_text(encoding="utf-8")
-        self.assertIn("timeout=_HF_TIMEOUT", testo)
+        self.assertIn("model_info(mid, files_metadata=False, timeout=_HF_TIMEOUT)", testo)
         self.assertLessEqual(cm._HF_TIMEOUT, 30)
+        # `list_models` NON ha il parametro timeout: passarglielo faceva
+        # fallire ogni controllo con uscita 3.
+        blocco_lista = testo.split("api.list_models(", 1)[1].split(")", 1)[0]
+        self.assertNotIn("timeout", blocco_lista)
+
+    def test_gather_con_api_reale_non_usa_kwarg_inesistente(self) -> None:
+        sys.path.insert(0, str(ROOT / "src" / "scripts"))
+        import check_embedding_models as cm
+
+        class ApiFirmaReale:
+            def model_info(
+                self, mid: str, files_metadata: bool = False, timeout: Any = None
+            ) -> Any:
+                return mock.Mock(lastModified=None, downloads=1)
+
+            def list_models(self, search: str, sort: str, direction: int, limit: int) -> list:
+                return []
+
+        dati = cm._gather(ApiFirmaReale())
+        self.assertIn("tracked", dati)
+        self.assertIn("new_candidates", dati)
 
     def test_timeline_assente_esce_non_verificabile(self) -> None:
         sys.path.insert(0, str(ROOT / "src" / "scripts"))
@@ -295,6 +316,20 @@ class TestScriptELauncher(unittest.TestCase):
         self.assertIn("somiglianza media", testo)
         self.assertIn("punteggio", testo)
         self.assertIn("--no-update-check", testo)
+        # Il consumatore e' inutile se il produttore cambia frase: si verifica
+        # che main.py emetta ANCORA la riga che la regex del .ps1 sa leggere.
+        import re
+
+        produttore = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
+        self.assertIn("somiglianza media ", produttore)
+        riga = (
+            "ALTO — il parlato somiglia chiaramente alla sua slide "
+            "(punteggio 1.477 contro una soglia di 0.450; somiglianza media 0.836)"
+        )
+        trovato = re.search(r"somiglianza media\s+([\d]+\.[\d]+)", riga)
+        self.assertIsNotNone(trovato)
+        assert trovato is not None
+        self.assertEqual(trovato.group(1), "0.836")
 
 
 if __name__ == "__main__":

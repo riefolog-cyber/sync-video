@@ -124,10 +124,10 @@ jobs:
         run: python -m mypy --platform darwin .
 
       - name: Test veloci (PR/push; i lenti solo in nightly)
-        # I test marcati @slow (download modelli, A/B embedding) girano solo
-        # con SYNC_VIDEO_RUN_SLOW=1 (job nightly sotto). Oggi tutta la suite
-        # e' mockata e veloce (<1s/file), ma il meccanismo resta per i futuri
-        # test con rete/modelli reali (vedi test_slow.py).
+        # I test marcati @slow girano SOLO con SYNC_VIDEO_RUN_SLOW=1 (job
+        # nightly sotto): test_end_to_end_minimo, test_lenti (PyMuPDF/FS reali),
+        # test_ripresa_equivalente (Whisper small vero), test_revisions_modelli
+        # (HuggingFace live). Non sono "futuri": senza il nightly non girano.
         # I .py sono in src/: senza -s src questo comando troverebbe ZERO
         # test e uscirebbe con "OK", facendo passare la CI senza eseguire
         # nulla. E' il perche' del -s esplicito, non una formalta'.

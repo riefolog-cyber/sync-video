@@ -1,9 +1,10 @@
 ## 🧪 Prova sul materiale reale (prova_materiale_reale.py)
 
-I test della suite sono **tutti finti** (un PDF finto, un audio finto): le
-cose che contano — le ancore, i confini, il riconoscimento — si verificano
-solo sul materiale vero. Questo script lancia la pipeline sul PDF e sull'audio
-della cartella e confronta la timeline con un **riferimento** (file golden):
+I test **veloci** della suite sono finti (PDF finto, audio finto): le cose
+che contano — ancore, confini, riconoscimento — si verificano davvero solo
+nei test lenti (`SYNC_VIDEO_RUN_SLOW=1`, job notturno) e con questo script.
+Esso lancia la pipeline sul PDF e sull'audio della cartella e confronta la
+timeline con un **riferimento** (file golden):
 
 ```bash
 python src/scripts/prova_materiale_reale.py             # verifica
