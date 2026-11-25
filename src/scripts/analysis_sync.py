@@ -27,6 +27,7 @@ controllare la qualità della sincronizzazione.
 """
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -179,6 +180,13 @@ if _fuori_timeline:
         f"corrente ({sorted(set(_fuori_timeline))} su 1..{total_slides}): e' una "
         "cache di un altro podcast, la sua sezione 3 sarebbe falsa."
     )
+    # Senza fermarsi qui, la sezione 1 indicizzava `slide_texts[s-1]` con un
+    # numero fuori dal deck e moriva con IndexError prima di arrivare ai
+    # controlli che servono. Non e' un incidente: e' un materiale non
+    # verificabile, e il codice di uscita deve dirlo (2, come "non
+    # verificabile", non 1 che significa "timeline cambiata").
+    print("[Verifica] MATERIALE NON VERIFICABILE: timeline di un altro deck.")
+    sys.exit(2)
 
 # Segmenti reali: end = start della slide successiva, ultimo = fine audio
 starts = [float(s["start"]) for s in timeline]
@@ -419,24 +427,49 @@ def _extract_frame(out: Path, t: float) -> None:
     """
     if out.exists() and out.stat().st_mtime >= VIDEO.stat().st_mtime:
         return
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-ss",
-            f"{t:.3f}",
-            "-i",
-            str(VIDEO),
-            "-frames:v",
-            "1",
-            "-q:v",
-            "2",
-            str(out),
-        ],
-        check=False,
-    )
+    # Stesso guard della pipeline (`video._extract_frame`): un ffmpeg fallito
+    # che lascia un PNG parziale non e' un frame, e un frame parziale scambiato
+    # per valido produceva un falso "il video mostra la slide 1". Scrittura
+    # temporanea + os.replace, controllo del codice di uscita e timeout.
+    fd, nome_tmp = tempfile.mkstemp(prefix=out.name + ".", suffix=".tmp.png", dir=out.parent)
+    os.close(fd)
+    tmp = Path(nome_tmp)
+    try:
+        res = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{t:.3f}",
+                "-i",
+                str(VIDEO),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                str(tmp),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            check=False,
+        )
+        if res.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+            raise RuntimeError(f"ffmpeg non ha estratto il frame a {t:.1f}s: {res.stderr.strip()}")
+        os.replace(tmp, out)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        with suppress(OSError):
+            tmp.unlink()
+        # Un vecchio frame parziale non resti a fare da "prova".
+        with suppress(OSError):
+            out.unlink()
+        raise
 
 
 def _estrai_in_blocco(richieste: list[tuple[float, Path]]) -> None:
@@ -459,9 +492,11 @@ def _estrai_in_blocco(richieste: list[tuple[float, Path]]) -> None:
         [t for t, _ in mancanti],
         [out for _, out in mancanti],
     ):
-        # Ripiego: uno per uno (il percorso che funziona sempre).
+        # Ripiego: uno per uno. Un frame non estraibile si salta (viene
+        # contato come non verificato), non si lascia diventare una prova.
         for t, out in mancanti:
-            _extract_frame(out, t)
+            with suppress(OSError, RuntimeError, subprocess.TimeoutExpired):
+                _extract_frame(out, t)
 
 
 def _build_slide_paths() -> list[Path]:
@@ -478,8 +513,16 @@ def _build_slide_paths() -> list[Path]:
     un referto inventato.
     """
     with tempfile.TemporaryDirectory(prefix="analysis_refs_") as tmp:
-        built = _letterbox_references([str(sf) for sf in slide_files], Path(tmp))
-        if built is None:
+        # `_letterbox_references` restituisce SEMPRE una lista: per una slide
+        # illeggibile mette un PNG nero. Il vecchio controllo `if built is None`
+        # era quindi codice morto, e il confronto contro un reference nero
+        # produceva falsi mismatch invece di saltare la slide come fa la
+        # pipeline (che usa `unreadable_out`).
+        unreadable_idx: list[int] = []
+        built = _letterbox_references(
+            [str(sf) for sf in slide_files], Path(tmp), unreadable_out=unreadable_idx
+        )
+        if unreadable_idx:
             return []
         # La temporanea muore con il `with`: i PNG servono ancora, quindi si
         # copiano in una directory che sopravvive allo script.
@@ -536,6 +579,7 @@ if not slide_paths:
 SLIDE_MATRIX = _slide_matrix()
 
 frame_ok = 0
+frame_esaminati = 0
 mismatches: list[tuple[int, int, float]] = []
 _richieste_frame: list[tuple[float, Path]] = []
 for i, seg in enumerate(segs if slide_paths else []):
@@ -549,6 +593,12 @@ for i, seg in enumerate(segs if slide_paths else []):
     s = seg["slide"]
     t = (seg["start"] + seg["end"]) / 2
     out = FRAMES_DIR / f"seg{i:02d}_t{t:07.1f}_slide{s:02d}.png"
+    if not out.exists() or out.stat().st_size == 0:
+        # Nessun frame: non si puo' dire nulla, quindi non si inventa uno
+        # "slide 1" dall'argmax di un vettore di zeri.
+        print(f"  seg {i:>2} (slide {s:>2}, t={t:>7.1f}s): frame non estratto — saltato")
+        continue
+    frame_esaminati += 1
     sims_img = _frame_sims(out, SLIDE_MATRIX)
     best_img = int(np.argmax(sims_img)) + 1
     best_sim_img = max(sims_img)
@@ -560,7 +610,7 @@ for i, seg in enumerate(segs if slide_paths else []):
     flag = "OK" if best_img == s else f"<-- VIDEO mostra slide {best_img}?"
     print(f"  seg {i:>2} (slide {s:>2}, t={t:>7.1f}s): frame vs slide {best_img:>2} (sim {best_sim_img:.3f}) {flag}")
 
-print(f"\nFrame coerenti con la timeline: {frame_ok}/{len(segs)}")
+print(f"\nFrame coerenti con la timeline: {frame_ok}/{frame_esaminati}")
 if mismatches:
     print("DISCREPANZE:", mismatches)
 
@@ -576,6 +626,7 @@ print("=" * 100)
 # disallineato NON e' piu' un effetto atteso del raffinamento: e' un dato da
 # guardare davvero.
 boundary_ok = 0
+boundary_esaminati = 0
 _richieste_confine: list[tuple[float, Path]] = []
 for i, seg in enumerate(segs[1:] if slide_paths else [], start=1):
     s = seg["slide"]
@@ -591,6 +642,10 @@ for i, seg in enumerate(segs[1:] if slide_paths else [], start=1):
     if t >= AUDIO_DURATION:
         continue
     out = FRAMES_DIR / f"bnd{i:02d}_t{t:07.1f}_slide{s:02d}.png"
+    if not out.exists() or out.stat().st_size == 0:
+        print(f"  confine {i}->{s}: frame non estratto — saltato")
+        continue
+    boundary_esaminati += 1
     sims_img = _frame_sims(out, SLIDE_MATRIX)
     best_img = int(np.argmax(sims_img)) + 1
     best_sim_img = max(sims_img)
@@ -603,7 +658,7 @@ for i, seg in enumerate(segs[1:] if slide_paths else [], start=1):
         f"-> slide {best_img:>2} (sim {best_sim_img:.3f}) {flag}"
     )
 
-print(f"\nConfini coerenti con la timeline: {boundary_ok}/{len(segs) - 1}")
+print(f"\nConfini coerenti con la timeline: {boundary_ok}/{boundary_esaminati}")
 
 # ----------------------------------------------------------------------
 # Riepilogo

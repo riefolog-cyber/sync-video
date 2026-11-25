@@ -773,6 +773,16 @@ def _build_video_moviepy(
         audio_clip = AudioFileClip(str(audio_source))
         own_audio = True
 
+    # Stesso schema del percorso ffmpeg: si scrive su un temporaneo unico e
+    # si sostituisce solo a encoding finito. Prima MoviePy scriveva DIRETTAMENTE
+    # sul file finale: un write interrotto (disco pieno, codec, Ctrl+C)
+    # lasciava un MP4 troncato al nome canonico, e il backup del video buono
+    # non veniva mai ripristinato (solo il ramo ffmpeg lo fa).
+    fd_tmp, nome_tmp = tempfile.mkstemp(
+        prefix=output_path.stem + ".", suffix=".tmp.mp4", dir=output_path.parent
+    )
+    os.close(fd_tmp)
+    tmp_out = Path(nome_tmp)
     video_clip = None
     try:
         if transition_duration > 0 and len(clips) > 1:
@@ -785,14 +795,21 @@ def _build_video_moviepy(
 
         log.info("   Encoding video... (fps=%d, threads=%d)", fps, threads)
         video_clip.write_videofile(
-            str(output_path),
+            str(tmp_out),
             fps=fps,
             codec="libx264",
             audio_codec="aac",
             preset="ultrafast",
             threads=threads,
         )
-
+        if not tmp_out.exists() or tmp_out.stat().st_size == 0:
+            raise RuntimeError("MoviePy e' uscito senza scrivere il video.")
+        os.replace(tmp_out, output_path)
+    except BaseException:
+        with suppress(OSError):
+            tmp_out.unlink()
+        _ripristina_video_precedente(output_path)
+        raise
     finally:
         # Rilascio risorse MoviePy. L'AudioFileClip è chiuso SOLO se aperto qui.
         for c in clips:
@@ -1184,13 +1201,21 @@ def frame_consistency_check(
                 # verifica risparmiati).
                 with suppress(OSError):
                     shutil.copy2(frame, frames_dir / frame.name)
+    # Una slide non leggibile che NESSUN segmento dichiara non e' un buco
+    # nella verifica: il video e' stato controllato per intero, e dire
+    # "N segmenti non verificati" con N=0 faceva abortire --strict-sync per
+    # niente. `unreadable` resta nel report come diagnostica, ma l'incomplete
+    # e' solo cio' che e' stato davvero saltato.
+    unreadable_usate = [
+        s for s in unreadable if any(int(seg[0]) == s for seg in segments)
+    ]
     return {
         "checked": checked,
         "coherent": coherent,
         "mismatches": mismatches,
         "unreadable": unreadable,
         "skipped": skipped,
-        "incomplete": bool(unreadable or skipped),
+        "incomplete": bool(unreadable_usate or skipped),
     }
 
 

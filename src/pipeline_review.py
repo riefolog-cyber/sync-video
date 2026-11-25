@@ -54,7 +54,13 @@ def _write_boundary_previews(
     Solo i dubbi con un'anteprima davvero scritta ricevono la chiave ``preview``:
     nel dry-run il video non esiste e il riepilogo non deve citare un file che
     non c'è.
+
+    I nomi deterministici NON bastano a evitare l'accumulo: se la run dopo ha
+    meno dubbi, le anteprime in piu' della run prima restano li' a testimoniare
+    un problema gia' corretto. A ogni scrittura si rimuovono quindi tutte le
+    anteprime di confine non prodotte in questa run.
     """
+    scritte: set[Path] = set()
     for i, item in enumerate(items):
         slide = int(cast("int", item.get("slide") or 0))
         # Import differito da main (stesso schema di cache_maintenance): evita
@@ -69,6 +75,12 @@ def _write_boundary_previews(
         )
         if sheet is not None:
             item["preview"] = str(sheet)
+            scritte.add(Path(sheet))
+    if review_dir.exists():
+        for vecchia in review_dir.glob("confine_slide*.png"):
+            if vecchia not in scritte:
+                with suppress(OSError):
+                    vecchia.unlink()
 
 
 def _boundary_doubt_text(item: dict[str, object]) -> str:

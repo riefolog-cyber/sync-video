@@ -8,6 +8,7 @@ citazioni a posteriori), la timeline viene completata usando le ancore reali
 (sotto-sequenza crescente più lunga) + interpolazione delle slide mancanti.
 """
 
+import bisect
 import re
 from collections.abc import Mapping
 from itertools import pairwise
@@ -572,7 +573,13 @@ def _risolvi_mentioni_implicite(
             candidata = numero
         if ultima is not None and candidata <= ultima:
             continue  # richiamo di una slide gia' detta
-        kinds.setdefault(candidata, []).append((t, False))
+        if numero is None:
+            # Solo le menzioni implicite vanno aggiunte: riscrivere anche
+            # quelle esplicite le duplicava (ogni volta che c'era un
+            # "prossima slide"), gonfiando "N riferimenti trovati" e i
+            # conteggi di ancore scartate. Inserimento ordinato: il
+            # contratto e' 'in ordine cronologico'.
+            bisect.insort(kinds.setdefault(candidata, []), (t, False))
         ultima = max(ultima or 0, candidata)
     return kinds
 

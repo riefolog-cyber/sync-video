@@ -5,10 +5,10 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 11 (la revisione del codice), dopo il batch 10
-(la prova sul materiale reale) e il batch 5 (audit completo del codice: 6 difetti
-corretti e 7 ottimizzazioni misurate), con la chiusura del piano (P2 #11
-archiviata come non consigliata, primo avvio automatico di Python su Windows).
+Ultimo aggiornamento: batch 19 (revisione trasversale di cache, CLI, video,
+timeline e diagnostica), dopo il batch 18 (CI notturna) e il batch 11 (la
+revisione del codice). Il piano resta un registro delle decisioni: i dettagli
+di ogni cambiamento sono nei messaggi di commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -273,7 +273,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1528 test).
+`python -m unittest discover -s src -p "test_*.py"` (1549 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -553,6 +553,65 @@ versioni Python per due test lenti, mentre i job veloci erano verdi:
 Verifiche: **1528 test verdi anche con `SYNC_VIDEO_RUN_SLOW=1`** (job nightly),
 oltre ai 6/6 controlli del job veloce.
 
+## Batch 19 — revisione trasversale (2026-11)
+
+Ottava revisione, condotta in parallelo su cinque aree (cache, CLI, video,
+timeline, diagnostica). Nessun difetto spettacolare, ma ventinove modi in cui
+il programma diceva una cosa e ne faceva un'altra, o perdeva lavoro gia'
+fatto. Ventuno test nuovi coprono i percorsi principali.
+
+**Cache che non si perde e controlli che non uccidono la run.**
+`--clean-cache` calcolava le chiavi da tenere PRIMA di bootstrap/machine_setup:
+su una macchina CUDA la trascrizione viva della run precedente veniva cancellata
+come orfana e il log diceva "conservata". Ora si conservano tutte le
+trascrizioni dell'audio corrente, qualsiasi sia il decodifice scelto. Il
+segnale del tentativo OpenVINO, la cache degli aggiornamenti e la sua
+invalidazione dopo un upgrade sono diventate best-effort come tutte le altre
+cache: una cartella in sola lettura non ferma piu' la pipeline prima che
+cominci. Una cache scaduta con PyPI non raggiungibile ristampava aggiornamenti
+gia' installati: le voci si rivalidano anche su quella strada. La pulizia
+conteggiava i byte dei modelli e i frame anche quando la cancellazione era
+fallita, e il A/B scriveva il referto senza temporaneo.
+
+**Comandi che dicono il vero.** `--whisper-device`/`--openvino-device`
+accettavano qualsiasi stringa (un refuso moriva dopo OCR e download): ora la
+validazione e' immediata e la case viene normalizzata, anche per il `.env`.
+L'handler di `--log-file` sopravviveva a una seconda `main()` nello stesso
+processo e continuava a scrivere nel file vecchio: ora si rimuove a ogni
+chiamata. `VIDEO_ENCODER=auto` annunciava "GPU accelerata" prima che l'encoder
+fosse scelto. Il riepilogo diceva "video non generato (dry-run)" anche quando
+il video era stato riusato (stessi argomenti, `t_video=0`). Il referto su Mac
+diceva "nessun encoder accelerato" pur usando VideoToolbox.
+
+**Video, frame e anteprime.** Il percorso MoviePy scriveva direttamente sul
+file finale: un encoding interrotto lasciava un MP4 troncato e il backup del
+video buono non veniva ripristinato. Ora anche MoviePy usa temporaneo unico +
+`os.replace` e ripristina in caso di errore. Una slide non leggibile che nessun
+segmento usa rendeva incompleta la verifica e abortiva `--strict-sync` con
+"0 segmenti non verificati". Le anteprime dei confini dubbi si accumulavano
+quando la run dopo aveva meno dubbi della precedente. `analysis_sync.py`,
+fermato a una timeline di un altro deck con un `IndexError`, ora esce 2
+("non verificabile"); un frame non estratto non diventa piu' "slide 1"
+dall'argmax di un vettore di zeri; i denominatori contano solo cio' che e'
+stato davvero guardato; il fallback ffmpeg controlla il codice di uscita e
+non lascia PNG parziali.
+
+**Timeline e diagnostica.** L'aggancio alle pause poteva accorciare l'ULTIMA
+slide sotto il minimo di leggibilita' (nessun vicino dopo): ora la fine
+dell'audio fa da successivo. Le menzioni implicite ("prossima slide")
+duplicavano tutte le menzioni esplicite, gonfiando i conteggi del report. Il
+riuso parziale degli embedding scriveva `seconds≈0`, facendo dire "0s
+risparmiati" su una cache che aveva fatto risparmiare minuti. `diagnostica.py`
+leggeva `.cache` scritto a mano invece della cache rediretta; un `ts`
+non numerico in `hardware.json` faceva morire il probe degli encoder a
+startup; una slide con poco testo nativo ("Domande?") bloccava la run senza
+Tesseract anche se il PDF era digitale. Il controllo "batch su RAM" e
+l'encoder di `_debug_hardware.py` confrontavano formule con se' stessi: ora
+leggono la configurazione e le scelte reali.
+
+Verifiche: `ruff` e `mypy` puliti (90 file, win32/linux/darwin), 1549 test
+verdi (21 nuovi), `_debug_hardware.py` e controlli 6/6.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -648,5 +707,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio: ruff pulito, mypy pulito, test verdi,
-`_debug_hardware.py` 17/17.
+Stato all'ultimo lancio (batch 19): ruff pulito, mypy pulito su tre
+piattaforme, 1549 test verdi, `_debug_hardware.py` e controlli 6/6.

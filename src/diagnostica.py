@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 import verifica_pc
-from config import versione_programma
+from config import CACHE_DIR, versione_programma
 from hardware import project_root
 from verifica_pc import Relazione
 
@@ -98,8 +98,13 @@ def _conta_parole(cache: Path) -> dict[str, object]:
 
 
 def _stato_run(radice: Path) -> dict[str, object]:
-    """Ultima run in numeri: materiali (nomi+byte), video, slide, parole."""
-    cache = radice / ".cache"
+    """Ultima run in numeri: materiali (nomi+byte), video, slide, parole.
+
+    La cache e' QUELLA DELLA RUN, non radice/'.cache' scritto a mano:
+    `SYNC_VIDEO_CACHE_DIR` la sposta (test, dischi diversi), e il bundle
+    serviva proprio a spiegare una run che non si trovava piu'.
+    """
+    cache = CACHE_DIR
     stato: dict[str, object] = {}
     try:
         materiali = [

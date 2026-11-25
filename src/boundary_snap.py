@@ -164,6 +164,7 @@ def aggancia_confini(
     tolleranza: float = TOLLERANZA,
     min_secondi: float,  # obbligatorio: il default vive in --semantic-min-duration
     starts: Sequence[float] | None = None,
+    total_duration: float | None = None,
 ) -> tuple[dict[int, float], list[tuple[int, float, float, str]]]:
     """Restituisce (timeline agganciata, mosse) con ``mosse`` = (slide, prima, dopo, tipo).
 
@@ -173,6 +174,11 @@ def aggancia_confini(
     ``starts_parole``: passandolo, chi misura prima e dopo non paga due
     ricostruzioni del vettore ne' il ricalcolo interno di
     ``confini_disponibili``.
+
+    ``total_duration`` e' la durata dell'audio: senza, l'ULTIMA slide non ha
+    un vicino dopo e può essere accorciata sotto ``min_secondi`` (il controllo
+    guarda solo il successivo), trasformandola in un lampo finale. Quando e'
+    noto, la fine dell'audio fa da successivo.
     """
     nuove = {int(s): float(t) for s, t in timeline.items()}
     if starts is None:
@@ -204,6 +210,12 @@ def aggancia_confini(
         if nuova - precedente < min_secondi - 1e-9:
             continue
         if successiva is not None and successiva - nuova < min_secondi - 1e-9:
+            continue
+        if (
+            successiva is None
+            and total_duration is not None
+            and total_duration - nuova < min_secondi - 1e-9
+        ):
             continue
         nuove[slide] = nuova
         mosse.append((slide, prima, nuova, tipo))

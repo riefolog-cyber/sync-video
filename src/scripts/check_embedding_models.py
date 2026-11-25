@@ -219,7 +219,12 @@ def _recommendation(
     # 1. Modello preferito aggiornato?
     pref = data["tracked"].get(PREFERRED_MODEL, {})
     prev_pref = prev.get("tracked", {}).get(PREFERRED_MODEL, {}) if prev else {}
-    if _model_updated(pref.get("lastModified"), prev_pref.get("lastModified")):
+    # `prev is None` e' gia' gestito sopra: qui una baseline MANCANTE significa
+    # che la prima lettura non aveva lastModified (404 tollerato), non che il
+    # modello sia cambiato. Senza questo, la prima osservazione riuscita
+    # veniva annunciata come "è stato aggiornato" con exit 2.
+    baseline_pref = prev_pref.get("lastModified")
+    if baseline_pref and _model_updated(pref.get("lastModified"), baseline_pref):
         action = True
         reasons.append(
             f"{PREFERRED_MODEL} è stato aggiornato (ultima modifica: {pref.get('lastModified')}). "
@@ -231,7 +236,8 @@ def _recommendation(
         if mid == PREFERRED_MODEL:
             continue
         prev_info = (prev or {}).get("tracked", {}).get(mid, {}) if prev else {}
-        if info.get("lastModified") and _model_updated(info["lastModified"], prev_info.get("lastModified")):
+        baseline = prev_info.get("lastModified")
+        if info.get("lastModified") and baseline and _model_updated(info["lastModified"], baseline):
             action = True
             reasons.append(
                 f"{mid} aggiornato ({info['lastModified']}, {info.get('downloads')} download). "
@@ -284,7 +290,11 @@ def _load_state() -> dict | None:
 
 
 def _write_report(action: bool, reasons: list[str], data: dict) -> None:
-    CACHE_DIR.mkdir(exist_ok=True)
+    # `parents=True`: con SYNC_VIDEO_CACHE_DIR che punta a una cartella annidata
+    # non ancora esistente, il mkdir senza parenti sollevava FileNotFoundError
+    # e lo script moriva PRIMA di scrivere il referto (uscita fuori dal set
+    # documentato 0/2/3).
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
     lines = [
         "# Controllo modello embedding",
         "",

@@ -9,6 +9,7 @@ e che nessun percorso si rompa. Eseguire dalla cartella progetto:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -67,13 +68,20 @@ def scenario(
         # Il controllo DA' star dentro il patch di sys.platform: fuori, su un
         # Mac reale, `_video_vendor` tornerebbe "apple" per tutti gli scenari.
         ok &= _check("famiglia GPU", ms._video_vendor(gpus), vendor)
+        # Prima l'encoder veniva solo STAMPATO: un machine_setup che sceglieva
+        # sempre libx264 passava il controllo. Si confronta con la scelta che
+        # la stessa funzione condivisa fa per questa GPU simulata.
+        ok &= _check(
+            "encoder video",
+            args.video_encoder,
+            hw.choose_video_encoder(vendor, encoders),
+        )
     # Prima si confrontava memory_tier(totale) con se' stesso: non poteva mai
     # fallire, e il ram_gb dello scenario non veniva verificato. Le soglie sono
     # quelle reali di hardware.memory_tier (<6 basso, <12 medio, poi alto).
     atteso_tier = "basso" if ram_gb < 6 else "medio" if ram_gb < 12 else "alto"
     ok &= _check("tier RAM", hw.memory_tier(totale), atteso_tier)
     print(f"   [   ] RAM: {hw.format_ram(totale)} ({hw.memory_tier(totale)})")
-    print(f"   [   ] encoder scelto: {args.video_encoder}")
     return ok
 
 
@@ -146,20 +154,23 @@ def main() -> int:
     print("\n" + "=" * 66)
     print("2. BATCH SCALATI SULLA RAM")
     print("=" * 66)
-    tier_basso = hw.memory_tier(4 * GB)
-    tier_medio = hw.memory_tier(8 * GB)
-    tier_alto = hw.memory_tier(32 * GB)
-    ok2 = tier_basso == "basso" and tier_medio == "medio" and tier_alto == "alto"
-    for etichetta, tier, batch in (
-        ("4 GB  -> whisper/embed", tier_basso, (4, 16)),
-        ("8 GB  -> whisper/embed", tier_medio, (8, 32)),
-        ("32 GB -> whisper/embed", tier_alto, (8, 64)),
-    ):
-        wb = 4 if tier == "basso" else 8
-        eb = {"basso": 16, "medio": 32}.get(tier, 64)
-        atteso = batch == (wb, eb)
-        ok2 &= atteso
-        print(f"   [{'OK ' if atteso else 'KO '}] {etichetta}: whisper={wb}, embedding={eb}")
+    # Ultima riga del vecchio controllo: confrontava tuple riscritte a mano
+    # con numeri ricalcolati dalle STESSE formule, quindi non poteva mai
+    # fallire anche se config.py non usava affatto quei valori. Ora si legge
+    # la configurazione REALE caricata all'import.
+    import config
+
+    ram = hw.ram_total_bytes()
+    tier_reale = hw.memory_tier(ram) if ram else "alto"
+    wb_atteso = 4 if tier_reale == "basso" else 8
+    eb_atteso = {"basso": 16, "medio": 32}.get(tier_reale, 64)
+    if "WHISPER_BATCH" in os.environ or "EMBED_BATCH" in os.environ:
+        print("   [   ] batch su RAM: salto (override esplicito nell'ambiente)")
+        ok2 = True
+    else:
+        ok2 = True
+        ok2 &= _check("batch whisper (RAM di questa macchina)", config.DEFAULT_WHISPER_BATCH, wb_atteso)
+        ok2 &= _check("batch embedding (RAM di questa macchina)", config.DEFAULT_EMBED_BATCH, eb_atteso)
     risultati.append(("batch su RAM", ok2))
 
     print("\n" + "=" * 66)

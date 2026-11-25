@@ -349,6 +349,7 @@ def _print_timing(
     t_total: float,
     *,
     video_encoder: str | None = None,
+    video_presente: bool | None = None,
     ocr_workers: int | None = None,
     whisper_batch: int | None = None,
     thread_overrides: bool = False,
@@ -373,6 +374,7 @@ def _print_timing(
         t_ocr, t_transcribe, t_sync, t_embed, t_model, t_video, t_total,
         history_fn=_storia,
         video_encoder=video_encoder,
+        video_presente=video_presente,
         cache_dir=CACHE_DIR,
         ocr_workers=ocr_workers,
         whisper_batch=whisper_batch,
@@ -3349,8 +3351,21 @@ def main(argv: list | None = None) -> None:
             if pdf_qui.exists() and audio_qui is not None and audio_qui.exists():
                 chiave_slide = _cache_key_slides(_file_hash(pdf_qui), args.dpi, args.lang)
                 hash_audio = _file_hash(audio_qui)
+                # `--clean-cache` torna PRIMA di bootstrap/machine_setup, quindi
+                # qui non si sa ancora quale motore/device la run usera': auto
+                # puo' passare da cpu/int8 a cuda/float16 (o a OpenVINO), e la
+                # chiave di trascrizione cambia di conseguenza. Senza questo,
+                # la cache VIVA della run precedente veniva cancellata come
+                # orfana e il messaggio diceva il contrario. Si conservano
+                # tutte le trascrizioni di QUESTO audio, qualunque sia il
+                # decodifice che le ha prodotte (il prefisso contiene l'hash
+                # del contenuto, non i parametri).
                 attive = {
                     chiave_slide,
+                    *(
+                        p.stem
+                        for p in CACHE_DIR.glob(f"transcript_{hash_audio[:12]}_*.json")
+                    ),
                     _transcript_cache_key(hash_audio, args),
                     # La cache delle zone cieche rilette e' VIVA quanto le altre:
                     # senza questa chiave `--clean-cache` la cancellava e la run
@@ -4620,6 +4635,7 @@ def main(argv: list | None = None) -> None:
                 words_raw,
                 min_secondi=min_slide_seconds,
                 starts=_starts_parole,
+                total_duration=total_duration,
             )
             if snapped:
                 log.info(
@@ -5110,6 +5126,7 @@ def main(argv: list | None = None) -> None:
                 # Il video NON e' stato generato: dire "h264_nvenc (GPU)"
                 # qui faceva credere che l'encoding accelerato fosse avvenuto.
                 video_encoder=None,
+                video_presente=False,
                 ocr_workers=getattr(args, "ocr_workers", None),
                 whisper_batch=getattr(args, "whisper_batch", None),
                 thread_overrides=bool(
@@ -5332,6 +5349,9 @@ def main(argv: list | None = None) -> None:
             video_encoder=None if video_riutilizzato and video_riutilizzato[-1] else (
                 encoder_video_effettivo[-1] if encoder_video_effettivo else encoder_video_risolto
             ),
+            # A prescindere dal riuso, a questo punto il output video esiste:
+            # dire "dry-run" qui era falso in ogni rilancio senza modifiche.
+            video_presente=True,
             ocr_workers=getattr(args, "ocr_workers", None),
             whisper_batch=getattr(args, "whisper_batch", None),
             thread_overrides=bool(

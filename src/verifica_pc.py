@@ -230,7 +230,13 @@ def prova_ffmpeg(r: Relazione) -> None:
     # andare in accelerazione hardware. Un PC con GPU ma senza i suoi encoder
     # produce il video molto piu' lento, e il collega lo scopre come "il
     # programma e' lentissimo" invece che come "manca un encoder".
-    encoder_compilati = [n for n in ("h264_nvenc", "h264_qsv", "h264_amf") if n in out]
+    # VideoToolbox e' l'encoder della piattaforma macOS: `machine_setup`
+    # classifica ogni Mac come "apple" e `choose_video_encoder` cerca PROPRIO
+    # questo nome. Senza di lui il referto diceva "nessun encoder accelerato"
+    # su ogni Mac, mentre la run usa h264_videotoolbox (batch 13).
+    encoder_compilati = [
+        n for n in ("h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolbox") if n in out
+    ]
     # Avere i encoder compilati NON vuol dire poterli usare: i build desktop
     # (compreso Gyan su Windows) li includono tutti, anche su PC senza GPU.
     # La scelta reale la fa `choose_video_encoder`, che incrocia la famiglia GPU e

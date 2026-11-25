@@ -430,6 +430,29 @@ def _pin_note(pip_name: str) -> str:
 _ULTIMO_CHECK_SENZA_RISPOSTA = 0
 
 
+def _voci_cache_valide(cache: dict) -> list[dict]:
+    """Voci di una cache di aggiornamenti ancora vere per l'ambiente corrente.
+
+    Una voce dice "installed=X, latest=Y": se X non e' piu' la versione
+    installata (upgrade/downgrade fatto fuori dal tool), annunciarla e' un
+    falso aggiornamento, e la riga copiabile `pip install -U Y` installerebbe
+    qualcosa che c'e' gia'. La validazione era fatta solo nella branca "cache
+    dentro il TTL": con cache SCADUTA e PyPI non raggiungibile le vecchie voci
+    venivano ristampate per intero.
+    """
+    voci = cache.get("outdated", [])
+    if not isinstance(voci, list):
+        return []
+    valide: list[dict] = []
+    for voce in voci:
+        if not isinstance(voce, dict):
+            continue
+        nome = str(voce.get("name", ""))
+        if _installed_version(nome) == voce.get("installed"):
+            valide.append(voce)
+    return valide
+
+
 def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
     """Verifica aggiornamenti dei pacchetti usati (con cache TTL).
 
@@ -449,7 +472,7 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
         # Rileggere l'installata per ogni voce evita di annunciare "X -> Y"
         # quando X non e' piu' quello che c'e' nell'ambiente.
         cached = list(cache.get("outdated", []))
-        valide = [d for d in cached if _installed_version(d.get("name", "")) == d.get("installed")]
+        valide = _voci_cache_valide(cache)
         if len(valide) == len(cached):
             return valide
         # Non rinnovare il timestamp con una cache vuota (o piu' corta): e' il
@@ -463,7 +486,8 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
             "cache invalidata, controllo ripetuto.",
             len(cached) - len(valide),
         )
-        UPDATES_CACHE.unlink(missing_ok=True)
+        with suppress(OSError):
+            UPDATES_CACHE.unlink(missing_ok=True)
         cache = {}
 
     outdated: list[dict] = []
@@ -523,7 +547,7 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
             installati,
         )
         _ULTIMO_CHECK_SENZA_RISPOSTA = unreachable
-        return list(cache.get("outdated", []))
+        return _voci_cache_valide(cache)
 
     outdated.sort(key=lambda d: d["name"].lower())
     if unreachable:
@@ -538,7 +562,7 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
             unreachable,
         )
         _ULTIMO_CHECK_SENZA_RISPOSTA = unreachable
-        return list(cache.get("outdated", []))
+        return _voci_cache_valide(cache)
     if non_installati:
         log.debug("   %d pacchetti non installati: saltati (non e' un errore di rete).", non_installati)
     _ULTIMO_CHECK_SENZA_RISPOSTA = 0
@@ -788,8 +812,11 @@ def _run_pinned_ab_test(pkg: dict) -> str | None:
         "batch_size": DEFAULT_EMBED_BATCH,
         "ts": time.time(),
     }
+    # Scrittura atomica come tutte le altre cache: un taglio a meta' lasciava
+    # un JSON troncato al nome canonico e il A/B (venv temporanea + 200+
+    # embedding) veniva rifatto a ogni run.
     with suppress(OSError):
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_text(report_path, json.dumps(report, ensure_ascii=False, indent=2))
     return str(res["verdict"])
 
 
@@ -1076,7 +1103,10 @@ def run_update_check(
         # health-check ok): su fallimento i dati vecchi restano validi e il
         # prossimo avvio deve riprovare senza perdere il controllo gia' fatto.
         if esito:
-            UPDATES_CACHE.unlink(missing_ok=True)
+            # L'upgrade e' riuscito: la cache va invalidata, ma un file bloccato
+            # non puo' trasformare un successo in un fallimento della run.
+            with suppress(OSError):
+                UPDATES_CACHE.unlink(missing_ok=True)
         else:
             log.info("   ⚠️ Cache mantenuta: al prossimo avvio il controllo verra' ripetuto.")
     else:
@@ -1317,5 +1347,13 @@ def _read_cache() -> dict:
 
 
 def _write_cache(data: dict) -> None:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(UPDATES_CACHE, json.dumps(data, ensure_ascii=False, indent=2))
+    """Scrive la cache del controllo aggiornamenti, best-effort.
+
+    Il controllo aggiornamenti e' una notifica d'avvio, non una dipendenza
+    della pipeline: una cartella di cache in sola lettura, un ACL o il disco
+    pieno non devono fermare la run prima che cominci il lavoro vero (stessa
+    regola di `pipeline_cache.save_cache` e `config.atomic_write_text`).
+    """
+    with suppress(OSError):
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(UPDATES_CACHE, json.dumps(data, ensure_ascii=False, indent=2))

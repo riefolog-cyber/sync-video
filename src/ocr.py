@@ -896,6 +896,14 @@ def extract_slides_text_ocr(
     slide_texts: list[str] = [""] * total_pages
     for idx, testo in nativi.items():
         slide_texts[idx] = testo
+    # Una pagina con POCO testo digitale (un titolo: "Domande?", "Grazie")
+    # finisce nell'OCR per la soglia di 20 caratteri, ma quel testo c'e' e
+    # resta l'unica fonte possibile senza Tesseract. Senza questo fallback la
+    # slide veniva lasciata vuota e la guardia "caso misto" abortiva la run
+    # chiedendo di installare Tesseract a chi ha un PDF tutto digitale.
+    nativi_brevi = {
+        i: t for i, t in enumerate(testi_nativi) if t.strip() and i not in nativi
+    }
     da_ocr = [(idx, slide_files[idx]) for idx in indici_da_ocr]
     tesseract_assente_segnalato = False
     if da_ocr:
@@ -915,7 +923,7 @@ def extract_slides_text_ocr(
                     # guardia qui sotto non veniva mai raggiunta (codice morto).
                     # Si segnala UNA volta e si lascia la slide vuota, cosi'
                     # la guardia puo' dare il messaggio azionabile.
-                    slide_texts[idx] = ""
+                    slide_texts[idx] = nativi_brevi.get(idx, "")
                     if not tesseract_assente_segnalato:
                         tesseract_assente_segnalato = True
                         log.warning("   OCR non disponibile: Tesseract mancante (%s).", e)

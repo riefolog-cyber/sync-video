@@ -167,11 +167,13 @@ def clean_cache(
     if clean_verify_frames:
         vf = cache_dir / "verify_frames"
         if vf.exists():
-            frame = [f for f in vf.glob("*.png")]
-            esito["verify_frames"] = len(frame)
-            for f in frame:
+            for f in vf.glob("*.png"):
+                # Conta solo cio' che e' stato davvero rimosso: un file bloccato
+                # (antivirus, ACL, share) resta sul disco, e dire "N frame
+                # rimossi" quando N=0 faceva credere che lo spazio fosse libero.
                 with contextlib.suppress(OSError):
                     f.unlink()
+                    esito["verify_frames"] += 1
         # Il report dell'ultima run cita quei frame nei mismatches (tempo + slide):
         # cancellati i file, il riferimento resterebbe appeso a un file inesistente.
         # Azzeriamo il campo: la verifica successiva lo riscrive con i frame nuovi.
@@ -204,5 +206,9 @@ def clean_cache(
                 except OSError:
                     peso = 0
                 shutil.rmtree(cartella, ignore_errors=True)
-                esito["model_bytes"] += peso
+                # `ignore_errors=True` non dice se ha funzionato: con una
+                # cartella in sola lettura i byte venivano conteggiati come
+                # recuperati pur essendo ancora li'.
+                if not cartella.exists():
+                    esito["model_bytes"] += peso
     return esito

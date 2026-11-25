@@ -274,6 +274,12 @@ def main(argv: list[str] | None = None) -> int:
     richiesti: set[str] = set()
     for controllo in passi:
         richiesti.update(a for a in ("ruff", "mypy") if a in controllo.argomenti)
+        # `_debug_hardware.py` lancia mypy tre volte (win32/linux/darwin) ma nei
+        # suoi argomenti compare solo il nome dello script: senza questa riga,
+        # chi ha i requirements runtime ma non quelli dev passava il gate e
+        # riceveva tre KO opachi invece del rimedio "installa requirements-dev".
+        if "debug hardware" in controllo.nome.lower():
+            richiesti.add("mypy")
     mancanti = _moduli_mancanti(richiesti)
     if mancanti:
         print(

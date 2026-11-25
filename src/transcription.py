@@ -699,22 +699,27 @@ def _read_attempt() -> dict[str, Any] | None:
 
 
 def _write_attempt(audio_path: Path) -> None:
-    """Registra l'inizio di un tentativo GPU (sovrascrive il precedente)."""
-    try:
+    """Registra l'inizio di un tentativo GPU (sovrascrive il precedente).
+
+    Best-effort come la sua cancellazione (``_clear_attempt``): se la cartella
+    di cache non e' scrivibile, o il disco e' pieno, il segnale non viene
+    scritto ma la trascrizione deve proseguire sul motore scelto. Prima la
+    scrittura non era protetta: un OSError qui abbatteva la run PRIMA di
+    chiamare OpenVINO, cioe' il modo peggiore di perdere minuti di setup.
+    """
+    with contextlib.suppress(OSError):
         info = audio_path.stat()
-    except OSError:
-        return
-    atomic_write_text(
-        _openvino_attempt_path(),
-        json.dumps(
-            {
-                "audio": str(audio_path),
-                "size": info.st_size,
-                "mtime": info.st_mtime,
-                "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            }
-        ),
-    )
+        atomic_write_text(
+            _openvino_attempt_path(),
+            json.dumps(
+                {
+                    "audio": str(audio_path),
+                    "size": info.st_size,
+                    "mtime": info.st_mtime,
+                    "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+            ),
+        )
 
 
 def _clear_attempt() -> None:

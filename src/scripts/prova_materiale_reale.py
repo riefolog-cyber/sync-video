@@ -65,19 +65,24 @@ ESITO_NON_VERIFICABILE = 2
 
 def _materiale() -> tuple[Path, Path]:
     """Il PDF e l'audio che la pipeline userebbe (le sue scelte, non le mie)."""
-    from pipeline_inputs import find_audio_file
+    from pipeline_inputs import find_audio_file, find_presentation_file
 
-    pdf = RADICE / DEFAULT_PDF
-    if not pdf.exists():
-        pdf = next(
-            (p for p in sorted(RADICE.glob("*.pdf")) if p.is_file()), pdf
-        )
+    # Stessa ricerca della pipeline: .ppt/.pptx e nomi personalizzati sono
+    # supportati da main.py, ma qui si guardava solo presentazione.pdf e
+    # i *.pdf: un checkout con presentazione.pptx moriva con FileNotFoundError
+    # in `file_hash()` dopo aver lanciato la pipeline.
+    trovato = find_presentation_file(RADICE)
+    pdf = trovato if trovato is not None else RADICE / DEFAULT_PDF
     audio = find_audio_file(RADICE)
     if audio is None:
-        raise SystemExit(
+        print(
             "Nessun file audio nella cartella: metti il podcast (m4a/mp3/wav) "
-            "accanto al PDF e rilancia."
+            "accanto alla presentazione e rilancia."
         )
+        # Uscita 2 = NON VERIFICABILE. `raise SystemExit(str)` usciva 1, che
+        # il docstring riserva a "timeline CAMBIATA": un checkout senza audio
+        # sembrava una regressione del codice.
+        raise SystemExit(ESITO_NON_VERIFICABILE)
     return pdf, audio
 
 

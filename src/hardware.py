@@ -363,7 +363,14 @@ def _read_encoder_cache() -> frozenset[str] | None:
         return None
     if not isinstance(data, dict) or data.get("fingerprint") != _cache_fingerprint():
         return None
-    if time.time() - float(data.get("ts", 0)) > _CACHE_VALID_SECONDS:
+    # Il try qui sopra copre solo json.loads: un ts non numerico (cache
+    # vecchia o scritta a mano) sollevava ValueError/TypeError qui, e il
+    # probe degli encoder - chiamato a ogni avvio - moriva con un traceback
+    # invece di ricalcolarlo. Una cache non e' mai un errore fatale.
+    ts = data.get("ts", 0)
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return None
+    if time.time() - float(ts) > _CACHE_VALID_SECONDS:
         return None
     encoders = data.get("encoders")
     if not isinstance(encoders, list) or not all(isinstance(e, str) for e in encoders):

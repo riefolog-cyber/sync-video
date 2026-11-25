@@ -486,6 +486,12 @@ def _apply_video_encoder(args: _TranscriberArgs, gpus: list[str]) -> None:
     args.video_encoder = scelto
     if scelto == "libx264":
         log.info("   Video: libx264 (CPU) — nessuna accelerazione video disponibile")
+    elif scelto == "auto":
+        # VIDEO_ENCODER=auto nel .env arriva qui come stringa non vuota: la
+        # scelta viene risolta dopo da main._risolvi_encoder_video(). Dire
+        # "GPU accelerata" adesso affermava una cosa non ancora decisa, e il
+        # riepilogo finale poteva contraddirla (GPU->CPU).
+        log.info("   Video: auto (encoder risolto piu' avanti nella run)")
     else:
         log.info("   Video: %s (GPU accelerata)", scelto)
 

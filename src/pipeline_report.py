@@ -87,6 +87,7 @@ def print_timing(
     *,
     history_fn: Callable[..., None] | None = None,
     video_encoder: str | None = None,
+    video_presente: bool | None = None,
     cache_dir: Path | None = None,
     ocr_workers: int | None = None,
     whisper_batch: int | None = None,
@@ -102,6 +103,12 @@ def print_timing(
     rendere visibile che la GPU è stata usata davvero (prima l'encoding era
     sempre su CPU). Con ``auto``/valori sconosciuti non si può affermare nulla:
     il riepilogo dice "non verificato" invece di "GPU".
+
+    ``video_presente``: True se un video e' presente a fine run (anche riusato,
+    quindi con ``t_video=0`` e encoder sconosciuto), False se e' un --dry-run.
+    Senza questo flag i due casi producevano la STESSA riga ("non generato
+    (dry-run)"): ogni rilancio con video riusato diceva il contrario di cio'
+    che era successo.
 
     ``cache_dir``: main.py inietta la PROPRIA CACHE_DIR patchabile, come fa per
     tutti gli altri shim: senza, i test che la spostano scrivevano lo storico
@@ -162,8 +169,15 @@ def print_timing(
             righe_hw.append(f"video {_enc} (GPU)")
         elif _enc == "libx264":
             righe_hw.append("video libx264 (CPU)")
+        elif video_presente is False:
+            # Dry-run esplicito: nessun video scritto, nessun encoder usato.
+            righe_hw.append("video non generato (dry-run)")
+        elif video_presente is True and t_video <= 0:
+            # Video riusato dalla run precedente: nessun encoding in QUESTA
+            # run, ma il file c'e'. Non e' un dry-run.
+            righe_hw.append("video riusato (nessun encoding in questa run)")
         elif t_video <= 0:
-            # Dry-run: nessun video scritto, nessun encoder usato.
+            # Compatibilita' coi chiamanti che non passano il flag.
             righe_hw.append("video non generato (dry-run)")
         else:
             righe_hw.append(f"video {_enc or 'sconosciuto'} (non verificato)")

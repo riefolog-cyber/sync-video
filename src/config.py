@@ -503,6 +503,27 @@ def versione_programma() -> str:
     return "sconosciuta"
 
 
+def _rimuovi_handler_log_file(path: Path | None = None) -> None:
+    """Rimuove gli handler su file installati da `parse_args`.
+
+    Senza questo, due `main()` nello stesso processo lasciavano il primo
+    handler attivo: il file della run 1 continuava a ricevere i messaggi della
+    run 2 (e della 3), senza avviso. Solo gli handler marcati da questa
+    funzione, o quelli sullo stesso percorso, vengono toccati: un handler
+    attaccato da un test o da un'altra libreria resta dove e'.
+    """
+    assoluto = os.path.abspath(path) if path is not None else None
+    for logger in (log, logging.getLogger()):
+        for vecchio in list(logger.handlers):
+            if not isinstance(vecchio, logging.FileHandler):
+                continue
+            if getattr(vecchio, "_slide2video_log_file", False) or (
+                assoluto is not None and vecchio.baseFilename == assoluto
+            ):
+                logger.removeHandler(vecchio)
+                vecchio.close()
+
+
 def _log_file_una_volta(record: logging.LogRecord) -> bool:
     """Filtro anti-duplicati per l'handler su file.
 
@@ -2562,6 +2583,30 @@ class _WhisperModelChoices:
         return iter(self.TAGLIE)
 
 
+def _device_cli(
+    nome: str, validi: tuple[str, ...], normalizza: Callable[[str], str]
+) -> Callable[[str], str]:
+    """Type di argparse per i flag di device (CLI e .env, stessa validazione).
+
+    L'help promette 'cpu'/'cuda' e 'GPU'/'CPU', ma i due flag non avevano
+    `choices`: un refuso come `--whisper-device CUDA` o `gpu` arrivava fino a
+    CTranslate2/OpenVINO e moriva con un traceback grezzo dopo OCR e download
+    dei modelli. Qui il rifiuto e' immediato (exit 2) e nomina il flag. La
+    normalizzazione rende innocui i valori scritti in maiuscole/minuscole
+    diverse nel .env, che argparse valida come se fossero default stringa.
+    """
+
+    def converti(valore: str) -> str:
+        normalizzato = normalizza(valore.strip())
+        if normalizzato not in validi:
+            raise argparse.ArgumentTypeError(
+                f"{nome} vuole uno di {', '.join(validi)}, ricevuto {valore!r}"
+            )
+        return normalizzato
+
+    return converti
+
+
 def _intero_cli(nome: str, minimo: int) -> Callable[[str], int]:
     """Type di argparse per flag interi con un minimo, con errore azionabile.
 
@@ -2691,11 +2736,13 @@ Esempi:
     )
     parser.add_argument(
         "--openvino-device",
+        type=_device_cli("--openvino-device", ("GPU", "CPU"), str.upper),
         default=DEFAULT_OPENVINO_DEVICE,
         help=f"Device OpenVINO: 'GPU' (iGPU Intel, default) o 'CPU' (default: {DEFAULT_OPENVINO_DEVICE})",
     )
     parser.add_argument(
         "--whisper-device",
+        type=_device_cli("--whisper-device", ("cpu", "cuda"), str.lower),
         default=DEFAULT_WHISPER_DEVICE,
         help=f"Device faster-whisper: 'cpu' o 'cuda' (default: {DEFAULT_WHISPER_DEVICE})",
     )
@@ -3116,16 +3163,10 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
             file_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-5s | %(message)s"))
             file_handler.addFilter(_log_file_una_volta)
             # parse_args puo' essere chiamata piu' volte nello stesso processo:
-            # sostituisci l'handler precedente sullo stesso file, altrimenti
-            # ogni riga verrebbe scritta due volte.
-            for logger in (log, logging.getLogger()):
-                for vecchio in list(logger.handlers):
-                    if (
-                        isinstance(vecchio, logging.FileHandler)
-                        and vecchio.baseFilename == os.path.abspath(log_path)
-                    ):
-                        logger.removeHandler(vecchio)
-                        vecchio.close()
+            # rimuovi QUALSIASI handler installato da una chiamata precedente,
+            # non solo quello sullo stesso file (altrimenti run 2 e run 3
+            # scrivevano anche nel file della run 1).
+            _rimuovi_handler_log_file(log_path)
         except OSError as e:
             log.error(
                 "\n❌ Non posso scrivere il file di log '%s': %s\n"
@@ -3137,9 +3178,14 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
             sys.exit(1)
         # Il root riceve anche i log dei moduli che non usano `log`: senza di
         # lui, nel file mancavano tutti i messaggi del bootstrap.
+        file_handler._slide2video_log_file = True  # type: ignore[attr-defined]
         log.addHandler(file_handler)
         logging.getLogger().addHandler(file_handler)
         log.info("   Log salvato anche in: %s", log_path)
+    else:
+        # Una main() senza --log-file non deve ereditare l'handler della
+        # precedente: chi legge il vecchio file vedrebbe log di run diverse.
+        _rimuovi_handler_log_file()
 
     # Risolvi percorsi relativi a BASE_DIR
     args.pdf_path = BASE_DIR / args.pdf

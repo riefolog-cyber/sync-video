@@ -769,6 +769,35 @@ def _salva_cache_voce(embed_id: str, texts: Sequence[str], arr: np.ndarray, save
         log.debug("   Cache embedding non salvata (%s).", e)
 
 
+def _costo_testi_riusati(embed_id: str, posizioni: Collection[int], texts: Sequence[str]) -> float:
+    """Quanto e' costato calcolare, la prima volta, i vettori riusati.
+
+    Il campo ``seconds`` di una voce dice il costo REALE del suo calcolo da
+    zero. Quando una lista nuova riusa parte di una voce vecchia, quel costo
+    va portato nella voce nuova: altrimenti il riuso parziale scriveva
+    ``seconds≈0`` e il riepilogo diceva "0s risparmiati" su una cache che
+    aveva fatto risparmiare minuti (batch 15 aveva coperto solo il caso
+    "tutto riusato", non questo).
+    """
+    indice = _indice_embedding().get(embed_id, {})
+    per_file: dict[Path, int] = {}
+    for pos in posizioni:
+        voce = indice.get(_chiave_testo(texts[pos]))
+        if voce is not None:
+            per_file[voce[0]] = per_file.get(voce[0], 0) + 1
+    totale = 0.0
+    for path, quanti in per_file.items():
+        try:
+            with np.load(path) as data:
+                secondi = float(np.asarray(data["seconds"]).reshape(()))
+                n_testi = len(np.asarray(data["keys"]))
+            if n_testi > 0:
+                totale += secondi * quanti / n_testi
+        except (OSError, ValueError, KeyError):
+            continue
+    return totale
+
+
 def _embed_list(embed_fn: EmbedFn, texts: Sequence[str], context: str) -> np.ndarray:
     """Embedding di una lista di testi, dalla cache quando possibile.
 
@@ -829,7 +858,15 @@ def _embed_list(embed_fn: EmbedFn, texts: Sequence[str], context: str) -> np.nda
                         arr[pos] = nuovi[k]
                     for pos, vec in riusati.items():
                         arr[pos] = vec
-                    _salva_cache_voce(embed_id, texts, arr, time.time() - t0)
+                    # Il tempo della voce nuova e' il costo dei vettori
+                    # ricalcolati PIU' quello dei vettori riusati (che qualcuno
+                    # ha gia' pagato): cosi' il prossimo riuso dice la verita'.
+                    _salva_cache_voce(
+                        embed_id,
+                        texts,
+                        arr,
+                        _costo_testi_riusati(embed_id, riusati, texts) + (time.time() - t0),
+                    )
                     log.info(
                         "   [%s] Embedding riusato per %d/%d testi (stessi testi, "
                         "stesso modello): ricalcolati solo i %d nuovi.",
