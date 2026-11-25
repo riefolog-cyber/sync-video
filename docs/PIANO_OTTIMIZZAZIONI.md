@@ -5,10 +5,10 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 20 (revisione delle revisioni e delle aree mai
-lette riga per riga), dopo il batch 19 (cache, CLI, video, timeline e
-diagnostica). Il piano resta un registro delle decisioni: i dettagli di ogni
-cambiamento sono nei messaggi di commit e nei test.
+Ultimo aggiornamento: batch 21 (orchestrazione, trascrizione/gap, diagnostica
+hardware e launcher), dopo il batch 20 (revisione delle revisioni). Il piano
+resta un registro delle decisioni: i dettagli di ogni cambiamento sono nei
+messaggi di commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -273,7 +273,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1564 test).
+`python -m unittest discover -s src -p "test_*.py"` (1580 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -660,6 +660,59 @@ override.
 Verifiche: `ruff` e `mypy` puliti (91 file, win32/linux/darwin), 1564 test
 verdi (15 nuovi), `controlli.py` 6/6 e debug hardware 17/17.
 
+## Batch 21 — orchestrazione e strumenti (2026-11)
+
+Undicesima revisione: si e' letta l'orchestrazione di `main.py` da cima a
+fondo, la trascrizione di ripiego, la diagnostica hardware e gli script che
+l'utente lancia a mano (compresi i `.bat`). Ventuno difetti, sedici test
+nuovi. Anche qui una correzione del batch precedente (ricerca dei materiali)
+non era completa.
+
+**Report e anteprime coerenti con il video.** Dopo l'auto-riparazione dei
+confini il report, il riepilogo e le anteprime parlavano ancora del video
+VECCHIO, mentre sottotitoli e capitoli usavano quello nuovo: i dubbi vengono
+ora ricalcolati sulle durate corrette. `--preview` tornava prima di scrivere
+report e riepilogo: con `--skip-slides` il JSON descriveva il deck intero e
+il giorno dopo `--review` sbagliava. Con ZERO dubbi le anteprime della run
+precedente restavano sul disco (il caso "dubbi piu' numerosi" era coperto,
+"nessun dubbio" no). `--prefetch-models` usciva 0 anche se tutti i download
+erano falliti. La verifica frame non era cronometrata e, con riparazione, il
+suo tempo finiva nella riga "Encoding Video": ora ha una voce propria e il
+tempo di encoding misura solo l'encoding.
+
+**Trascrizione e ricerca materiali.** Il recupero delle zone cieche
+ri-encodingava la clip in AAC, cambiando proprio le parole dell'annuncio che
+doveva recuperare: ora usa FLAC lossless come il taglio della ripresa. Su un
+portatile ibrido NVIDIA+iGPU il log diceva "iGPU OpenVINO attiva" mentre la
+decodifica girava su CUDA; il ripiego CUDA→CPU non avvisava della lentezza.
+Un segnale di crash GPU restante faceva partire su CPU per sempre, anche
+dopo reboot: ora si cancella quando una trascrizione arriva in fondo.
+`find_audio_file`/`find_presentation_file` avevano il guard `OSError`
+sull'intero ciclo: un solo file bloccato faceva dire "nessun audio" con il
+podcast buono accanto (il test l'ha scoperto) — ora si salta il singolo
+candidato.
+
+**Setup e diagnostica.** Il primo avvio con CUDA non controllava che
+faster-whisper fosse installato (lo fa solo la run successiva) e finiva in
+cuda/float16 con ImportError dopo OCR. Il device OpenVINO veniva scelto prima
+del provisioning: su iGPU Intel la prima run partiva in CPU. Il referto
+consigliava di installare OpenVINO su PC senza iGPU, e diceva "OpenVINO
+scelto" su un PC configurato con `TRANSCRIBER=whisper`; con un segnale di
+crash aggiungeva DUE voci "Motore" contraddittorie.
+
+**Launcher e script.** `genera_video.bat`, `prova.bat` e `pulisci.bat`
+terminavano con `endlocal`, azzerando l'ERRORLEVEL: il fallimento veniva
+stampato ma il codice di uscita era 0. `check_embedding_models.py` considerava
+401/403/429 come "nessun aggiornamento", distruggeva la baseline e usciva 0,
+e non passava timeout alle chiamate HuggingFace (blocco infinito).
+`prova_materiale_reale.py` usciva 1 ("timeline cambiata") quando la timeline
+non c'era affatto. `confronta-embedding.ps1` cercava la vecchia frase
+"similarità media" e non trovava mai il punteggio, dicendo sempre "nessun
+modello valutabile".
+
+Verifiche: `ruff` e `mypy` puliti (92 file, win32/linux/darwin), 1580 test
+verdi (16 nuovi), `controlli.py` 6/6 e debug hardware 17/17.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -755,5 +808,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio (batch 20): ruff pulito, mypy pulito su tre
-piattaforme, 1564 test verdi, `_debug_hardware.py` e controlli 6/6.
+Stato all'ultimo lancio (batch 21): ruff pulito, mypy pulito su tre
+piattaforme, 1580 test verdi, `_debug_hardware.py` e controlli 6/6.

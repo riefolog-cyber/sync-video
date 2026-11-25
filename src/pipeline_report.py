@@ -89,6 +89,7 @@ def print_timing(
     video_encoder: str | None = None,
     video_presente: bool | None = None,
     cache_dir: Path | None = None,
+    t_verify: float = 0.0,
     ocr_workers: int | None = None,
     whisper_batch: int | None = None,
     thread_overrides: bool = False,
@@ -127,6 +128,8 @@ def print_timing(
         log.info("     └ Modello   │ %s", format_time(t_model))
     if t_video > 0:
         log.info("   Encoding Video│ %s", format_time(t_video))
+    if t_verify > 0:
+        log.info("   Verifica frame│ %s", format_time(t_verify))
     log.info("   ─────────────────────────")
     log.info("   TOTALE         │ %s", format_time(t_total))
     log.info("─" * 50)

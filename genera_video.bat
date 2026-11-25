@@ -133,7 +133,9 @@ echo   crash nativo o memoria esaurita, tipicamente durante la trascrizione.
 echo.
 echo ========================================
 if "%PAUSE_IT%"=="1" pause
-endlocal
+rem `endlocal` da solo azzera ERRORLEVEL: il batch usciva sempre 0 anche
+rem quando il programma aveva segnalato un errore (automazione ingannata).
+endlocal & exit /b %EXIT_CODE%
 
 rem ============================================================
 rem ricarica_path_utente: rilegge il PATH utente dal registro.

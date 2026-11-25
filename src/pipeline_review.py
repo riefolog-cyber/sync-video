@@ -224,6 +224,10 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
             "dichiarati: niente da rivedere.%s",
             " (controllo ricalcolato dalle parole in cache)" if ricalcolati else "",
         )
+        # Nessun dubbio anche in `--review`: le anteprime della vecchia run
+        # vanno comunque via, altrimenti restano a indicare un problema che
+        # non c'e' piu'.
+        _write_boundary_previews(video_path, [], cache_dir / "review")
     elif video_path.exists():
         _write_boundary_previews(video_path, items, cache_dir / "review")
     else:

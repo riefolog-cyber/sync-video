@@ -431,22 +431,13 @@ def prova_motore(r: Relazione) -> None:
                 audio_nome = None
     except (ImportError, OSError):
         incompiuto, audio_nome = False, None
-    if incompiuto:
-        r.aggiungi(
-            Esito(
-                "Motore",
-                AVV,
-                "tentativo GPU precedente incompiuto"
-                + (f" su {audio_nome}" if audio_nome else "")
-                + " (probabile crash): per quel materiale la prossima trascrizione parte su CPU",
-                "Un giro piu' lento, poi tutto torna da solo. Per riprovare subito "
-                "la GPU: genera_video.bat --transcriber openvino.",
-            )
-        )
     try:
-        from config import DEFAULT_OPENVINO_MODEL_DIR
+        from config import DEFAULT_OPENVINO_MODEL_DIR, DEFAULT_TRANSCRIBER
 
-        scelto = resolved_transcriber("auto", Path(DEFAULT_OPENVINO_MODEL_DIR))
+        # Hardcodare "auto" faceva dire "OpenVINO scelto" su un PC configurato
+        # con TRANSCRIBER=whisper (CUDA): il referto descriveva un motore che la
+        # pipeline non usa mai. Si usa la scelta configurata, non un valore fisso.
+        scelto = resolved_transcriber(DEFAULT_TRANSCRIBER, Path(DEFAULT_OPENVINO_MODEL_DIR))
     except Exception as e:  # noqa: BLE001
         r.aggiungi(Esito("Motore", AVV, f"non determinabile: {e}"))
         return
@@ -456,25 +447,37 @@ def prova_motore(r: Relazione) -> None:
         # versione di questa prova leggeva il ritorno al contrario e segnalava
         # KO su un PC dove OpenVINO andava benissimo.
         if openvino_usable(Path(DEFAULT_OPENVINO_MODEL_DIR)):
-            r.aggiungi(Esito("Motore", OK, "openvino (iGPU/CPU Intel)"))
+            causa = Esito("Motore", OK, "openvino (iGPU/CPU Intel)")
         else:
             # Non e' un KO: il programma ripiega DA SOLO su faster-whisper su
-            # CPU e il video viene prodotto. Un KO qui faceva dire a un PC che
-            # ha già generato video "1 problema che impedisce il video",
-            # contraddicendo l'Esito e facendo fallire il referto su una
-            # macchina perfettamente funzionante. E' un AVV: va letto, non
-            # blocca.
-            r.aggiungi(
-                Esito(
-                    "Motore",
-                    AVV,
-                    "OpenVINO scelto ma non utilizzabile adesso (runtime, modello IR o device GPU manca)",
-                    "Il programma ripiega da solo su faster-whisper su CPU: il video si fa, "
-                    "ma piu' lento. Per riprovare la GPU: genera_video.bat --transcriber openvino.",
-                )
+            # CPU e il video viene prodotto. E' un AVV: va letto, non blocca.
+            causa = Esito(
+                "Motore",
+                AVV,
+                "OpenVINO disponibile ma non utilizzabile adesso (runtime, modello IR o device GPU manca)",
+                "Il programma sceglie da solo il motore che regge: senza iGPU usa "
+                "faster-whisper su CPU, quindi il video si fa. Non serve forzare "
+                "OpenVINO a mano su una macchina che non ha il device.",
             )
     else:
-        r.aggiungi(_motore_senza_openvino(scelto))
+        causa = _motore_senza_openvino(scelto)
+
+    if incompiuto:
+        # Un solo stato per "Motore": prima veniva aggiunto un AVV per il crash
+        # e poi un secondo OK/AVV con la frase opposta, e il referto contava
+        # due problemi per la stessa cosa. Ora il dettaglio porta ENTRAMBE le
+        # informazioni (crash + causa reale) in una riga sola.
+        dettaglio = (
+            "tentativo GPU precedente incompiuto"
+            + (f" su {audio_nome}" if audio_nome else "")
+            + " (probabile crash): " + causa.dettaglio
+        )
+        rimedio = causa.rimedio or (
+            "Un giro piu' lento, poi tutto torna da solo."
+        )
+        r.aggiungi(Esito("Motore", AVV, dettaglio, rimedio))
+    else:
+        r.aggiungi(causa)
 
 
 def _motore_senza_openvino(scelto: str) -> Esito:
@@ -516,6 +519,31 @@ def _motore_senza_openvino(scelto: str) -> Esito:
     try:
         import openvino_genai  # noqa: F401
     except ImportError:
+        # Prima di suggerire l'installazione verificare che ci sia una iGPU:
+        # il docstring dice che senza iGPU scaricare OpenVINO non cambia niente,
+        # ma il controllo era DOPO questo ramo, quindi su AMD/NVIDIA-only il
+        # referto consigliava comunque i pacchetti inutili.
+        try:
+            from transcription import openvino_device_available
+
+            ha_igpu = openvino_device_available()
+        except ImportError:
+            ha_igpu = False
+        if not ha_igpu:
+            # Si dice comunque che il runtime manca (e' una causa vera), ma si
+            # avvisa che senza iGPU installarlo non accelererebbe nulla. Il
+            # rimedio resta il pip della venv, con `-U` fra "pip install" e
+            # "openvino": chi copia il comando installa dove gira il programma.
+            return Esito(
+                "Motore",
+                AVV,
+                dettaglio + " (nessuna iGPU Intel su questo PC; OpenVINO non e' installato)",
+                "Attenzione: senza iGPU Intel OpenVINO non accelererebbe nulla; "
+                "il programma resta su CPU di proposito. Solo se in futuro avrai "
+                f'una iGPU installa con "{sys.executable}" -m pip install openvino '
+                "openvino-genai (oppure lancia crea_venv.bat, che prepara la venv "
+                "con tutte le dipendenze).",
+            )
         # Il pip di sistema non e' quello della venv che esegue il programma:
         # suggerire `py -m pip` installa altrove e il problema ricompare.
         return Esito(

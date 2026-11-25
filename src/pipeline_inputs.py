@@ -18,24 +18,43 @@ from chunks import Word
 from config import AUDIO_SEARCH_SUFFIXES, PRESENTATION_ACCEPTED_SUFFIXES, log
 
 
+def _mtime_legibile(file: Path) -> float:
+    """mtime, o -inf se il file e' sparito/irraggiungibile.
+
+    Un singolo candidato non leggibile non deve far sparire TUTTI gli altri:
+    il guard `OSError` intorno a `max()` faceva dire "nessun audio" con il
+    podcast buono li' accanto (race con antivirus/OneDrive).
+    """
+    try:
+        return file.stat().st_mtime
+    except OSError:
+        return float("-inf")
+
+
 def find_audio_file(directory: Path) -> Path | None:
     """Cerca qualsiasi file audio nella directory (glob pattern).
     Se più file audio presenti, sceglie il più recente per data di modifica.
     Anche una cartella puo' finire per .m4a/.mp3: senza `is_file()` verrebbe
     scelta come audio e la pipeline aprirebbe una directory al suo posto."""
-    # Stessa difesa di `find_presentation_file`: una cartella sparita o non
-    # leggibile deve dire "nessun audio", non morire con un traceback. Anche
-    # `stat()` puo' fallire se un file sparisce fra iterdir e la lettura.
+    # Il guard NON puo' essere intorno a tutto il ciclo: `Path.is_file()`
+    # rilancia OSError diversi da "file sparito", quindi un solo candidato
+    # bloccato faceva dire "nessun audio" anche con il podcast buono accanto.
+    # Si salta il singolo candidato, non l'intera cartella.
     try:
-        candidates = [
-            f for f in directory.iterdir() if f.is_file() and f.suffix.lower() in AUDIO_SEARCH_SUFFIXES
-        ]
-        if not candidates:
-            return None
-        # Ordina per data di modifica (più recente prima)
-        return max(candidates, key=lambda f: f.stat().st_mtime)
+        voci = list(directory.iterdir())
     except OSError:
         return None
+    candidates: list[Path] = []
+    for f in voci:
+        try:
+            if f.is_file() and f.suffix.lower() in AUDIO_SEARCH_SUFFIXES:
+                candidates.append(f)
+        except OSError:
+            continue
+    if not candidates:
+        return None
+    # Ordina per data di modifica (più recente prima)
+    return max(candidates, key=_mtime_legibile)
 
 
 def find_presentation_file(directory: Path) -> Path | None:
@@ -47,21 +66,26 @@ def find_presentation_file(directory: Path) -> Path | None:
     da doppio download o al nome personalizzato: senza, il primo avvio dice
     "manca il materiale" con il file li' accanto, e l'utente legge un falso.
     """
+    # Stessa regola di `find_audio_file`: un singolo file non leggibile non
+    # deve far sparire la presentazione buona che sta accanto.
     try:
-        files = [
-            f
-            for f in directory.iterdir()
-            if f.is_file() and f.suffix.lower() in PRESENTATION_ACCEPTED_SUFFIXES
-        ]
-        if not files:
-            return None
-        for nome in ("presentazione.pdf", "presentazione.pptx", "presentazione.ppt"):
-            for f in files:
-                if f.name.lower() == nome:
-                    return f
-        return max(files, key=lambda f: f.stat().st_mtime)
+        voci = list(directory.iterdir())
     except OSError:
         return None
+    files: list[Path] = []
+    for f in voci:
+        try:
+            if f.is_file() and f.suffix.lower() in PRESENTATION_ACCEPTED_SUFFIXES:
+                files.append(f)
+        except OSError:
+            continue
+    if not files:
+        return None
+    for nome in ("presentazione.pdf", "presentazione.pptx", "presentazione.ppt"):
+        for f in files:
+            if f.name.lower() == nome:
+                return f
+    return max(files, key=_mtime_legibile)
 
 
 def _parse_transcript_raw(raw_path: Path) -> list[Word] | None:

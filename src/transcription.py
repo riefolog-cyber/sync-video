@@ -921,22 +921,30 @@ def transcribe_audio(
             openvino_model_dir,
         )
 
-    return transcribe_with_whisper(
-        audio_path,
-        model_size=model_size,
-        language=language,
-        device=whisper_device,
-        compute_type=whisper_compute_type,
-        # Il model dir reale, non il default: con --openvino-model-dir
-        # personalizzato il probe deve guardare lo stesso percorso che verrà
-        # usato davvero, altrimenti l'avviso "usa OpenVINO" valuterebbe una
-        # cartella diversa da quella della pipeline.
-        openvino_available=openvino_usable(openvino_model_dir),
-        beam_size=whisper_beam,
-        batch_size=whisper_batch,
-        device_explicit=whisper_device_explicit,
-        riprendi=not no_ripresa,
-    )
+    try:
+        return transcribe_with_whisper(
+            audio_path,
+            model_size=model_size,
+            language=language,
+            device=whisper_device,
+            compute_type=whisper_compute_type,
+            # Il model dir reale, non il default: con --openvino-model-dir
+            # personalizzato il probe deve guardare lo stesso percorso che verrà
+            # usato davvero, altrimenti l'avviso "usa OpenVINO" valuterebbe una
+            # cartella diversa da quella della pipeline.
+            openvino_available=openvino_usable(openvino_model_dir),
+            beam_size=whisper_beam,
+            batch_size=whisper_batch,
+            device_explicit=whisper_device_explicit,
+            riprendi=not no_ripresa,
+        )
+    finally:
+        # Un segnale di crash GPU lasciato da un processo morto dentro il
+        # nativo faceva partire SEMPRE su CPU, anche dopo reboot, aggiornamento
+        # driver o cambio macchina: non c'era piu' nulla che lo cancellasse.
+        # Una trascrizione arrivata in fondo (con qualsiasi esito Python)
+        # dimostra che la macchina e' utilizzabile: si rivaluta alla run dopo.
+        _clear_attempt()
 
 
 # --- Salvataggio a pezzi della trascrizione --------------------------------
@@ -1449,8 +1457,11 @@ def transcribe_with_whisper(
     # caso in cui l'utente ha davvero bisogno di saperlo restava muto.
     if device == "cpu":
         _warn_cpu_transcription(model_size)
-    elif openvino_available:
-        log.info("   Trascrizione su iGPU OpenVINO:Accelerazione attiva.")
+    elif device == "cuda":
+        # `openvino_available` dice solo che un upgrade e' POSSIBILE, non che
+        # sia il motore in uso: su un portatile ibrido NVIDIA+iGPU stampava
+        # "iGPU OpenVINO attiva" mentre la decodifica girava su CUDA.
+        log.info("   Trascrizione su NVIDIA CUDA: accelerazione attiva.")
 
     # Carica modello. cpu_threads esplicito: il default di faster-whisper
     # sottoutilizza CPU con piu' core (misurato su Snapdragon X Elite: 8
@@ -1492,6 +1503,10 @@ def transcribe_with_whisper(
         log.warning("   Ripiego su faster-whisper su CPU (int8): piu' lento, ma la run prosegue.")
         device = "cpu"
         compute_type = "int8"
+        # Il controllo in cima non scatta piu': e' QUI che la macchina comincia
+        # davvero a trascrivere su CPU, ed e' il momento in cui l'utente deve
+        # sapere che i minuti che seguono sono quelli lenti.
+        _warn_cpu_transcription(model_size)
         model = WhisperModel(model_size, device=device, compute_type=compute_type, cpu_threads=n_threads)
     log.debug("   Modello Whisper caricato (device=%s).", device)
 
@@ -1658,12 +1673,15 @@ def retranscribe_zone(
     start = max(0.0, t0 - pad_seconds)
     try:
         with tempfile.TemporaryDirectory(prefix="sync_zone_") as tmp:
-            clip = Path(tmp) / "zona.m4a"
+            # FLAC lossless, come `_taglia_audio`: qui si recupera PROPRIO
+            # l'annuncio che il decoder veloce ha storpiato, e una ricodifica
+            # AAC puo' cambiare una parola ("è" -> "e") spostando l'ancora.
+            clip = Path(tmp) / "zona.flac"
             res = subprocess.run(
                 [
                     "ffmpeg", "-y", "-v", "error", "-nostdin",
                     "-ss", f"{start:.1f}", "-t", f"{t1 - start + pad_seconds:.1f}",
-                    "-i", str(audio_path), str(clip),
+                    "-i", str(audio_path), "-c:a", "flac", str(clip),
                 ],
                 capture_output=True,
                 stdin=subprocess.DEVNULL,

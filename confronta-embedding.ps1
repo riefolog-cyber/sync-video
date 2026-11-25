@@ -30,10 +30,11 @@ $MODEL_MAP = @{
 }
 
 function Get-Durations([string]$Output) {
-    # La timeline è stampata 2 volte nel log: uso solo quella dell'anteprima
-    # finale (dopo l'ultima "similarità media"), così i valori non si duplicano.
+    # La timeline è stampata 2 volte nel log: uso solo l'ULTIMA stampa,
+    # così i valori non si duplicano. Il vecchio taglio su "similarit" non
+    # esiste più nel formato attuale del log.
     $durations = @()
-    $idx = $Output.LastIndexOf("similarit")
+    $idx = $Output.LastIndexOf("-> Slide")
     if ($idx -ge 0) { $Output = $Output.Substring($idx) }
     foreach ($m in [regex]::Matches($Output, '-> Slide \d+: da [\d.]+s a [\d.]+s \(durata: ([\d.]+)s\)')) {
         $durations += [double]$m.Groups[1].Value
@@ -42,7 +43,11 @@ function Get-Durations([string]$Output) {
 }
 
 function Get-Sim([string]$Output) {
-    $m = [regex]::Match($Output, 'similarit.+?([\d]+\.[\d]+)')
+    # Il programma stampa "somiglianza media 0.836" (non più "similarità
+    # media"), e con tutti i cambi ancorati la misura non c'è affatto: in
+    # quel caso si usa il punteggio z, che è il numero che conta davvero.
+    $m = [regex]::Match($Output, 'somiglianza media\s+([\d]+\.[\d]+)')
+    if (-not $m.Success) { $m = [regex]::Match($Output, 'punteggio\s+([\d]+\.[\d]+)') }
     if ($m.Success) { return [double]$m.Groups[1].Value }
     return $null
 }
@@ -83,7 +88,9 @@ foreach ($short in $Models) {
 
     $env:EMBEDDING_MODEL = $modelName
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $raw = & $PYTHON src\main.py --dry-run --debug --flow $Flow 2>&1 | Out-String
+    # Nessuna domanda: lo script è un confronto automatico e non deve fermarsi
+    # su PyPI/bootstrap come succedeva con la sola invocazione --dry-run.
+    $raw = & $PYTHON src\main.py --dry-run --debug --flow $Flow --no-update-check --no-confirm 2>&1 | Out-String
     $sw.Stop()
 
     if ($LASTEXITCODE -ne 0) {

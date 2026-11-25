@@ -109,9 +109,11 @@ def _timeline() -> list[dict[str, object]]:
     try:
         dati = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
-        raise SystemExit(
-            f"Nessuna timeline in {path}: la run non e' andata a fine."
-        ) from e
+        print(f"Nessuna timeline in {path}: la run non e' andata a fine.")
+        # `raise SystemExit(str)` usciva 1, che il docstring riserva a
+        # "timeline CAMBIATA": qui non c'e' niente da confrontare, quindi e'
+        # MATERIALE NON VERIFICABILE (2).
+        raise SystemExit(ESITO_NON_VERIFICABILE) from e
     return list(dati) if isinstance(dati, list) else []
 
 

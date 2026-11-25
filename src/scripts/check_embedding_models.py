@@ -82,6 +82,10 @@ KNOWN_MODELS: set[str] = set(TRACKED_MODELS)
 KNOWN_MODELS_KEY = "known_models"
 
 
+# Secondi oltre i quali una chiamata a HuggingFace viene considerata fallita.
+_HF_TIMEOUT = 30
+
+
 class NetworkError(RuntimeError):
     """Controllo non verificabile: HF irraggiungibile o libreria mancante."""
 
@@ -95,7 +99,17 @@ def _is_network_error(exc: BaseException) -> bool:
     if "HfHubHTTPError" in type(exc).__name__ or "HTTPError" in type(exc).__name__:
         response = getattr(exc, "response", None)
         code = getattr(response, "status_code", None)
-        return code is None or int(code) >= 500
+        if code is None:
+            return True
+        try:
+            stato = int(code)
+        except (TypeError, ValueError):
+            return True
+        # 401/403 (token scaduto, repo privato) e 429 (rate limit) non sono
+        # "nessun aggiornamento": il controllo e' CIECO. Prima venivano
+        # salvati come lastModified=None e il referto diceva "nessuna azione"
+        # con uscita 0, distruggendo la baseline per sempre.
+        return stato >= 500 or stato in (401, 403, 429)
     msg = str(exc).lower()
     return any(
         k in msg
@@ -149,7 +163,9 @@ def _gather(api: Any, known: set[str] | None = None) -> dict:
     network_errors: list[str] = []
     for mid in TRACKED_MODELS:
         try:
-            info = api.model_info(mid, files_metadata=False)
+            # Timeout finito: senza, una connessione half-open faceva girare
+            # per sempre lo script (che promette uscita 3 = non verificabile).
+            info = api.model_info(mid, files_metadata=False, timeout=_HF_TIMEOUT)
             tracked[mid] = {
                 "lastModified": info.lastModified.isoformat() if info.lastModified else None,
                 "downloads": info.downloads,
@@ -167,6 +183,7 @@ def _gather(api: Any, known: set[str] | None = None) -> dict:
             sort="lastModified",
             direction=-1,
             limit=SEARCH_LIMIT,
+            timeout=_HF_TIMEOUT,
         )
         for m in models:
             mid = m.modelId

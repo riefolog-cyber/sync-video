@@ -302,6 +302,12 @@ def _provision(rec: dict, model_dir: Path) -> dict:
         if not cuda_available():
             log.warning("   ⚠️ CUDA non disponibile, uso faster-whisper su CPU.")
             return dict(_CPU_FALLBACK)
+        # `_validate` controlla che faster-whisper sia installato, ma il primo
+        # avvio passa da QUI e non lo controllava: con bootstrap saltato si
+        # finiva in cuda/float16 e la run moriva con ImportError dopo OCR.
+        if importlib.util.find_spec("faster_whisper") is None:
+            log.warning("   ⚠️ faster-whisper non installato: uso la CPU, non CUDA.")
+            return dict(_CPU_FALLBACK)
         mancante = cuda_runtime_lib_mancante()
         if mancante:
             log.warning(
@@ -662,6 +668,16 @@ def machine_setup(args: _TranscriberArgs, force: bool = False) -> None:
     # l'hardware e' stato davvero rilevato in questa run; altrimenti si valida.
     rec = recommend(gpus)
     rec = _provision(rec, model_dir) if fresh_detection else _validate(rec, model_dir)
+    # `recommend()` ha scelto il device PRIMA che il provisioning installasse
+    # il runtime: su una iGPU Intel il primo avvio restava in CPU mentre
+    # scaricava il modello, e solo la run dopo passava a GPU.
+    if (
+        fresh_detection
+        and rec["transcriber"] == "openvino"
+        and openvino_device_available()
+        and rec.get("openvino_device") != "GPU"
+    ):
+        rec["openvino_device"] = "GPU"
 
     log.info("   Motore scelto: %s (%s)", rec["transcriber"], rec["reason"])
     if rec["transcriber"] == "openvino":

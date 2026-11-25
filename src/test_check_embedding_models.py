@@ -127,7 +127,7 @@ class TestRecommendation(unittest.TestCase):
 class TestGather(unittest.TestCase):
     def test_filters_only_onnx_multilingual(self):
         api = mock.Mock()
-        api.model_info.side_effect = lambda mid: _FakeModelInfo(downloads=10)
+        api.model_info.side_effect = lambda mid, **_kw: _FakeModelInfo(downloads=10)
         api.list_models.return_value = [
             _FakeLiteModel("foo/multilingual-e5-onnx", tags=["onnx", "multilingual"]),
             _FakeLiteModel("bar/german-only", tags=["onnx"]),
@@ -146,7 +146,7 @@ class TestGather(unittest.TestCase):
 
     def test_ricerca_candidati_offline_raises(self):
         api = mock.Mock()
-        api.model_info.side_effect = lambda mid: _FakeModelInfo(lastModified=_DT, downloads=1)
+        api.model_info.side_effect = lambda mid, **_kw: _FakeModelInfo(lastModified=_DT, downloads=1)
         api.list_models.side_effect = OSError("connection unreachable")
         with self.assertRaises(cm.NetworkError):
             cm._gather(api)
@@ -187,7 +187,7 @@ class TestKnownModels(unittest.TestCase):
 
     def test_gather_filtra_modelli_gia_visti(self):
         api = mock.Mock()
-        api.model_info.side_effect = lambda mid: _FakeModelInfo(lastModified=_DT, downloads=1)
+        api.model_info.side_effect = lambda mid, **_kw: _FakeModelInfo(lastModified=_DT, downloads=1)
         api.list_models.return_value = [_FakeLiteModel(_CANDIDATO, tags=["onnx", "multilingual"])]
         data = cm._gather(api, known=set(cm.KNOWN_MODELS) | {_CANDIDATO})
         self.assertEqual(data["new_candidates"], {})
@@ -216,7 +216,7 @@ class TestStatePersistence(unittest.TestCase):
     @staticmethod
     def _fake_hf():
         api = mock.Mock()
-        api.model_info.side_effect = lambda mid: _FakeModelInfo(lastModified=_DT, downloads=1)
+        api.model_info.side_effect = lambda mid, **_kw: _FakeModelInfo(lastModified=_DT, downloads=1)
         api.list_models.return_value = [_FakeLiteModel(_CANDIDATO, tags=["onnx", "multilingual"])]
         return types.SimpleNamespace(HfApi=mock.Mock(return_value=api))
 

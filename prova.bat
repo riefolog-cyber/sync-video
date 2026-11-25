@@ -33,6 +33,11 @@ if errorlevel 1 (
 )
 echo Python scelto: !PY_CMD!
 !PY_CMD! src\main.py --dry-run --debug !MAIN_ARGS!
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "%EXIT_CODE%"=="0" (
+    echo.
+    echo [USCITA ANOMALA] main.py e' terminato con codice %EXIT_CODE%.
+)
 
 echo.
 echo ========================================
@@ -40,4 +45,5 @@ echo  Niente video generato: solo timeline.
 echo  Usa genera_video.bat per il video vero.
 echo ========================================
 if "%PAUSE_IT%"=="1" pause
-endlocal
+rem Propaga il codice del programma: prima endlocal lo azzerava a 0.
+endlocal & exit /b %EXIT_CODE%

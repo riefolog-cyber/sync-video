@@ -350,6 +350,7 @@ def _print_timing(
     *,
     video_encoder: str | None = None,
     video_presente: bool | None = None,
+    t_verify: float = 0.0,
     ocr_workers: int | None = None,
     whisper_batch: int | None = None,
     thread_overrides: bool = False,
@@ -375,6 +376,7 @@ def _print_timing(
         history_fn=_storia,
         video_encoder=video_encoder,
         video_presente=video_presente,
+        t_verify=t_verify,
         cache_dir=CACHE_DIR,
         ocr_workers=ocr_workers,
         whisper_batch=whisper_batch,
@@ -3433,7 +3435,10 @@ def main(argv: list | None = None) -> None:
 
     # --- Download di TUTTI i modelli (una tantum) e uscita ---
     if args.prefetch_models:
-        _prefetch_models(args)
+        # `_prefetch_models` ritorna False se anche un solo download e' fallito:
+        # uscire 0 faceva credere a .bat e job che i modelli fossero pronti.
+        if not _prefetch_models(args):
+            sys.exit(1)
         return
 
     # --- Download modello OpenVINO (una tantum) e uscita ---
@@ -5042,6 +5047,40 @@ def main(argv: list | None = None) -> None:
         )
         durations_prima_riparazione = list(durations)
 
+        def _dubbi_annunci() -> list[dict[str, object]]:
+            """Dubbi annuncio/confine sulle durate CURRENT di questa run.
+
+            Va richiamato di nuovo dopo un'auto-riparazione: i `durations`
+            cambiano e i dubbi calcolati prima descrivono il video VECCHIO.
+            """
+            if not words_raw or not isinstance(sync_notes.get("anchors"), dict):
+                return []
+            _declared: dict[int, float] = {}
+            _cursor = 0.0
+            for _sid, _dur in zip(slide_ids, durations, strict=True):
+                _declared.setdefault(int(_sid), _cursor)
+                _cursor += float(_dur)
+            # L'offset utente e' solo la correzione dichiarata a mano: quella
+            # automatica del mapping va sommata, altrimenti ogni annuncio
+            # corretto sembra contraddire il confine della pagina sbagliata.
+            # Se la correzione non e' un offset unico, il confronto con un solo
+            # numero sarebbe falso: meglio non segnalare nulla (e dirlo).
+            if _mapping_non_uniform:
+                log.debug(
+                    "   [Mapping] Correzione non uniforme: salto il controllo "
+                    "annunci/confini per evitare falsi dubbi."
+                )
+                return []
+            return [
+                {"slide": s, "mention": m, "declared": d}
+                for s, m, d in announcements_off_timeline(
+                    list(words_raw),
+                    _declared,
+                    total_slides,
+                    slide_offset=_offset_utente + _offset_mapping,
+                )
+            ]
+
         # --- Anteprima timeline (--preview) ---
         if args.preview:
             log.info("\n" + "=" * 70)
@@ -5062,6 +5101,17 @@ def main(argv: list | None = None) -> None:
                 "Rimuovi --preview per creare il video (--dry-run, invece, "
                 "si ferma prima di questa anteprima)."
             )
+            # Anche --preview e' una run completa (OCR+trascrizione+sync): il
+            # report e il riepilogo devono descrivere la sequenza MOSTRATA,
+            # non quella di una run vecchia. Prima il return arrivava prima di
+            # ogni scrittura, quindi --skip-slides e i dubbi restavano solo in
+            # memoria e il giorno dopo --review ricalcolava su dati stale.
+            if isinstance(sync_notes.get("anchors"), dict):
+                cast("dict[str, object]", sync_notes["anchors"])["mentions_off"] = _dubbi_annunci()
+            _save_sync_report(sync_report)
+            from riepilogo import scrivi_riepilogo
+
+            scrivi_riepilogo(sync_report, Path(args.output_video), dry_run=args.dry_run)
             _avvisa_verifica_non_eseguita(args, "--preview")
             return
 
@@ -5071,34 +5121,8 @@ def main(argv: list | None = None) -> None:
         # ancore) e va fatto qui perché lo deve poter dichiarare il riepilogo, dry
         # run compreso. Run del 14/10: "Passiamo alla slide 10" a 16:56, il video
         # la mostrava da 17:38, e il riepilogo scriveva "nessuno" fra i dubbi.
-        if words_raw and isinstance(sync_notes.get("anchors"), dict):
-            _declared: dict[int, float] = {}
-            _cursor = 0.0
-            for _sid, _dur in zip(slide_ids, durations, strict=True):
-                _declared.setdefault(int(_sid), _cursor)
-                _cursor += float(_dur)
-            # L'offset utente e' solo la correzione dichiarata a mano: quella
-            # automatica del mapping va sommata, altrimenti ogni annuncio
-            # corretto sembra contraddire il confine della pagina sbagliata.
-            # Se la correzione non e' un offset unico, il confronto con un solo
-            # numero sarebbe falso: meglio non segnalare nulla (e dirlo).
-            if _mapping_non_uniform:
-                _dubbi: list[dict[str, object]] = []
-                log.debug(
-                    "   [Mapping] Correzione non uniforme: salto il controllo "
-                    "annunci/confini per evitare falsi dubbi."
-                )
-            else:
-                _dubbi = [
-                    {"slide": s, "mention": m, "declared": d}
-                    for s, m, d in announcements_off_timeline(
-                        list(words_raw),
-                        _declared,
-                        total_slides,
-                        slide_offset=_offset_utente + _offset_mapping,
-                    )
-                ]
-            cast("dict[str, object]", sync_notes["anchors"])["mentions_off"] = _dubbi
+        if isinstance(sync_notes.get("anchors"), dict):
+            cast("dict[str, object]", sync_notes["anchors"])["mentions_off"] = _dubbi_annunci()
 
         # Il report in memoria è lo STESSO dict di sync_notes["anchors"], quindi
         # il controllo incrociato appena aggiunto a `mentions_off` deve finire
@@ -5210,12 +5234,19 @@ def main(argv: list | None = None) -> None:
         # video: un controllo che scopre il problema ma non fa nulla lascia
         # l'utente con un video sbagliato in mano.
         repairs: list[dict[str, object]] = []
+        # La verifica frame NON e' encoding: prima non era cronometrata e, con
+        # riparazione, il suo tempo finiva nella riga "Encoding Video" (insieme
+        # al secondo build), facendo sembrare lento l'encoder.
+        t_verify = 0.0
         if args.verify_video:
+            inizio_verifica = time.time()
             frame_check = _frame_check_video(
                 args.output_video, slide_ids, durations, all_slide_files
             )
+            t_verify += time.time() - inizio_verifica
             mismatches = cast("list[dict[str, object]]", frame_check["mismatches"])
             if mismatches and args.auto_repair:
+                inizio_riparazione = time.time()
                 repaired = _repair_durations_from_frames(
                     durations,
                     slide_ids,
@@ -5229,6 +5260,7 @@ def main(argv: list | None = None) -> None:
                         min_slide_duration=args.semantic_min_duration,
                     ),
                 )
+                t_verify += time.time() - inizio_riparazione
                 if repaired is not None:
                     durations, repairs = repaired
                     log.info(
@@ -5256,6 +5288,15 @@ def main(argv: list | None = None) -> None:
                     sync_report["segments"] = _build_sync_report(
                         durations, slide_ids, total_duration, verdicts
                     )["segments"]
+                    # Anche i dubbi annuncio/confine vanno ricalcolati: prima
+                    # restavano quelli del video VECCHIO in report, riepilogo e
+                    # anteprime, mentre sottotitoli e capitoli usavano il nuovo
+                    # confine. Il report si contraddiceva da solo.
+                    if isinstance(sync_notes.get("anchors"), dict):
+                        cast("dict[str, object]", sync_notes["anchors"])["mentions_off"] = (
+                            _dubbi_annunci()
+                        )
+                    inizio_secondo_encoding = time.time()
                     build_video(
                         slide_files,
                         durations,
@@ -5273,7 +5314,9 @@ def main(argv: list | None = None) -> None:
                         # (l'impronta cambia coi tempi).
                         reuse=not args.no_cache,
                     )
-                    t_video = time.time() - t_phase_start
+                    # Solo il SECONDO encoding: verifica e riparazione hanno
+                    # il loro bucket, non gonfiano "Encoding Video".
+                    t_video = time.time() - inizio_secondo_encoding
                     # I frame del video precedente li rimuove la verifica stessa
                     # (``video.frame_consistency_check`` svuota la cartella prima
                     # di scrivere): qui non serve un secondo punto di pulizia.
@@ -5352,6 +5395,7 @@ def main(argv: list | None = None) -> None:
             # A prescindere dal riuso, a questo punto il output video esiste:
             # dire "dry-run" qui era falso in ogni rilancio senza modifiche.
             video_presente=True,
+            t_verify=t_verify,
             ocr_workers=getattr(args, "ocr_workers", None),
             whisper_batch=getattr(args, "whisper_batch", None),
             thread_overrides=bool(
@@ -5388,6 +5432,12 @@ def main(argv: list | None = None) -> None:
             # vedrebbero le anteprime appena create.
             _save_sync_report(sync_report)
             scrivi_riepilogo(sync_report, Path(args.output_video), dry_run=args.dry_run)
+        else:
+            # Nessun dubbio: le anteprime della run precedente non hanno piu'
+            # senso e il report non le cita. Senza questa chiamata restavano
+            # sul disco per sempre (lo stesso accumulo che il batch 19 aveva
+            # coperto solo nel caso "dubbi piu' numerosi").
+            _write_boundary_previews(args.output_video, [], CACHE_DIR / "review")
 
         # Pulizia cache orfana
         cleaned = _clean_orphan_cache(active_cache_keys)
