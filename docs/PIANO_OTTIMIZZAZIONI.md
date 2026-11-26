@@ -5,9 +5,9 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 31 (titoli, abort e test), dopo il batch 30.
-Il piano resta un registro delle decisioni: i dettagli sono nei messaggi di
-commit e nei test.
+Ultimo aggiornamento: batch 32 (checkpoint, correzioni e diagnostica mista),
+dopo il batch 31. Il piano resta un registro delle decisioni: i dettagli sono
+nei messaggi di commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -1142,6 +1142,34 @@ avvisa piu' di confini non verificabili quando tutti sono annunciati.
 parziale, correzioni, riuso video), conteggio storico e tabella exit code
 aggiornati, eccezioni Ruff ridotte ai soli moduli con prosa.
 
+## Batch 32 — checkpoint, correzioni e diagnostica mista (2026-11)
+
+Quindicesima revisione. Difetti quasi tutti sulle correzioni del batch 31.
+
+**Checkpoint.** `_salva_parziale` cancellava il PROPRIO parziale a ogni altro
+checkpoint: il guard confrontava il nome con il prefisso del nome due volte,
+mentre la firma contiene gia' lo stem. I checkpoint ora alternavano scrittura
+e cancellazione, e un crash poteva ripartire da zero. Ora il confronto e'
+corretto e il parziale corrente viene riscritto.
+
+**Report e diagnostica.** `_correzioni_effettive` validava la forma ORIGINALE
+(o una sottostringa casuale): report e riepilogo potevano dichiarare correzioni
+mai applicate. Si controlla solo il risultato, a confine di parola. Con diagnose
+miste (normali per slide + guidate dall'indice) la tabella dei tempi e il
+riepilogo perdevano le decisioni non indicizzate: ora ogni occorrenza prende
+la propria. I contatori di embedding non vengono piu' azzerati prima della
+sincronizzazione, così la verifica delle ancore compare nei tempi. Se
+`build_video` solleva, il report viene marcato `senza_video` con motivo stabile
+e la timeline non rimane a descrivere il video vecchio.
+
+**Titoli.** `l’esito` in mezzo a una frase non taglia piu' il titolo (solo
+l'intestazione in maiuscola e' un confine); l'apostrofo orfano non lascia una
+consonante; la virgoletta chiusa attaccata a una cifra non viene scambiata per
+apostrofo.
+
+**Docs/test.** Documentazione dei codici di uscita, del modello OpenVINO e del
+comando `controlli.py` corretta; test rafforzati su questi percorsi.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -1237,5 +1265,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio (batch 30): ruff pulito, mypy pulito su tre
-piattaforme, 1710 test verdi, `_debug_hardware.py` e controlli 6/6.
+Stato all'ultimo lancio (batch 32): ruff pulito, mypy pulito su tre
+piattaforme, 1723 test verdi, `_debug_hardware.py` e controlli 6/6.

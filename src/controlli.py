@@ -8,7 +8,7 @@ controlli che il progetto fa girare a mano:
   2. mypy --platform win32 .          type-check su Windows
   3. mypy --platform linux .          la CI gira su ubuntu-latest: e' IL caso
   4. mypy --platform darwin .         l'altra piattaforma supportata
-  5. unittest discover -p 'test_*.py' la stessa suite della CI
+  5. unittest discover -s src -p 'test_*.py' la stessa suite della CI
   6. _debug_hardware.py               encoder reali, ripiego a runtime
 
 Perche' tre piattaforme e non un `mypy .`: in locale il type-check vede solo

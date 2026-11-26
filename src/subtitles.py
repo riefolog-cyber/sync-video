@@ -344,7 +344,7 @@ def _pulisci_virgolette(testo: str) -> str:
                 i > 0
                 and i + 1 < len(out)
                 and out[i - 1].isalpha()
-                and (out[i + 1].isalpha() or out[i + 1].isdigit())
+                and (out[i + 1].isalpha() or (out[i + 1].isdigit() and i - 1 == 0))
             )
             if not apostrofo:
                 if aperti:
@@ -499,7 +499,14 @@ def _titolo_da_frammento(frammento: str, numero: int) -> str:
 
     tagli: list[int] = []
     sezione = _SEZIONI_TITOLO.search(raw, 8)
-    if sezione:
+    # Solo l'INTESTAZIONE di sezione ("L'Esito: ...") e' un confine: la
+    # stessa parola in mezzo a una frase ("ha stabilito l'esito del ricorso")
+    # fa parte del titolo e non va tagliata.
+    if (
+        sezione
+        and sezione.group(0)[:1].isupper()
+        and raw[max(0, sezione.start() - 1):sezione.start()].strip() in ("", "|")
+    ):
         tagli.append(sezione.start())
     for separatore in (". ", ": ", "? ", "! ", " — ", " – ", " - ", "; "):
         pos = raw.find(separatore, 8)
@@ -802,8 +809,12 @@ def _taglia_sintesi(valore: str) -> str:
         valore = limite[: max(tagli)] if tagli else limite.rsplit(" ", 1)[0]
     parole = valore.split()
     while parole:
-        ultima = parole[-1].lower().strip(" .,;:()\"'“”‘’")
-        if ultima in _PAROLE_FUNZIONALI or re.fullmatch(r"(?:l|d|un)['’]", ultima):
+        grezza = parole[-1].lower()
+        ultima = grezza.strip(" .,;:()\"'“”‘’")
+        if (
+            ultima in _PAROLE_FUNZIONALI
+            or re.fullmatch(r"(?:l|d|un)['’]", grezza.strip(" .,;:()\"“”"))
+        ):
             parole.pop()
             continue
         break

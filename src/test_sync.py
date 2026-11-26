@@ -6258,6 +6258,30 @@ class TestConfiniStimatiNonSostenuti(unittest.TestCase):
         self.assertIn("finestre di parlato vuote", testo)
         self.assertIn("non è annunciato a voce", testo)
 
+    def test_indice_misto_non_perde_le_decisioni_per_slide(self):
+        from main import _estimated_boundary_facts
+
+        refine = [
+            {"slide": 2, "sigma": 0.5, "decision": "tenuto: margine dentro il rumore"},
+            {
+                "slide": 4,
+                "indice": 3,
+                "sigma": 0.4,
+                "decision": "tenuto: margine dentro il rumore",
+            },
+        ]
+        fatti = _estimated_boundary_facts(
+            [100.0, 100.0, 100.0, 100.0],
+            [1, 2, 2, 4],
+            {2, 4},
+            refine,
+            indici=[0, 1, 2, 3],
+        )
+        # Le due occorrenze di slide 2 usano la diagnosi per numero (0.5);
+        # la slide 4 usa quella indicizzata dal frame-repair (0.4).
+        self.assertEqual([f["slide"] for f in fatti], [2, 2, 4])
+        self.assertEqual([f["sigma"] for f in fatti], [0.5, 0.5, 0.4])
+
     def test_durata_garantita_dal_pavimento_esclusa(self):
         from main import _estimated_boundary_facts
 

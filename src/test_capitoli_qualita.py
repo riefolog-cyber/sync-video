@@ -344,6 +344,26 @@ class TestSintesiRobusta(unittest.TestCase):
         )
 
 
+class TestConfiniBatch32(unittest.TestCase):
+    def test_esito_in_mezzo_al_titolo_non_taglia(self) -> None:
+        self.assertEqual(
+            subtitles._titolo_capitolo("La corte ha stabilito l’esito del ricorso", 1),
+            "La corte ha stabilito l’esito del ricorso",
+        )
+        self.assertEqual(
+            subtitles._titolo_capitolo("La scuola e l’esito della riforma", 1),
+            "La scuola e l’esito della riforma",
+        )
+
+    def test_apostrofo_orfano_non_lascia_consonante(self) -> None:
+        self.assertEqual(subtitles._taglia_sintesi("La Corte d’"), "La Corte")
+        self.assertEqual(subtitles._taglia_sintesi("La Corte d'"), "La Corte")
+
+    def test_virgoletta_chiusa_prima_di_cifra_resta(self) -> None:
+        self.assertEqual(subtitles._pulisci_virgolette("‘Uno’2 e ‘Due’"), "‘Uno’2 e ‘Due’")
+        self.assertEqual(subtitles._pulisci_virgolette("‘La legge’80"), "‘La legge’80")
+
+
 class TestFormatoFile(unittest.TestCase):
     def test_numeri_slide_reali_dopo_skip_slides(self) -> None:
         self.assertEqual(

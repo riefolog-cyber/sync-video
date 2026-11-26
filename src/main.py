@@ -327,11 +327,21 @@ def _correzioni_effettive(
     L'A/B puo' scartare la trascrizione accurata: le sue correzioni non
     devono finire nel report come se fossero state applicate.
     """
-    usate = " ".join(str(p.get("word", "")) for p in words).lower()
+    parole_usate = {
+        p.strip(" .,;:!?\"'“”\u2018\u2019").lower()
+        for w in words
+        for p in str(w.get("word", "")).split()
+    }
     valide: list[str] = []
     for correzione in dict.fromkeys(correzioni):
         parti = [p.strip() for p in re.split(r"\s*->\s*", correzione.lower()) if p.strip()]
-        if parti and any(parte in usate for parte in parti[::-1]):
+        # Solo il RISULTATO della correzione deve essere nelle parole usate:
+        # se c'e' ancora la forma sbagliata, la correzione non e' stata fatta.
+        risultato = parti[-1] if parti else ""
+        if risultato and (
+            risultato in parole_usate
+            or any(p.strip(" .,;:!?\"'“”\u2018\u2019").lower() in parole_usate for p in risultato.split())
+        ):
             valide.append(correzione)
     return valide
 
@@ -638,8 +648,11 @@ def _estimated_boundary_facts(
             continue
         d = float(durata)
         indice = indici[pos] if indici is not None and pos < len(indici) else None
+        # La decisione guidata dall'indice (riparazione frame) prevale su
+        # quella per numero slide, ma se manca si usa quest'ultima:-di solito
+        # i due tipi convivono nella stessa run.
         voce = (
-            per_indice.get(int(indice), {})
+            per_indice.get(int(indice)) or per_slide.get(s, {})
             if indice is not None
             else per_slide.get(s, {})
         )
@@ -3401,6 +3414,11 @@ def _main_impl(argv: list | None = None) -> None:
     # Anche il DPI effettivo e' stato di modulo: senza azzerarlo, una seconda
     # main() che prende le slide dalla cache erediterebbe quello della prima.
     azzera_dpi_effettivo()
+    # I contatori di embedding e segnale debole si azzerano all'INIZIO della
+    # run: azzerarli prima della sincronizzazione butta via il costo della
+    # verifica delle ancore, che pure embeddinga slide e finestre di parlato.
+    reset_weak_signal_flag()
+    reset_embed_cache()
 
     # Versione subito e senza effetti: deve funzionare anche su un PC rotto.
     # Il numero si calcola UNA volta: `git describe` e' un processo, e la run
@@ -4699,11 +4717,9 @@ def _main_impl(argv: list | None = None) -> None:
         # contenuto è discusso, dal motore embedding + raffinamento a
         # livello di parola (nessuna rete, nessun servizio esterno).
         #
-        # Il flag di segnale debole è globale: azzerato qui per misurarlo
-        # SOLO su questa chiamata (altrimenti una rilevazione precedente
-        # della stessa run lo falserebbe).
-        reset_weak_signal_flag()
-        reset_embed_cache()
+        # I contatori e il flag di segnale debole sono già azzerati all'inizio
+        # della run: qui non si toccano, altrimenti la verifica delle ancore
+        # sparirebbe dalla tabella dei tempi.
         # Due main() nello stesso processo non devono ereditare le decisioni
         # sul raffinamento della run precedente.
         reset_refine_diagnostics()
@@ -5486,21 +5502,34 @@ def _main_impl(argv: list | None = None) -> None:
         # --- Fase 4: Assemblaggio video ---
         t_phase_start = time.time()
         _verifica_audio_invariato(sync_report, audio_path, audio_hash, Path(args.output_video))
-        build_video(
-            slide_files,
-            durations,
-            audio_path,
-            args.output_video,
-            fps=DEFAULT_VIDEO_FPS,
-            threads=DEFAULT_VIDEO_THREADS,
-            transition_duration=args.transitions,
-            engine=args.engine,
-            encoder=encoder_video_risolto,
-            # --no-cache vuol dire "rifai tutto": quindi niente video riusato.
-            reuse=not args.no_cache,
-            encoder_out=encoder_video_effettivo,
-            reused_out=video_riutilizzato,
-        )
+        try:
+            build_video(
+                slide_files,
+                durations,
+                audio_path,
+                args.output_video,
+                fps=DEFAULT_VIDEO_FPS,
+                threads=DEFAULT_VIDEO_THREADS,
+                transition_duration=args.transitions,
+                engine=args.engine,
+                encoder=encoder_video_risolto,
+                # --no-cache vuol dire "rifai tutto": quindi niente video riusato.
+                reuse=not args.no_cache,
+                encoder_out=encoder_video_effettivo,
+                reused_out=video_riutilizzato,
+            )
+        except Exception as e:  # noqa: BLE001 - ogni encoder puo' fallire a modo suo
+            # Il report e la timeline sono gia' salvati: senza questo segnale
+            # descriverebbero un video che non esiste (o il VECCHIO video),
+            # e --review/analysis_sync li confronterebbero con la timeline nuova.
+            sync_report.pop("audio_invariato_durante_la_run", None)
+            _abort_senza_video(
+                sync_report,
+                f"Generazione del video fallita ({e}). Il video NON e' stato "
+                "generato con questa timeline.",
+                motivo="encoding_fallito",
+                output_path=Path(args.output_video),
+            )
         t_video = time.time() - t_phase_start
         t_verify = 0.0  # definito anche senza --verify-video
 

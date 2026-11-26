@@ -128,6 +128,14 @@ class TestCorrezioniEffettive(unittest.TestCase):
             [],
         )
 
+    def test_forma_sbagliata_non_valida_la_correzione(self) -> None:
+        self.assertEqual(
+            main._correzioni_effettive(["sigmond -> sigmund"], [{"word": "sigmond"}]), []
+        )
+        self.assertEqual(
+            main._correzioni_effettive(["casa -> caso"], [{"word": "casalinga"}]), []
+        )
+
     def test_correzioni_applicate_restano(self) -> None:
         self.assertEqual(
             main._correzioni_effettive(
@@ -305,6 +313,7 @@ class TestMotivoInterruzione(unittest.TestCase):
 
     def test_motivi_stabili_spiegati_da_review(self) -> None:
         for motivo, spiegazione in (
+            ("audio_sostituito_durante_la_run", "il podcast e' stato sostituito durante la run"),
             ("allineamento_sospetto", "allineamento delle slide era sospetto"),
             ("prima_sezione_disallineata", "prima sezione non parlava della slide 1"),
         ):

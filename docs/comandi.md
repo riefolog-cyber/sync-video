@@ -13,7 +13,7 @@ python src/main.py --preview
 # Dry-run: genera timeline senza produrre video
 python src/main.py --dry-run --debug
 
-# Rivedi i confini dubbi dell'ultima run (legge la cache, non rigenera nulla)
+# Rivedi i confini dubbi dell'ultima run (non rifà la pipeline né il video, ma rigenera le anteprime e riscrive report e riepilogo)
 python src/main.py --review
 
 # Forza nuova analisi (ignora cache)

@@ -1141,10 +1141,11 @@ def _salva_parziale(
     # Se esiste un parziale di QUEST'audio con una firma diversa, l'audio e'
     # stato sostituito a meta' trascrizione: le parole vecchie non vanno
     # riattaccate a quelle nuove. Si butta il parziale e si riparte da capo.
-    prefixed = f"{audio_path.stem}_"
     cartella = percorso_parziale(audio_path, firma).parent
-    for vecchio in cartella.glob(f"{prefixed}*.json"):
-        if vecchio.stem == f"{audio_path.stem}_{firma}":
+    for vecchio in cartella.glob(f"{audio_path.stem}_*.json"):
+        # La firma e' gia' il nome del file (senza .json): non cancellare
+        # il parziale che stiamo per riscrivere.
+        if vecchio.stem == firma:
             continue
         try:
             contenuto = json.loads(vecchio.read_text(encoding="utf-8"))
@@ -1155,9 +1156,8 @@ def _salva_parziale(
                 vecchio.unlink(missing_ok=True)
             log.info(
                 "   [Trascrizione] Audio sostituito durante la decodifica: "
-                "butto il parziale e riparto da capo."
+                "butto il parziale vecchio e risalvo quello attuale."
             )
-            return
     try:
         path = percorso_parziale(audio_path, firma)
         path.parent.mkdir(parents=True, exist_ok=True)
