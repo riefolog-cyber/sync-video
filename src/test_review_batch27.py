@@ -124,6 +124,7 @@ class TestStatoEParziali(unittest.TestCase):
             semantic_sync.reset_refine_diagnostics()
 
     def test_parziale_coperto_nan_scartato(self) -> None:
+        transcription._ULTIMA_RIPRESA = 0.0
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             audio = base / "podcast.m4a"

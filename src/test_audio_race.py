@@ -28,6 +28,36 @@ from chunks import Word
 
 
 class TestAudioCambiato(unittest.TestCase):
+    def test_firma_cambiata_a_meta_trascrizione_non_riprende(self) -> None:
+        import config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            audio = cache / "podcast.m4a"
+            audio.write_bytes(b"audio")
+            firme = iter(["S1", "S1", "S2", "S2", "S2"])
+
+            def firma(_percorso: Path) -> str:
+                return next(firme)
+
+            with (
+                mock.patch.object(config, "CACHE_DIR", cache),
+                mock.patch.object(transcription, "CACHE_DIR", cache),
+                mock.patch.object(transcription, "_firma_audio", side_effect=firma),
+                mock.patch.object(transcription, "_taglia_audio", return_value=cache / "coda.flac"),
+            ):
+                transcription._salva_parziale(
+                    audio, [{"word": "vecchia", "start": 1.0}], coperto_fino=10.0, params=None
+                )
+                transcription._salva_parziale(
+                    audio,
+                    [{"word": "nuova", "start": 70.0}],
+                    coperto_fino=120.0,
+                    params=None,
+                )
+                iniziali, _sorgente, _offset = transcription._prepara_ripresa(audio, params=None)
+            self.assertEqual(iniziali, [])
+
     def test_file_invariato(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             audio = Path(tmp) / "podcast.m4a"
@@ -89,6 +119,24 @@ class TestCoperturaTrascrizione(unittest.TestCase):
                 self.assertEqual(main._coda_audio_senza_parole(parole, 120.0), 20.0)
 
 
+class TestCorrezioniEffettive(unittest.TestCase):
+    def test_correzioni_senza_parole_usate_non_finito_nel_report(self) -> None:
+        self.assertEqual(
+            main._correzioni_effettive(
+                ["sigmond -> sigmund"], [{"word": "altro"}, {"word": "testo"}]
+            ),
+            [],
+        )
+
+    def test_correzioni_applicate_restano(self) -> None:
+        self.assertEqual(
+            main._correzioni_effettive(
+                ["sigmond -> sigmund", "casa -> caso"], [{"word": "Sigmund"}]
+            ),
+            ["sigmond -> sigmund"],
+        )
+
+
 class TestHashUnaSolaVolta(unittest.TestCase):
     def test_salva_parziale_calcola_la_firma_una_volta(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -96,6 +144,9 @@ class TestHashUnaSolaVolta(unittest.TestCase):
             audio.write_bytes(b"audio")
             with (
                 mock.patch.object(transcription, "CACHE_DIR", Path(tmp)),
+                mock.patch.object(
+                    transcription, "percorso_parziale", return_value=Path(tmp) / "p.json"
+                ),
                 mock.patch.object(
                     transcription, "_firma_audio", wraps=transcription._firma_audio
                 ) as firma,

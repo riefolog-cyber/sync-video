@@ -31,11 +31,10 @@ ignore = [
     "PLR2004",  # magic-value-comparison
 ]
 [lint.per-file-ignores]
-# La punteggiatura italiana e' parte dei testi reali di slide/trascrizioni.
-# Si concede solo nei moduli con prosa: le stringhe di codice (flag argparse,
-# chiavi dict) restano controllate.
-"subtitles.py" = ["RUF001", "RUF003"]
-"riepilogo.py" = ["RUF001", "RUF003"]
+# subtitles.py lavora SOLO su prosa di slide: virgolette, apostrofi e trattini
+# tipografici sono dati veri, non identificatori o flag. Gli altri moduli di
+# produzione restano controllati; qui e' solo testo di capitoli.
+"subtitles.py" = ["RUF001", "RUF002", "RUF003"]
 "test_capitoli_qualita.py" = ["RUF001"]
 # I test usano patch/assert interni in modo volutamente permissivo
 "test_*.py" = ["BLE001"]

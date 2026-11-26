@@ -5,9 +5,9 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 30 (titoli e abort a prova di regressione), dopo
-il batch 29. Il piano resta un registro delle decisioni: i dettagli sono nei
-messaggi di commit e nei test.
+Ultimo aggiornamento: batch 31 (titoli, abort e test), dopo il batch 30.
+Il piano resta un registro delle decisioni: i dettagli sono nei messaggi di
+commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -272,7 +272,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1710 test).
+`python -m unittest discover -s src -p "test_*.py"`.
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -1115,6 +1115,32 @@ la data del video vecchio.
 **Test e docs.** Test vacui rafforzati (parziale, review, riuso video, limite
 100 caratteri), regex che ora riconosce davvero «L'Esito», doc e conteggi
 aggiornati, guardrail Ruff di nuovo mirato ai moduli con prosa.
+
+## Batch 31 — titoli, abort e qualita' dei test (2026-11)
+
+Quattordicesima revisione. Difetti quasi tutti sulle correzioni del batch 30.
+
+**Titoli.** Il taglio di clausola distruggeva i nomi composti
+(«Rossi e Bianchi» diventava «Rossi») e cancellava parole vere che iniziano
+con un apostrofo («d'appello»): ora il taglio vale solo oltre il budget e
+sceglie l'ultimo separatore, e si tolgono solo gli apostrofi orfani. L'apostrofo
+tipografico davanti a una cifra (`L’80`) non e' piu' una virgolette, e le
+virgolette si abbinano con uno stack invece che per conteggio. L'intestazione
+`L’Esito` con apostrofo tipografico viene finalmente riconosciuta.
+
+**Abort e report.** Le correzioni dei nomi della trascrizione scartata
+restavano nel report quando tutte venivano filtrate: ora l'helper puro
+`_correzioni_effettive` dichiara l'assenza. La timeline poteva essere avvelenata
+da un parziale scritto dopo la sostituzione dell'audio a meta' trascrizione:
+il vecchio parziale viene buttato. `analysis_sync` distingue una run interrotta
+da una timeline mai scritta (entrambe exit 2, ma con diagnosi diversa) e non
+tratta piu' la cache mancante come guasto (exit 1). I confini stimati con
+`--skip-slides` non prendono piu' tutti la stessa diagnosi, e il riepilogo non
+avvisa piu' di confini non verificabili quando tutti sono annunciati.
+
+**Test e docs.** Test rafforzati (virgolette, nomi composti, `numeri_slide`,
+parziale, correzioni, riuso video), conteggio storico e tabella exit code
+aggiornati, eccezioni Ruff ridotte ai soli moduli con prosa.
 
 ## Stato delle voci
 

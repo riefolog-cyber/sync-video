@@ -327,31 +327,32 @@ _SEPARATORI_TITOLO = (". ", " - ", " \u2014 ", " \u2013 ", " | ", ": ", "; ", "?
 
 
 def _pulisci_virgolette(testo: str) -> str:
-    """Toglie le virgolette spaiate, senza toccare gli apostrofi italiani."""
+    """Abbina ‘ e ’ con uno stack: solo le virgolette spaiate vanno via.
 
-    def chiusure(t: str) -> list[int]:
-        # «» fra due lettere e' un apostrofo (d’uscita, l’altra), non una
-        # virgoletta di chiusura.
-        return [
-            m.start()
-            for m in re.finditer("’", t)
-            if not (
-                m.start() > 0
-                and m.start() + 1 < len(t)
-                and t[m.start() - 1].isalpha()
-                and t[m.start() + 1].isalpha()
-            )
-        ]
-
+    «’» fra lettera e lettera o cifra (d’uscita, L’80) e' un apostrofo,
+    non una chiusura. Le aperture non chiuse si tolgono dall'ultima in poi;
+    le chiusure senza apertura si tolgono dalla prima in poi.
+    """
     out = testo.strip()
-    aperture = [m.start() for m in re.finditer("‘", out)]
-    chiuse = chiusure(out)
-    if len(aperture) > len(chiuse):
-        for pos in reversed(aperture[: len(aperture) - len(chiuse)]):
-            out = out[:pos] + out[pos + 1 :]
-    elif len(chiuse) > len(aperture):
-        for pos in reversed(chiuse[: len(chiuse) - len(aperture)]):
-            out = out[:pos] + out[pos + 1 :]
+    aperti: list[int] = []
+    spaiate: list[int] = []
+    for i, c in enumerate(out):
+        if c == "‘":
+            aperti.append(i)
+        elif c == "’":
+            apostrofo = (
+                i > 0
+                and i + 1 < len(out)
+                and out[i - 1].isalpha()
+                and (out[i + 1].isalpha() or out[i + 1].isdigit())
+            )
+            if not apostrofo:
+                if aperti:
+                    aperti.pop()
+                else:
+                    spaiate.append(i)
+    for pos in sorted(set(aperti + spaiate), reverse=True):
+        out = out[:pos] + out[pos + 1 :]
     return out.strip()
 
 
@@ -425,7 +426,7 @@ def _miglior_riga(testo: str) -> str:
 # Intestazioni ricorrenti nelle slide: quello che segue e' il CONTENUTO, non
 # piu' il titolo. Tagliarle evita capitoli tipo "L'Esito" o "Il Caso".
 _SEZIONI_TITOLO = re.compile(
-    r"\b(?:il|la|lo|l'\s*|gli|le)\s*(?:fatto|problema|caso|esito|soluzione|"
+    r"\b(?:il|la|lo|l['’]\s*|gli|le)\s*(?:fatto|problema|caso|esito|soluzione|"
     r"antecedente|lettura|contesto|correzione|diagnosi|errore|ribaltamento|"
     r"mito|origine|regola|principio|impatto|conseguenza|checklist|indizi|"
     r"domanda|sintesi|focus)\b",
@@ -562,7 +563,7 @@ def _titolo_capitolo(testo: str, numero: int) -> str:
 
 def _titolo_unito(titoli: Sequence[str]) -> str:
     """Titoli di capitoli fusi in uno, entro il limite di YouTube."""
-    titolo = " / ".join(t for t in titoli if t)
+    titolo = _pulisci_virgolette(" / ".join(t for t in titoli if t))
     if len(titolo) <= MAX_CARATTERI_CAPITOLO:
         return titolo
     troncato = _tronca_titolo(titolo.rstrip(" /"), MAX_CARATTERI_CAPITOLO)
@@ -784,23 +785,28 @@ _PAROLE_FUNZIONALI = frozenset(
 )
 
 
+_BUDGET_SINTESI = 45
+
+
 def _taglia_sintesi(valore: str) -> str:
-    """Sintesi corta che finisce su un concetto, non su una preposizione."""
-    tagli = [
-        valore.find(sep)
-        for sep in (",", " — ", " – ", ";", " che ", " e ", " ma ")
-        if valore.find(sep) != -1
-    ]
-    if tagli:
-        valore = valore[: min(tagli)]
-    if len(valore) > 45:
-        valore = valore[:45].rsplit(" ", 1)[0]
+    """Sintesi corta che finisce su un concetto, non su una preposizione.
+
+    Il taglio di clausola vale SOLO entro il budget: "Rossi e Bianchi" e'
+    un nome composto e resta intero, mentre un valore lungo si ferma
+    all'ULTIMO separatore prima del taglio, non al primo in assoluto.
+    """
+    if len(valore) > _BUDGET_SINTESI:
+        limite = valore[:_BUDGET_SINTESI]
+        tagli = [limite.rfind(sep) for sep in (",", " — ", " – ", ";", " che ", " e ", " ma ")]
+        tagli = [t for t in tagli if t > 0]
+        valore = limite[: max(tagli)] if tagli else limite.rsplit(" ", 1)[0]
     parole = valore.split()
-    while parole and (
-        parole[-1].lower().strip(".,;:") in _PAROLE_FUNZIONALI
-        or re.match(r"^(l'|l’|d'|d’|un'|un’)", parole[-1].lower()) is not None
-    ):
-        parole.pop()
+    while parole:
+        ultima = parole[-1].lower().strip(" .,;:()\"'“”‘’")
+        if ultima in _PAROLE_FUNZIONALI or re.fullmatch(r"(?:l|d|un)['’]", ultima):
+            parole.pop()
+            continue
+        break
     return " ".join(parole).strip(" .,;:()\"'“”‘’")
 
 

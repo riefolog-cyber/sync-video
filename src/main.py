@@ -319,6 +319,23 @@ def _abort(message: str) -> NoReturn:
     sys.exit(1)
 
 
+def _correzioni_effettive(
+    correzioni: Sequence[str], words: Sequence[Any]
+) -> list[str]:
+    """Solo le correzioni il cui risultato e' nelle parole usate davvero.
+
+    L'A/B puo' scartare la trascrizione accurata: le sue correzioni non
+    devono finire nel report come se fossero state applicate.
+    """
+    usate = " ".join(str(p.get("word", "")) for p in words).lower()
+    valide: list[str] = []
+    for correzione in dict.fromkeys(correzioni):
+        parti = [p.strip() for p in re.split(r"\s*->\s*", correzione.lower()) if p.strip()]
+        if parti and any(parte in usate for parte in parti[::-1]):
+            valide.append(correzione)
+    return valide
+
+
 def _abort_senza_video(
     report: dict[str, object],
     messaggio: str,
@@ -570,6 +587,7 @@ def _estimated_boundary_facts(
     estimated: Collection[int],
     refine: Sequence[dict[str, object]],
     floor_report: dict[str, object] | None = None,
+    indici: Sequence[int] | None = None,
     ratio: float = _WEAK_ESTIMATE_DURATION_RATIO,
 ) -> list[dict[str, object]]:
     """Cosa si sa del confine di ogni slide STIMATA: evidenza del contenuto e durata.
@@ -595,6 +613,16 @@ def _estimated_boundary_facts(
         return []
     garantite, non_garantite, _ = _floor_split(floor_report)
     esclusi = set(garantite) | set(non_garantite) | set(_floor_shortened(floor_report))
+    # Con --skip-slides lo stesso numero compare a piu' posizioni e ci sono
+    # piu' voci di refine: la chiave e' l'INDICE del segmento, non il numero
+    # della slide, altrimenti la seconda occorrenza copre la prima.
+    per_indice = {
+        int(cast(int, voce.get("indice"))): voce
+        for voce in refine
+        if isinstance(voce, dict) and voce.get("indice") is not None
+    }
+    # Le vecchie diagnostiche senza "indice" non indicizzano per posizione:
+    # restano senza indice e li' si usa il numero slide (comportamento storico).
     per_slide = {
         int(cast(int, voce.get("slide") or 0)): voce
         for voce in refine
@@ -604,12 +632,17 @@ def _estimated_boundary_facts(
     if mediana <= 0:
         return []
     fatti: list[dict[str, object]] = []
-    for slide, durata in zip(slide_ids, durations, strict=True):
+    for pos, (slide, durata) in enumerate(zip(slide_ids, durations, strict=True)):
         s = int(slide)
         if s not in estimated or s in esclusi:
             continue
         d = float(durata)
-        voce = per_slide.get(s, {})
+        indice = indici[pos] if indici is not None and pos < len(indici) else None
+        voce = (
+            per_indice.get(int(indice), {})
+            if indice is not None
+            else per_slide.get(s, {})
+        )
         decisione = str(voce.get("decision") or "")
         sigma_raw = voce.get("sigma")
         sigma = float(cast(float, sigma_raw)) if isinstance(sigma_raw, (int, float)) else None
@@ -974,6 +1007,13 @@ def _log_plain_summary(
         set(senza_ancora),
         refine,
         floor_report=floor_report,
+        # Solo le diagnostiche scritte con indice (batch 27+) vanno indicizzate
+        # per posizione: le vecchie non hanno "indice" e usano il numero slide.
+        indici=(
+            list(range(len(durations)))
+            if any(isinstance(v, dict) and v.get("indice") is not None for v in refine)
+            else None
+        ),
     )
     gia_dichiarati = {
         int(cast(int, f.get("slide") or 0)) for f in fatti_stimati
@@ -1192,7 +1232,14 @@ def _log_plain_summary(
         )
     log.info("")
     log.info("   COSA NON È CERTO")
-    if coda_senza_parole > 60.0:
+    _tutti_annunciati = bool(anchors) and _all_transitions_anchored(anchors)
+    if coda_senza_parole > 60.0 and _tutti_annunciati:
+        log.info(
+            "     - Gli ultimi %.0fs non hanno parlato, ma ogni cambio di "
+            "slide e' annunciato: la coda non e' un problema.",
+            coda_senza_parole,
+        )
+    elif coda_senza_parole > 60.0:
         log.info(
             "     - Il parlato si ferma %.0fs prima della fine: gli ultimi "
             "confini non sono verificabili col testo.",
@@ -5028,17 +5075,10 @@ def _main_impl(argv: list | None = None) -> None:
         # di una trascrizione poi scartata). Si riscrive con lo stato finale.
         # Le correzioni della trascrizione scartata dall'A/B non sono state
         # applicate alle parole usate: non devono comparire nel report.
-        if _correzioni_nomi:
-            usate = " ".join(str(p.get("word", "")) for p in words_raw).lower()
-            valide = [
-                c for c in dict.fromkeys(_correzioni_nomi)
-                if any(
-                    parte and parte in usate
-                    for parte in re.split(r"\s*->\s*", c.lower())[::-1]
-                )
-            ]
-            if valide:
-                sync_notes["correzioni_nomi"] = valide
+        sync_notes.pop("correzioni_nomi", None)
+        valide = _correzioni_effettive(_correzioni_nomi, words_raw or [])
+        if valide:
+            sync_notes["correzioni_nomi"] = valide
         sync_notes["transcript_cache_key"] = chiave_parole_effettiva
         # La coda non coperta si misura sulla trascrizione EFFETTIVA (dopo
         # escalation beam e recupero zone): il primo greedy puo' fermarsi prima

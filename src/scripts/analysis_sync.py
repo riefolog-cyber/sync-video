@@ -52,6 +52,7 @@ from config import (
     DEFAULT_EMBEDDING_MODEL_ALTERNATE,
     STOPWORDS_ITA,
 )
+from pipeline_cache import load_sync_report
 from pipeline_inputs import find_audio_file
 from semantic_sync import _clean_slide_text, _load_embed_model, _make_embed_fn, segment_verdict
 from timeline import extract_slide_anchors
@@ -96,8 +97,13 @@ TIMELINE_FILE = None
 def _newest(pattern: str) -> Path:
     files = sorted(CACHE.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
-        print(f"ERRORE: nessun file {pattern} in {CACHE}")
-        sys.exit(1)
+        # Mancano gli input, non e' un guasto del programma: stesso codice
+        # 2 degli altri casi "non verificabile".
+        print(
+            f"NON VERIFICABILE: nessun file {pattern} in {CACHE} "
+            "(cache della run assente o parziale). Rilancia main.py."
+        )
+        sys.exit(2)
     return files[0]
 
 
@@ -106,10 +112,18 @@ FINAL_TIMELINE = CACHE / "timeline_finale.json"
 if not FINAL_TIMELINE.exists():
     # Dopo un abort prima del rendering main.py rimuove la timeline: non e'
     # un guasto del programma ma una run da verificare, come il caso exit 2.
+    report = load_sync_report(cache_dir=CACHE) or {}
+    motivo = str(report.get("motivo_interruzione") or "")
+    spiegazione = (
+        "L'ultima run e' stata interrotta prima del video: rilancia main.py "
+        "con il materiale definitivo."
+        if motivo
+        else "La timeline non e' mai stata scritta: verifica permessi e spazio "
+        f"nella cartella {CACHE}."
+    )
     print(
         f"NON VERIFICABILE: nessuna timeline finale in {CACHE} "
-        "(timeline_finale.json). L'ultima run e' stata interrotta prima del "
-        "video: rilancia main.py con il materiale definitivo."
+        f"(timeline_finale.json). {spiegazione}"
     )
     sys.exit(2)
 TIMELINE_FILE = FINAL_TIMELINE

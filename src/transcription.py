@@ -1138,6 +1138,26 @@ def _salva_parziale(
     from config import atomic_write_text
 
     firma = _firma_audio(audio_path)
+    # Se esiste un parziale di QUEST'audio con una firma diversa, l'audio e'
+    # stato sostituito a meta' trascrizione: le parole vecchie non vanno
+    # riattaccate a quelle nuove. Si butta il parziale e si riparte da capo.
+    prefixed = f"{audio_path.stem}_"
+    cartella = percorso_parziale(audio_path, firma).parent
+    for vecchio in cartella.glob(f"{prefixed}*.json"):
+        if vecchio.stem == f"{audio_path.stem}_{firma}":
+            continue
+        try:
+            contenuto = json.loads(vecchio.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if str(contenuto.get("audio") or "") == str(audio_path):
+            with contextlib.suppress(OSError):
+                vecchio.unlink(missing_ok=True)
+            log.info(
+                "   [Trascrizione] Audio sostituito durante la decodifica: "
+                "butto il parziale e riparto da capo."
+            )
+            return
     try:
         path = percorso_parziale(audio_path, firma)
         path.parent.mkdir(parents=True, exist_ok=True)

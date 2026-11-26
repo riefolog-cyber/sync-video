@@ -175,6 +175,34 @@ class TestRegoleStoricheNonRotte(unittest.TestCase):
 
 
 class TestTitoliRiassuntivi(unittest.TestCase):
+    def test_nomi_composti_non_perdono_il_secondo(self) -> None:
+        testo = "Gli abusi nella scuola Il Caso (Rossi e Bianchi): Un uomo aggredisce la moglie."
+        self.assertEqual(
+            subtitles.build_capitoli({1: 0.0}, [testo]),
+            "0:00 Gli abusi nella scuola: caso Rossi e Bianchi",
+        )
+
+    def test_parola_con_apostrofo_non_scambiata_per_articolo(self) -> None:
+        self.assertEqual(subtitles._taglia_sintesi("La Corte d'appello"), "La Corte d'appello")
+        testo = "Gli abusi nella scuola Il Caso: La Corte d'appello. Il resto."
+        self.assertEqual(
+            subtitles.build_capitoli({1: 0.0}, [testo]),
+            "0:00 Gli abusi nella scuola: La Corte d'appello",
+        )
+
+    def test_apostrofo_prima_di_cifra_non_e_virgoletta(self) -> None:
+        self.assertEqual(subtitles._pulisci_virgolette("L’80 dei casi"), "L’80 dei casi")
+        self.assertEqual(
+            subtitles.build_capitoli({1: 0.0}, ["L’80 dei casi e la legge"]),
+            "0:00 L’80 dei casi e la legge",
+        )
+
+    def test_intestazione_con_apostrofo_tipografico(self) -> None:
+        self.assertEqual(
+            subtitles._titolo_capitolo("La vittima processata L’Esito (2020)", 1),
+            "La vittima processata",
+        )
+
     def test_il_caso_diventa_parte_del_titolo(self) -> None:
         testo = (
             "L'uomo travolto: Lo stereotipo della «Tempesta Emotiva» "
@@ -317,6 +345,12 @@ class TestSintesiRobusta(unittest.TestCase):
 
 
 class TestFormatoFile(unittest.TestCase):
+    def test_numeri_slide_reali_dopo_skip_slides(self) -> None:
+        self.assertEqual(
+            subtitles.build_capitoli({1: 0.0, 2: 30.0}, ["", ""], numeri_slide=[3, 9]),
+            "0:00 Slide 3\n0:30 Slide 9",
+        )
+
     def test_tempi_ascendenti_e_primo_a_zero(self) -> None:
         timeline = {1: 12.0, 2: 40.0, 3: 90.0}
         righe = subtitles.build_capitoli(timeline, ["Uno", "Due", "Tre"]).splitlines()
