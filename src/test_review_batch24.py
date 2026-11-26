@@ -120,10 +120,11 @@ class TestRiparazioneEStato(unittest.TestCase):
         try:
             semantic_sync._record_refine(2, 3, decision="A")
             semantic_sync._record_refine(5, 3, decision="B")
-            # L'ultima decisione sulla stessa slide sostituisce la precedente.
+            # Due occorrenze della stessa slide (indici diversi) restano
+            # distinte: la seconda non cancella la prima.
             voci = semantic_sync.refine_diagnostics()
-            self.assertEqual(len(voci), 1)
-            self.assertEqual(voci[0]["decision"], "B")
+            self.assertEqual([v["indice"] for v in voci], [2, 5])
+            self.assertEqual([v["decision"] for v in voci], ["A", "B"])
         finally:
             semantic_sync.reset_refine_diagnostics()
 

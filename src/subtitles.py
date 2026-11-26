@@ -52,6 +52,16 @@ QUALITA_MINIMA_TITOLO = 0.6
 _ONSET_ITALIANI = frozenset(
     {"str", "scr", "spr", "spl", "sfr", "sbr", "sgr", "scl", "tgl", "gli", "gnl"}
 )
+# Acronimi noti (anche senza vocali) e frammenti che l'OCR inventa sulle
+# slide decorative: entrambi devono essere riconosciuti, non dedotti dalla
+# sola presenza di una vocale.
+_ACRONIMI_NOTI = frozenset(
+    {
+        "ai", "cd", "tv", "ux", "ui", "pdf", "sql", "xml", "css", "gif",
+        "cpu", "gpu", "ram", "api", "html", "url", "ip", "faq", "nasa",
+    }
+)
+_RUMORI_NOTI = frozenset({"inte", "st", "rrar", "nere", "mme"})
 
 
 def _sequenza_rumorosa(parola: str) -> bool:
@@ -386,33 +396,22 @@ def _titolo_capitolo(testo: str, numero: int) -> str:
     if all(p.isalpha() and p.isupper() for p in compatto.split()):
         parole_maiuscole = compatto.split()
         if len(parole_maiuscole) == 1:
-            # Acronimi veri: NASA, FAQ, ma anche PDF/SQL/XML/CSS (senza
-            # vocali). Il rumore e' una parola LUNGA con sequenze impossibili
-            # (SFFSITE) o consonanti raddoppiate (RRAR).
             parola = parole_maiuscole[0].lower()
-            # Frammenti noti dell'OCR di slide decorative: non sono acronimi.
-            rumori_noti = {"inte", "st", "rrar", "nere", "mme"}
-            tre_vocali = bool(re.search(r"[aeiou]{3,}", parola))
-            # SFFSITE comincia con consonante raddoppiata; STRUTTURE no
-            # ("str..." ha tre consonanti DIVERSE): il taglio netto va solo
-            # sul rumore evidente, il resto lo valuta `_qualita_titolo`.
-            doppia_in_testa = bool(
-                re.search(r"^[bcdfghjklmnpqrstvwxyz]([bcdfghjklmnpqrstvwxyz])\1", parola)
-            )
-            if parola in rumori_noti or tre_vocali or (len(parola) >= 6 and doppia_in_testa):
+            if parola in _ACRONIMI_NOTI:
+                return compatto
+            if parola in _RUMORI_NOTI or _sequenza_rumorosa(parola):
                 return f"Slide {numero}"
-            # Acronimi brevi: NASA, FAQ, ma anche PDF/SQL/XML/CSS ("ss" e'
-            # legittimo in un acronimo di 3 lettere). Le parole piu' lunghe
-            # (STRUTTURE) cadono nel normale controllo di qualita'.
-            if 3 <= len(parola) <= 5 and (
-                len(parola) == 3 or not re.search(r"([bcdfghjklmnpqrstvwxyz])\1", parola)
-            ):
+            # Tre lettere senza vocali (RRR, SFF, MMM) non sono acronimi noti:
+            # sono frammenti, non titoli. Le parole piu' lunghe (STRUTTURE)
+            # cadono nel normale controllo di qualita'.
+            if len(parola) <= 3 and not any(c in "aeiou" for c in parola):
+                return f"Slide {numero}"
+            if 3 <= len(parola) <= 5:
                 return compatto
         else:
-            # Titoli tecnici maiuscoli (SPRING BOOT, SCRUM, STRUTTURE)
-            # iniziano spesso con tre consonanti: non sono rumore. Lo e'
-            # invece una sequenza di tre vocali (IEEARSI DIRLA).
-            if any(re.search(r"[aeiou]{3,}", p.lower()) for p in parole_maiuscole):
+            # Anche ogni parola di una riga maiuscola va controllata:
+            # "SFFSITE QQQ" non diventa titolo solo perche' c'e' uno spazio.
+            if any(_sequenza_rumorosa(p.lower()) for p in parole_maiuscole):
                 return f"Slide {numero}"
             return compatto
 
@@ -464,15 +463,19 @@ def _titolo_unito(titoli: Sequence[str]) -> str:
 
 def _acronimo_plausibile(testo: str) -> bool:
     """Vero per un acronimo breve (NASA, PDF, CSS), falso per rumore OCR."""
-    if not (testo.isalpha() and testo.isupper() and 3 <= len(testo) <= 5):
+    if not (testo.isalpha() and testo.isupper() and 2 <= len(testo) <= 5):
         return False
     basso = testo.lower()
-    if basso in {"inte", "st", "rrar", "nere", "mme"}:
+    if basso in _RUMORI_NOTI:
+        return False
+    if basso in _ACRONIMI_NOTI:
+        return True
+    if _sequenza_rumorosa(basso):
+        return False
+    if len(basso) <= 3 and not any(c in "aeiou" for c in basso):
         return False
     # «CSS» ha la doppia S legittima; «RRAR» no (ed e' gia' scartato sopra).
-    if len(basso) > 3 and re.search(r"([bcdfghjklmnpqrstvwxyz])\1", basso):
-        return False
-    return not _sequenza_rumorosa(basso)
+    return not (len(basso) > 3 and re.search(r"([bcdfghjklmnpqrstvwxyz])\1", basso))
 
 
 def _simili(a: str, b: str) -> bool:

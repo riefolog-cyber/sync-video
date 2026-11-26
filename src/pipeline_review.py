@@ -114,9 +114,9 @@ def _boundary_doubt_text(item: dict[str, object]) -> str:
     revisione (`--review`): due copie della stessa frase prima o poi divergono,
     e la revisione deve ripetere esattamente quello che ha detto la run.
     """
-    slide = int(cast("int", item.get("slide") or 0))
-    mention = float(cast("float", item.get("mention") or 0.0))
-    declared = float(cast("float", item.get("declared") or 0.0))
+    slide = _intero_sicuro(item.get("slide"))
+    mention = _numero_sicuro(item.get("mention"))
+    declared = _numero_sicuro(item.get("declared"))
     preview = f" (anteprima: {item.get('preview')})" if item.get("preview") else ""
     return (
         f"nel parlato la slide {slide} viene annunciata a {_format_time(mention)} "
@@ -336,9 +336,15 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
         report["anchors"] = anchors
         try:
             save_sync_report(report, cache_dir=cache_dir)
-            scrivi_riepilogo(report, video_path, video_presente=video_path.exists())
+            # `scrivi_riepilogo` ingoia gli errori e restituisce None: senza
+            # controllare il ritorno, un riepilogo NON scritto veniva dato per
+            # successo e restavano i collegamenti della run precedente.
+            scritto = scrivi_riepilogo(report, video_path, video_presente=video_path.exists())
         except OSError as e:
             log.error("   [Revisione] Impossibile salvare report/riepilogo (%s).", e)
+            return 1
+        if scritto is None:
+            log.error("   [Revisione] Riepilogo non scritto: non dichiaro successo.")
             return 1
         # `save_sync_report` ingoia gli OSError: verificare il file sul disco
         # e' l'unico modo di non dichiarare successo quando non e' successo.

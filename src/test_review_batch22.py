@@ -10,6 +10,7 @@ Esegui con: python -m unittest test_review_batch22 -v
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -238,11 +239,26 @@ class TestReviewVeritiero(unittest.TestCase):
             self.assertIn("Lezione del 25/11/2026", path.read_text(encoding="utf-8"))
 
     def test_report_ab_scrittura_atomica(self) -> None:
-        testo = (ROOT / "src" / "scripts" / "check_fastembed_upgrade.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("tempfile.mkstemp", testo)
-        self.assertIn("os.replace(nome_tmp, report)", testo)
+        # Prima bastava cercare due stringhe nel sorgente: passava anche se la
+        # scrittura non veniva mai eseguita. Ora si esercita la funzione e si
+        # verifica che il temporaneo sia stato rinominato nel report finale.
+        sys.path.insert(0, str(ROOT / "src" / "scripts"))
+        import check_fastembed_upgrade as ab
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            report = base / "fastembed_ab.json"
+            args = mock.Mock(
+                candidate="9.9.9", model="modello", sim_mean=0.9, decision_match=0.95
+            )
+            ab._scrivi_report_ab(
+                {"verdict": "DIVERGENTE"}, report, ["slide", "blocco"], args, 64, base / "emb"
+            )
+            dati = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(dati["verdict"], "DIVERGENTE")
+            self.assertEqual(dati["candidate"], "9.9.9")
+            self.assertEqual(dati["batch_size"], 64)
+            self.assertEqual(list(base.glob("*.tmp")), [])
 
 
 if __name__ == "__main__":

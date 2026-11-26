@@ -7,6 +7,8 @@ __pycache__/
 .venv/
 
 # Cache e temporanei
+# LibreOffice lascia questi lock quando converte i PPTX durante i test.
+.~lock.*#
 .cache/
 .mypy_cache/
 .ruff_cache/

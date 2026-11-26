@@ -1312,8 +1312,14 @@ def _prepara_ripresa(
             parole.append(cast("Word", w))
     try:
         coperto = float(dati.get("coperto_fino") or 0.0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         coperto = 0.0
+    if not math.isfinite(coperto):
+        log.info(
+            "   [Trascrizione] Parziale con punto di ripresa non valido: "
+            "decodifico tutto da capo."
+        )
+        return [], audio_path, 0.0
     if not parole or coperto <= 1.0:
         if parole:
             log.info(

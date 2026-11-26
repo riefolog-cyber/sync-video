@@ -5,8 +5,8 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 26 (acronimi, review coerente e parziali),
-dopo il batch 25. Il piano resta un registro delle decisioni: i dettagli di
+Ultimo aggiornamento: batch 27 (rumore maiuscolo, report A/B e parziali),
+dopo il batch 26. Il piano resta un registro delle decisioni: i dettagli di
 ogni cambiamento sono nei messaggi di commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
@@ -272,7 +272,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1644 test).
+`python -m unittest discover -s src -p "test_*.py"` (1653 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -949,6 +949,44 @@ precedenti erano vacui (controlli sul testo sorgente o patch inutilizzate):
 ora esercitano le funzioni reali.
 
 Verifiche: `ruff` e `mypy` puliti (97 file, win32/linux/darwin), test verdi,
+`controlli.py` 6/6 e debug hardware 17/17.
+
+## Batch 27 — rumore maiuscolo, verdetto A/B e parziali (2026-11)
+
+Decima revisione, sul codice del batch 26 ancora prima del commit. Sei difetti,
+nove test nuovi. Ancora una volta le correzioni precedenti avevano aperto
+falle nuove.
+
+**Titoli maiuscoli.** La scarsa regola del batch 26 lasciava passare qualsiasi
+frammento di tre lettere (`RRR`, `SFF`, `MMM`) e qualunque riga maiuscola di
+piu' parole (`SFFSITE QQQ`). Ora gli acronimi noti (anche senza vocali:
+`PDF`, `SQL`, `XML`, `CSS`, e i brevi `AI`, `CD`, `TV`) sono esplicitamente
+ammessi, i frammenti noti e le sequenze rumorose di OGNI parola della riga
+tornano a "Slide N", mentre i titoli tecnici legittimi sopravvivono.
+
+**`--review`.** Anche il testo del dubbio usava `int()`/`float()` grezzi: un
+report con campi sporchi moriva dopo aver generato le anteprime. Ora usa gli
+stessi convertitori sicuri del resto del modulo. `scrivi_riepilogo` restituisce
+`None` invece di sollevare quando la scrittura fallisce: il ritorno viene
+controllato e `--review` non esce piu' 0 se il riepilogo non e' stato scritto.
+
+**Stato e parziali.** La cancellazione per numero slide del batch 26
+cancellava anche la seconda occorrenza di una slide con `--skip-slides`: ora
+il raffinamento guidato dall'indice rimuove solo la vecchia decisione presa
+per numero sullo stesso confine, e le due occorrenze restano distinte. Un
+`coperto_fino` NaN/Infinito passava il controllo sul timestamp delle parole e
+finiva nel report come punto di ripresa: viene scartato come un timestamp
+non valido.
+
+**Verdetto A/B.** Su forme di embedding diverse lo script usciva 1 senza
+scrivere il report: il verdetto DIVERGENTE non veniva persistito e il test
+costoso veniva ripetuto. Ora il report viene scritto in entrambi i percorsi,
+con i campi che `updates` rilegge; `cache_dir` viene serializzato come stringa.
+Un test del batch 22 controllava solo due stringhe nel sorgente dello script:
+ora esegue la scrittura e verifica che il report finale esista e che non
+restino file temporanei.
+
+Verifiche: `ruff` e `mypy` puliti (98 file, win32/linux/darwin), test verdi,
 `controlli.py` 6/6 e debug hardware 17/17.
 
 ## Stato delle voci

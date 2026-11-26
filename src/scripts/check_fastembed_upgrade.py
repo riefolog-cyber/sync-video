@@ -547,6 +547,45 @@ def _candidate_version_from_pypi() -> str | None:
 # =====================================================================
 # CLI
 # =====================================================================
+def _scrivi_report_ab(
+    result: dict[str, Any],
+    percorso: Path,
+    all_texts: list[str],
+    args: Any,
+    batch: int,
+    embedding_cache: str | Path,
+) -> None:
+    """Scrive il verdetto nel file che `updates._ab_report_valido` rilegge.
+
+    Chiamata sia nel percorso felice sia quando il confronto non e' possibile:
+    un DIVERGENTE senza report verrebbe ripetuto a ogni controllo, pagando di
+    nuovo venv e ~200 embedding.
+    """
+    from config import _installed_version
+    from updates import _hash_texts
+
+    result.update(
+        {
+            "candidate": args.candidate,
+            "installed": str(_installed_version("fastembed") or ""),
+            "model": args.model,
+            "texts_hash": _hash_texts(all_texts),
+            "batch_size": batch,
+            "threshold_sim_mean": args.sim_mean,
+            "threshold_decision_match": args.decision_match,
+            "ts": time.time(),
+            "cache_dir": str(embedding_cache),
+        }
+    )
+    percorso.parent.mkdir(parents=True, exist_ok=True)
+    # Nome temporaneo UNICO (mkstemp), non `<report>.tmp`: due controlli
+    # concorrenti con lo stesso report si troncavano a vicenda il file.
+    fd, nome_tmp = tempfile.mkstemp(dir=percorso.parent, prefix=percorso.name + ".", suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(result, ensure_ascii=False, indent=2))
+    os.replace(nome_tmp, percorso)
+
+
 def main(argv: list | None = None) -> int:
     parser = argparse.ArgumentParser(description="Test A/B isolato fastembed")
     parser.add_argument("--candidate", default=None, help="Versione candidata (default: ultima installabile su PyPI)")
@@ -611,36 +650,29 @@ def main(argv: list | None = None) -> int:
             result = compare(base, cand, n_slides=len(texts["slides"]), sim_mean_threshold=args.sim_mean,
                              decision_match_threshold=args.decision_match)
         except ValueError as e:
-            # Forme diverse: e' un verdetto DIVERGENTE, non un traceback.
+            # Forme diverse: e' un verdetto DIVERGENTE, non un traceback. Il
+            # verdetto va perso solo se non lo si scrive: scriverlo evita di
+            # ripagare venv + embedding a ogni controllo successivo.
             print(f"ERRORE: confronto non possibile ({e})", file=sys.stderr)
+            result = {
+                "verdict": "DIVERGENTE",
+                "motivo": str(e),
+                "n_vectors": 0.0,
+                "n_slides": 0.0,
+                "n_blocks": 0.0,
+                "cosine_mean": 0.0,
+                "cosine_min": 0.0,
+                "decision_match": 0.0,
+                "argmax_match": 0.0,
+                "alignment_valid": False,
+            }
+            _scrivi_report_ab(result, Path(args.report), all_texts, args, batch, embedding_cache)
+            print("\n  VERDETTO: DIVERGENTE")
+            print(f"  Report: {args.report}")
             return 1
-        # Lo script scrive nello STESSO file usato da updates.py: senza i
-        # campi che `_ab_report_valido` richiede, il report appena prodotto
-        # veniva sempre rifiutato e il test A/B (venv + 200 embedding) girava
-        # di nuovo a ogni avvio, dopo aver distrutto quello valido.
-        from config import _installed_version
-        from updates import _hash_texts
-
-        result.update({
-            "candidate": args.candidate,
-            "installed": str(_installed_version("fastembed") or ""),
-            "model": args.model,
-            "texts_hash": _hash_texts(all_texts),
-            "batch_size": batch,
-            "threshold_sim_mean": args.sim_mean,
-            "threshold_decision_match": args.decision_match,
-            "ts": time.time(),
-            "cache_dir": embedding_cache,
-        })
 
         report = Path(args.report)
-        report.parent.mkdir(parents=True, exist_ok=True)
-        # Nome temporaneo UNICO (mkstemp), non `<report>.tmp`: due controlli
-        # concorrenti con lo stesso report si troncavano a vicenda il file.
-        fd, nome_tmp = tempfile.mkstemp(dir=report.parent, prefix=report.name + ".", suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(result, ensure_ascii=False, indent=2))
-        os.replace(nome_tmp, report)
+        _scrivi_report_ab(result, report, all_texts, args, batch, embedding_cache)
 
         print(f"\n  Riepilogo: {len(texts['slides'])} slide, {len(texts['blocks'])} blocchi")
         print(f"  coseno medio  : {result['cosine_mean']:.4f} (min {result['cosine_min']:.4f})")

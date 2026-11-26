@@ -2436,11 +2436,12 @@ def _record_refine(key: int, slide: int, **fields: object) -> None:
     # e confini diversi: tenerle separate evita che la seconda decisione
     # cancelli la prima dal report.
     chiave_interna = ("idx", key) if key != slide else ("slide", slide)
-    # L'ULTIMA decisione sulla stessa slide vince: il raffinamento normale e
-    # quello guidato dai frame producono due chiavi di lavoro diverse per lo
-    # stesso confine, e il report deve tenere solo quello applicato per ultimo.
-    for esistente in [k for k, v in _REFINE_DIAGNOSTICS.items() if v.get("slide") == slide]:
-        del _REFINE_DIAGNOSTICS[esistente]
+    # Il raffinamento guidato dai frame (per INDICE) sostituisce soltanto la
+    # vecchia decisione presa per NUMERO di slide sullo stesso confine. Le due
+    # occorrenze di una slide con --skip-slides hanno indici diversi e vanno
+    # tenute entrambe: cancellare per numero le faceva sparire una.
+    if key != slide:
+        _REFINE_DIAGNOSTICS.pop(("slide", slide), None)
     _REFINE_DIAGNOSTICS[chiave_interna] = voce
 
 
