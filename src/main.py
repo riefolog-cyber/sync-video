@@ -325,6 +325,38 @@ def _abort_senza_video(report: dict[str, object], messaggio: str) -> NoReturn:
     _abort(messaggio)
 
 
+def _audio_cambiato_durante_la_run(audio_path: Path, audio_hash: str) -> bool:
+    """True se l'audio sul disco non e' piu' quello letto all'inizio della run.
+
+    Il podcast viene spesso rigenerato mentre il video e' in costruzione (stesso
+    nome, stessa durata, contenuto diverso): trascrizione e timeline appartengono
+    alla versione vecchia, e assemblarle col file nuovo darebbe un video fuorviante.
+    Un file sparito o non leggibile e' comunque un cambiamento.
+    """
+    try:
+        return _file_hash(audio_path) != audio_hash
+    except OSError:
+        return True
+
+
+def _coda_audio_senza_parole(words: Sequence[Word], durata: float) -> float:
+    """Secondi finali dell'audio che la trascrizione NON copre.
+
+    Una trascrizione troncata (run interrotta, cache di un audio diverso) da'
+    confini solo fino al punto in cui il testo si ferma: il resto diventa una
+    slide unica allungata. Zero quando la trascrizione arriva in fondo.
+    """
+    istanti: list[float] = []
+    for w in words:
+        try:
+            istante = float(w.get("start", 0.0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        istanti.append(istante)
+    ultima = max(istanti, default=0.0)
+    return max(0.0, durata - ultima)
+
+
 def _percorso_override(indicato: str, output: Path) -> Path:
     """Dove stanno le correzioni manuali, e cosa fare se il file non c'e'.
 
@@ -3877,6 +3909,18 @@ def _main_impl(argv: list | None = None) -> None:
         sync_notes: dict[str, object] = {}
         if _correzioni_nomi:
             sync_notes["correzioni_nomi"] = list(_correzioni_nomi)
+        # Una trascrizione che si ferma molto prima della fine dell'audio non
+        # puo' vincolare i confini finali: senza questo controllo il video
+        # resta su un'unica slide per tutta la coda (caso del 26/11).
+        _coda_senza_parole = _coda_audio_senza_parole(words_raw or [], total_duration)
+        if _coda_senza_parole > 60.0:
+            log.warning(
+                "   [Trascrizione] Il testo si ferma %.0fs prima della fine "
+                "dell'audio: gli ultimi confini non possono essere verificati "
+                "col parlato.",
+                _coda_senza_parole,
+            )
+            sync_notes["coda_senza_parole"] = round(_coda_senza_parole, 1)
         # Il DPI effettivo del rendering: se il tetto sui pixel l'ha abbassato,
         # l'artefatto lo dice (l'opzione --dpi sembrava fare un'altra cosa).
         _dpi_effettivo = ultimo_dpi_effettivo()
@@ -4949,6 +4993,29 @@ def _main_impl(argv: list | None = None) -> None:
             notes=sync_notes,
             versione=_versione,
         )
+        # L'audio puo' essere stato sostituito DURANTE la run: la timeline e'
+        # stata costruita sul file letto all'inizio, e un video assemblato col
+        # file nuovo descriverebbe un podcast diverso da quello che l'utente
+        # ascoltera'. Interrompe anche --dry-run/--preview, che scrivono un
+        # report. Il vecchio errore (26/11) era esattamente questo.
+        if _audio_cambiato_durante_la_run(audio_path, audio_hash):
+            _abort_senza_video(
+                sync_report,
+                "Il file audio e' cambiato mentre la pipeline era in esecuzione: "
+                "trascrizione e timeline sono state calcolate sulla versione "
+                "precedente. Il video NON e' stato generato. Rilancia la "
+                "pipeline con il podcast definitivo."
+            )
+        sync_report["audio_invariato_durante_la_run"] = True
+        if _coda_senza_parole > 60.0 and args.strict_sync:
+            _abort_senza_video(
+                sync_report,
+                f"La trascrizione copre solo fino a {total_duration - _coda_senza_parole:.0f}s "
+                f"di {total_duration:.0f}s di audio: mancano {_coda_senza_parole:.0f}s di "
+                "parlato e gli ultimi confini non sono verificabili. Il video NON e' "
+                "stato generato (--strict-sync attivo): rigenera il podcast o "
+                "rimuovi --strict-sync per accettare la timeline stimata."
+            )
         _save_sync_report(sync_report)
         if anomalous:
             coherent = sorted(

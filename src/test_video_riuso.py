@@ -185,6 +185,12 @@ class TestRiusoVideo(unittest.TestCase):
         nuovo = b"video alterato"
         self.assertEqual(len(nuovo), len(b"video fittizio"))
         self.output.write_bytes(nuovo)
+        # Su filesystem con risoluzione grossolana due scritture ravvicinate
+        # possono avere lo STESSO mtime: in quel caso il percorso rapido non
+        # confronta il contenuto e il test diventa flaky. Forzare un mtime
+        # diverso garantisce che si eserciti proprio il confronto dell'hash.
+        st = self.output.stat()
+        os.utime(self.output, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
         self.assertFalse(video_riutilizzabile(self.output, self.chiave, cache_dir=self.base))
 
     def test_build_video_non_rifà_se_si_puo_riusare(self) -> None:

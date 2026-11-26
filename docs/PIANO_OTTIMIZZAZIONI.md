@@ -5,8 +5,8 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 27 (rumore maiuscolo, report A/B e parziali),
-dopo il batch 26. Il piano resta un registro delle decisioni: i dettagli di
+Ultimo aggiornamento: correzione mirata all'audio sostituito durante la run,
+dopo il batch 27. Il piano resta un registro delle decisioni: i dettagli di
 ogni cambiamento sono nei messaggi di commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
@@ -272,7 +272,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1653 test).
+`python -m unittest discover -s src -p "test_*.py"` (1660 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -988,6 +988,30 @@ restino file temporanei.
 
 Verifiche: `ruff` e `mypy` puliti (98 file, win32/linux/darwin), test verdi,
 `controlli.py` 6/6 e debug hardware 17/17.
+
+## Correzione mirata — audio sostituito durante la run (2026-11)
+
+Il video del 26/11 era fuori sincrono non per un errore degli annunci ma
+perche' il podcast e' stato rigenerato mentre la pipeline lavorava: stesso
+nome e stessa durata, ma contenuto diverso. La run aveva letto l'hash del file
+all'inizio e usato una trascrizione di 2477 parole che finiva a 860s; il
+podcast finale ne ha 3334 e arriva a 1197s. Mancavano gli annunci della parte
+finale, quindi la slide 15 restava ferma per 402s.
+
+Due controlli nuovi:
+
+1. `_audio_cambiato_durante_la_run` rilegge l'hash dell'audio prima di salvare
+   il report e interrompe la run (anche `--dry-run`/`--preview`) se il file non
+   e' piu' quello di partenza. Il report viene marcato `senza_video`.
+2. `_coda_audio_senza_parole` misura quanti secondi finali dell'audio non sono
+   coperti dalla trascrizione. Oltre 60s avvisa, e con `--strict-sync` ferma la
+   run prima del rendering. Il dato finisce in `sync_report.json`.
+
+Sette test nuovi in `test_audio_race.py`. Un test del riuso video era flaky
+(su filesystem con mtime grossolano non raggiungeva il confronto dell'hash):
+ora forza un mtime diverso. Dopo la correzione la pipeline e'
+stata rilanciata sul podcast attuale: 14 annunci su 14, 15 slide bilanciate
+(la 15 dura 76,9s), verifica frame 15/15 e giudizio "ALTO".
 
 ## Stato delle voci
 
