@@ -272,7 +272,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1683 test).
+`python -m unittest discover -s src -p "test_*.py"` (1688 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -1046,6 +1046,17 @@ appena fatte:
 
 Documentazione aggiornata (`funzionamento.md`, conteggio 1683), docstring del
 riuso video resa onesta sul percorso rapido.
+
+## Titoli riassuntivi dei capitoli (2026-11)
+
+Il titolo preso dall'inizio della slide diceva l'argomento ma non **cosa**
+tratta quel capitolo. Ora `build_capitoli` passa il titolo per
+`_titolo_riassuntivo`: dal corpo della pagina estrae l'elemento distintivo
+(il caso tra parentesi, la sentenza, la commissione, il contesto), lo pulisce,
+non lo ripete se contiene parole lunghe già presenti nel titolo e lo aggiunge
+dopo «:». Limite portato a 100 caratteri, quello vero di YouTube, così il
+titolo non viene tagliato a metà parola. Cinque test nuovi coprono caso,
+sentenza, frase generica non ripetuta, assenza di sintesi e limite di lunghezza.
 
 ## Stato delle voci
 

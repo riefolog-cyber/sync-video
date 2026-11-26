@@ -174,6 +174,39 @@ class TestRegoleStoricheNonRotte(unittest.TestCase):
                          "0:00 Titolo della slide")
 
 
+class TestTitoliRiassuntivi(unittest.TestCase):
+    def test_il_caso_diventa_parte_del_titolo(self) -> None:
+        testo = (
+            "L'uomo travolto: Lo stereotipo della «Tempesta Emotiva» "
+            "Il Caso (Castaldo/Matei): Un uomo strangola la compagna."
+        )
+        capitoli = subtitles.build_capitoli({1: 0.0}, [testo])
+        self.assertEqual(capitoli, "0:00 L'uomo travolto: caso Castaldo/Matei")
+
+    def test_sentenza_del_corpo_nel_titolo(self) -> None:
+        testo = "Il DNA culturale del problema: La «Sentenza dei Jeans» L'Antecedente (1998)"
+        capitoli = subtitles.build_capitoli({1: 0.0}, [testo])
+        self.assertEqual(capitoli, "0:00 Il DNA culturale del problema: sentenza dei jeans")
+
+    def test_frase_generica_non_ripete_il_titolo(self) -> None:
+        testo = "Il doppio standard dell’Alcol ‘Il Contesto: L'uso dell'alcol nelle aule"
+        capitoli = subtitles.build_capitoli({1: 0.0}, [testo])
+        self.assertEqual(capitoli, "0:00 Il doppio standard dell’Alcol")
+
+    def test_senza_elemento_riassuntivo_il_titolo_resta(self) -> None:
+        self.assertEqual(subtitles.build_capitoli({1: 0.0}, ["Titolo semplice"]), "0:00 Titolo semplice")
+
+    def test_titolo_riassuntivo_rientra_nel_limite_youtube(self) -> None:
+        testo = (
+            "La vittima processata al posto degli imputati Il Caso "
+            "(J.L. contro Italia): La Corte Europea condanna l'Italia."
+        )
+        titolo = subtitles.build_capitoli({1: 0.0}, [testo]).split(" ", 1)[1]
+        self.assertLessEqual(len(titolo), subtitles.MAX_CARATTERI_CAPITOLO)
+        self.assertTrue(titolo.endswith("Italia"))
+        self.assertFalse(titolo.endswith("…"))
+
+
 class TestFormatoFile(unittest.TestCase):
     def test_tempi_ascendenti_e_primo_a_zero(self) -> None:
         timeline = {1: 12.0, 2: 40.0, 3: 90.0}

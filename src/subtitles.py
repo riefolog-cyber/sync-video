@@ -24,7 +24,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from config import atomic_write_text, log
+from config import STOPWORDS_ITA, atomic_write_text, log
 
 # Una riga da 42 caratteri sta in un sottotitolo su schermo normale senza
 # costringere l'occhio a rincorrerla; due righe sono il massimo leggibile, e
@@ -79,7 +79,9 @@ def _sequenza_rumorosa(parola: str) -> bool:
         for m in re.finditer(r"[bcdfghjklmnpqrstvwxyz]{3,}", basso)
     )
 # Titolo di capitolo: oltre ~60 caratteri YouTube lo tronca da solo, e peggio.
-MAX_CARATTERI_CAPITOLO = 60
+# YouTube accetta fino a 100 caratteri per un titolo di capitolo: serve tutto
+# lo spazio per mettere argomento + sintesi senza tagliare a meta' parola.
+MAX_CARATTERI_CAPITOLO = 100
 # YouTube scarta i capitoli piu' corti di 10s: qui sotto si fondono con i
 # consecutivi invece di scrivere un file che il sito ignorerebbe a meta'.
 MIN_SECONDI_CAPITOLO = 10.0
@@ -727,6 +729,78 @@ def _titolo_affidabile(titolo: str) -> bool:
     return _qualita_titolo(titolo) >= QUALITA_MINIMA_TITOLO
 
 
+# Il titolo della slide dice SOLO l'argomento. Perche' un capitolo sia
+# riassuntivo serve l'elemento che lo contraddistingue: il caso esaminato,
+# la sentenza, l'istituzione. L'OCR lo mette sempre nel corpo della pagina.
+# (schema, prefisso, minuscolo): i nomi di caso conservano le maiuscole,
+# le frasi generiche no ("commissione Parlamentare" non si scrive).
+_MOTIVI_RIASSUNTO: tuple[tuple[re.Pattern[str], str, bool], ...] = (
+    (re.compile(r"\b(Dallo stereotipo alla competenza)\b", re.I), "", True),
+    (re.compile(r"\bIl Caso\s*\(([^)]{3,50})\)", re.I), "caso", False),
+    (re.compile(r"\bIl Caso:\s*([A-ZÀ-ÖØ-Þ][^.;]{3,60})", re.I), "", False),
+    (re.compile(r"Fatto\s*\(([^)]{3,40})\)", re.I), "", False),
+    (re.compile(r"\b(Sentenza dei Jeans|Commissione Parlamentare|"
+                r"Lettura Criminologica)\b", re.I), "", True),
+    (re.compile(r"\bIl Contesto:\s*([A-ZÀ-ÖØ-Þ][^.;]{3,60})", re.I), "", True),
+)
+
+
+def _sintesi_da_slide(testo: str, titolo: str) -> str:
+    """Un frammento corto che dice COSA parla davvero quel capitolo."""
+    raw = " ".join(str(testo or "").split())
+    if not raw:
+        return ""
+    def parole_utili(testo: str) -> set[str]:
+        parti = re.split(r"[\s'’“”‘’/]+", testo.lower())
+        return {
+            p.strip(" .,;:!?\"")
+            for p in parti
+            if len(p.strip(" .,;:!?\"")) >= 5 and p.strip(" .,;:!?\"") not in STOPWORDS_ITA
+        }
+
+    parole_titolo = parole_utili(titolo)
+    for schema, prefisso, minuscolo in _MOTIVI_RIASSUNTO:
+        trovato = schema.search(raw)
+        if not trovato:
+            continue
+        valore = (trovato.group(1) if trovato.lastindex else trovato.group(0)).strip(" .,;:()\"'“”‘’")
+        # La prima frase/comma chiude il motivo: "Madre denuncia violenze —
+        # sessuali del padre..." non serve tutto.
+        valore = re.split(r"\s+[—–]|,", valore)[0].strip(" .,;:()\"'“”‘’")
+        valore = " ".join(valore.split())
+        if len(valore) < 4 or len(valore) > 60:
+            continue
+        # Un frammento che ripete una parola lunga del titolo non riassume nulla.
+        parole_valore = parole_utili(valore)
+        nuove = [p for p in parole_valore if len(p) >= 6 and p not in parole_titolo]
+        if not nuove:
+            continue
+        sintesi = f"{prefisso} {valore}" if prefisso else valore
+        if len(sintesi) > 45:
+            sintesi = sintesi[:45].rsplit(" ", 1)[0]
+        if minuscolo:
+            sintesi = sintesi.lower()
+        return sintesi
+    return ""
+
+
+def _titolo_riassuntivo(titolo: str, testo_slide: str) -> str:
+    """Titolo + sintesi del capitolo, entro il limite dei capitoli YouTube."""
+    sintesi = _sintesi_da_slide(testo_slide, titolo)
+    if not sintesi or sintesi.lower() in titolo.lower():
+        return titolo
+    spazio = MAX_CARATTERI_CAPITOLO - len(sintesi) - 2
+    base = titolo
+    if len(base) > spazio:
+        troncato = base[:spazio]
+        if " " in troncato:
+            troncato = troncato.rsplit(" ", 1)[0]
+        base = troncato.rstrip(" ,;:-–—")
+    if len(base) < 4:
+        return titolo
+    return f"{base}: {sintesi}"
+
+
 def build_capitoli(
     timeline: Mapping[int, float],
     slide_texts: Sequence[str],
@@ -821,6 +895,9 @@ def build_capitoli(
                     titolo = annuncio
                 elif parlato_breve:
                     titolo = parlato
+        # Il titolo deve RIASSUMERE il capitolo: la slide dice l'argomento,
+        # il corpo della pagina dice il caso/la sentenza che lo contraddistingue.
+        titolo = _titolo_riassuntivo(titolo, testo)
         capitoli.append((inizio, titolo))
 
     # Unisce i gruppi di capitoli troppo corti: si chiude un gruppo solo quando
