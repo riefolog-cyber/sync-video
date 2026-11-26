@@ -607,8 +607,13 @@ def main(argv: list | None = None) -> int:
             return 6
         print(f"  Candidata {args.candidate} ({cand.shape[0]}x{cand.shape[1]}) OK")
 
-        result = compare(base, cand, n_slides=len(texts["slides"]), sim_mean_threshold=args.sim_mean,
-                         decision_match_threshold=args.decision_match)
+        try:
+            result = compare(base, cand, n_slides=len(texts["slides"]), sim_mean_threshold=args.sim_mean,
+                             decision_match_threshold=args.decision_match)
+        except ValueError as e:
+            # Forme diverse: e' un verdetto DIVERGENTE, non un traceback.
+            print(f"ERRORE: confronto non possibile ({e})", file=sys.stderr)
+            return 1
         # Lo script scrive nello STESSO file usato da updates.py: senza i
         # campi che `_ab_report_valido` richiede, il report appena prodotto
         # veniva sempre rifiutato e il test A/B (venv + 200 embedding) girava

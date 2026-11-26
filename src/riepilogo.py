@@ -252,5 +252,12 @@ def rigenera(cache_dir: Path, output_path: Path) -> int:
     if not isinstance(report, dict):
         log.error("%s non contiene un report.", report_path)
         return 1
-    # Qui il video dovrebbe gia' esserci: se manca, il riepilogo lo dichiara.
-    return 0 if scrivi_riepilogo(report, output_path, video_presente=output_path.exists()) is not None else 1
+    # `--solo-riepilogo` NON deve cancellare il verdetto "video non creato"
+    # di un --dry-run/--preview: il report lo dice, e un video vecchio che
+    # sta ancora nella cartella non lo rende valido per quella timeline.
+    # Se il video manca SENZA che il report sia un dry-run, resta il messaggio
+    # diverso ("assente dalla cartella"): sono due situazioni distinte.
+    dry_run = bool(report.get("senza_video") or report.get("anteprima"))
+    return 0 if scrivi_riepilogo(
+        report, output_path, dry_run=dry_run, video_presente=output_path.exists()
+    ) is not None else 1

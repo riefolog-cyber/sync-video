@@ -158,9 +158,10 @@ python -m unittest discover -s src -p "test_*.py"
 
 | Codice | Significato |
 |---|---|
-| `0` | Run completata (video scritto, oppure `--dry-run` arrivato in fondo); anche i comandi di ispezione riusciti (`--cache-du`, `--frozen-report`, `--review` con report presente, `--prefetch-models`, primo avvio senza materiali) |
+| `0` | Run completata (video scritto, oppure `--dry-run` arrivato in fondo); anche i comandi di ispezione riusciti (`--cache-du`, `--frozen-report`, `--review` con report presente **e verificabile**, `--prefetch-models`, primo avvio senza materiali) |
 | `1` | Esecuzione interrotta: un errore, oppure un gate di qualità (`--require-flow`, `--require-full-anchors`, copertura delle ancore sotto soglia), oppure `--review` senza report, oppure `--solo-riepilogo` senza report |
 | `2` | `src/scripts/prova_materiale_reale.py`: confronto **non verificabile** (materiale diverso dal riferimento o riferimento assente); `analysis_sync.py`: timeline non verificabile (slide fuori dal deck) o video mancante. Non è un guasto del programma |
+| `3` | `--review`: non verificabile — report scritto da `--preview`/`--dry-run` (nessun video per quella timeline) oppure controllo annunci/confini mai eseguito. `--version` non usa questo codice |
 
 Una run concorrente sulla stessa cartella **si ferma con errore e codice 1** dopo aver aspettato fino a 15 minuti: non è solo un avviso.
 

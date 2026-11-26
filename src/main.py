@@ -2401,8 +2401,9 @@ def _resolve_flow(
 # e' del sistema operativo: quando l'altra run muore il blocco si libera da
 # solo, quindi l'attesa non e' un'attesa cieca).
 _BLOCCO_ATTESA_SECONDI = 900.0
-# Blocco preso dalla run corrente: il wrapper lo rilascia in un finally.
-_BLOCCO_ATTIVO: BloccoRun | None = None
+# Blocco della run corrente: per THREAD, non un global. Due main() concorrenti
+# nello stesso processo altrimenti sovrascrivevano il riferimento a vicenda.
+_STATO_RUN = threading.local()
 
 # Sotto questa durata media per pagina il podcast e' probabilmente troppo
 # sintetico: il prompt chiede sezioni da 45-180 secondi, e a 20s per pagina il
@@ -3349,8 +3350,7 @@ def _main_impl(argv: list | None = None) -> None:
         # Il wrapper `main()` rilascia SEMPRE questo blocco in un finally,
         # anche se un'eccezione viene trattenuta dal chiamante (il traceback
         # terrebbe vivo il frame e `__del__` non scatterebbe mai).
-        global _BLOCCO_ATTIVO
-        _BLOCCO_ATTIVO = _blocco
+        _STATO_RUN.blocco = _blocco
 
     # --- Pulizia cache (OPERAZIONE DISTRUTTIVA) ---
     # Dopo il blocco run: `--clean-cache --include-models --yes` cancella
@@ -3486,7 +3486,7 @@ def _main_impl(argv: list | None = None) -> None:
     # run per 15 minuti faceva aspettare (e poi abortire) una run vera avviata
     # mentre il download era in corso. Si rilascia il blocco per la durata del
     # download e lo si riprende dopo.
-    blocco_download = _BLOCCO_ATTIVO
+    blocco_download = getattr(_STATO_RUN, "blocco", None)
     if (args.prefetch_models or args.openvino_download) and blocco_download is not None:
         blocco_download.release()
     try:
@@ -5598,13 +5598,12 @@ def main(argv: list | None = None) -> None:
     non scatterebbe mai. Qui il rilascio e' in un `finally`, indipendente
     dalla vita del traceback.
     """
-    global _BLOCCO_ATTIVO
-    _BLOCCO_ATTIVO = None
+    _STATO_RUN.blocco = None
     try:
         _main_impl(argv)
     finally:
-        blocco = _BLOCCO_ATTIVO
-        _BLOCCO_ATTIVO = None
+        blocco = getattr(_STATO_RUN, "blocco", None)
+        _STATO_RUN.blocco = None
         if blocco is not None:
             blocco.release()
 

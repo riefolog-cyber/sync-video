@@ -47,6 +47,22 @@ CODA_ULTIMA_PAROLA = 0.8
 # Quanto una riga deve sembrare testo per diventare un titolo di capitolo:
 # l'OCR delle slide infografiche restituisce anche righe di soli trattini.
 QUALITA_MINIMA_TITOLO = 0.6
+# Attacchi consonantici italiani legittimi: «STRUTTURE», «SPRING», «SCRUM»
+# non sono errori OCR, mentre «inggtanno» o «sffsite» lo sono.
+_ONSET_ITALIANI = frozenset(
+    {"str", "scr", "spr", "spl", "sfr", "sbr", "sgr", "scl", "tgl", "gli", "gnl"}
+)
+
+
+def _sequenza_rumorosa(parola: str) -> bool:
+    """Tre vocali, o tre consonanti che non sono un attacco italiano."""
+    basso = parola.lower()
+    if re.search(r"[aeiou]{3,}", basso):
+        return True
+    return any(
+        m.group(0)[:3] not in _ONSET_ITALIANI
+        for m in re.finditer(r"[bcdfghjklmnpqrstvwxyz]{3,}", basso)
+    )
 # Titolo di capitolo: oltre ~60 caratteri YouTube lo tronca da solo, e peggio.
 MAX_CARATTERI_CAPITOLO = 60
 # YouTube scarta i capitoli piu' corti di 10s: qui sotto si fondono con i
@@ -332,10 +348,7 @@ def _qualita_titolo(riga: str) -> float:
         # Tre consonanti consecutive in una parola italiana sono quasi sempre
         # un errore di lettura (inggtanno, cunosita' e' piu' sottile ma almeno
         # le sequenze rumorose vengono penalizzate).
-        rumorose = sum(
-            1 for p in parole
-            if re.search(r"[bcdfghjklmnpqrstvwxyz]{3,}|[aeiou]{3,}", p.lower())
-        )
+        rumorose = sum(1 for p in parole if _sequenza_rumorosa(p))
         punteggio *= 1.0 - 0.45 * (rumorose / len(parole))
     return max(0.0, min(1.0, punteggio))
 
@@ -371,15 +384,36 @@ def _titolo_capitolo(testo: str, numero: int) -> str:
     # ufficiale: solo se e' PLAUSIBILE (alternanza consonante/vocale, niente
     # ripetizioni). "ST", "INTE", "RRAR" sono rumore OCR, non acronimi.
     if all(p.isalpha() and p.isupper() for p in compatto.split()):
-        # IEEARSI DIRLA e SFFSITE sono rumore: sequenze di 3 vocali o
-        # consonanti che l'OCR ha letto male in una slide decorativa.
-        rumore = any(
-            re.search(r"[bcdfghjklmnpqrstvwxyz]{3,}|[aeiou]{3,}", p.lower())
-            for p in compatto.split()
-        )
-        if rumore:
-            return f"Slide {numero}"
-        if _acronimo_plausibile(compatto):
+        parole_maiuscole = compatto.split()
+        if len(parole_maiuscole) == 1:
+            # Acronimi veri: NASA, FAQ, ma anche PDF/SQL/XML/CSS (senza
+            # vocali). Il rumore e' una parola LUNGA con sequenze impossibili
+            # (SFFSITE) o consonanti raddoppiate (RRAR).
+            parola = parole_maiuscole[0].lower()
+            # Frammenti noti dell'OCR di slide decorative: non sono acronimi.
+            rumori_noti = {"inte", "st", "rrar", "nere", "mme"}
+            tre_vocali = bool(re.search(r"[aeiou]{3,}", parola))
+            # SFFSITE comincia con consonante raddoppiata; STRUTTURE no
+            # ("str..." ha tre consonanti DIVERSE): il taglio netto va solo
+            # sul rumore evidente, il resto lo valuta `_qualita_titolo`.
+            doppia_in_testa = bool(
+                re.search(r"^[bcdfghjklmnpqrstvwxyz]([bcdfghjklmnpqrstvwxyz])\1", parola)
+            )
+            if parola in rumori_noti or tre_vocali or (len(parola) >= 6 and doppia_in_testa):
+                return f"Slide {numero}"
+            # Acronimi brevi: NASA, FAQ, ma anche PDF/SQL/XML/CSS ("ss" e'
+            # legittimo in un acronimo di 3 lettere). Le parole piu' lunghe
+            # (STRUTTURE) cadono nel normale controllo di qualita'.
+            if 3 <= len(parola) <= 5 and (
+                len(parola) == 3 or not re.search(r"([bcdfghjklmnpqrstvwxyz])\1", parola)
+            ):
+                return compatto
+        else:
+            # Titoli tecnici maiuscoli (SPRING BOOT, SCRUM, STRUTTURE)
+            # iniziano spesso con tre consonanti: non sono rumore. Lo e'
+            # invece una sequenza di tre vocali (IEEARSI DIRLA).
+            if any(re.search(r"[aeiou]{3,}", p.lower()) for p in parole_maiuscole):
+                return f"Slide {numero}"
             return compatto
 
     # Prima frase/segmento (solo dopo i primi caratteri, altrimenti un titolo
@@ -429,17 +463,16 @@ def _titolo_unito(titoli: Sequence[str]) -> str:
 
 
 def _acronimo_plausibile(testo: str) -> bool:
-    """Vero per un acronimo breve (NASA, FAQ), falso per rumore maiuscolo."""
+    """Vero per un acronimo breve (NASA, PDF, CSS), falso per rumore OCR."""
     if not (testo.isalpha() and testo.isupper() and 3 <= len(testo) <= 5):
         return False
     basso = testo.lower()
-    if not any(c in "aeiou" for c in basso):
+    if basso in {"inte", "st", "rrar", "nere", "mme"}:
         return False
-    return not (
-        re.search(r"[bcdfghjklmnpqrstvwxyz]{3,}", basso)
-        or re.search(r"[aeiou]{3,}", basso)
-        or re.search(r"([bcdfghjklmnpqrstvwxyz])\1", basso)
-    )
+    # «CSS» ha la doppia S legittima; «RRAR» no (ed e' gia' scartato sopra).
+    if len(basso) > 3 and re.search(r"([bcdfghjklmnpqrstvwxyz])\1", basso):
+        return False
+    return not _sequenza_rumorosa(basso)
 
 
 def _simili(a: str, b: str) -> bool:
@@ -485,11 +518,17 @@ def _titolo_dal_parlato(
     e' un controllo indipendente, non un altro passaggio della stessa catena
     che ha gia' sbagliato.
     """
-    dette = [
-        str(w.get("word", ""))
-        for w in words
-        if inizio <= float(w.get("start", -1.0)) < fine
-    ]
+    dette: list[str] = []
+    for w in words:
+        # Uno start sporco ("n/d", None) non deve far morire la pipeline
+        # dopo che l'SRT e' gia' stato scritto: `build_srt` lo scarta, qui
+        # si scarta allo stesso modo.
+        try:
+            t = float(w.get("start", -1.0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(t) and inizio <= t < fine:
+            dette.append(str(w.get("word", "")))
     return " ".join(dette)
 
 
@@ -622,9 +661,12 @@ def scrivi_sottotitoli(
             atomic_write_text(
                 capitoli, build_capitoli(timeline, slide_texts, numeri_slide, words=words) + "\n"
             )
-    except OSError as e:
+    except (OSError, TypeError, ValueError, OverflowError) as e:
         log.warning("   Sottotitoli/capitoli non scritti (%s).", e)
-        return srt if srt and srt.exists() else None, capitoli if capitoli and capitoli.exists() else None
+        # Non restituire un file VECCHIO che sta ancora li': il contratto
+        # dice "percorsi SCRITTI", e un chiamante che li controlla crederebbe
+        # che questa run abbia prodotto i sottotitoli.
+        return None, None
     if srt:
         log.info("   Sottotitoli: %s", srt.name)
     if capitoli:

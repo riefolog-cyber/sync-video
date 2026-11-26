@@ -189,7 +189,11 @@ def main(argv: list[str] | None = None) -> int:
     # Confrontare dopo aver scritto convincerebbe sempre che non e' cambiato
     # niente: si legge l'originale PRIMA della scrittura.
     testo_originale: str | None = None
-    if args.scrivi and args.confronta and Path(args.scrivi) == Path(args.confronta):
+    if (
+        args.scrivi
+        and args.confronta
+        and Path(args.scrivi).resolve() == Path(args.confronta).resolve()
+    ):
         try:
             testo_originale = Path(args.scrivi).read_text(encoding="utf-8")
         except OSError as e:

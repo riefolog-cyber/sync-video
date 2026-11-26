@@ -12,6 +12,7 @@ Due motori disponibili:
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -1104,9 +1105,11 @@ def _firma_audio(audio_path: Path) -> str:
             if stat.st_size > _FINESTRA_HASH:
                 fh.seek(max(_FINESTRA_HASH, stat.st_size - _FINESTRA_HASH))
                 h.update(fh.read(_FINESTRA_HASH))
-        firma = f"{audio_path.stem}_{stat.st_size}_{h.hexdigest()[:16]}"
+        percorso = hashlib.sha1(str(audio_path.resolve()).encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
+        firma = f"{audio_path.stem}_{percorso}_{stat.st_size}_{h.hexdigest()[:16]}"
     except OSError:
-        firma = f"{audio_path.stem}_{stat.st_size}"
+        percorso = hashlib.sha1(str(audio_path.resolve()).encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
+        firma = f"{audio_path.stem}_{percorso}_{stat.st_size}"
     _FIRME[chiave] = firma
     return firma
 
@@ -1268,6 +1271,17 @@ def _prepara_ripresa(
     dati = _leggi_parziale(audio_path)
     if dati is None:
         return [], audio_path, 0.0
+    # L'impronta del nome puo' collidere fra due file con lo stesso nome in
+    # cartelle diverse: il percorso salvato nel parziale e' l'unica prova che
+    # le parole appartengano a QUESTO audio.
+    audio_salvato = str(dati.get("audio") or "")
+    if audio_salvato and audio_salvato not in (str(audio_path), str(audio_path.resolve())):
+        log.info(
+            "   [Trascrizione] Parziale di un altro audio (%s): lo lascio stare e "
+            "decodifico tutto, per non cucire parole estranee.",
+            audio_salvato,
+        )
+        return [], audio_path, 0.0
     salvati = dati.get("params")
     if params is not None and (not isinstance(salvati, dict) or salvati != params):
         log.info(
@@ -1280,8 +1294,22 @@ def _prepara_ripresa(
     parole: list[Word] = []
     if isinstance(grezze, list):
         for w in grezze:
-            if isinstance(w, dict) and "word" in w and "start" in w:
-                parole.append(cast("Word", w))
+            if not (isinstance(w, dict) and "word" in w and "start" in w):
+                continue
+            # Un timestamp non numerico (parziale vecchio o corrotto) verrebbe
+            # scartato solo dopo il taglio audio, e `float()` esploderebbe in
+            # `_collect_words`: si butta via il parziale e si riparte da capo.
+            try:
+                istante = float(w["start"])
+            except (TypeError, ValueError, OverflowError):
+                istante = float("nan")
+            if not math.isfinite(istante):
+                log.info(
+                    "   [Trascrizione] Parziale con timestamp non valido: "
+                    "decodifico tutto da capo."
+                )
+                return [], audio_path, 0.0
+            parole.append(cast("Word", w))
     try:
         coperto = float(dati.get("coperto_fino") or 0.0)
     except (TypeError, ValueError):

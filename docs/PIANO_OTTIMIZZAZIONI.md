@@ -5,10 +5,9 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 25 (regressioni dei capitoli, report costante,
-blocco run e script di verifica), dopo il batch 24 (la cui CI e' ora verde).
-Il piano resta un registro delle decisioni: i dettagli di ogni cambiamento
-sono nei messaggi di commit e nei test.
+Ultimo aggiornamento: batch 26 (acronimi, review coerente e parziali),
+dopo il batch 25. Il piano resta un registro delle decisioni: i dettagli di
+ogni cambiamento sono nei messaggi di commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -273,7 +272,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1630 test).
+`python -m unittest discover -s src -p "test_*.py"` (1644 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -908,6 +907,49 @@ produzione per i contatori di tempo.
 
 Verifiche: `ruff` e `mypy` puliti (96 file, win32/linux/darwin), 1630 test
 verdi (11 nuovi), `controlli.py` 6/6 e debug hardware 17/17.
+
+## Batch 26 — acronimi, review e parziali (2026-11)
+
+Nona revisione incrociata. Ventinove difetti, quattordici test nuovi. Ancora
+una volta, diversi problemi sono regressioni delle correzioni del batch 25.
+
+**Capitoli: acronimi e titoli tecnici.** La regola dell'ultimo batch scartava
+PDF, SQL, XML, CSS (nessuna vocale) e titoli maiuscoli legittimi come
+SPRING BOOT, SCRUM, STRUTTURE (tre consonanti iniziali); nel contempo
+l'euristica lasciava passare INTE. Ora gli acronimi brevi senza vocale sono
+ammessi, i titoli maiuscoli di piu' parole restano tali se non contengono
+tre vocali consecutive, e i rumori veri (IEEARSI DIRLA, SFFSITE, RRAR)
+tornano a "Slide N". Un timestamp sporco in una parola non fa piu' morire
+la generazione dei capitoli dopo che l'SRT e' gia' stato scritto.
+
+**`--review` non piu' contrastatoria.** Non lascia piu' il collegamento a
+un'anteprima appena cancellata quando l'estrazione fallisce; con video
+mancante pulisce le anteprime e toglie i collegamenti invece di dire
+"senza anteprima" e poi stamparli; tollera i campi sporchi del report che
+`riepilogo` gia' tollerava; non esce 0 se non riesce a salvare report e
+riepilogo. `--solo-riepilogo` conserva il verdetto "video non creato" di un
+dry-run/preview. `scrivi_sottotitoli` non restituisce piu' un SRT vecchio
+quando la scrittura di quello nuovo e' fallita.
+
+**Parziali e blocco.** L'impronta del parziale non includeva il percorso:
+due file con lo stesso nome in cartelle diverse potevano scambiarsi le
+parole già trascritte. Ora il percorso assoluto entra nell'impronta e
+`_prepara_ripresa` verifica il campo `audio` salvato; un parziale con
+timestamp non numerico viene scartato e si riparte da capo invece di
+esplodere in `float()`. La diagnostica del refine tiene solo l'ULTIMA
+decisione per slide, non quella vecchia del raffinamento prima della
+riparazione. Il wrapper `main()` usa uno stato per THREAD: due run
+nello stesso processo non si rilasciano il blocco a vicenda.
+
+**Script e docs.** Il confronto A/B su forme diverse non solleva piu' un
+traceback ma dà un verdetto; `riga_baseline` confronta i percorsi risolti
+(assoluto/relativo/maiuscole); la tabella dei codici di uscita documenta
+finalmente il `3` di `--review`. Cinque test "di regressione" dei batch
+precedenti erano vacui (controlli sul testo sorgente o patch inutilizzate):
+ora esercitano le funzioni reali.
+
+Verifiche: `ruff` e `mypy` puliti (97 file, win32/linux/darwin), test verdi,
+`controlli.py` 6/6 e debug hardware 17/17.
 
 ## Stato delle voci
 

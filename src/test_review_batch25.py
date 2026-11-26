@@ -15,9 +15,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
+import main
 import subtitles
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -73,14 +75,35 @@ class TestReportEBlocco(unittest.TestCase):
         self.assertIn("        _save_sync_report(sync_report)\n\n        # Pulizia cache orfana", testo)
 
     def test_abort_prima_render_marca_report(self) -> None:
-        testo = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
-        self.assertIn("report[\"senza_video\"] = True", testo)
-        self.assertEqual(testo.count("_abort_senza_video("), 3)  # definizione + 2 usi
+        # Il controllo sul testo sorgente non provava nulla: si esercita la
+        # funzione, che deve salvare il report marcato prima di uscire.
+        report: dict[str, object] = {"segments": []}
+        with (
+            mock.patch.object(main, "_save_sync_report") as salvataggio,
+            self.assertRaises(SystemExit) as esito,
+        ):
+            main._abort_senza_video(report, "test")
+        self.assertEqual(esito.exception.code, 1)
+        self.assertIs(report["senza_video"], True)
+        salvataggio.assert_called_once_with(report)
 
     def test_blocco_rilasciato_dal_wrapper(self) -> None:
-        testo = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
-        self.assertIn("def _main_impl(", testo)
-        self.assertIn("        blocco.release()", testo)
+        # Un'eccezione trattenuta dal chiamante non deve lasciare il blocco:
+        # il wrapper lo rilascia in finally, anche senza __del__.
+        blocco = mock.Mock()
+
+        def impl_con_blocco(_argv: object) -> None:
+            # _main_impl assegna il blocco allo stato del thread prima di
+            # sollevare: e' cio' che il finally del wrapper deve rilasciare.
+            main._STATO_RUN.blocco = blocco
+            raise RuntimeError("boom")
+
+        with (
+            mock.patch.object(main, "_main_impl", side_effect=impl_con_blocco),
+            self.assertRaises(RuntimeError),
+        ):
+            main.main([])
+        blocco.release.assert_called_once_with()
 
     def test_dry_run_pulisce_anteprime(self) -> None:
         testo = (ROOT / "src" / "main.py").read_text(encoding="utf-8")

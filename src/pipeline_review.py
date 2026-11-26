@@ -9,6 +9,8 @@ con lo shim (stesso schema di pipeline_cache / pipeline_report).
 
 from __future__ import annotations
 
+import json
+import math
 import time
 from collections.abc import Sequence
 from contextlib import suppress
@@ -24,6 +26,23 @@ from riepilogo import scrivi_riepilogo
 from timeline import announcements_off_timeline
 
 
+def _intero_sicuro(valore: object) -> int:
+    """Intero da un report sporco: mai un traceback in `--review`."""
+    try:
+        return int(cast("str | int | float", valore))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _numero_sicuro(valore: object) -> float:
+    """Float finito da un report sporco (JSON accetta ``Infinity``)."""
+    try:
+        numero = float(cast("str | int | float", valore))
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return numero if math.isfinite(numero) else 0.0
+
+
 def _boundary_preview_moments(item: dict[str, object]) -> list[tuple[str, float]]:
     """I due istanti di un confine dubbio: l'annuncio e il confine dichiarato.
 
@@ -32,9 +51,9 @@ def _boundary_preview_moments(item: dict[str, object]) -> list[tuple[str, float]
     rispondere: a schermo c'era già?), il secondo dove la timeline la fa
     comparire.
     """
-    slide = int(cast("int", item.get("slide") or 0))
-    mention = float(cast("float", item.get("mention") or 0.0))
-    declared = float(cast("float", item.get("declared") or 0.0))
+    slide = _intero_sicuro(item.get("slide"))
+    mention = _numero_sicuro(item.get("mention"))
+    declared = _numero_sicuro(item.get("declared"))
     return [
         (f"parlato: annuncio 'slide {slide}' a {_format_time(mention)}", mention),
         (f"video: la slide {slide} compare qui ({_format_time(declared)})", declared),
@@ -62,7 +81,7 @@ def _write_boundary_previews(
     """
     scritte: set[Path] = set()
     for i, item in enumerate(items):
-        slide = int(cast("int", item.get("slide") or 0))
+        slide = _intero_sicuro(item.get("slide"))
         # Import differito da main (stesso schema di cache_maintenance): evita
         # il ciclo main<->review e rispetta mock.patch("main.boundary_review_sheet")
         # dei test, che il riferimento diretto qui ignorerebbe.
@@ -76,6 +95,11 @@ def _write_boundary_previews(
         if sheet is not None:
             item["preview"] = str(sheet)
             scritte.add(Path(sheet))
+        else:
+            # Una anteprime NON scritta non puo' restare citata nel report:
+            # la pulizia qui sotto cancella il PNG e il collegamento verrebbe
+            # lasciato appeso a un file inesistente.
+            item.pop("preview", None)
     if review_dir.exists():
         for vecchia in review_dir.glob("confine_slide*.png"):
             if vecchia not in scritte:
@@ -136,15 +160,19 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
             "pipeline completa prima di rivedere i confini."
         )
         return 3
-    segments = cast("list[dict[str, object]]", report.get("segments") or [])
+    grezzo = report.get("segments")
+    segments = [s for s in cast("list[object]", grezzo or []) if isinstance(s, dict)]
+    if not segments:
+        log.error("   [Revisione] Il report non contiene segmenti leggibili.")
+        return 1
     starts: dict[int, float] = {}
     for seg in segments:
-        slide = int(cast("int", seg.get("slide") or 0))
+        slide = _intero_sicuro(seg.get("slide"))
         # Ultima occorrenza: con --skip-slides la stessa slide puo' comparire
         # piu' volte, e l'annuncio Pronunciato piu' tardi parla dell'ultima.
         # Tenere la prima faceva dire "video in anticipo" e piazzava
         # l'anteprima sul confine sbagliato.
-        starts[slide] = float(cast("float", seg.get("start") or 0.0))
+        starts[slide] = _numero_sicuro(seg.get("start"))
     if not starts:
         log.error("   [Revisione] Il report non contiene segmenti: niente da rivedere.")
         return 1
@@ -160,16 +188,23 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
     controllo_non_fatto = False
     motivo_non_fatto = ""
 
-    anchors = cast("dict[str, object]", report.get("anchors") or {})
+    grezzo_anchors = report.get("anchors")
+    # Un report scritto a mano puo' avere `anchors` non-dict: `riepilogo` lo
+    # tollera, `--review` deve farlo senza traceback.
+    anchors: dict[str, object] = (
+        cast("dict[str, object]", grezzo_anchors) if isinstance(grezzo_anchors, dict) else {}
+    )
     # `mentions_off=[]` e' un dato: la run ha confrontato gli annunci e non ne
     # ha trovati fuori posto. `mentions_off` assente e' un report VECCHIO, che
     # va ricalcolato. Con `if not items` i due casi coincidevano e la revisione
     # stampava "(il report non li aveva salvati...)" anche quando la run ne
     # aveva salvati 0 — facendo credere che il controllo non fosse girato.
     mentions_salvati = "mentions_off" in anchors
+    grezzo_items = anchors.get("mentions_off")
     items = [
         dict(item)
-        for item in cast("list[dict[str, object]]", anchors.get("mentions_off") or [])
+        for item in cast("list[object]", grezzo_items or [])
+        if isinstance(item, dict)
     ]
     ricalcolati = False
     if not mentions_salvati:
@@ -229,22 +264,21 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
     log.info(
         "   %d slide, %s di parlato.",
         len(segments),
-        _format_time(
-            max((float(cast("float", seg.get("end") or 0.0)) for seg in segments), default=0.0)
-        ),
+        _format_time(max((_numero_sicuro(seg.get("end")) for seg in segments), default=0.0)),
     )
-    transitions = int(cast("int", anchors.get("transitions") or 0))
+    transitions = _intero_sicuro(anchors.get("transitions"))
     if transitions:
         log.info(
             "   Confini ancorati nell'ultima run: %s su %s.",
-            int(cast("int", anchors.get("anchored") or 0)),
+            _intero_sicuro(anchors.get("anchored")),
             transitions,
         )
     # Un confine senza annuncio è una stima, non una misura: nei dubbi sui
     # confini va detto anche quando non c'è nessuna contraddizione, altrimenti
     # "niente da rivedere" suonerebbe come "tutto misurato".
     senza_ancora = sorted(
-        int(s) for s in cast("Sequence[int]", anchors.get("unanchored_slides") or [])
+        _intero_sicuro(s)
+        for s in cast("list[object]", anchors.get("unanchored_slides") or [])
     )
     if senza_ancora:
         log.info(
@@ -275,6 +309,12 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
         _write_boundary_previews(video_path, items, cache_dir / "review")
     else:
         log.info("   Video assente (%s): i dubbi restano, senza anteprima.", video_path)
+        # Nessun video: ogni anteprime della run precedente e' di un altro
+        # artefatto. Si pulisce e si tolgono i collegamenti, altrimenti il
+        # comando dice "senza anteprima" e poi stampa "anteprima: <path>".
+        _write_boundary_previews(video_path, [], cache_dir / "review")
+        for item in items:
+            item.pop("preview", None)
     if ricalcolati:
         log.info(
             "   (il report non li aveva salvati: ricalcolati dalle parole in cache)"
@@ -292,9 +332,22 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
     # confronto sulle parole in cache. Il report e' quello letto all'inizio,
     # con `mentions_off` aggiornato dalle copie che hanno ricevuto `preview`.
     if items or ricalcolati:
-        cast("dict[str, object]", anchors)["mentions_off"] = items
+        anchors["mentions_off"] = items
         report["anchors"] = anchors
-        save_sync_report(report, cache_dir=cache_dir)
-        scrivi_riepilogo(report, video_path, video_presente=video_path.exists())
+        try:
+            save_sync_report(report, cache_dir=cache_dir)
+            scrivi_riepilogo(report, video_path, video_presente=video_path.exists())
+        except OSError as e:
+            log.error("   [Revisione] Impossibile salvare report/riepilogo (%s).", e)
+            return 1
+        # `save_sync_report` ingoia gli OSError: verificare il file sul disco
+        # e' l'unico modo di non dichiarare successo quando non e' successo.
+        try:
+            riletto = json.loads((cache_dir / "sync_report.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            riletto = None
+        if riletto != report:
+            log.error("   [Revisione] Il report non e' stato aggiornato su disco.")
+            return 1
     log.info("=" * 70)
     return 0

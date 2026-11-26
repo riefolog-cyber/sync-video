@@ -120,7 +120,10 @@ class TestRiparazioneEStato(unittest.TestCase):
         try:
             semantic_sync._record_refine(2, 3, decision="A")
             semantic_sync._record_refine(5, 3, decision="B")
-            self.assertEqual(len(semantic_sync.refine_diagnostics()), 2)
+            # L'ultima decisione sulla stessa slide sostituisce la precedente.
+            voci = semantic_sync.refine_diagnostics()
+            self.assertEqual(len(voci), 1)
+            self.assertEqual(voci[0]["decision"], "B")
         finally:
             semantic_sync.reset_refine_diagnostics()
 
