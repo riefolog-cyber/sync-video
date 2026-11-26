@@ -220,6 +220,7 @@ class TestTitoliRiassuntivi(unittest.TestCase):
     def test_ellissi_non_rimasta_in_mezzo_al_titolo(self) -> None:
         testo = " ".join(["parola"] * 12) + " Il Caso (Castaldo/Matei)"
         titolo = subtitles.build_capitoli({1: 0.0}, [testo]).split(" ", 1)[1]
+        self.assertIn("castaldo", titolo.lower())
         self.assertNotIn("…:", titolo)
         self.assertLessEqual(len(titolo), subtitles.MAX_CARATTERI_CAPITOLO)
 
@@ -263,6 +264,55 @@ class TestTitoliRiassuntivi(unittest.TestCase):
         self.assertIn(
             "tribunale di roma",
             subtitles.build_capitoli({1: 0.0}, ["Un tema Il Fatto (Tribunale di Roma)"]).lower(),
+        )
+
+
+class TestSintesiRobusta(unittest.TestCase):
+    def test_sintesi_non_finisce_con_preposizione(self) -> None:
+        testo = (
+            "Il doppio standard dell’Alcol Il Contesto: L'uso dell'alcol "
+            "nelle aule di tribunale nei casi di violenza sessuale"
+        )
+        sintesi = subtitles._sintesi_da_slide(testo, "Il doppio standard dell’Alcol")
+        self.assertFalse(sintesi.endswith(" nei"))
+        self.assertTrue(sintesi.endswith("tribunale"))
+
+    def test_virgolette_spaiate_con_apostrofo(self) -> None:
+        self.assertEqual(
+            subtitles._pulisci_virgolette("La ‘scaltra d’uscita"), "La scaltra d’uscita"
+        )
+        eq = subtitles._pulisci_virgolette("La ‘scaltra’ e ‘l’altra’")
+        self.assertEqual(eq, "La ‘scaltra’ e ‘l’altra’")
+
+    def test_troncatura_non_lascia_virgolette_aperte(self) -> None:
+        titolo = subtitles._titolo_capitolo("Oggi ‘" + "parola " * 15 + "’", 1)
+        self.assertEqual(titolo.count("‘"), titolo.count("’"))
+
+    def test_unito_non_lascia_barra_prima_dell_ellissi(self) -> None:
+        out = subtitles._titolo_unito(["a" * 95, "b" * 20])
+        self.assertFalse(out.endswith("/…"))
+
+    def test_dedup_non_perde_la_parola_distintiva(self) -> None:
+        # Con una parola sola in comune la sintesi resta.
+        self.assertEqual(
+            subtitles._sintesi_da_slide(
+                "Il Contesto: La violenza domestica strutturale", "La violenza"
+            ),
+            "la violenza domestica strutturale",
+        )
+        # Se ripete quasi tutto il titolo viene scartata.
+        self.assertEqual(
+            subtitles._sintesi_da_slide(
+                "Il DNA culturale del problema Il Contesto: il dna culturale del problema nazionale",
+                "Il DNA culturale del problema",
+            ),
+            "",
+        )
+
+    def test_sottostringa_non_cancella_cognome_breve(self) -> None:
+        self.assertEqual(
+            subtitles._titolo_riassuntivo("Rossini e il processo", "Il Caso: Rossi"),
+            "Rossini e il processo: Rossi",
         )
 
 

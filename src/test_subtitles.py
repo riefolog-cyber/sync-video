@@ -301,7 +301,7 @@ class TestFile(unittest.TestCase):
     def test_titolo_lungo_si_accorcia_a_un_confine_di_parola(self) -> None:
         lungo = " ".join(["parola"] * 30)
         titolo = build_capitoli({1: 0.0}, [lungo]).split(" ", 1)[1]
-        self.assertLessEqual(len(titolo), subtitles.MAX_CARATTERI_CAPITOLO + 1)
+        self.assertLessEqual(len(titolo), subtitles.MAX_CARATTERI_CAPITOLO)
         self.assertTrue(titolo.endswith("…"))
         self.assertFalse(titolo.rstrip("…").endswith("parol"), "tagliato a meta' parola")
 

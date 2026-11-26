@@ -324,6 +324,7 @@ def _abort_senza_video(
     messaggio: str,
     motivo: str | None = None,
     output_path: Path | None = None,
+    video_generato: bool = False,
 ) -> NoReturn:
     """Abort prima del rendering: il report salvato NON descrive un video.
 
@@ -334,22 +335,33 @@ def _abort_senza_video(
     report["senza_video"] = True
     report["motivo_interruzione"] = motivo or messaggio
     _save_sync_report(report)
-    # La timeline finale era gia' stata salvata prima di questi abort: senza
-    # rimuoverla, analysis_sync la confronterebbe con il video VECCHIO.
-    with suppress(OSError):
-        (CACHE_DIR / "timeline_finale.json").unlink(missing_ok=True)
+    # Se il video non e' ancora stato generato, la timeline finale descrive
+    # un artefatto che non esiste: analysis_sync la confronterebbe col video
+    # VECCHIO. Dopo il rendering invece la timeline e' valida e va conservata.
+    if not video_generato:
+        with suppress(OSError):
+            (CACHE_DIR / "timeline_finale.json").unlink(missing_ok=True)
     # La pagina vecchia accanto al video resterebbe li' a dichiarare valida
     # una timeline che non esiste piu': si aggiorna subito, senza aspettare
     # un --solo-riepilogo che l'utente non sa di dover lanciare.
     if output_path is not None:
         from riepilogo import scrivi_riepilogo
 
-        scrivi_riepilogo(report, output_path, video_presente=False)
+        scrivi_riepilogo(
+            report,
+            output_path,
+            data=time.strftime("%d/%m/%Y"),
+            video_presente=video_generato,
+        )
     _abort(messaggio)
 
 
 def _verifica_audio_invariato(
-    report: dict[str, object], audio_path: Path, audio_hash: str, output_path: Path | None = None
+    report: dict[str, object],
+    audio_path: Path,
+    audio_hash: str,
+    output_path: Path | None = None,
+    video_generato: bool = False,
 ) -> None:
     """Ultimo controllo prima di usare l'audio: se e' cambiato, si ferma.
 
@@ -365,6 +377,7 @@ def _verifica_audio_invariato(
             "pipeline con il podcast definitivo.",
             motivo="audio_sostituito_durante_la_run",
             output_path=output_path,
+            video_generato=video_generato,
         )
     report["audio_invariato_durante_la_run"] = True
 
@@ -5013,9 +5026,19 @@ def _main_impl(argv: list | None = None) -> None:
         # La lista e' condivisa con beam accurato e recupero zone: lo snapshot
         # preso subito dopo il greedy era incompleto (o conteneva correzioni
         # di una trascrizione poi scartata). Si riscrive con lo stato finale.
-        sync_notes.pop("correzioni_nomi", None)
+        # Le correzioni della trascrizione scartata dall'A/B non sono state
+        # applicate alle parole usate: non devono comparire nel report.
         if _correzioni_nomi:
-            sync_notes["correzioni_nomi"] = list(dict.fromkeys(_correzioni_nomi))
+            usate = " ".join(str(p.get("word", "")) for p in words_raw).lower()
+            valide = [
+                c for c in dict.fromkeys(_correzioni_nomi)
+                if any(
+                    parte and parte in usate
+                    for parte in re.split(r"\s*->\s*", c.lower())[::-1]
+                )
+            ]
+            if valide:
+                sync_notes["correzioni_nomi"] = valide
         sync_notes["transcript_cache_key"] = chiave_parole_effettiva
         # La coda non coperta si misura sulla trascrizione EFFETTIVA (dopo
         # escalation beam e recupero zone): il primo greedy puo' fermarsi prima
@@ -5535,7 +5558,9 @@ def _main_impl(argv: list | None = None) -> None:
                             _dubbi_annunci()
                         )
                     inizio_secondo_encoding = time.time()
-                    _verifica_audio_invariato(sync_report, audio_path, audio_hash, Path(args.output_video))
+                    _verifica_audio_invariato(
+                        sync_report, audio_path, audio_hash, Path(args.output_video), video_generato=True
+                    )
                     build_video(
                         slide_files,
                         durations,

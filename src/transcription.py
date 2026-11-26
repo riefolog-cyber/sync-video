@@ -1107,11 +1107,15 @@ def _firma_audio(audio_path: Path) -> str:
         return f"{audio_path.stem}_{percorso}_{stat.st_size}"
 
 
-def percorso_parziale(audio_path: Path) -> Path:
-    """Dove finiscono le parole gia' trascritte di QUEST'audio."""
+def percorso_parziale(audio_path: Path, firma: str | None = None) -> Path:
+    """Dove finiscono le parole gia' trascritte di QUEST'audio.
+
+    `firma` e' opzionale: chi ha gia' letto l'intero file la passa, così non
+    lo rilegge a ogni checkpoint.
+    """
     from config import CACHE_DIR
 
-    return CACHE_DIR / "parziali" / f"{_firma_audio(audio_path)}.json"
+    return CACHE_DIR / "parziali" / f"{firma or _firma_audio(audio_path)}.json"
 
 
 def _salva_parziale(
@@ -1133,15 +1137,16 @@ def _salva_parziale(
     """
     from config import atomic_write_text
 
+    firma = _firma_audio(audio_path)
     try:
-        path = percorso_parziale(audio_path)
+        path = percorso_parziale(audio_path, firma)
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(
             path,
             json.dumps(
                 {
                     "audio": str(audio_path),
-                    "firma": _firma_audio(audio_path),
+                    "firma": firma,
                     "parole": len(parole),
                     "coperto_fino": round(float(coperto_fino), 3),
                     "params": params or {},
@@ -1156,10 +1161,10 @@ def _salva_parziale(
         log.debug("   Trascrizione parziale non salvata (%s).", e)
 
 
-def _leggi_parziale(audio_path: Path) -> dict[str, Any] | None:
+def _leggi_parziale(audio_path: Path, firma: str | None = None) -> dict[str, Any] | None:
     """Il parziale di quest'audio, se c'e' ed e' leggibile."""
     try:
-        dati = json.loads(percorso_parziale(audio_path).read_text(encoding="utf-8"))
+        dati = json.loads(percorso_parziale(audio_path, firma).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return dati if isinstance(dati, dict) else None
@@ -1262,7 +1267,8 @@ def _prepara_ripresa(
     # seconda, "accurata", usa un beam diverso e quindi non riprende).
     # Azzerare a ogni chiamata cancellava il dato della prima, e il riepilogo
     # di una lezione ripresa diceva "una passata sola".
-    dati = _leggi_parziale(audio_path)
+    firma = _firma_audio(audio_path)
+    dati = _leggi_parziale(audio_path, firma)
     if dati is None:
         return [], audio_path, 0.0
     # L'impronta del nome puo' collidere fra due file con lo stesso nome in
@@ -1279,7 +1285,7 @@ def _prepara_ripresa(
     # Il percorso puo' essere lo stesso con il contenuto cambiato (stesso nome,
     # stessa dimensione e mtime): la firma dell'intero file e' l'unica prova.
     firma_salvata = str(dati.get("firma") or "")
-    if firma_salvata and firma_salvata != _firma_audio(audio_path):
+    if firma_salvata and firma_salvata != firma:
         log.info(
             "   [Trascrizione] Parziale di un'altra versione dell'audio: lo "
             "lascio stare e decodifico tutto, per non cucire parole estranee."
@@ -1329,7 +1335,7 @@ def _prepara_ripresa(
                 "   [Trascrizione] Trovate %d parole di una run interrotta, ma senza "
                 "il punto di ripresa: decodifico tutto (il testo resta in %s).",
                 len(parole),
-                percorso_parziale(audio_path),
+                percorso_parziale(audio_path, firma),
             )
         return [], audio_path, 0.0
     taglio = max(0.0, coperto - _SOVRAPPOSIZIONE_RIPRESA)
@@ -1340,7 +1346,7 @@ def _prepara_ripresa(
             "in %s. Non riesco a tagliare l'audio per riprendere, quindi decodifico "
             "da capo (il testo resta; faster-whisper non riprende a meta' audio).",
             len(parole),
-            percorso_parziale(audio_path),
+            percorso_parziale(audio_path, firma),
         )
         return [], audio_path, 0.0
     log.info(

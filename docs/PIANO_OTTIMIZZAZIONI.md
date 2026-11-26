@@ -5,9 +5,9 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 29 (titoli riassuntivi a prova di regressione),
-dopo i titoli riassuntivi. Il piano resta un registro delle decisioni: i
-dettagli sono nei messaggi di commit e nei test.
+Ultimo aggiornamento: batch 30 (titoli e abort a prova di regressione), dopo
+il batch 29. Il piano resta un registro delle decisioni: i dettagli sono nei
+messaggi di commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -272,7 +272,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1698 test).
+`python -m unittest discover -s src -p "test_*.py"` (1710 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -1088,6 +1088,34 @@ distinguere un audio sostituito nel mezzo. Il parziale salvato porta la firma
 completa e `_prepara_ripresa` la verifica, così non si cuciscono piu' parole di
 un'altra versione dello stesso file.
 
+## Batch 30 — titoli e abort a prova di regressione (2026-11)
+
+Tredicesima revisione. Numerosi difetti, quasi tutti sulle correzioni del
+batch 29.
+
+**Titoli.** Due sintesi reali finivano con una preposizione orfana
+(«...nelle aule di tribunale nei»): il taglio ora si ferma a confine di clausola
+e butta le parole funzionali finali. Le virgolette venivano conteggiate male
+perche' «» e' anche l'apostrofo italiano: ora si contano solo le virgolette
+vere, e la pulizia gira anche dopo la troncatura e nei capitoli fusi. Il
+capitolo 14 perdeva il proprio «Il Caso» per una soppressione troppo ampia;
+la sintesi e' di nuovo cercata nel corpo della slide, che e' fonte diversa
+dalla narrazione. Soglia di dedup e guardia sulle sottostringhe aggiustate per
+non buttare la parola distintiva.
+
+**Abort e report.** L'hash completo dell'audio veniva ricalcolato due volte a
+ogni checkpoint e fino a cinque volte per ripresa: `percorso_parziale` e
+`_leggi_parziale` accettano la firma gia' calcolata. La timeline veniva rimossa
+anche dopo il rendering: ora `_abort_senza_video` distingue i due casi e la
+conserva se il video esiste; `analysis_sync.py` esce 2 (non verificabile) invece
+di 1 (guasto). Le correzioni dei nomi della trascrizione scartata dall'A/B non
+finiscono piu' nel report, la pagina di abort non dice piu' «video assente» con
+la data del video vecchio.
+
+**Test e docs.** Test vacui rafforzati (parziale, review, riuso video, limite
+100 caratteri), regex che ora riconosce davvero «L'Esito», doc e conteggi
+aggiornati, guardrail Ruff di nuovo mirato ai moduli con prosa.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -1183,5 +1211,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio (batch 25): ruff pulito, mypy pulito su tre
-piattaforme, 1630 test verdi, `_debug_hardware.py` e controlli 6/6.
+Stato all'ultimo lancio (batch 30): ruff pulito, mypy pulito su tre
+piattaforme, 1710 test verdi, `_debug_hardware.py` e controlli 6/6.

@@ -10,14 +10,18 @@ Esegui con: python -m unittest test_audio_race -v
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from typing import cast
 from unittest import mock
 
 import main
+import pipeline_cache
+import pipeline_review
 import riepilogo
 import transcription
 from chunks import Word
@@ -85,25 +89,71 @@ class TestCoperturaTrascrizione(unittest.TestCase):
                 self.assertEqual(main._coda_audio_senza_parole(parole, 120.0), 20.0)
 
 
-class TestParzialeContenuto(unittest.TestCase):
-    def test_parziale_di_altra_versione_stesso_nome_dimensione_e_mtime(self) -> None:
+class TestHashUnaSolaVolta(unittest.TestCase):
+    def test_salva_parziale_calcola_la_firma_una_volta(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             audio = Path(tmp) / "podcast.m4a"
-            originale = b"A" * (300 * 1024)
+            audio.write_bytes(b"audio")
+            with (
+                mock.patch.object(transcription, "CACHE_DIR", Path(tmp)),
+                mock.patch.object(
+                    transcription, "_firma_audio", wraps=transcription._firma_audio
+                ) as firma,
+            ):
+                transcription._salva_parziale(audio, [], coperto_fino=10.0, params=None)
+            self.assertEqual(firma.call_count, 1)
+
+
+class TestParzialeContenuto(unittest.TestCase):
+    def test_parziale_di_altra_versione_stesso_nome_dimensione_e_mtime(self) -> None:
+        import config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            audio = cache / "podcast.m4a"
+            # >2 MB: le vecchie finestre da 256 KB non vedevano il mezzo.
+            originale = bytearray(b"A" * (3 * 1024 * 1024))
             audio.write_bytes(originale)
             stat = audio.stat()
             with (
-                mock.patch.object(transcription, "CACHE_DIR", Path(tmp)),
-                mock.patch.object(transcription, "_taglia_audio", return_value=Path(tmp) / "coda.flac"),
+                mock.patch.object(config, "CACHE_DIR", cache),
+                mock.patch.object(transcription, "CACHE_DIR", cache),
+                mock.patch.object(transcription, "_taglia_audio", return_value=cache / "coda.flac"),
+                mock.patch.object(
+                    transcription, "_firma_audio", wraps=transcription._firma_audio
+                ) as firma,
             ):
                 transcription._salva_parziale(
                     audio, [{"word": "vecchia", "start": 1.0}], coperto_fino=60.0, params=None
                 )
-                # Stesso percorso, stessa dimensione, stesso mtime, contenuto diverso.
-                audio.write_bytes(b"B" * (300 * 1024))
+                vecchia_firma = firma.call_args_list[-1].args[0] and str(
+                    transcription._firma_audio(audio)
+                )
+                # Stesso percorso, dimensione e mtime: cambia SOLO il mezzo.
+                originale[len(originale) // 2] = ord("B")
+                audio.write_bytes(originale)
                 os.utime(audio, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                self.assertNotEqual(transcription._firma_audio(audio), vecchia_firma)
+                # Il parziale e' scritto con la firma VECCHIA ma nel file della
+                # firma NUOVA: cosi' si esercita il controllo sul campo "firma".
+                percorso = transcription.percorso_parziale(audio)
+                percorso.write_text(
+                    json.dumps(
+                        {
+                            "audio": str(audio),
+                            "firma": vecchia_firma,
+                            "words": [{"word": "estranea", "start": 1.0}],
+                            "coperto_fino": 60.0,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
                 iniziali, _sorgente, _offset = transcription._prepara_ripresa(audio, params=None)
             self.assertEqual(iniziali, [])
+            # Il parziale con la firma vecchia resta come artefatto inerte:
+            # la protezione e' che NON venga usato per la ripresa.
+            dati_parziale = json.loads(percorso.read_text(encoding="utf-8"))
+            self.assertEqual(dati_parziale["firma"], vecchia_firma)
 
 
 class TestMotivoInterruzione(unittest.TestCase):
@@ -144,6 +194,42 @@ class TestMotivoInterruzione(unittest.TestCase):
         self.assertNotIn("dry-run", testo)
         self.assertIn("podcast sostituito", testo)
 
+    def test_abort_dopo_rendering_conserva_la_timeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            timeline = Path(tmp) / "timeline_finale.json"
+            timeline.write_text("[]", encoding="utf-8")
+            video = Path(tmp) / "video_finale.mp4"
+            video.write_bytes(b"video")
+            with (
+                mock.patch.object(main, "CACHE_DIR", Path(tmp)),
+                mock.patch.object(main, "_save_sync_report"),
+                mock.patch("riepilogo.scrivi_riepilogo") as pagina,
+                self.assertRaises(SystemExit),
+            ):
+                main._abort_senza_video(
+                    {"segments": []},
+                    "test",
+                    motivo="audio_sostituito_durante_la_run",
+                    output_path=video,
+                    video_generato=True,
+                )
+            self.assertTrue(timeline.exists())
+            self.assertIs(pagina.call_args.kwargs["video_presente"], True)
+
+    def test_pagina_di_abort_usa_la_data_di_oggi(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video_finale.mp4"
+            video.write_bytes(b"video")
+            with (
+                mock.patch.object(main, "_save_sync_report"),
+                mock.patch("riepilogo.scrivi_riepilogo") as pagina,
+                self.assertRaises(SystemExit),
+            ):
+                main._abort_senza_video(
+                    {"segments": []}, "test", motivo="audio_sostituito_durante_la_run", output_path=video,
+                )
+            self.assertEqual(pagina.call_args.kwargs["data"], time.strftime("%d/%m/%Y"))
+
     def test_abort_rimuove_la_timeline_non_piu_valida(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             timeline = Path(tmp) / "timeline_finale.json"
@@ -165,6 +251,28 @@ class TestMotivoInterruzione(unittest.TestCase):
                 )
                 self.assertIn("interrotto", testo)
                 self.assertIn(motivo.replace("_", " "), testo)
+
+    def test_motivi_stabili_spiegati_da_review(self) -> None:
+        for motivo, spiegazione in (
+            ("allineamento_sospetto", "allineamento delle slide era sospetto"),
+            ("prima_sezione_disallineata", "prima sezione non parlava della slide 1"),
+        ):
+            with self.subTest(motivo=motivo), tempfile.TemporaryDirectory() as tmp:
+                cache = Path(tmp)
+                video = cache / "video.mp4"
+                video.write_bytes(b"video")
+                pipeline_cache.save_sync_report(
+                    {
+                        "segments": [{"slide": 1, "start": 0.0, "end": 60.0}],
+                        "senza_video": True,
+                        "motivo_interruzione": motivo,
+                    },
+                    cache_dir=cache,
+                )
+                with self.assertLogs("slide2video", level="ERROR") as log:
+                    codice = pipeline_review._review_boundary_doubts(video, cache_dir=cache)
+                self.assertEqual(codice, 3)
+                self.assertIn(spiegazione, "\n".join(log.output))
 
     def test_riepilogo_avvisa_la_coda_senza_parole(self) -> None:
         report: dict[str, object] = {

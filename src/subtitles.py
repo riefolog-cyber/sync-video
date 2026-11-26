@@ -327,14 +327,32 @@ _SEPARATORI_TITOLO = (". ", " - ", " \u2014 ", " \u2013 ", " | ", ": ", "; ", "?
 
 
 def _pulisci_virgolette(testo: str) -> str:
-    """Toglie le virgolette di apertura rimaste senza chiusura."""
+    """Toglie le virgolette spaiate, senza toccare gli apostrofi italiani."""
+
+    def chiusure(t: str) -> list[int]:
+        # «» fra due lettere e' un apostrofo (d’uscita, l’altra), non una
+        # virgoletta di chiusura.
+        return [
+            m.start()
+            for m in re.finditer("’", t)
+            if not (
+                m.start() > 0
+                and m.start() + 1 < len(t)
+                and t[m.start() - 1].isalpha()
+                and t[m.start() + 1].isalpha()
+            )
+        ]
+
     out = testo.strip()
-    if out and out[-1] in "'‘“":
-        out = out[:-1].rstrip()
-    # «’» e' anche l'apostrofo italiano ("d’uscita"): si toglie solo «‘».
-    if out.count("‘") != out.count("’"):
-        out = out.replace("‘", "").strip()
-    return out
+    aperture = [m.start() for m in re.finditer("‘", out)]
+    chiuse = chiusure(out)
+    if len(aperture) > len(chiuse):
+        for pos in reversed(aperture[: len(aperture) - len(chiuse)]):
+            out = out[:pos] + out[pos + 1 :]
+    elif len(chiuse) > len(aperture):
+        for pos in reversed(chiuse[: len(chiuse) - len(aperture)]):
+            out = out[:pos] + out[pos + 1 :]
+    return out.strip()
 
 
 def _tronca_titolo(testo: str, limite: int) -> str:
@@ -407,7 +425,7 @@ def _miglior_riga(testo: str) -> str:
 # Intestazioni ricorrenti nelle slide: quello che segue e' il CONTENUTO, non
 # piu' il titolo. Tagliarle evita capitoli tipo "L'Esito" o "Il Caso".
 _SEZIONI_TITOLO = re.compile(
-    r"\b(?:il|la|lo|l'|gli|le)\s+(?:fatto|problema|caso|esito|soluzione|"
+    r"\b(?:il|la|lo|l'\s*|gli|le)\s*(?:fatto|problema|caso|esito|soluzione|"
     r"antecedente|lettura|contesto|correzione|diagnosi|errore|ribaltamento|"
     r"mito|origine|regola|principio|impatto|conseguenza|checklist|indizi|"
     r"domanda|sintesi|focus)\b",
@@ -547,7 +565,10 @@ def _titolo_unito(titoli: Sequence[str]) -> str:
     titolo = " / ".join(t for t in titoli if t)
     if len(titolo) <= MAX_CARATTERI_CAPITOLO:
         return titolo
-    return _tronca_titolo(titolo.rstrip(" /"), MAX_CARATTERI_CAPITOLO)
+    troncato = _tronca_titolo(titolo.rstrip(" /"), MAX_CARATTERI_CAPITOLO)
+    if troncato.endswith("…"):
+        troncato = troncato[:-1].rstrip(" /") + "…"
+    return _pulisci_virgolette(troncato)
 
 
 def _acronimo_plausibile(testo: str) -> bool:
@@ -708,7 +729,7 @@ def _titolo_da_annuncio(
             parole.pop(0)
         out = " ".join(parole).strip(" .,;:!?\"'“”‘’")
         if len(out) >= 6 and _qualita_titolo(out) >= QUALITA_MINIMA_TITOLO:
-            return _tronca_titolo(out, MAX_CARATTERI_CAPITOLO)
+            return _pulisci_virgolette(_tronca_titolo(out, MAX_CARATTERI_CAPITOLO))
     return ""
 
 
@@ -754,6 +775,35 @@ _MOTIVI_RIASSUNTO: tuple[tuple[re.Pattern[str], str, bool], ...] = (
 )
 
 
+_PAROLE_FUNZIONALI = frozenset(
+    {
+        "di", "a", "da", "in", "con", "su", "per", "tra", "fra", "nel", "nei",
+        "nella", "nelle", "del", "della", "delle", "dei", "al", "alla", "alle",
+        "ai", "il", "lo", "la", "i", "le", "un", "una", "che", "e", "ma", "o",
+    }
+)
+
+
+def _taglia_sintesi(valore: str) -> str:
+    """Sintesi corta che finisce su un concetto, non su una preposizione."""
+    tagli = [
+        valore.find(sep)
+        for sep in (",", " — ", " – ", ";", " che ", " e ", " ma ")
+        if valore.find(sep) != -1
+    ]
+    if tagli:
+        valore = valore[: min(tagli)]
+    if len(valore) > 45:
+        valore = valore[:45].rsplit(" ", 1)[0]
+    parole = valore.split()
+    while parole and (
+        parole[-1].lower().strip(".,;:") in _PAROLE_FUNZIONALI
+        or re.match(r"^(l'|l’|d'|d’|un'|un’)", parole[-1].lower()) is not None
+    ):
+        parole.pop()
+    return " ".join(parole).strip(" .,;:()\"'“”‘’")
+
+
 def _sintesi_da_slide(testo: str, titolo: str) -> str:
     """Un frammento corto che dice COSA parla davvero quel capitolo."""
     raw = " ".join(str(testo or "").split())
@@ -777,10 +827,7 @@ def _sintesi_da_slide(testo: str, titolo: str) -> str:
         # sessuali del padre..." non serve tutto.
         valore = re.split(r"\s+[—–]|,", valore)[0].strip(" .,;:()\"'“”‘’")
         valore = " ".join(valore.split())
-        if len(valore) < 4:
-            continue
-        if len(valore) > 45:
-            valore = valore[:45].rsplit(" ", 1)[0].rstrip(" ,;:-–—")
+        valore = _taglia_sintesi(valore)
         valore = _pulisci_virgolette(valore)
         if len(valore) < 4:
             continue
@@ -808,7 +855,7 @@ def _sintesi_da_slide(testo: str, titolo: str) -> str:
 def _titolo_riassuntivo(titolo: str, testo_slide: str) -> str:
     """Titolo + sintesi del capitolo, entro il limite dei capitoli YouTube."""
     sintesi = _sintesi_da_slide(testo_slide, titolo)
-    if not sintesi or sintesi.lower() in titolo.lower():
+    if not sintesi or re.search(r"\b" + re.escape(sintesi.lower()) + r"\b", titolo.lower()):
         return titolo
     spazio = MAX_CARATTERI_CAPITOLO - len(sintesi) - 2
     base = titolo
@@ -917,11 +964,9 @@ def build_capitoli(
                     titolo = annuncio
                 elif parlato_breve:
                     titolo = parlato
-            # Con OCR inaffidabile il titolo e' gia' la frase pronunciata: e'
-            # di per se' riassuntivo. Aggiungerci il parlato che segue darebbe
-            # narrazione ("Un uomo impugna le misure..."), non una sintesi.
-            if titolo != titolo_ocr and not _titolo_affidabile(titolo_ocr):
-                fonte_sintesi = ""
+            # Con OCR inaffidabile il titolo arriva dal parlato, ma il CORPO
+            # della slide puo' ancora contenere un "Il Caso" valido: e' una
+            # fonte diversa dalla narrazione, e va tenuta.
         # Il titolo deve RIASSUMERE il capitolo: la slide dice l'argomento,
         # il corpo della pagina dice il caso/la sentenza che lo contraddistingue.
         titolo = _titolo_riassuntivo(titolo, fonte_sintesi)

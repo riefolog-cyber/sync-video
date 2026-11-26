@@ -104,11 +104,14 @@ def _newest(pattern: str) -> Path:
 # Timeline finale validata da main.py (scritta a ogni run)
 FINAL_TIMELINE = CACHE / "timeline_finale.json"
 if not FINAL_TIMELINE.exists():
+    # Dopo un abort prima del rendering main.py rimuove la timeline: non e'
+    # un guasto del programma ma una run da verificare, come il caso exit 2.
     print(
-        f"ERRORE: nessuna timeline finale in {CACHE} "
-        "(timeline_finale.json). Lancia prima main.py."
+        f"NON VERIFICABILE: nessuna timeline finale in {CACHE} "
+        "(timeline_finale.json). L'ultima run e' stata interrotta prima del "
+        "video: rilancia main.py con il materiale definitivo."
     )
-    sys.exit(1)
+    sys.exit(2)
 TIMELINE_FILE = FINAL_TIMELINE
 print(f"[Verifica] Uso timeline finale validata: {FINAL_TIMELINE.name}")
 

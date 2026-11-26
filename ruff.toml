@@ -30,10 +30,13 @@ ignore = [
     "PLC0415",  # import-outside-top-level (bootstrap lazy in config.py)
     "PLR2004",  # magic-value-comparison
 ]
-# La punteggiatura italiana e' parte dei testi reali di slide/trascrizioni.
-allowed-confusables = ["‘", "’", "“", "”", "–", "—", "…"]
-
 [lint.per-file-ignores]
+# La punteggiatura italiana e' parte dei testi reali di slide/trascrizioni.
+# Si concede solo nei moduli con prosa: le stringhe di codice (flag argparse,
+# chiavi dict) restano controllate.
+"subtitles.py" = ["RUF001", "RUF003"]
+"riepilogo.py" = ["RUF001", "RUF003"]
+"test_capitoli_qualita.py" = ["RUF001"]
 # I test usano patch/assert interni in modo volutamente permissivo
 "test_*.py" = ["BLE001"]
 # Script standalone di analisi: sys.path insert e except difensivi sono voluti

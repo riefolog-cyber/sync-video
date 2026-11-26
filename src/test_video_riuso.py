@@ -88,7 +88,19 @@ class TestChiaveVideo(unittest.TestCase):
         self.assertNotEqual(self._chiave(), self._chiave(durations=[11.0]))
 
     def test_cambia_se_cambia_l_audio(self) -> None:
-        self.assertNotEqual(self._chiave(), self._chiave(audio_path=self.base / "b.m4a"))
+        altra = self.base / "b.m4a"
+        altra.write_bytes(b"audio diverso, stessa dimensione!")
+        self.assertNotEqual(self._chiave(), self._chiave(audio_path=altra))
+
+    def test_stessi_byte_in_altro_percorso_non_cambiano_la_chiave(self) -> None:
+        copia = self.base / "copia.m4a"
+        copia.write_bytes((self.base / "a.m4a").read_bytes())
+        self.assertEqual(self._chiave(), self._chiave(audio_path=copia))
+
+    def test_audio_stesso_con_estensione_diversa_cambia_la_chiave(self) -> None:
+        wav = self.base / "a.wav"
+        wav.write_bytes((self.base / "a.m4a").read_bytes())
+        self.assertNotEqual(self._chiave(), self._chiave(audio_path=wav))
 
     def test_cambia_se_cambia_l_encoder(self) -> None:
         self.assertNotEqual(self._chiave(), self._chiave(encoder="h264_nvenc"))
