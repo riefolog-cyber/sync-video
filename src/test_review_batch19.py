@@ -377,9 +377,12 @@ class TestTimelineESemantica(unittest.TestCase):
             3: [(20.0, False)],
         }
         risultato = timeline._risolvi_mentioni_implicite(kinds, [(15.0, False)], 5)
-        for lista in risultato.values():
-            self.assertEqual(len(lista), len(set(lista)))
-            self.assertEqual(lista, sorted(lista, key=lambda e: e[0]))
+        # Asserire solo unicita'/ordine passava anche con un'implementazione
+        # che non assegnava affatto la menzione implicita.
+        self.assertEqual(
+            risultato,
+            {2: [(10.0, False)], 3: [(15.0, False), (20.0, False)]},
+        )
 
     def test_riuso_parziale_porta_il_costo_dei_vettori_riusati(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

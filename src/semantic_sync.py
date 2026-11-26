@@ -138,8 +138,13 @@ def embed_seconds() -> float:
 
 def reset_embed_cache() -> None:
     """Svuota memo e indice di processo della cache embedding (usato dai test)."""
+    global _EMBED_SECONDS, _MODEL_LOAD_SECONDS
     _EMBED_MEMO.clear()
     invalida_indice_embedding()
+    # I contatori di tempo sono di MODULO: senza azzerarli, due main() nello
+    # stesso processo sommano i secondi della prima run nella seconda.
+    _EMBED_SECONDS = 0.0
+    _MODEL_LOAD_SECONDS = 0.0
 
 
 def invalida_indice_embedding() -> None:
@@ -2385,7 +2390,7 @@ REFINE_PERTURBATION_SCALE = 1.5
 # ``slide`` della voce, quindi la diagnostica visiva e' invariata nel caso
 # normale. Accumula fra le chiamate della stessa run tenendo l'ULTIMA decisione
 # per chiave, che e' quella applicata.
-_REFINE_DIAGNOSTICS: dict[int, dict[str, object]] = {}
+_REFINE_DIAGNOSTICS: dict[tuple[str, int], dict[str, object]] = {}
 
 
 def refine_diagnostics() -> list[dict[str, object]]:
@@ -2427,7 +2432,11 @@ def _record_refine(key: int, slide: int, **fields: object) -> None:
     voce: dict[str, object] = {"slide": slide, **fields}
     if key != slide:
         voce["indice"] = key
-    _REFINE_DIAGNOSTICS[slide] = voce
+    # Due occorrenze della STESSA slide (--skip-slides) hanno indici diversi
+    # e confini diversi: tenerle separate evita che la seconda decisione
+    # cancelli la prima dal report.
+    chiave_interna = ("idx", key) if key != slide else ("slide", slide)
+    _REFINE_DIAGNOSTICS[chiave_interna] = voce
 
 
 def _refine_wins_under_perturbation(
@@ -2596,7 +2605,10 @@ def refine_segment_boundaries(
             # attuale (serve come termine di confronto).
             wlo, whi = window
             lo = max(float(out[i - 1]["start"]) + min_segment_seconds, min(float(wlo), t_current))
-            hi = min(float(out[i]["end"]) - min_segment_seconds, max(float(whi), t_current))
+            # `whi` e' il limite superiore EVIDENZIATO dai frame: estenderlo
+            # fino a `t_current` faceva scegliere un confine AFTER il frame
+            # che lo contraddice, e la riparazione non risolveva niente.
+            hi = min(float(out[i]["end"]) - min_segment_seconds, float(whi))
         if hi <= lo:
             _record_refine(
                 key, int(out[i]["slide"]),
@@ -3039,7 +3051,11 @@ def repair_segments_from_frame_mismatches(
             hi = min(float(out[idx]["end"]) - min_segment_seconds, current + max_shift_seconds)
         if target in ranges:
             rlo, rhi = ranges[target]
-            ranges[target] = (min(rlo, lo), max(rhi, hi))
+            # PIU' frame che contraddicono lo stesso confine restringono la
+            # finestra, non l'allargano: prendere il massimo dei limiti
+            # superiori perdeva il frame piu' vincolante e la riparazione
+            # continuava a sbagliare.
+            ranges[target] = (max(rlo, lo), min(rhi, hi))
         else:
             ranges[target] = (lo, hi)
             evidence[target] = {"shown": shown, "frame_time": round(time, 1)}

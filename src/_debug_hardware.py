@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import hardware as hw
@@ -221,6 +222,7 @@ def main() -> int:
     print("\n" + "=" * 66)
     print("4. L'ENCODER SCELTO PRODUCE UN VIDEO REALE")
     print("=" * 66)
+    tmp_ctx: Any = None
     try:
         from video import _build_video_ffmpeg
 
@@ -255,11 +257,13 @@ def main() -> int:
         # Ogni `controlli.py` creava due cartelle in %TEMP% e non le
         # rimuoveva mai: la diagnostica non puo' essere la causa di crescita
         # infinita del disco.
-        tmp_ctx.cleanup()
+        if tmp_ctx is not None:
+            tmp_ctx.cleanup()
 
     print("\n" + "=" * 66)
     print("5. RIPIEGO SE L'ENCODER ACCELERATO FALLISCE A RUNTIME")
     print("=" * 66)
+    tmp2_ctx: Any = None
     try:
         import video
 
@@ -301,7 +305,8 @@ def main() -> int:
         print(f"   [KO ] ripiego: {type(e).__name__}: {e}")
         risultati.append(("ripiego su libx264", False))
     finally:
-        tmp2_ctx.cleanup()
+        if tmp2_ctx is not None:
+            tmp2_ctx.cleanup()
 
     print("\n" + "=" * 66)
     risultati.append(("mypy cross-platform", _mypy_cross_platform()))

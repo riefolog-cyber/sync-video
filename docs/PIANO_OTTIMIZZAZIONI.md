@@ -5,10 +5,9 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 23 (capitoli leggibili, regressioni del batch 22,
-mapping ancore e audit dei test), dopo il batch 22. Il piano resta un registro
-delle decisioni: i dettagli di ogni cambiamento sono nei messaggi di commit e
-nei test.
+Ultimo aggiornamento: batch 24 (capitoli, segnali GPU per audio, riparazione
+guidata e CI), dopo il batch 23. Il piano resta un registro delle decisioni: i
+dettagli di ogni cambiamento sono nei messaggi di commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -273,7 +272,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1608 test).
+`python -m unittest discover -s src -p "test_*.py"` (1619 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -813,6 +812,52 @@ OpenVINO su ogni macchina: corretti.
 Verifiche: `ruff` e `mypy` puliti (93 file, win32/linux/darwin), 1607 test
 verdi (14 nuovi), `controlli.py` 6/6 e debug hardware 17/17.
 
+## Batch 24 — capitoli, segnali e CI (2026-11)
+
+Settima revisione incrociata. Ventitré difetti, undici test nuovi. Il primo
+intervento e' stato pero' fuori dal codice: la CI del batch 23 e' morta per un
+**504 di Chocolatey** durante l'installazione di Tesseract, non per una
+regressione.
+
+**CI resiliente.** Il passo Tesseract riprova tre volte e, se il feed resta
+giu', usa winget con `--silent`; il controllo finale e' sul binario e sul suo
+exit code, non sull'exit code di choco e non su una pipe di PowerShell che
+avrebbe mascherato un binario rotto.
+
+**I capitoli finalmente leggibili.** Il batch 23 correggeva solo gli errori
+che diventavano "Slide N": le parole con errori minuscoli ("cunosita'" contro
+"curiosita") passavano ancora, e i titoli ufficiali in maiuscolo (NASA, FAQ)
+venivano distrutti dalla penalità. Ora il confronto usa la similarita' fra
+parole OCR e parole dette, gli acronimi sono riconosciuti come titoli veri, e
+l'aggiunta di lettere/spazi non richiede piu' una radice comune di 4 caratteri.
+
+**Segnale GPU per audio.** Il file-segnale e' unico ma ora contiene PIU'
+record: un crash su un podcast non impedisce a un secondo podcast di
+registrare il proprio, e cancellare il proprio non tocca gli altri. Qualsiasi
+eccezione Python sulla GPU (non solo Ctrl+C) cancella il segnale, perche' e'
+un ripiego, non un crash nativo. Il marcatore dell'ID OpenVINO corrotto non
+fa piu' crashare setup/prefetch.
+
+**Riparazione e stato.** La finestra della riparazione guidata dai frame non
+si estende piu' oltre il tempo del frame che la contraddice, e piu' mismatch
+sullo stesso confine restringono la finestra invece di allargarla. La
+diagnostica del refine tiene distinte le occorrenze della stessa slide
+(`--skip-slides`). `--dry-run` marchia il report come "senza video" e
+`--review` rifiuta di estrarre frame da un video vecchio. Con `--strict-sync`,
+se la riparazione ha spostato i confini e la verifica resta incompleta, SRT,
+capitoli e riepilogo vengono riscritti PRIMA dell'abort. I contatori di tempo
+e il DPI effettivo si azzerano fra due `main()` nello stesso processo.
+
+**Test che realmente verificano.** Cinque test di regressione dei batch
+precedenti erano vacui: il fallback CUDA non raggiungeva il ramo CUDA su CI,
+il controllo di `faster_whisper` non raggiungeva il suo ramo, l'ancora
+implicita non veniva controllata, il cleanup del PPTX non verificava la
+chiamata al converter, e la frase del riepilogo era scritta a mano nel test.
+Ora passano dalla funzione di produzione, con i probe forzati.
+
+Verifiche: `ruff` e `mypy` puliti (94 file, win32/linux/darwin), 1619 test
+verdi (11 nuovi), `controlli.py` 6/6 e debug hardware 17/17.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -908,5 +953,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio (batch 23): ruff pulito, mypy pulito su tre
-piattaforme, 1608 test verdi, `_debug_hardware.py` e controlli 6/6.
+Stato all'ultimo lancio (batch 24): ruff pulito, mypy pulito su tre
+piattaforme, 1619 test verdi, `_debug_hardware.py` e controlli 6/6.

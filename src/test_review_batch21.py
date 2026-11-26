@@ -134,13 +134,17 @@ class TestTrascrizione(unittest.TestCase):
                 return_value=([], mock.Mock(language="it", language_probability=0.99)),
             ),
             mock.patch.object(transcription, "openvino_usable", return_value=False),
+            # Senza questo patch, su CI `cuda_runtime_lib_mancante` ritorna
+            # il nome di una DLL e il ramo CUDA non veniva mai raggiunto.
+            mock.patch.object(transcription, "cuda_runtime_lib_mancante", return_value=None),
+            mock.patch.object(transcription, "_warn_cpu_transcription") as avviso_cpu,
             mock.patch.object(transcription, "log") as log,
         ):
             transcription.transcribe_with_whisper(
                 Path("podcast.m4a"), device="cuda", openvino_available=True
             )
-        messaggi = " ".join(str(chiamata) for chiamata in log.warning.call_args_list)
-        self.assertIn("CPU", messaggi)
+        avviso_cpu.assert_called_once_with("small")
+        self.assertEqual([c["device"] for c in chiamate], ["cuda", "cpu"])
         self.assertFalse(any("iGPU OpenVINO" in str(c) for c in log.info.call_args_list))
 
 
@@ -159,9 +163,14 @@ class TestSetupEDiagnostica(unittest.TestCase):
             mock.patch.object(machine_setup, "detect_gpus", return_value=["NVIDIA RTX 4060"]),
             mock.patch.object(machine_setup, "_write_hardware"),
             mock.patch.object(machine_setup, "recommend", return_value=dict(rec)),
-            mock.patch("importlib.util.find_spec", return_value=None),
+            # Su CI non c'e' CUDA: senza forzare il probe, il ritorno a CPU
+            # veniva dal ramo "CUDA non disponibile" e il test era vacuo.
+            mock.patch.object(machine_setup, "cuda_available", return_value=True),
+            mock.patch.object(machine_setup, "cuda_runtime_lib_mancante", return_value=None),
+            mock.patch("importlib.util.find_spec", return_value=None) as find_spec,
         ):
             machine_setup.machine_setup(args, force=True)
+        find_spec.assert_called_once_with("faster_whisper")
         self.assertEqual(args.whisper_device, "cpu")
         self.assertEqual(args.whisper_compute_type, "int8")
 
@@ -333,9 +342,8 @@ class TestScriptELauncher(unittest.TestCase):
         motif = re.search(r"Get-Sim.*?'([^']*somiglianza[^']*)'", testo, re.DOTALL)
         self.assertIsNotNone(motif)
         assert motif is not None
-        riga = (
-            "ALTO — il parlato somiglia chiaramente alla sua slide "
-            "(punteggio 1.477 contro una soglia di 0.450; somiglianza media 0.836)"
+        riga = main._quality_phrase(
+            {"avg_z": 1.477, "min_avg_z": 0.450, "avg_sim": 0.836}, False
         )
         trovato = re.search(motif.group(1), riga)
         self.assertIsNotNone(trovato)

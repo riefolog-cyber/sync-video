@@ -142,6 +142,7 @@ from machine_setup import _video_vendor, detect_gpus, machine_setup
 from ocr import (
     PRESENTATION_SUFFIXES,
     _set_dpi_effettivo,
+    azzera_dpi_effettivo,
     convert_presentation_to_pdf,
     extract_slides_text_ocr,
     ultimo_dpi_effettivo,
@@ -193,6 +194,7 @@ from semantic_sync import (
     refine_diagnostics,
     refine_timeline_from_words,
     repair_segments_from_frames_from_words,
+    reset_embed_cache,
     reset_refine_diagnostics,
     reset_weak_signal_flag,
     semantic_timeline_from_words,
@@ -3241,6 +3243,9 @@ def main(argv: list | None = None) -> None:
     # una SECONDA main() nella stessa interpreter: il report direbbe
     # "trascrizione ripresa" anche se questa run e' partita da capo.
     azzera_ripresa()
+    # Anche il DPI effettivo e' stato di modulo: senza azzerarlo, una seconda
+    # main() che prende le slide dalla cache erediterebbe quello della prima.
+    azzera_dpi_effettivo()
 
     # Versione subito e senza effetti: deve funzionare anche su un PC rotto.
     # Il numero si calcola UNA volta: `git describe` e' un processo, e la run
@@ -4524,6 +4529,7 @@ def main(argv: list | None = None) -> None:
         # SOLO su questa chiamata (altrimenti una rilevazione precedente
         # della stessa run lo falserebbe).
         reset_weak_signal_flag()
+        reset_embed_cache()
         # Due main() nello stesso processo non devono ereditare le decisioni
         # sul raffinamento della run precedente.
         reset_refine_diagnostics()
@@ -5183,7 +5189,12 @@ def main(argv: list | None = None) -> None:
         # il controllo incrociato appena aggiunto a `mentions_off` deve finire
         # su disco anche nel percorso default (prima la seconda scrittura
         # avveniva solo con --verify-video, e con --dry-run non avveniva mai).
-        _save_sync_report(sync_report)
+        if args.dry_run:
+            # La timeline e' appena stata riscritta ma il video NON e'
+            # stato generato: `--review` non deve estrarre frame da un video
+            # vecchio seguendo questi tempi (stesso problema di --preview).
+            sync_report["senza_video"] = True
+            _save_sync_report(sync_report)
 
         # Riepilogo leggibile accanto al video: il referto JSON resta tecnico.
         from riepilogo import scrivi_riepilogo
@@ -5407,6 +5418,21 @@ def main(argv: list | None = None) -> None:
                 sync_notes["refine"] = refine_refresh
                 sync_report["refine"] = refine_refresh
             _save_sync_report(sync_report)
+            # Riscrivere SOVRATITOLI/capitoli/riepilogo PRIMA di un eventuale
+            # abort --strict-sync: se la riparazione ha spostato i confini e
+            # la verifica resta incompleta, i tre file devono comunque
+            # descrivere la timeline del video appena rigenerato, non quella
+            # vecchia che l'utente leggerebbe dopo l'errore.
+            if repairs and durations != durations_prima_riparazione:
+                _scrivi_sottotitoli_mostrati(
+                    Path(args.output_video),
+                    words_raw,
+                    durations,
+                    slide_ids,
+                    slide_texts,
+                    total_duration,
+                )
+                scrivi_riepilogo(sync_report, Path(args.output_video), dry_run=args.dry_run)
             if args.strict_sync and frame_check.get("incomplete"):
                 _abort(
                     "Verifica frame incompleta: alcune slide non erano leggibili "
@@ -5422,22 +5448,6 @@ def main(argv: list | None = None) -> None:
                     "È stato generato ma non è affidabile: controlla "
                     ".cache/sync_report.json e i frame in .cache/verify_frames/."
                 )
-
-        # L'auto-riparazione ha spostato i confini e rigenerato il video: i
-        # capitoli e il riepilogo scritti prima descrivevano la timeline
-        # vecchia. Riscriverli solo se le durate sono cambiate davvero, cosi'
-        # quando la riparazione non tocca niente i file restano scritti una
-        # volta sola (e il report appena salvato e' gia' quello nuovo).
-        if repairs and durations != durations_prima_riparazione:
-            _scrivi_sottotitoli_mostrati(
-                Path(args.output_video),
-                words_raw,
-                durations,
-                slide_ids,
-                slide_texts,
-                total_duration,
-            )
-            scrivi_riepilogo(sync_report, Path(args.output_video), dry_run=args.dry_run)
 
         # --- Riepilogo finale ---
         t_total = time.time() - t_total_start

@@ -91,17 +91,21 @@ class TestRegressioniBatch22(unittest.TestCase):
             pptx.write_bytes(b"pptx")
             audio = base / "podcast.m4a"
             audio.write_bytes(b"audio")
-            args = _Args(pdf_path=pptx, audio=str(audio))
             with (
                 mock.patch.object(main, "bootstrap"),
                 mock.patch.object(
-                    main, "convert_presentation_to_pdf", side_effect=RuntimeError("nessun converter")
-                ),
+                    main,
+                    "convert_presentation_to_pdf",
+                    side_effect=RuntimeError("nessun converter"),
+                ) as converti,
                 mock.patch("cache_maintenance.clean_cache", return_value={}) as pulizia,
+                self.assertLogs("slide2video", level="WARNING") as log,
             ):
                 main.main(["--clean-cache", "--yes", "--pdf", str(pptx), "--audio", str(audio)])
+            self.assertEqual(converti.call_count, 1)
             self.assertEqual(pulizia.call_count, 1)
-            self.assertIs(args, args)
+            self.assertEqual(pulizia.call_args.kwargs["active_keys"], set())
+            self.assertIn("Pulizia piena", "\n".join(log.output))
 
     def test_openvino_esplicito_preserva_segnale_di_altro_audio(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

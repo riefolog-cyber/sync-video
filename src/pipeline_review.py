@@ -126,13 +126,14 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
             report_path,
         )
         return 1
-    if report.get("anteprima"):
-        # `--preview` ha aggiornato il report ma NON ha generato il video:
-        # estrarre frame da un video vecchio seguendo i tempi nuovi darebbe
-        # anteprime e giudizi sbagliati.
+    if report.get("anteprima") or report.get("senza_video"):
+        # `--preview`/`--dry-run` hanno aggiornato il report ma NON hanno
+        # generato il video: estrarre frame da un video vecchio seguendo i
+        # tempi nuovi darebbe anteprime e giudizi sbagliati.
         log.error(
-            "\n   [Revisione] Il report in cache viene da --preview: nessun video "
-            "e' stato generato con quella timeline. Rilancia senza --preview."
+            "\n   [Revisione] Il report in cache viene da --preview/--dry-run: "
+            "nessun video e' stato generato con quella timeline. Rilancia la "
+            "pipeline completa prima di rivedere i confini."
         )
         return 3
     segments = cast("list[dict[str, object]]", report.get("segments") or [])

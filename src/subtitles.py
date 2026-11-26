@@ -17,6 +17,7 @@ silenzio).
 
 from __future__ import annotations
 
+import difflib
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -314,17 +315,23 @@ def _qualita_titolo(riga: str) -> float:
         # Tuoni di lettere maiuscole ("IEEARSI DIRLA", "SFFSITE") e frammenti
         # tutti maiuscoli di 2-4 lettere ("ST", "INTE", "RRAR") non sono
         # titoli: sono OCR che ha letto male un carattere decorativo.
-        maiuscole = sum(
-            1 for p in parole if len(p) >= 2 and p.isalpha() and p.isupper() and p != "IO"
-        )
-        punteggio *= 1.0 - 0.7 * (maiuscole / len(parole))
+        # Un titolo SCRITTO tutto in maiuscolo (NASA, FAQ, BISOGNI PRIMARI)
+        # e' legittimo: si penalizzano solo i tuoni maiuscoli MISTI a testo
+        # minuscolo, tipici dell'OCR che ha letto male una slide decorativa.
+        tutte_maiuscole = all(p.isupper() for p in parole if any(c.isalpha() for c in p))
+        if not tutte_maiuscole:
+            maiuscole = sum(
+                1 for p in parole if len(p) >= 2 and p.isalpha() and p.isupper() and p != "IO"
+            )
+            punteggio *= 1.0 - 0.7 * (maiuscole / len(parole))
         # Tre consonanti consecutive in una parola italiana sono quasi sempre
         # un errore di lettura (inggtanno, cunosita' e' piu' sottile ma almeno
         # le sequenze rumorose vengono penalizzate).
         rumorose = sum(
-            1 for p in parole if re.search(r"[bcdfghjklmnpqrstvwxyz]{4,}", p.lower())
+            1 for p in parole
+            if re.search(r"[bcdfghjklmnpqrstvwxyz]{3,}|[aeiou]{3,}", p.lower())
         )
-        punteggio *= 1.0 - 0.35 * (rumorose / len(parole))
+        punteggio *= 1.0 - 0.45 * (rumorose / len(parole))
     return max(0.0, min(1.0, punteggio))
 
 
@@ -355,6 +362,10 @@ def _titolo_capitolo(testo: str, numero: int) -> str:
     compatto = " ".join(_miglior_riga(str(testo or "")).split())
     if not compatto:
         return f"Slide {numero}"
+    # Un acronimo ("NASA", "FAQ") ha meno di 5 caratteri ma e' un titolo
+    # ufficiale: non va confuso con una riga di rumore OCR.
+    if compatto.isalpha() and compatto.isupper() and len(compatto) >= 2:
+        return compatto
 
     # Prima frase/segmento (solo dopo i primi caratteri, altrimenti un titolo
     # che comincia con un punto verrebbe buttato via).
@@ -400,6 +411,32 @@ def _titolo_unito(titoli: Sequence[str]) -> str:
     if " " in tagliato:
         tagliato = tagliato.rsplit(" ", 1)[0]
     return tagliato.rstrip(" /") + "…"
+
+
+def _simili(a: str, b: str) -> bool:
+    """Similarita' fra due parole: youngest typo OCR vs parola detta."""
+    return _a_una_lettera(a, b) or difflib.SequenceMatcher(None, a, b).ratio() >= 0.72
+
+
+def _a_una_lettera(a: str, b: str) -> bool:
+    """Vero se due parole differiscono di una sola lettera (OCR typo)."""
+    a, b = a.strip(" .,;:'\""), b.strip(" .,;:'\"")
+    if a == b or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b, strict=True)) == 1
+    corta, lunga = (a, b) if len(a) < len(b) else (b, a)
+    i = j = 0
+    mentre = 0
+    while i < len(corta) and j < len(lunga):
+        if corta[i] == lunga[j]:
+            i += 1
+        else:
+            mentre += 1
+            if mentre > 1:
+                return False
+        j += 1
+    return True
 
 
 def _titolo_dal_parlato(
@@ -469,22 +506,29 @@ def build_capitoli(
             # Preferire il parlato quando e' leggibile: l'OCR di slide
             # infografiche produce testo "plausibile" (tutte lettere) ma
             # sbagliato, quindi un confronto solo numerico non basta.
-            # Un titolo OCR breve e' affidabile ("Prima"): non si sostituisce
-            # con le prime parole della narrazione solo perche' sono piu'
-            # lunghe. Si richiedono almeno 3 parole per parte e almeno una
-            # radice in comune (gli errori OCR lasciano di solito lo stemma:
-            # "inggtanno"/"inganno", "cunosita'"/"curiosita'").
-            radici_ocr = {p[:4].lower() for p in titolo_ocr.split() if len(p) > 3}
-            radici_parlato = {p[:4].lower() for p in parlato.split() if len(p) > 3}
+            # La radice comune NON basta: "cunosita'" e "curiosita'" non
+            # condividono i primi 4 caratteri. Si confrontano le parole con
+            # distanza di edit 1: se una parola dell'OCR e' quasi uguale a
+            # una detta, l'OCR ha sbagliato e la trascrizione e' autorevole.
+            # Un titolo OCR breve e' comunque affidabile SE non c'e' questo
+            # confronto (non si sostituisce "Prima" con la narrazione).
+            parole_ocr = [p.lower().strip(" .,;:'\"") for p in titolo_ocr.split()]
+            parole_dette = [p.lower().strip(" .,;:'\"") for p in parlato.split()]
+            coincide = any(
+                _simili(a, b) for a in parole_ocr for b in parole_dette
+            )
+            radici_ocr = {p[:4] for p in parole_ocr if len(p) > 3}
+            radici_parlato = {p[:4] for p in parole_dette if len(p) > 3}
             if (
                 q_parlato >= 0.6
                 and q_parlato >= q_ocr - 0.05
                 and not parlato.startswith("Slide ")
                 and (
                     titolo_ocr.startswith("Slide ")
+                    or coincide
                     or (
-                        len(titolo_ocr.split()) >= 3
-                        and len(parlato.split()) >= 3
+                        len(parole_ocr) >= 3
+                        and len(parole_dette) >= 3
                         and radici_ocr & radici_parlato
                     )
                 )

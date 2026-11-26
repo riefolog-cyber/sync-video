@@ -319,12 +319,44 @@ jobs:
         # verde senza aver verificato niente, come succedeva su Linux.
         shell: pwsh
         run: |
-          choco install tesseract -y --no-progress
-          if (-not (Get-Command tesseract -ErrorAction SilentlyContinue)) {
-            Write-Error "Tesseract non disponibile dopo choco: i test OCR si skipperebbero."
+          # Il 25/11/2026 il feed di Chocolatey ha risposto 504 su tesseract:
+          # choco e' uscito 0 senza installare niente e il job e' morto qui.
+          # Si riprova e, se il feed resta giu', si usa winget (UB Mannheim):
+          # il controllo finale e' sempre sul BINARIO, non su exit code di choco.
+          $trovato = $false
+          for ($tentativo = 1; $tentativo -le 3 -and -not $trovato; $tentativo++) {
+            Write-Host "Tesseract: tentativo $tentativo/3 con choco"
+            choco install tesseract -y --no-progress --ignore-http-cache
+            if (Get-Command tesseract -ErrorAction SilentlyContinue) { $trovato = $true; break }
+
+            Write-Host "::warning::choco senza risultato al tentativo $tentativo, provo winget."
+            winget install --id UB-Mannheim.TesseractOCR -e --accept-source-agreements --accept-package-agreements --silent
+            if (-not $trovato) {
+              $candidati = @(
+                "C:\Program Files\Tesseract-OCR\tesseract.exe",
+                "C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"
+              )
+              $eseguibile = $candidati | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+              if ($eseguibile) {
+                # winget installa ma non aggiorna il PATH della sessione corrente.
+                Add-Content -Path $env:GITHUB_PATH -Value (Split-Path -Parent $eseguibile)
+                $env:PATH = "$(Split-Path -Parent $eseguibile);$env:PATH"
+                $trovato = $true
+              }
+            }
+            if (-not $trovato) { Start-Sleep -Seconds 10 }
+          }
+          if (-not $trovato) {
+            Write-Error "Tesseract non disponibile dopo 3 tentativi (choco + winget): i test OCR si skipperebbero."
             exit 1
           }
-          tesseract --version | Select-Object -First 1
+          # Nessuna pipe: in PowerShell il codice sarebbe quello di Select-Object,
+          # e un binario rotto passerebbe il setup per fallire dopo nei test.
+          tesseract --version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "tesseract presente ma non eseguibile (uscita $LASTEXITCODE)."
+            exit 1
+          }
 
       - name: ffmpeg nel PATH, verificato
         # Misurato il 19/10/2026: il feed di Chocolatey ha risposto 504 sul

@@ -355,12 +355,15 @@ def openvino_model_id_ok(model_dir: Path, model_id: str) -> bool:
     Una cartella senza marcatore e' un IR storico, compatibile col default.
     """
     try:
-        salvato = cast(
-            "dict[str, object]",
-            json.loads((model_dir / _OPENVINO_ID_FILE).read_text(encoding="utf-8")),
-        )
+        grezzo = json.loads((model_dir / _OPENVINO_ID_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return True
+    if not isinstance(grezzo, dict):
+        # Marcatore corrotto: non e' una prova di un ID diverso. Si tratta
+        # come "non noto" (cartella storica) invece di far crashare setup,
+        # prefetch e trascrizione con AttributeError.
+        return True
+    salvato = cast("dict[str, object]", grezzo)
     return salvato.get("model_id") == model_id
 
 
@@ -383,6 +386,8 @@ def download_openvino_model(model_dir: Path, model_id: str = DEFAULT_OPENVINO_MO
             salvato = json.loads((model_dir / _OPENVINO_ID_FILE).read_text(encoding="utf-8"))
             marcatore_presente = True
         except (OSError, ValueError):
+            salvato, marcatore_presente = {}, False
+        if not isinstance(salvato, dict):
             salvato, marcatore_presente = {}, False
         # Cartella scritta prima che il marcatore esistesse: e' il modello di
         # default, non un ID diverso. Riscaricarla farebbe perdere ore di
@@ -735,12 +740,44 @@ def _openvino_ram_need_bytes(model_dir: Path | None) -> int:
     return _GPU_MIN_NEED_BYTES
 
 
-def _read_attempt() -> dict[str, Any] | None:
-    """Il tentativo precedente incompiuto, o None se non ce n'e' / illeggibile."""
+def _read_attempts() -> list[dict[str, Any]]:
+    """Tutti i segnali di tentativi GPU ancora incompiuti.
+
+    Il file e' uno solo, ma puo' contenere piu' record: il segnale di un
+    podcast non deve impedire a un SECONDO podcast di registrare il proprio
+    crash. Il formato vecchio (un dict solo) resta leggibile.
+    """
     try:
-        return cast("dict[str, Any]", json.loads(_openvino_attempt_path().read_text(encoding="utf-8")))
+        dati = json.loads(_openvino_attempt_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
+        return []
+    if isinstance(dati, dict):
+        precedent = dati.get("tentativi")
+        if isinstance(precedent, list):
+            return [r for r in precedent if isinstance(r, dict)]
+        return [dati]
+    if isinstance(dati, list):
+        return [r for r in dati if isinstance(r, dict)]
+    return []
+
+
+def _scrivi_attempts(records: list[dict[str, Any]]) -> None:
+    with contextlib.suppress(OSError):
+        atomic_write_text(
+            _openvino_attempt_path(),
+            json.dumps({"tentativi": records}, ensure_ascii=False),
+        )
+
+
+def _read_attempt() -> dict[str, Any] | None:
+    """Il primo tentativo incompiuto (compatibilita' con i chiamanti storici)."""
+    records = _read_attempts()
+    return records[0] if records else None
+
+
+def _read_attempt_for(audio_path: Path) -> dict[str, Any] | None:
+    """Il segnale di QUESTO audio, se c'e'."""
+    return next((r for r in _read_attempts() if _same_audio(r, audio_path)), None)
 
 
 def _write_attempt(audio_path: Path) -> None:
@@ -752,24 +789,20 @@ def _write_attempt(audio_path: Path) -> None:
     scrittura non era protetta: un OSError qui abbatteva la run PRIMA di
     chiamare OpenVINO, cioe' il modo peggiore di perdere minuti di setup.
     """
-    # Il segnale e' unico in cache: sovrascrivere quello di un ALTRO audio
-    # farebbe sparire il suo "GPU ha fatto crash" quando l'utente forza
-    # OpenVINO su un secondo podcast.
-    if _read_attempt() is not None and not _same_audio(_read_attempt(), audio_path):
-        return
+    # Si AGGIUNGE il record di questo audio senza toccare gli altri: cosi'
+    # anche un secondo podcast puo' registrare il proprio crash GPU.
     with contextlib.suppress(OSError):
         info = audio_path.stat()
-        atomic_write_text(
-            _openvino_attempt_path(),
-            json.dumps(
-                {
-                    "audio": str(audio_path),
-                    "size": info.st_size,
-                    "mtime": info.st_mtime,
-                    "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                }
-            ),
+        records = [r for r in _read_attempts() if not _same_audio(r, audio_path)]
+        records.append(
+            {
+                "audio": str(audio_path),
+                "size": info.st_size,
+                "mtime": info.st_mtime,
+                "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
         )
+        _scrivi_attempts(records)
 
 
 def _clear_attempt(audio_path: Path | None = None) -> None:
@@ -781,10 +814,18 @@ def _clear_attempt(audio_path: Path | None = None) -> None:
     il proprietario perdeva la protezione e al prossimo run ripeteva il
     segfault. Con `audio_path=None` si mantiene il vecchio comportamento.
     """
-    if audio_path is not None and not _same_audio(_read_attempt(), audio_path):
+    if audio_path is None:
+        with contextlib.suppress(OSError):
+            _openvino_attempt_path().unlink(missing_ok=True)
         return
-    with contextlib.suppress(OSError):
-        _openvino_attempt_path().unlink(missing_ok=True)
+    # Si rimuove SOLO il record di questo audio: un segnale di crash di un
+    # altro podcast resta intatto.
+    records = [r for r in _read_attempts() if not _same_audio(r, audio_path)]
+    if records:
+        _scrivi_attempts(records)
+    else:
+        with contextlib.suppress(OSError):
+            _openvino_attempt_path().unlink(missing_ok=True)
 
 
 def _same_audio(segnalato: object, audio_path: Path) -> bool:
@@ -844,7 +885,7 @@ def decide_transcriber(
             f"RAM libera {libera / 1024**3:.1f} GB sotto il fabbisogno "
             f"({necessari / 1024**3:.1f} GB per caricare il modello sulla GPU)",
         )
-    if cartella is not None and _same_audio(_read_attempt(), audio_path):
+    if cartella is not None and _same_audio(_read_attempt_for(audio_path), audio_path):
         return (
             "whisper",
             "l'ultimo tentativo OpenVINO su questo audio non e' finito "
@@ -956,9 +997,11 @@ def transcribe_audio(
                     language=language,
                     device=openvino_device,
                 )
-            except (KeyboardInterrupt, SystemExit):
-                # Un Ctrl+C e' un abort dell'utente, non un crash della GPU:
-                # il segnale non deve avvelenare la run successiva.
+            except BaseException:
+                # Qualsiasi eccezione PYTHON (compreso Ctrl+C) dimostra che
+                # il processo e' vivo: il segnale di "crash dentro il nativo"
+                # sarebbe falso e condannerebbe la run dopo alla CPU. Un vero
+                # segfault non lancia eccezioni, quindi lascia il segnale.
                 _clear_attempt(audio_path)
                 raise
             # Il segnale resta se il processo e' morto dentro il nativo
@@ -978,7 +1021,7 @@ def transcribe_audio(
                 language=language,
                 device=openvino_device,
             )
-        except (KeyboardInterrupt, SystemExit):
+        except BaseException:
             _clear_attempt(audio_path)
             raise
         _clear_attempt(audio_path)

@@ -618,6 +618,12 @@ def ultimo_dpi_effettivo() -> int | None:
     return _ULTIMO_DPI_EFFETTIVO
 
 
+def azzera_dpi_effettivo() -> None:
+    """Azzera il DPI di modulo: due main() non devono scambiarsi il valore."""
+    global _ULTIMO_DPI_EFFETTIVO
+    _ULTIMO_DPI_EFFETTIVO = None
+
+
 def _set_dpi_effettivo(dpi: int) -> None:
     """Ricorda il DPI effettivo (usato quando le slide arrivano dalla cache)."""
     global _ULTIMO_DPI_EFFETTIVO
