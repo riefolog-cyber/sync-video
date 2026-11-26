@@ -1079,39 +1079,32 @@ def transcribe_audio(
 _CHECKPOINT_OGNI_SEGMENTI = 50
 
 
-# Firme gia' calcolate in questa run: (percorso, dimensione, mtime) -> hash.
-# Il parziale si chiama con l'HASH del contenuto, non con il mtime: copiare
-# l'audio o toccarlo (touch) cambiava il nome del file e buttava via una
-# trascrizione buona. L'hash costa una lettura di due finestre da 256 KB, e
-# solo la prima volta per file.
-_FIRME: dict[tuple[str, int, int], str] = {}
-_FINESTRA_HASH = 256 * 1024
-
-
 def _firma_audio(audio_path: Path) -> str:
-    """Impronta stabile del CONTENUTO: nome + hash di inizio e fine + dimensione."""
+    """Impronta del CONTENUTO INTERO: due finestre potevano nascondere una
+    modifica nel mezzo e fare riattaccare parole di un altro audio.
+
+    Nessuna memoizzazione per (percorso, dimensione, mtime): con quegli stessi
+    valori un file sostituito riceveva la firma vecchia. Un MP4 da ~15 MB si
+    legge in pochi millisecondi.
+    """
     try:
         stat = audio_path.stat()
     except OSError:
         return audio_path.stem
-    chiave = (str(audio_path), stat.st_size, int(stat.st_mtime))
-    firma = _FIRME.get(chiave)
-    if firma is not None:
-        return firma
     try:
         h = hashlib.sha1(usedforsecurity=False)
         with open(audio_path, "rb") as fh:
-            h.update(fh.read(_FINESTRA_HASH))
-            if stat.st_size > _FINESTRA_HASH:
-                fh.seek(max(_FINESTRA_HASH, stat.st_size - _FINESTRA_HASH))
-                h.update(fh.read(_FINESTRA_HASH))
-        percorso = hashlib.sha1(str(audio_path.resolve()).encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
-        firma = f"{audio_path.stem}_{percorso}_{stat.st_size}_{h.hexdigest()[:16]}"
+            for blocco in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(blocco)
+        percorso = hashlib.sha1(
+            str(audio_path.resolve()).encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:12]
+        return f"{audio_path.stem}_{percorso}_{stat.st_size}_{h.hexdigest()[:16]}"
     except OSError:
-        percorso = hashlib.sha1(str(audio_path.resolve()).encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
-        firma = f"{audio_path.stem}_{percorso}_{stat.st_size}"
-    _FIRME[chiave] = firma
-    return firma
+        percorso = hashlib.sha1(
+            str(audio_path.resolve()).encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:12]
+        return f"{audio_path.stem}_{percorso}_{stat.st_size}"
 
 
 def percorso_parziale(audio_path: Path) -> Path:
@@ -1148,6 +1141,7 @@ def _salva_parziale(
             json.dumps(
                 {
                     "audio": str(audio_path),
+                    "firma": _firma_audio(audio_path),
                     "parole": len(parole),
                     "coperto_fino": round(float(coperto_fino), 3),
                     "params": params or {},
@@ -1280,6 +1274,15 @@ def _prepara_ripresa(
             "   [Trascrizione] Parziale di un altro audio (%s): lo lascio stare e "
             "decodifico tutto, per non cucire parole estranee.",
             audio_salvato,
+        )
+        return [], audio_path, 0.0
+    # Il percorso puo' essere lo stesso con il contenuto cambiato (stesso nome,
+    # stessa dimensione e mtime): la firma dell'intero file e' l'unica prova.
+    firma_salvata = str(dati.get("firma") or "")
+    if firma_salvata and firma_salvata != _firma_audio(audio_path):
+        log.info(
+            "   [Trascrizione] Parziale di un'altra versione dell'audio: lo "
+            "lascio stare e decodifico tutto, per non cucire parole estranee."
         )
         return [], audio_path, 0.0
     salvati = dati.get("params")

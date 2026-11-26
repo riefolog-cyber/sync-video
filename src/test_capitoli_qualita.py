@@ -189,22 +189,81 @@ class TestTitoliRiassuntivi(unittest.TestCase):
         self.assertEqual(capitoli, "0:00 Il DNA culturale del problema: sentenza dei jeans")
 
     def test_frase_generica_non_ripete_il_titolo(self) -> None:
-        testo = "Il doppio standard dell’Alcol ‘Il Contesto: L'uso dell'alcol nelle aule"
+        testo = "La commissione parlamentare: Commissione Parlamentare"
+        # Il candidato esiste ed e' abbastanza lungo: e' la dedup a scartarlo.
+        self.assertEqual(subtitles._sintesi_da_slide(testo, ""), "commissione parlamentare")
+        self.assertEqual(
+            subtitles.build_capitoli({1: 0.0}, [testo]),
+            "0:00 La commissione parlamentare",
+        )
+
+    def test_cognome_breve_entra_nella_sintesi(self) -> None:
+        testo = "Gli abusi nella scuola Il Caso (Rossi): Un uomo aggredisce la moglie."
+        self.assertEqual(
+            subtitles.build_capitoli({1: 0.0}, [testo]), "0:00 Gli abusi nella scuola: caso Rossi"
+        )
+
+    def test_caso_con_due_punti_lungo_non_perde_la_sintesi(self) -> None:
+        testo = (
+            "Il ‘Rapporto Altalenante'’ non è simmetrico | Il Caso: La Cassazione "
+            "annulla l'assoluzione d'appello che definiva anni di abusi."
+        )
         capitoli = subtitles.build_capitoli({1: 0.0}, [testo])
-        self.assertEqual(capitoli, "0:00 Il doppio standard dell’Alcol")
+        self.assertIn("cassazione", capitoli.lower())
+
+    def test_sintesi_non_lascia_virgolette_aperte(self) -> None:
+        testo = ("Il corpo della donna come argomento giudiziario "
+                 "Il Caso (La ‘scaltra peruviana’)")
+        titolo = subtitles.build_capitoli({1: 0.0}, [testo]).split(" ", 1)[1]
+        self.assertEqual(titolo.count("‘"), titolo.count("’"))
+
+    def test_ellissi_non_rimasta_in_mezzo_al_titolo(self) -> None:
+        testo = " ".join(["parola"] * 12) + " Il Caso (Castaldo/Matei)"
+        titolo = subtitles.build_capitoli({1: 0.0}, [testo]).split(" ", 1)[1]
+        self.assertNotIn("…:", titolo)
+        self.assertLessEqual(len(titolo), subtitles.MAX_CARATTERI_CAPITOLO)
+
+    def test_annuncio_lungo_rientra_nel_limite_youtube(self) -> None:
+        parole = [
+            {"word": "Passiamo", "start": 0.0},
+            {"word": "alla", "start": 0.1},
+            {"word": "slide", "start": 0.2},
+            {"word": "1.", "start": 0.3},
+        ]
+        parole += [
+            {"word": "argomento", "start": 0.4 + i * 0.1} for i in range(14)
+        ]
+        titolo = subtitles.build_capitoli({1: 0.0}, ["a b c d e f g"], words=parole).split(" ", 1)[1]
+        self.assertLessEqual(len(titolo), subtitles.MAX_CARATTERI_CAPITOLO)
+        self.assertTrue(titolo.endswith("…"))
 
     def test_senza_elemento_riassuntivo_il_titolo_resta(self) -> None:
         self.assertEqual(subtitles.build_capitoli({1: 0.0}, ["Titolo semplice"]), "0:00 Titolo semplice")
 
     def test_titolo_riassuntivo_rientra_nel_limite_youtube(self) -> None:
-        testo = (
-            "La vittima processata al posto degli imputati Il Caso "
-            "(J.L. contro Italia): La Corte Europea condanna l'Italia."
+        self.assertEqual(subtitles.MAX_CARATTERI_CAPITOLO, 100)
+        titolo = (
+            "La vittima processata al posto degli imputati davanti "
+            "alla corte europea dei diritti umani"
         )
-        titolo = subtitles.build_capitoli({1: 0.0}, [testo]).split(" ", 1)[1]
-        self.assertLessEqual(len(titolo), subtitles.MAX_CARATTERI_CAPITOLO)
-        self.assertTrue(titolo.endswith("Italia"))
-        self.assertFalse(titolo.endswith("…"))
+        out = subtitles._titolo_riassuntivo(titolo, "Il Caso (J.L. contro Italia)")
+        self.assertEqual(
+            out,
+            "La vittima processata al posto degli imputati davanti "
+            "alla corte europea: caso J.L. contro Italia",
+        )
+        self.assertLessEqual(len(out), 100)
+        self.assertFalse(out.endswith("…"))
+
+    def test_altri_motivi_di_sintesi(self) -> None:
+        self.assertEqual(
+            subtitles.build_capitoli({1: 0.0}, ["15 La via d’uscita: Dallo stereotipo alla competenza"]),
+            "0:00 La via d’uscita: dallo stereotipo alla competenza",
+        )
+        self.assertIn(
+            "tribunale di roma",
+            subtitles.build_capitoli({1: 0.0}, ["Un tema Il Fatto (Tribunale di Roma)"]).lower(),
+        )
 
 
 class TestFormatoFile(unittest.TestCase):

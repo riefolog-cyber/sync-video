@@ -326,6 +326,25 @@ def build_srt(
 _SEPARATORI_TITOLO = (". ", " - ", " \u2014 ", " \u2013 ", " | ", ": ", "; ", "?", "!")
 
 
+def _pulisci_virgolette(testo: str) -> str:
+    """Toglie le virgolette di apertura rimaste senza chiusura."""
+    out = testo.strip()
+    if out and out[-1] in "'‘“":
+        out = out[:-1].rstrip()
+    # «’» e' anche l'apostrofo italiano ("d’uscita"): si toglie solo «‘».
+    if out.count("‘") != out.count("’"):
+        out = out.replace("‘", "").strip()
+    return out
+
+
+def _tronca_titolo(testo: str, limite: int) -> str:
+    """Tronca a confine di parola, ellipsi compresa, entro `limite`."""
+    if len(testo) <= limite:
+        return testo
+    tagliato = testo[: limite - 1].rsplit(" ", 1)[0].rstrip(" ,;:-–—")
+    return (tagliato or testo[: limite - 1].rstrip()) + "…"
+
+
 def _qualita_titolo(riga: str) -> float:
     """Quanto una riga dell'OCR sembra testo vero, da 0 a 1.
 
@@ -503,19 +522,12 @@ def _titolo_da_frammento(frammento: str, numero: int) -> str:
         break
     out = " ".join(parole).strip(" .:;,-–—|\"'“”‘’")
     out = re.sub(r"\s+([,.;:'’])", r"\1", out)
-    # Virgolette di apertura rimaste senza chiusura (OCR che omette l'ultima).
-    if out and out[-1] in "'‘“":
-        out = out[:-1].rstrip()
-    # «’» e' anche l'apostrofo italiano ("d’uscita"): si toglie solo «‘».
-    if out.count("‘") != out.count("’"):
-        out = out.replace("‘", "").strip()
+    out = _pulisci_virgolette(out)
     if len(out) < 4 or sum(c.isalpha() for c in out) < 4:
         return f"Slide {numero}"
     if _qualita_titolo(out) < QUALITA_MINIMA_TITOLO:
         return f"Slide {numero}"
-    if len(out) > 70:
-        out = out[:70].rsplit(" ", 1)[0] + "…"
-    return out
+    return _tronca_titolo(out, MAX_CARATTERI_CAPITOLO)
 
 
 def _titolo_capitolo(testo: str, numero: int) -> str:
@@ -535,10 +547,7 @@ def _titolo_unito(titoli: Sequence[str]) -> str:
     titolo = " / ".join(t for t in titoli if t)
     if len(titolo) <= MAX_CARATTERI_CAPITOLO:
         return titolo
-    tagliato = titolo[:MAX_CARATTERI_CAPITOLO]
-    if " " in tagliato:
-        tagliato = tagliato.rsplit(" ", 1)[0]
-    return tagliato.rstrip(" /") + "…"
+    return _tronca_titolo(titolo.rstrip(" /"), MAX_CARATTERI_CAPITOLO)
 
 
 def _acronimo_plausibile(testo: str) -> bool:
@@ -699,7 +708,7 @@ def _titolo_da_annuncio(
             parole.pop(0)
         out = " ".join(parole).strip(" .,;:!?\"'“”‘’")
         if len(out) >= 6 and _qualita_titolo(out) >= QUALITA_MINIMA_TITOLO:
-            return out if len(out) <= MAX_CARATTERI_CAPITOLO else out[:MAX_CARATTERI_CAPITOLO] + "…"
+            return _tronca_titolo(out, MAX_CARATTERI_CAPITOLO)
     return ""
 
 
@@ -737,11 +746,11 @@ def _titolo_affidabile(titolo: str) -> bool:
 _MOTIVI_RIASSUNTO: tuple[tuple[re.Pattern[str], str, bool], ...] = (
     (re.compile(r"\b(Dallo stereotipo alla competenza)\b", re.I), "", True),
     (re.compile(r"\bIl Caso\s*\(([^)]{3,50})\)", re.I), "caso", False),
-    (re.compile(r"\bIl Caso:\s*([A-ZÀ-ÖØ-Þ][^.;]{3,60})", re.I), "", False),
-    (re.compile(r"Fatto\s*\(([^)]{3,40})\)", re.I), "", False),
+    (re.compile(r"\bIl Caso:\s*([A-ZÀ-ÖØ-Þ][^.;]{3,100})", re.I), "", False),
+    (re.compile(r"Fatto\s*\(([^)]{3,60})\)", re.I), "", False),
     (re.compile(r"\b(Sentenza dei Jeans|Commissione Parlamentare|"
                 r"Lettura Criminologica)\b", re.I), "", True),
-    (re.compile(r"\bIl Contesto:\s*([A-ZÀ-ÖØ-Þ][^.;]{3,60})", re.I), "", True),
+    (re.compile(r"\bIl Contesto:\s*([A-ZÀ-ÖØ-Þ][^.;]{3,100})", re.I), "", True),
 )
 
 
@@ -768,11 +777,23 @@ def _sintesi_da_slide(testo: str, titolo: str) -> str:
         # sessuali del padre..." non serve tutto.
         valore = re.split(r"\s+[—–]|,", valore)[0].strip(" .,;:()\"'“”‘’")
         valore = " ".join(valore.split())
-        if len(valore) < 4 or len(valore) > 60:
+        if len(valore) < 4:
             continue
-        # Un frammento che ripete una parola lunga del titolo non riassume nulla.
+        if len(valore) > 45:
+            valore = valore[:45].rsplit(" ", 1)[0].rstrip(" ,;:-–—")
+        valore = _pulisci_virgolette(valore)
+        if len(valore) < 4:
+            continue
+        # Se il frammento e' per meta' il titolo ripetuto, non riassume nulla:
+        # "il dna culturale del problema nazionale" dopo "Il DNA culturale
+        # del problema" e' rumore, mentre "caso Rossi" aggiunge l'informazione.
         parole_valore = parole_utili(valore)
-        nuove = [p for p in parole_valore if len(p) >= 6 and p not in parole_titolo]
+        if not parole_valore:
+            continue
+        ripetizione = len(parole_titolo & parole_valore) / len(parole_valore)
+        if ripetizione > 0.5:
+            continue
+        nuove = [p for p in parole_valore if p not in parole_titolo]
         if not nuove:
             continue
         sintesi = f"{prefisso} {valore}" if prefisso else valore
@@ -834,6 +855,7 @@ def build_capitoli(
         numero = int(numeri_slide[pos]) if numeri_slide is not None and pos < len(numeri_slide) else slide
         titolo_ocr = _titolo_capitolo(testo, numero)
         titolo = titolo_ocr
+        fonte_sintesi = testo
         if words is not None:
             # L'ultimo capitolo non ha una fine nota: si leggono le parole
             # fino a fine trascrizione, altrimenti rimarrebbe il titolo OCR
@@ -895,9 +917,14 @@ def build_capitoli(
                     titolo = annuncio
                 elif parlato_breve:
                     titolo = parlato
+            # Con OCR inaffidabile il titolo e' gia' la frase pronunciata: e'
+            # di per se' riassuntivo. Aggiungerci il parlato che segue darebbe
+            # narrazione ("Un uomo impugna le misure..."), non una sintesi.
+            if titolo != titolo_ocr and not _titolo_affidabile(titolo_ocr):
+                fonte_sintesi = ""
         # Il titolo deve RIASSUMERE il capitolo: la slide dice l'argomento,
         # il corpo della pagina dice il caso/la sentenza che lo contraddistingue.
-        titolo = _titolo_riassuntivo(titolo, testo)
+        titolo = _titolo_riassuntivo(titolo, fonte_sintesi)
         capitoli.append((inizio, titolo))
 
     # Unisce i gruppi di capitoli troppo corti: si chiude un gruppo solo quando

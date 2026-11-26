@@ -334,6 +334,10 @@ def _abort_senza_video(
     report["senza_video"] = True
     report["motivo_interruzione"] = motivo or messaggio
     _save_sync_report(report)
+    # La timeline finale era gia' stata salvata prima di questi abort: senza
+    # rimuoverla, analysis_sync la confronterebbe con il video VECCHIO.
+    with suppress(OSError):
+        (CACHE_DIR / "timeline_finale.json").unlink(missing_ok=True)
     # La pagina vecchia accanto al video resterebbe li' a dichiarare valida
     # una timeline che non esiste piu': si aggiorna subito, senza aspettare
     # un --solo-riepilogo che l'utente non sa di dover lanciare.
@@ -5006,6 +5010,12 @@ def _main_impl(argv: list | None = None) -> None:
         # permette di rileggere le parole giuste invece di affidarsi al mtime.
         # Se l'escalation beam ha vinto (o le parole vengono dal recupero zone)
         # la chiave veloce punterebbe a un testo diverso da quello della timeline.
+        # La lista e' condivisa con beam accurato e recupero zone: lo snapshot
+        # preso subito dopo il greedy era incompleto (o conteneva correzioni
+        # di una trascrizione poi scartata). Si riscrive con lo stato finale.
+        sync_notes.pop("correzioni_nomi", None)
+        if _correzioni_nomi:
+            sync_notes["correzioni_nomi"] = list(dict.fromkeys(_correzioni_nomi))
         sync_notes["transcript_cache_key"] = chiave_parole_effettiva
         # La coda non coperta si misura sulla trascrizione EFFETTIVA (dopo
         # escalation beam e recupero zone): il primo greedy puo' fermarsi prima
@@ -5118,7 +5128,9 @@ def _main_impl(argv: list | None = None) -> None:
                         "simile a un'altra slide (probabile allineamento errato). "
                         "Il video NON è stato generato (--strict-sync attivo): "
                         "rivedi la timeline, oppure rimuovi --strict-sync per "
-                        "generarlo comunque. Dettagli in .cache/sync_report.json."
+                        "generarlo comunque. Dettagli in .cache/sync_report.json.",
+                        motivo="allineamento_sospetto",
+                        output_path=Path(args.output_video),
                     )
             if uncertain:
                 log.warning(
@@ -5162,7 +5174,9 @@ def _main_impl(argv: list | None = None) -> None:
                         f"Sincronizzazione sospetta: la prima sezione ({durations[0]:.0f}s) "
                         f"parla di una slide diversa dalla 1 mostrata nel video. Il video "
                         "NON è stato generato (--strict-sync attivo): guarda i primi "
-                        f"{durations[0]:.0f} secondi, oppure rimuovi --strict-sync."
+                        f"{durations[0]:.0f} secondi, oppure rimuovi --strict-sync.",
+                        motivo="prima_sezione_disallineata",
+                        output_path=Path(args.output_video),
                     )
 
         # --- Filtro slide da non mostrare (--skip-slides) ---

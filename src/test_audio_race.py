@@ -10,6 +10,7 @@ Esegui con: python -m unittest test_audio_race -v
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +19,7 @@ from unittest import mock
 
 import main
 import riepilogo
+import transcription
 from chunks import Word
 
 
@@ -83,6 +85,27 @@ class TestCoperturaTrascrizione(unittest.TestCase):
                 self.assertEqual(main._coda_audio_senza_parole(parole, 120.0), 20.0)
 
 
+class TestParzialeContenuto(unittest.TestCase):
+    def test_parziale_di_altra_versione_stesso_nome_dimensione_e_mtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "podcast.m4a"
+            originale = b"A" * (300 * 1024)
+            audio.write_bytes(originale)
+            stat = audio.stat()
+            with (
+                mock.patch.object(transcription, "CACHE_DIR", Path(tmp)),
+                mock.patch.object(transcription, "_taglia_audio", return_value=Path(tmp) / "coda.flac"),
+            ):
+                transcription._salva_parziale(
+                    audio, [{"word": "vecchia", "start": 1.0}], coperto_fino=60.0, params=None
+                )
+                # Stesso percorso, stessa dimensione, stesso mtime, contenuto diverso.
+                audio.write_bytes(b"B" * (300 * 1024))
+                os.utime(audio, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                iniziali, _sorgente, _offset = transcription._prepara_ripresa(audio, params=None)
+            self.assertEqual(iniziali, [])
+
+
 class TestMotivoInterruzione(unittest.TestCase):
     def test_abort_registra_il_motivo(self) -> None:
         report: dict[str, object] = {"segments": []}
@@ -121,6 +144,28 @@ class TestMotivoInterruzione(unittest.TestCase):
         self.assertNotIn("dry-run", testo)
         self.assertIn("podcast sostituito", testo)
 
+    def test_abort_rimuove_la_timeline_non_piu_valida(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            timeline = Path(tmp) / "timeline_finale.json"
+            timeline.write_text("[]", encoding="utf-8")
+            with (
+                mock.patch.object(main, "CACHE_DIR", Path(tmp)),
+                mock.patch.object(main, "_save_sync_report"),
+                mock.patch("riepilogo.scrivi_riepilogo"),
+                self.assertRaises(SystemExit),
+            ):
+                main._abort_senza_video({"segments": []}, "test", motivo="audio_sostituito_durante_la_run")
+            self.assertFalse(timeline.exists())
+
+    def test_motivi_stabili_riconosciuti_da_review_e_riepilogo(self) -> None:
+        for motivo in ("allineamento_sospetto", "prima_sezione_disallineata"):
+            with self.subTest(motivo=motivo):
+                testo = riepilogo.riepilogo_markdown(
+                    {"segments": [], "motivo_interruzione": motivo}, "lezione.mp4", "26/11/2026"
+                )
+                self.assertIn("interrotto", testo)
+                self.assertIn(motivo.replace("_", " "), testo)
+
     def test_riepilogo_avvisa_la_coda_senza_parole(self) -> None:
         report: dict[str, object] = {
             "segments": [
@@ -133,6 +178,14 @@ class TestMotivoInterruzione(unittest.TestCase):
         testo = riepilogo.riepilogo_markdown(report, "lezione.mp4", "26/11/2026")
         self.assertIn("prima della fine dell'audio", testo)
         self.assertNotIn("Niente: tutti i confini", testo)
+
+    def test_coda_al_di_la_di_sessanta_non_arrotondata_via(self) -> None:
+        report: dict[str, object] = {
+            "segments": [{"slide": 1, "start": 0.0, "end": 60.0, "duration": 60.0}],
+            "coda_senza_parole": 60.4,
+        }
+        testo = riepilogo.riepilogo_markdown(report, "lezione.mp4", "26/11/2026")
+        self.assertIn("prima della fine dell'audio", testo)
 
 
 if __name__ == "__main__":

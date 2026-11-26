@@ -5,9 +5,9 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 28 (capitoli e revisione incrociata), dopo la
-correzione mirata all'audio sostituito durante la run. Il piano resta un
-registro delle decisioni: i dettagli sono nei messaggi di commit e nei test.
+Ultimo aggiornamento: batch 29 (titoli riassuntivi a prova di regressione),
+dopo i titoli riassuntivi. Il piano resta un registro delle decisioni: i
+dettagli sono nei messaggi di commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -272,7 +272,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1688 test).
+`python -m unittest discover -s src -p "test_*.py"` (1698 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -1057,6 +1057,36 @@ non lo ripete se contiene parole lunghe già presenti nel titolo e lo aggiunge
 dopo «:». Limite portato a 100 caratteri, quello vero di YouTube, così il
 titolo non viene tagliato a metà parola. Cinque test nuovi coprono caso,
 sentenza, frase generica non ripetuta, assenza di sintesi e limite di lunghezza.
+
+## Batch 29 — titoli riassuntivi e revisione incrociata (2026-11)
+
+Dodicesima revisione, sulla funzionalita' dei titoli riassuntivi appena
+introdotta. Undici difetti, undici test nuovi.
+
+**Titoli.** I motivi con due punti catturavano 61 caratteri e venivano scartati
+dal controllo sui 60: tre capitoli reali restavano senza sintesi; ora il
+limite e' coerente e la cifra viene troncata a confine di parola. I titoli
+dell'annuncio e quelli uniti raggiungevano 101 caratteri: `_tronca_titolo`
+budgeta l'ellissi e li tiene entro 100, come YouTube. Le virgolette
+sbilanciate (`caso La ‘scaltra peruviana`) e l'ellissi rimasta in mezzo al
+titolo sono state eliminate. I cognomi brevi («Rossi») entrano nella sintesi,
+mentre un frammento che ripete piu' della meta' del titolo viene scartato.
+Quando l'OCR non e' leggibile e il titolo arriva dal parlato non si aggiunge
+una sintesi di narrazione.
+
+**Report e abort.** Le correzioni dei nomi nel report erano lo snapshot del
+primo greedy, incompleto rispetto alla trascrizione finale: ora si riscrive
+con lo stato finale. I due abort `--strict-sync` rimasti indietro passano
+`output_path` e un `motivo_interruzione` stabile, riconosciuto da `--review` e
+dal riepilogo. Ogni abort prima del rendering rimuove `timeline_finale.json`,
+che altrimenti descriveva un video mai generato. La coda non coperta non viene
+piu' arrotondata a 60 nel riepilogo.
+
+**Trascrizione.** `_firma_audio` ora hashera l'intero file, senza memoizzazione
+per percorso/dimensione/mtime: due finestre da 256 KB non bastavano a
+distinguere un audio sostituito nel mezzo. Il parziale salvato porta la firma
+completa e `_prepara_ripresa` la verifica, così non si cuciscono piu' parole di
+un'altra versione dello stesso file.
 
 ## Stato delle voci
 

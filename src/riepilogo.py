@@ -150,6 +150,8 @@ def riepilogo_markdown(
         etichetta = {
             "audio_sostituito_durante_la_run": "interrotto: podcast sostituito durante la run",
             "trascrizione_troncata": "interrotto: trascrizione incompleta",
+            "allineamento_sospetto": "interrotto: allineamento sospetto",
+            "prima_sezione_disallineata": "interrotto: prima sezione disallineata",
         }.get(motivo, f"interrotto: {motivo}")
         righe.append(f"| Esito | **{etichetta}** |")
     righe.append(f"| Pagine | {pagine} |")
@@ -176,7 +178,7 @@ def riepilogo_markdown(
     righe += ["", "## Cosa guardare a mano", ""]
     dubbi = _dubbi(anchors)
     coda = notes.get("coda_senza_parole")
-    coda_secondi = round(_float_sicuro(coda))
+    coda_secondi = _float_sicuro(coda)
     if coda_secondi > 60:
         dubbi = [f"Il testo si ferma {format_time(coda_secondi)} prima della fine dell'audio: "
                  "gli ultimi confini non sono verificabili col parlato.", *dubbi]
