@@ -107,6 +107,11 @@ def riepilogo_markdown(
     annidate = report.get("notes")
     if isinstance(annidate, dict):
         notes.update(annidate)
+    # Un abort per audio sostituito / trascrizione troncata NON e' un dry-run:
+    # dirlo nel riepilogo e' importante quanto non generare il video.
+    motivo = str(report.get("motivo_interruzione") or "").strip()
+    if motivo:
+        dry_run = False
 
     pagine, totale, minima, corto = _numeri(segmenti)
     media = totale / pagine if pagine else 0.0
@@ -141,6 +146,12 @@ def riepilogo_markdown(
     if versione:
         righe.append(f"Versione del programma: `{versione}`")
     righe += ["", "| Cosa | Valore |", "|---|---|"]
+    if motivo:
+        etichetta = {
+            "audio_sostituito_durante_la_run": "interrotto: podcast sostituito durante la run",
+            "trascrizione_troncata": "interrotto: trascrizione incompleta",
+        }.get(motivo, f"interrotto: {motivo}")
+        righe.append(f"| Esito | **{etichetta}** |")
     righe.append(f"| Pagine | {pagine} |")
     righe.append(f"| Parlato | {format_time(totale)} |")
     if pagine:
@@ -164,10 +175,18 @@ def riepilogo_markdown(
 
     righe += ["", "## Cosa guardare a mano", ""]
     dubbi = _dubbi(anchors)
+    coda = notes.get("coda_senza_parole")
+    coda_secondi = round(_float_sicuro(coda))
+    if coda_secondi > 60:
+        dubbi = [f"Il testo si ferma {format_time(coda_secondi)} prima della fine dell'audio: "
+                 "gli ultimi confini non sono verificabili col parlato.", *dubbi]
     if pagine <= 1:
-        # Con una pagina sola non esistono confini: la frase sui confini
-        # "stimati" sarebbe una diagnosi inventata.
-        righe.append("Una sola pagina: non c'è nessun confine da controllare.")
+        # Con una pagina sola non esistono confini, ma la trascrizione può
+        # essere troncata: in quel caso c'e' COMUNQUE qualcosa da controllare.
+        if dubbi:
+            righe += dubbi
+        else:
+            righe.append("Una sola pagina: non c'è nessun confine da controllare.")
     elif dubbi:
         righe += dubbi
     elif transitions and anchored >= transitions:
@@ -257,7 +276,8 @@ def rigenera(cache_dir: Path, output_path: Path) -> int:
     # sta ancora nella cartella non lo rende valido per quella timeline.
     # Se il video manca SENZA che il report sia un dry-run, resta il messaggio
     # diverso ("assente dalla cartella"): sono due situazioni distinte.
-    dry_run = bool(report.get("senza_video") or report.get("anteprima"))
+    interrotto = bool(report.get("motivo_interruzione"))
+    dry_run = bool(report.get("senza_video") or report.get("anteprima")) and not interrotto
     return 0 if scrivi_riepilogo(
         report, output_path, dry_run=dry_run, video_presente=output_path.exists()
     ) is not None else 1

@@ -30,6 +30,8 @@ ignore = [
     "PLC0415",  # import-outside-top-level (bootstrap lazy in config.py)
     "PLR2004",  # magic-value-comparison
 ]
+# La punteggiatura italiana e' parte dei testi reali di slide/trascrizioni.
+allowed-confusables = ["‘", "’", "“", "”", "–", "—", "…"]
 
 [lint.per-file-ignores]
 # I test usano patch/assert interni in modo volutamente permissivo

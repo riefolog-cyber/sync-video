@@ -9,10 +9,11 @@ scritto, se l'impronta coincide E il file di output non e' stato toccato.
 
 Il riuso non puo' sbagliare: l'impronta copre tutto quello che puo' cambiare
 il video. Se una slide, un tempo, l'audio, i thread o l'encoder cambiano, il
-video si rifa. E se il file di output e' stato spostato o modificato
-(dimensione diversa, oppure contenuto diverso a parita' di dimensione), si rifa:
-il solo momento di modifica puo' cambiare per un touch di antivirus/OneDrive e
-non basta piu' a invalidare il riuso.
+video si rifa. Se il file di output cambia dimensione si rifa subito; se
+cambia solo il momento di modifica (touch di antivirus/OneDrive) si confronta
+l'hash del contenuto. Nota: se dimensione E mtime coincidono con la marca, il
+percorso rapido non rilegge il video: uno strumento che riscriva il file
+mantenendo entrambi e' fuori dalla garanzia di questo controllo.
 
 Il "come" e' un file .json nella cache: piccolo, ispezionabile, e non lascia
 niente addosso nella cartella dell'utente.

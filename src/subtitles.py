@@ -50,7 +50,12 @@ QUALITA_MINIMA_TITOLO = 0.6
 # Attacchi consonantici italiani legittimi: «STRUTTURE», «SPRING», «SCRUM»
 # non sono errori OCR, mentre «inggtanno» o «sffsite» lo sono.
 _ONSET_ITALIANI = frozenset(
-    {"str", "scr", "spr", "spl", "sfr", "sbr", "sgr", "scl", "tgl", "gli", "gnl"}
+    {
+        "str", "scr", "spr", "spl", "sfr", "sbr", "sgr", "scl", "tgl", "gli", "gnl",
+        # gruppi dopo una nasale: "conFLITTO", "conFRONTO", "istanZA"...
+        "nfl", "nfr", "ntr", "nst", "nsp", "ncr", "ngr", "ncl", "npl", "nsf", "nsc",
+        "sch", "sce", "sci", "nch", "ngh", "ngl",
+    }
 )
 # Acronimi noti (anche senza vocali) e frammenti che l'OCR inventa sulle
 # slide decorative: entrambi devono essere riconosciuti, non dedotti dalla
@@ -378,6 +383,139 @@ def _miglior_riga(testo: str) -> str:
     return max(righe, key=_qualita_titolo)
 
 
+# Intestazioni ricorrenti nelle slide: quello che segue e' il CONTENUTO, non
+# piu' il titolo. Tagliarle evita capitoli tipo "L'Esito" o "Il Caso".
+_SEZIONI_TITOLO = re.compile(
+    r"\b(?:il|la|lo|l'|gli|le)\s+(?:fatto|problema|caso|esito|soluzione|"
+    r"antecedente|lettura|contesto|correzione|diagnosi|errore|ribaltamento|"
+    r"mito|origine|regola|principio|impatto|conseguenza|checklist|indizi|"
+    r"domanda|sintesi|focus)\b",
+    re.IGNORECASE,
+)
+_ARTICOLI_TITOLO = frozenset({"i", "il", "la", "lo", "gli", "le", "un", "uno", "l'", "l’"})
+_RUMORE_IN_TESTA = frozenset({"è", "e", "o", "ah", "ok", "ora", "men", "ecco"})
+# Parole che aprono una nuova sezione anche senza punteggiatura: una
+# maiuscola qualsiasi (p.es. "Alcol" in "dell’Alcol") NON e' un confine.
+_NUOVA_SEZIONE = frozenset(
+    {"il", "lo", "la", "i", "le", "gli", "un", "dominio", "assenza", "checklist", "nota", "esempio"}
+)
+_ETICHETTE_GENERICHE = frozenset(
+    {"il caso", "l'esito", "il fatto", "il problema", "la soluzione", "l'antecedente", "la lettura"}
+)
+
+
+def _titolo_da_testo(testo: str, numero: int) -> str:
+    """Titolo preso dall'INIZIO del testo OCR, non dalla riga "migliore".
+
+    L'OCR delle slide infografiche restituisce una riga unica con titolo,
+    sottotitoli e corpo; scegliere il frammento con piu' lettere prendeva il
+    corpo ("fatti. Il Problema", "muss. e ion.", "attiva di chi li indossa").
+    Il titolo e' invece all'inizio: si ripulisce la testa e si taglia alla
+    prima intestazione di sezione o cambio di frase.
+    """
+    # Il titolo e' all'INIZIO del testo OCR. Se pero' la prima riga e' un
+    # asse/grafico, si provano anche le righe seguenti (ordinate per qualita').
+    righe = [r.strip() for r in str(testo or "").splitlines() if r.strip()]
+    if not righe:
+        righe = [""]
+    if len(righe) == 1:
+        # Le colonne separate da "|" fanno parte della stessa frase ("Lo Stato
+        # che non prende | sul serio il rischio"): si riuniscono, non si scelgono.
+        righe = [re.sub(r"\s*\|\s*", " ", righe[0])]
+    candidati = [righe[0], *sorted(righe[1:], key=_qualita_titolo, reverse=True)]
+    for frammento in candidati:
+        # Una riga fatta di assi/grafici ("+ ———-__ 87% 7") non e' un titolo
+        # anche se contiene una parola vera: si passa alla riga seguente.
+        if _qualita_titolo(frammento) < 0.4:
+            continue
+        titolo = _titolo_da_frammento(frammento, numero)
+        if not titolo.startswith("Slide "):
+            return titolo
+    return f"Slide {numero}"
+
+
+def _titolo_da_frammento(frammento: str, numero: int) -> str:
+    raw = " ".join(frammento.split())
+    raw = re.sub(r"^\s*\d+[.)]?\s+", "", raw)  # numero di pagina ("15 La via...")
+    if " = " in raw[:40]:
+        raw = raw.split(" = ", 1)[1]  # "muss. e ion. = Il titolo"
+    parole_maiuscole = raw.split()
+    tutto_maiuscolo = bool(parole_maiuscole) and all(
+        p.isalpha() and p.isupper() for p in parole_maiuscole
+    )
+    if tutto_maiuscolo:
+        if len(parole_maiuscole) == 1:
+            parola = parole_maiuscole[0].lower()
+            if parola in _ACRONIMI_NOTI:
+                return raw
+            if parola in _RUMORI_NOTI or _sequenza_rumorosa(parola):
+                return f"Slide {numero}"
+            if len(parola) >= 3:
+                return raw
+        elif not any(_sequenza_rumorosa(p.lower()) for p in parole_maiuscole):
+            return raw
+        else:
+            return f"Slide {numero}"
+
+    tagli: list[int] = []
+    sezione = _SEZIONI_TITOLO.search(raw, 8)
+    if sezione:
+        tagli.append(sezione.start())
+    for separatore in (". ", ": ", "? ", "! ", " — ", " – ", " - ", "; "):
+        pos = raw.find(separatore, 8)
+        # Il punto di "slide 2." non chiude la frase: e' il numero annunciato.
+        while pos != -1 and separatore == ". " and pos > 0 and raw[pos - 1].isdigit():
+            pos = raw.find(separatore, pos + 2)
+        if pos != -1:
+            tagli.append(pos + (1 if separatore[0] in ".?!" else 0))
+    # Solo una parola che apre una sezione ("Lo stupro...") e' un confine;
+    # un nome proprio ("dell’Alcol") non lo e'.
+    for m in re.finditer(r"\s+([A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ]{1,})", raw[8:]):
+        if 8 + m.start() >= 15 and m.group(1).lower() in _NUOVA_SEZIONE:
+            tagli.append(8 + m.start())
+            break
+    if tagli:
+        raw = raw[: min(tagli)]
+
+    parole = raw.split()
+    #Una sequenza tutta maiuscola in testa ("SPRING BOOT") e' un titolo
+    # tecnico, non rumore: si scarta solo se davanti a testo minuscolo.
+    ha_minuscole_dopo = any(any(c.islower() for c in p) for p in parole[1:])
+    while parole:
+        originale = parole[0]
+        pulita = originale.lower().strip(".,;:!?\"'“”‘’")
+        if not any(c.isalpha() for c in pulita) or pulita in _RUMORE_IN_TESTA:
+            parole.pop(0)
+            continue
+        if pulita in _ARTICOLI_TITOLO:
+            break
+        if (
+            ha_minuscole_dopo
+            and originale.isalpha()
+            and originale.isupper()
+            and len(originale) >= 2
+            and pulita not in _ACRONIMI_NOTI
+        ):
+            parole.pop(0)
+            continue
+        break
+    out = " ".join(parole).strip(" .:;,-–—|\"'“”‘’")
+    out = re.sub(r"\s+([,.;:'’])", r"\1", out)
+    # Virgolette di apertura rimaste senza chiusura (OCR che omette l'ultima).
+    if out and out[-1] in "'‘“":
+        out = out[:-1].rstrip()
+    # «’» e' anche l'apostrofo italiano ("d’uscita"): si toglie solo «‘».
+    if out.count("‘") != out.count("’"):
+        out = out.replace("‘", "").strip()
+    if len(out) < 4 or sum(c.isalpha() for c in out) < 4:
+        return f"Slide {numero}"
+    if _qualita_titolo(out) < QUALITA_MINIMA_TITOLO:
+        return f"Slide {numero}"
+    if len(out) > 70:
+        out = out[:70].rsplit(" ", 1)[0] + "…"
+    return out
+
+
 def _titolo_capitolo(testo: str, numero: int) -> str:
     """Titolo breve e leggibile per un capitolo.
 
@@ -387,67 +525,7 @@ def _titolo_capitolo(testo: str, numero: int) -> str:
     tiene la prima frase, si tolgono le briciole ai due estremi e, se non
     resta testo vero, si ripiega sul numero della slide.
     """
-    compatto = " ".join(_miglior_riga(str(testo or "")).split())
-    if not compatto:
-        return f"Slide {numero}"
-    # Un acronimo ("NASA", "FAQ") ha meno di 5 caratteri ma e' un titolo
-    # ufficiale: solo se e' PLAUSIBILE (alternanza consonante/vocale, niente
-    # ripetizioni). "ST", "INTE", "RRAR" sono rumore OCR, non acronimi.
-    if all(p.isalpha() and p.isupper() for p in compatto.split()):
-        parole_maiuscole = compatto.split()
-        if len(parole_maiuscole) == 1:
-            parola = parole_maiuscole[0].lower()
-            if parola in _ACRONIMI_NOTI:
-                return compatto
-            if parola in _RUMORI_NOTI or _sequenza_rumorosa(parola):
-                return f"Slide {numero}"
-            # Tre lettere senza vocali (RRR, SFF, MMM) non sono acronimi noti:
-            # sono frammenti, non titoli. Le parole piu' lunghe (STRUTTURE)
-            # cadono nel normale controllo di qualita'.
-            if len(parola) <= 3 and not any(c in "aeiou" for c in parola):
-                return f"Slide {numero}"
-            if 3 <= len(parola) <= 5:
-                return compatto
-        else:
-            # Anche ogni parola di una riga maiuscola va controllata:
-            # "SFFSITE QQQ" non diventa titolo solo perche' c'e' uno spazio.
-            if any(_sequenza_rumorosa(p.lower()) for p in parole_maiuscole):
-                return f"Slide {numero}"
-            return compatto
-
-    # Prima frase/segmento (solo dopo i primi caratteri, altrimenti un titolo
-    # che comincia con un punto verrebbe buttato via).
-    tagli = [
-        pos + (1 if sep[0] in ".?!" else 0)
-        for sep in _SEPARATORI_TITOLO
-        if (pos := compatto.find(sep, 6)) != -1
-    ]
-    if tagli:
-        compatto = compatto[: min(tagli)]
-
-    compatto = compatto.lstrip(" -\u2014\u2013|/\\\"'\u201c\u201d\u2018\u2019()[]{}")
-    parole = compatto.split()
-    # Briciole in testa: "LI" e' un apostrofo letto male, ma "Il" e' un
-    # articolo. Il discriminante e' la minuscola, non la lunghezza.
-    while parole and len(parole[0]) <= 3 and parole[0].isupper():
-        parole.pop(0)
-    # Briciole in coda: simboli e lettere isolate. I numeri restano: "10%" o
-    # "Art. 4" fanno parte del titolo, e buttarli via lo rende inutile.
-    while parole and (
-        not any(c.isalnum() for c in parole[-1])
-        or (len(parole[-1]) == 1 and parole[-1].isalpha())
-    ):
-        parole.pop()
-    compatto = " ".join(parole).strip(" -\u2014\u2013|:;,")
-
-    if sum(c.isalpha() for c in compatto) < 5 or _qualita_titolo(compatto) < QUALITA_MINIMA_TITOLO:
-        return f"Slide {numero}"
-    if len(compatto) <= MAX_CARATTERI_CAPITOLO:
-        return compatto
-    tagliato = compatto[:MAX_CARATTERI_CAPITOLO]
-    if " " in tagliato:
-        tagliato = tagliato.rsplit(" ", 1)[0]
-    return tagliato + "…"
+    return _titolo_da_testo(testo, numero)
 
 
 def _titolo_unito(titoli: Sequence[str]) -> str:
@@ -535,6 +613,120 @@ def _titolo_dal_parlato(
     return " ".join(dette)
 
 
+_VERBI_ANNUNCIO = frozenset(
+    {
+        "passiamo", "affrontiamo", "analizziamo", "arriviamo", "vediamo",
+        "entriamo", "parliamo", "esaminiamo", "guardiamo", "tocchiamo",
+        "ora", "bene", "ecco", "e", "è", "alla", "al", "alle", "a",
+    }
+)
+
+
+def _fine_parlato_capitolo(
+    words: Sequence[Mapping[str, Any]], inizio: float, fine: float
+) -> float:
+    """Dove finisce il parlato di QUESTO capitolo.
+
+    Un annuncio «slide N» pronunciato dentro il capitolo apre il capitolo
+    successivo: il testo precedente non deve rubargli il titolo.
+    """
+    for w in words:
+        try:
+            t = float(w.get("start", -1.0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(t) and inizio <= t < fine and str(w.get("word", "")).lower().strip(".,") == "slide":
+            # «Passiamo alla slide 2»: non lasciare nel capitolo precedente
+            # le parole che aprono l'annuncio successivo.
+            indice = next(
+                (i for i, y in enumerate(words) if y is w), None
+            )
+            if indice is not None:
+                for precedente in reversed(words[max(0, indice - 3):indice]):
+                    if str(precedente.get("word", "")).lower().strip(".,") not in _VERBI_ANNUNCIO:
+                        break
+                    try:
+                        tp = float(precedente.get("start", -1.0))
+                    except (TypeError, ValueError, OverflowError):
+                        break
+                    if math.isfinite(tp) and tp >= t - 3.0:
+                        t = tp
+            return t
+    return fine
+
+
+def _titolo_da_annuncio(
+    words: Sequence[Mapping[str, Any]], inizio: float, fine: float, numero: int
+) -> str:
+    """Titolo letto dal relatore subito dopo «passiamo alla slide N».
+
+    Su una slide decorativa l'OCR non da' un titolo utilizzabile: la fonte
+    indipendente e' cio' che il relatore dice aprendo il capitolo. Si prende
+    la prima frase dopo il numero, non tutto il parlato della slide.
+    """
+    sequenza: list[str] = []
+    for w in words:
+        try:
+            t = float(w.get("start", -1.0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        # L'annuncio e' pronunciato poco PRIMA del confine. Non si cerca in
+        # tutto il capitolo, altrimenti si ruba l'annuncio della slide successiva.
+        if math.isfinite(t) and inizio - 3.0 <= t < fine:
+            sequenza.append(str(w.get("word", "")))
+    for i, parola in enumerate(sequenza):
+        if parola.lower().strip(".,") != "slide":
+            continue
+        j = i + 1
+        if j < len(sequenza) and re.fullmatch(r"\d+[.)]?", sequenza[j].strip()):
+            # Un annuncio di ALTRA slide non e' il titolo di questo capitolo.
+            if int(re.sub(r"\D", "", sequenza[j])) != numero:
+                continue
+            j += 1
+        dette: list[str] = []
+        for parte in sequenza[j:]:
+            fine_frase = bool(dette) and (
+                re.search(r"[.!?]", parte) or parte.rstrip().endswith(",")
+            )
+            dette.append(parte.rstrip(",.;"))
+            if fine_frase or len(" ".join(dette).split()) >= 14:
+                break
+        testo = re.sub(r"\s+([,.;:'’])", r"\1", " ".join(dette))
+        parole = testo.split()
+        while parole and parole[0].lower().strip(".,") in _VERBI_ANNUNCIO:
+            parole.pop(0)
+        out = " ".join(parole).strip(" .,;:!?\"'“”‘’")
+        if len(out) >= 6 and _qualita_titolo(out) >= QUALITA_MINIMA_TITOLO:
+            return out if len(out) <= MAX_CARATTERI_CAPITOLO else out[:MAX_CARATTERI_CAPITOLO] + "…"
+    return ""
+
+
+def _prima_parola_contenuto(titolo: str) -> str:
+    """Prima parola che non sia un articolo o una briciola, in minuscolo."""
+    for parola in titolo.split():
+        pulita = parola.lower().strip(" .,;:'\"“”‘’")
+        if len(pulita) >= 3 and pulita not in _ARTICOLI_TITOLO:
+            return pulita
+    return ""
+
+
+def _titolo_affidabile(titolo: str) -> bool:
+    """Un titolo di capitolo e' utilizzabile solo se e' un titolo, non un frammento."""
+    if not titolo or titolo.startswith("Slide ") or titolo.lower().strip("'’ ") in _ETICHETTE_GENERICHE:
+        return False
+    # "Int. xcepiro a ditto..." e' OCR di una slide decorativa: sigla con
+    # punto e parole che non esistono in italiano ("x..." a inizio parola).
+    # «Xenofobia» e' legittima; «xcepiro» e' OCR inventata.
+    if re.search(r"\bx[bcdfghjklmnpqrstvwxyz]", titolo.lower()):
+        return False
+    parole = [p.lower().strip(" .,;:'\"“”‘’") for p in titolo.split()]
+    if not parole:
+        return False
+    if any(_sequenza_rumorosa(p) and p not in _ACRONIMI_NOTI for p in parole):
+        return False
+    return _qualita_titolo(titolo) >= QUALITA_MINIMA_TITOLO
+
+
 def build_capitoli(
     timeline: Mapping[int, float],
     slide_texts: Sequence[str],
@@ -573,12 +765,14 @@ def build_capitoli(
             # fino a fine trascrizione, altrimenti rimarrebbe il titolo OCR
             # sbagliato proprio sull'ultima slide.
             fine = inizi[pos + 1] if pos + 1 < len(inizi) else float("inf")
-            parlato = _titolo_capitolo(_titolo_dal_parlato(words, inizio, fine), numero)
+            fine_parlato = _fine_parlato_capitolo(words, inizio, fine)
+            parlato = _titolo_capitolo(
+                _titolo_dal_parlato(words, inizio, fine_parlato), numero
+            )
             # Il deck nasce dal podcast: quando l'OCR e' palesemente rumoroso
             # (o ha rinunciato a "Slide N") ma il parlato e' leggibile, il
             # titolo detTO e' la fonte affidabile. Con OCR buono si lascia
             # quello, che e' il titolo ufficiale della pagina.
-            q_ocr = _qualita_titolo(titolo_ocr)
             q_parlato = _qualita_titolo(parlato)
             # Preferire il parlato quando e' leggibile: l'OCR di slide
             # infografiche produce testo "plausibile" (tutte lettere) ma
@@ -589,22 +783,44 @@ def build_capitoli(
             # una detta, l'OCR ha sbagliato e la trascrizione e' autorevole.
             # Un titolo OCR breve e' comunque affidabile SE non c'e' questo
             # confronto (non si sostituisce "Prima" con la narrazione).
-            parole_ocr = [p.lower().strip(" .,;:'\"") for p in titolo_ocr.split()]
-            parole_dette = [p.lower().strip(" .,;:'\"") for p in parlato.split()]
+            annuncio = _titolo_da_annuncio(words, inizio, fine, numero)
+            # La regola e' stretta: solo la PRIMA parola di contenuto puo'
+            # provare un errore OCR. Se si confrontano tutte le parole, due
+            # titoli corretti che condividono "problema" sembrano un typo e
+            # il titolo ufficiale viene sostituito dalla narrazione.
+            prima_ocr = _prima_parola_contenuto(titolo_ocr)
             coincide = any(
-                _simili(a, b) for a in parole_ocr for b in parole_dette
+                _simili(prima_ocr, p)
+                for p in (
+                    _prima_parola_contenuto(parlato),
+                    _prima_parola_contenuto(annuncio),
+                )
+                if p
             )
             # Solo una PAROLA DIVERSA MA QUASI UGUALE e' prova di errore OCR.
             # La condivisione di radici (o la ripetizione esatta del titolo
             # da parte del relatore) NON giustifica la sostituzione: e' il
             # caso normale, e faceva stravolgere titoli ufficiali.
-            if (
-                q_parlato >= 0.6
-                and q_parlato >= q_ocr - 0.05
-                and not parlato.startswith("Slide ")
-                and (titolo_ocr.startswith("Slide ") or coincide)
-            ):
-                titolo = parlato
+            parlato_breve = len(parlato.split()) <= 20 and _titolo_affidabile(parlato)
+            # La frase intera e' quasi sempre NARRAZIONE ("Benvenuti...",
+            # "marito accoltella..."): puo' correggere un typo OCR solo quando
+            # e' breve e non c'e' un annuncio piu' affidabile a disposizione.
+            if (titolo_ocr.startswith("Slide ") or coincide) and q_parlato >= 0.5:
+                # L'annuncio e' la frase piu' pulita e contiene gia' la parola
+                # corretta dall'OCR: meglio di un'intera frase di narrazione.
+                candidato = annuncio if _titolo_affidabile(annuncio) else ""
+                if not candidato and parlato_breve:
+                    candidato = parlato
+                if candidato and not candidato.startswith("Slide "):
+                    titolo = candidato
+            # Ultima istanza: l'OCR puo' produrre un testo "plausibile" ma
+            # inutilizzabile (lungo frammento, etichetta generica). In quel
+            # caso la frase aperta dal relatore e' la fonte affidabile.
+            if not _titolo_affidabile(titolo):
+                if _titolo_affidabile(annuncio):
+                    titolo = annuncio
+                elif parlato_breve:
+                    titolo = parlato
         capitoli.append((inizio, titolo))
 
     # Unisce i gruppi di capitoli troppo corti: si chiude un gruppo solo quando

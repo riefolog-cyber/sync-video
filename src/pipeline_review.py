@@ -151,13 +151,24 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
         )
         return 1
     if report.get("anteprima") or report.get("senza_video"):
-        # `--preview`/`--dry-run` hanno aggiornato il report ma NON hanno
-        # generato il video: estrarre frame da un video vecchio seguendo i
-        # tempi nuovi darebbe anteprime e giudizi sbagliati.
+        # Un abort per audio sostituito / trascrizione troncata NON e' un
+        # preview: il motivo e' salvato nel report e va riferito bene.
+        motivo = str(report.get("motivo_interruzione") or "").strip()
+        if not motivo:
+            log.error(
+                "\n   [Revisione] Il report in cache viene da --preview/--dry-run: "
+                "nessun video e' stato generato con quella timeline. Rilancia la "
+                "pipeline completa prima di rivedere i confini."
+            )
+            return 3
+        spiegazione = {
+            "audio_sostituito_durante_la_run": "il podcast e' stato sostituito durante la run",
+            "trascrizione_troncata": "la trascrizione era incompleta",
+        }.get(motivo, "la run e' stata interrotta")
         log.error(
-            "\n   [Revisione] Il report in cache viene da --preview/--dry-run: "
-            "nessun video e' stato generato con quella timeline. Rilancia la "
-            "pipeline completa prima di rivedere i confini."
+            "\n   [Revisione] Nessun video e' stato generato con questa timeline: %s. "
+            "Rilancia la pipeline con il materiale definitivo prima di rivedere i confini.",
+            spiegazione,
         )
         return 3
     grezzo = report.get("segments")

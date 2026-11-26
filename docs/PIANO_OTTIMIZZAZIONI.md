@@ -5,9 +5,9 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: correzione mirata all'audio sostituito durante la run,
-dopo il batch 27. Il piano resta un registro delle decisioni: i dettagli di
-ogni cambiamento sono nei messaggi di commit e nei test.
+Ultimo aggiornamento: batch 28 (capitoli e revisione incrociata), dopo la
+correzione mirata all'audio sostituito durante la run. Il piano resta un
+registro delle decisioni: i dettagli sono nei messaggi di commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -272,7 +272,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1660 test).
+`python -m unittest discover -s src -p "test_*.py"` (1683 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -1012,6 +1012,40 @@ Sette test nuovi in `test_audio_race.py`. Un test del riuso video era flaky
 ora forza un mtime diverso. Dopo la correzione la pipeline e'
 stata rilanciata sul podcast attuale: 14 annunci su 14, 15 slide bilanciate
 (la 15 dura 76,9s), verifica frame 15/15 e giudizio "ALTO".
+
+## Batch 28 — qualita' dei capitoli e revisione incrociata (2026-11)
+
+Undicesima revisione. Miglioramento richiesto: il `.capitoli.txt` dell'ultima
+run conteneva frammenti OCR (`fatti. Il Problema`, `muss. e ion.`,
+`15 La via d'uscita`) e frasi narrative invece di titoli.
+
+**Generazione dei capitoli.** Il titolo ora si prende dall'inizio del testo
+OCR, non dalla "riga migliore": si tolgono numero di pagina e prefissi rumorosi
+(`muss. e ion. =`), si riuniscono le colonne spezzate da `|`, si taglia alla
+prima intestazione di sezione (`Il Caso`, `L'Esito`, ...) o al primo separatore
+di titolo. Se la prima riga e' un asse di grafico si provano le righe seguenti.
+Quando l'OCR non e' affidabile si usa la frase pronunciata subito dopo
+«passiamo alla slide N», prestata alla slide GIUSTA (non a quella successiva).
+Ventitré test nuovi in `test_capitoli_qualita.py` e `test_audio_race.py`,
+comprese le regole storiche che la prima stesura aveva rotto.
+
+**Revisione.** Numerosi difetti, quasi tutti regressioni delle correzioni
+appena fatte:
+- la coda senza parlato veniva misurata sul primo greedy, poi sostituito dalla
+  trascrizione finale; ora si misura dopo la scelta definitiva e non aborta in
+  `--strict-sync` se tutti i confini sono annunciati (coda di musica);
+- `NaN`/`Infinito` in un timestamp disattivavano il controllo;
+- l'audio era ricontrollato una sola volta, 350 righe prima del rendering:
+  ora `_verifica_audio_invariato` gira anche prima di ogni `build_video`;
+- l'abort salvava solo `senza_video`, e `--review`/`--solo-riepilogo` raccon-
+  tavano di un `--preview` mai avvenuto: ora c'e' `motivo_interruzione`, la
+  pagina vecchia viene aggiornata subito e il riepilogo mostra il motivo e
+  l'avviso sulla coda anche con una pagina sola;
+- i timestamp non finiti, il file audio sparito e le parole sporche hanno Test
+  dedicati; i test vacui sui percorsi sono stati rafforzati.
+
+Documentazione aggiornata (`funzionamento.md`, conteggio 1683), docstring del
+riuso video resa onesta sul percorso rapido.
 
 ## Stato delle voci
 

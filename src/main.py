@@ -9,6 +9,7 @@ import hashlib
 import importlib.util
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -318,11 +319,50 @@ def _abort(message: str) -> NoReturn:
     sys.exit(1)
 
 
-def _abort_senza_video(report: dict[str, object], messaggio: str) -> NoReturn:
-    """Abort prima del rendering: il report salvato NON descrive un video."""
+def _abort_senza_video(
+    report: dict[str, object],
+    messaggio: str,
+    motivo: str | None = None,
+    output_path: Path | None = None,
+) -> NoReturn:
+    """Abort prima del rendering: il report salvato NON descrive un video.
+
+    Il MOTIVO viene salvato: senza, `--review` e `--solo-riepilogo` leggono
+    solo `senza_video` e raccontano di un `--preview`/`--dry-run` che non
+    e' mai successo.
+    """
     report["senza_video"] = True
+    report["motivo_interruzione"] = motivo or messaggio
     _save_sync_report(report)
+    # La pagina vecchia accanto al video resterebbe li' a dichiarare valida
+    # una timeline che non esiste piu': si aggiorna subito, senza aspettare
+    # un --solo-riepilogo che l'utente non sa di dover lanciare.
+    if output_path is not None:
+        from riepilogo import scrivi_riepilogo
+
+        scrivi_riepilogo(report, output_path, video_presente=False)
     _abort(messaggio)
+
+
+def _verifica_audio_invariato(
+    report: dict[str, object], audio_path: Path, audio_hash: str, output_path: Path | None = None
+) -> None:
+    """Ultimo controllo prima di usare l'audio: se e' cambiato, si ferma.
+
+    Chiamato anche subito prima di ogni `build_video`: il primo controllo
+    (prima del report) non copre i minuti di verifica frame e riparazione.
+    """
+    if _audio_cambiato_durante_la_run(audio_path, audio_hash):
+        _abort_senza_video(
+            report,
+            "Il file audio e' cambiato mentre la pipeline era in esecuzione: "
+            "trascrizione e timeline sono state calcolate sulla versione "
+            "precedente. Il video NON e' stato generato. Rilancia la "
+            "pipeline con il podcast definitivo.",
+            motivo="audio_sostituito_durante_la_run",
+            output_path=output_path,
+        )
+    report["audio_invariato_durante_la_run"] = True
 
 
 def _audio_cambiato_durante_la_run(audio_path: Path, audio_hash: str) -> bool:
@@ -351,6 +391,8 @@ def _coda_audio_senza_parole(words: Sequence[Word], durata: float) -> float:
         try:
             istante = float(w.get("start", 0.0))
         except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(istante):
             continue
         istanti.append(istante)
     ultima = max(istanti, default=0.0)
@@ -716,6 +758,7 @@ def _log_plain_summary(
     anchors: dict[str, object] | None = None,
     refine: Sequence[dict[str, object]] = (),
     never_discussed: Sequence[tuple[int, float, str]] = (),
+    coda_senza_parole: float = 0.0,
     title: str = "IL VIDEO È PRONTO — COSA C'È DENTRO",
 ) -> None:
     """Riepilogo finale in parole semplici (quello che l'utente vuole sapere).
@@ -743,7 +786,7 @@ def _log_plain_summary(
     log.info(" %s", title)
     log.info("=" * 70)
     log.info(
-        "   %d slide, %s di parlato (%.1fs).",
+        "   %d slide, %s di audio (%.1fs).",
         len(durations),
         _format_time(total_duration),
         total_duration,
@@ -1132,6 +1175,12 @@ def _log_plain_summary(
         )
     log.info("")
     log.info("   COSA NON È CERTO")
+    if coda_senza_parole > 60.0:
+        log.info(
+            "     - Il parlato si ferma %.0fs prima della fine: gli ultimi "
+            "confini non sono verificabili col testo.",
+            coda_senza_parole,
+        )
     if incerti:
         for voce in incerti:
             log.info("     - %s", voce)
@@ -3909,18 +3958,9 @@ def _main_impl(argv: list | None = None) -> None:
         sync_notes: dict[str, object] = {}
         if _correzioni_nomi:
             sync_notes["correzioni_nomi"] = list(_correzioni_nomi)
-        # Una trascrizione che si ferma molto prima della fine dell'audio non
-        # puo' vincolare i confini finali: senza questo controllo il video
-        # resta su un'unica slide per tutta la coda (caso del 26/11).
-        _coda_senza_parole = _coda_audio_senza_parole(words_raw or [], total_duration)
-        if _coda_senza_parole > 60.0:
-            log.warning(
-                "   [Trascrizione] Il testo si ferma %.0fs prima della fine "
-                "dell'audio: gli ultimi confini non possono essere verificati "
-                "col parlato.",
-                _coda_senza_parole,
-            )
-            sync_notes["coda_senza_parole"] = round(_coda_senza_parole, 1)
+        # Il controllo sulla coda si fa PIU' avanti, dopo che la trascrizione
+        # finale (beam accurato, zone ricucite) e' stata scelta: misurare il
+        # primo greedy darebbe un falso allarme.
         # Il DPI effettivo del rendering: se il tetto sui pixel l'ha abbassato,
         # l'artefatto lo dice (l'opzione --dpi sembrava fare un'altra cosa).
         _dpi_effettivo = ultimo_dpi_effettivo()
@@ -4967,6 +5007,30 @@ def _main_impl(argv: list | None = None) -> None:
         # Se l'escalation beam ha vinto (o le parole vengono dal recupero zone)
         # la chiave veloce punterebbe a un testo diverso da quello della timeline.
         sync_notes["transcript_cache_key"] = chiave_parole_effettiva
+        # La coda non coperta si misura sulla trascrizione EFFETTIVA (dopo
+        # escalation beam e recupero zone): il primo greedy puo' fermarsi prima
+        # e non e' quello che ha costruito la timeline.
+        _coda_senza_parole = _coda_audio_senza_parole(words_raw or [], total_duration)
+        _tutte_ancorate = _all_transitions_anchored(
+            cast("dict[str, object] | None", sync_notes.get("anchors"))
+        )
+        if _coda_senza_parole > 60.0:
+            sync_notes["coda_senza_parole"] = round(_coda_senza_parole, 1)
+            if _tutte_ancorate:
+                # Coda di musica/intro: i confini sono tutti annunciati, quindi
+                # verificabili dal parlato anche senza parole nella coda.
+                log.info(
+                    "   [Trascrizione] Ultimi %.0fs senza parlato, ma tutti i "
+                    "confini sono annunciati: la coda non e' un problema.",
+                    _coda_senza_parole,
+                )
+            else:
+                log.warning(
+                    "   [Trascrizione] Il testo si ferma %.0fs prima della fine "
+                    "dell'audio: gli ultimi confini non possono essere verificati "
+                    "col parlato.",
+                    _coda_senza_parole,
+                )
         # I tempi per fase nell'artefatto: con la cache e i tempi in un posto
         # solo si puo' capire PERCHE' una run e' stata lenta (e se la cache ha
         # funzionato) senza rileggere i log.
@@ -4998,23 +5062,17 @@ def _main_impl(argv: list | None = None) -> None:
         # file nuovo descriverebbe un podcast diverso da quello che l'utente
         # ascoltera'. Interrompe anche --dry-run/--preview, che scrivono un
         # report. Il vecchio errore (26/11) era esattamente questo.
-        if _audio_cambiato_durante_la_run(audio_path, audio_hash):
-            _abort_senza_video(
-                sync_report,
-                "Il file audio e' cambiato mentre la pipeline era in esecuzione: "
-                "trascrizione e timeline sono state calcolate sulla versione "
-                "precedente. Il video NON e' stato generato. Rilancia la "
-                "pipeline con il podcast definitivo."
-            )
-        sync_report["audio_invariato_durante_la_run"] = True
-        if _coda_senza_parole > 60.0 and args.strict_sync:
+        _verifica_audio_invariato(sync_report, audio_path, audio_hash, Path(args.output_video))
+        if _coda_senza_parole > 60.0 and args.strict_sync and not _tutte_ancorate:
             _abort_senza_video(
                 sync_report,
                 f"La trascrizione copre solo fino a {total_duration - _coda_senza_parole:.0f}s "
                 f"di {total_duration:.0f}s di audio: mancano {_coda_senza_parole:.0f}s di "
                 "parlato e gli ultimi confini non sono verificabili. Il video NON e' "
                 "stato generato (--strict-sync attivo): rigenera il podcast o "
-                "rimuovi --strict-sync per accettare la timeline stimata."
+                "rimuovi --strict-sync per accettare la timeline stimata.",
+                motivo="trascrizione_troncata",
+                output_path=Path(args.output_video),
             )
         _save_sync_report(sync_report)
         if anomalous:
@@ -5339,6 +5397,7 @@ def _main_impl(argv: list | None = None) -> None:
                 anchors=cast("dict[str, object] | None", sync_notes.get("anchors")),
                 refine=cast("Sequence[dict[str, object]]", sync_notes.get("refine") or ()),
                 never_discussed=_never_note,
+                coda_senza_parole=_coda_senza_parole,
                 title="TIMELINE PRONTA — COSA CONTERRÀ IL VIDEO",
             )
             log.info("\n" + "=" * 70)
@@ -5349,6 +5408,7 @@ def _main_impl(argv: list | None = None) -> None:
 
         # --- Fase 4: Assemblaggio video ---
         t_phase_start = time.time()
+        _verifica_audio_invariato(sync_report, audio_path, audio_hash, Path(args.output_video))
         build_video(
             slide_files,
             durations,
@@ -5461,6 +5521,7 @@ def _main_impl(argv: list | None = None) -> None:
                             _dubbi_annunci()
                         )
                     inizio_secondo_encoding = time.time()
+                    _verifica_audio_invariato(sync_report, audio_path, audio_hash, Path(args.output_video))
                     build_video(
                         slide_files,
                         durations,
@@ -5636,6 +5697,7 @@ def _main_impl(argv: list | None = None) -> None:
             anchors=cast("dict[str, object] | None", sync_notes.get("anchors")),
             refine=cast("Sequence[dict[str, object]]", sync_notes.get("refine") or ()),
             never_discussed=_never_note,
+            coda_senza_parole=_coda_senza_parole,
         )
 
     finally:
