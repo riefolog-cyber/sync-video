@@ -395,7 +395,12 @@ jobs:
             Write-Error "ffmpeg non disponibile: i test del PC sano fallirebbero per un guasto dell'ambiente."
             exit 1
           }
-          ffmpeg -version | Select-Object -First 1
+          # Stessa regola di Tesseract: la pipe maschererebbe un binario rotto.
+          ffmpeg -version
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "ffmpeg presente ma non eseguibile (uscita $LASTEXITCODE)."
+            exit 1
+          }
 
       - name: Test veloci su Windows
         run: python -m unittest discover -s src -p "test_*.py"
@@ -416,7 +421,9 @@ jobs:
 
       - name: Impacchetta lo ZIP
         run: |
-          TAG="build-$(date +%Y%m%d)-${GITHUB_SHA::7}-r${GITHUB_RUN_NUMBER}"
+          # Il retry di uno stesso push conserva GITHUB_RUN_NUMBER: senza
+          # l'attempt il tag esiste gia' e la release fallisce.
+          TAG="build-$(date +%Y%m%d)-${GITHUB_SHA::7}-r${GITHUB_RUN_NUMBER}-a${GITHUB_RUN_ATTEMPT}"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           rm -rf /tmp/pkg && mkdir -p /tmp/pkg
           git archive HEAD | tar -x -C /tmp/pkg

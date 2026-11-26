@@ -5,9 +5,10 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 24 (capitoli, segnali GPU per audio, riparazione
-guidata e CI), dopo il batch 23. Il piano resta un registro delle decisioni: i
-dettagli di ogni cambiamento sono nei messaggi di commit e nei test.
+Ultimo aggiornamento: batch 25 (regressioni dei capitoli, report costante,
+blocco run e script di verifica), dopo il batch 24 (la cui CI e' ora verde).
+Il piano resta un registro delle decisioni: i dettagli di ogni cambiamento
+sono nei messaggi di commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -272,7 +273,7 @@ tutti, i problemi hanno un test che li copre.
   programma non installa più mypy e ruff. `controlli.py` lo dice se mancano.
 
 Come si verificano: `python -m ruff check .`, `python -m mypy src`,
-`python -m unittest discover -s src -p "test_*.py"` (1619 test).
+`python -m unittest discover -s src -p "test_*.py"` (1630 test).
 
 ## Batch 12 — revisione delle revisioni (2026-11)
 
@@ -858,6 +859,56 @@ Ora passano dalla funzione di produzione, con i probe forzati.
 Verifiche: `ruff` e `mypy` puliti (94 file, win32/linux/darwin), 1619 test
 verdi (11 nuovi), `controlli.py` 6/6 e debug hardware 17/17.
 
+## Batch 25 — capitoli, report e script (2026-11)
+
+Ottava revisione incrociata. Ventiquattro difetti, undici test nuovi. La CI
+del batch 24 e' stata verificata verde prima di partire.
+
+**Capitoli: le correzioni del batch 24 avevano introdotto due regressioni.**
+Il confronto di similarita' considerava le parole IDENTICHE come prova di un
+errore OCR: il relatore che ripeteva il titolo ufficiale (NASA, BISOGNI
+PRIMARI, "Prima") faceva sostituire quel titolo con un pezzo di narrazione.
+Ora solo una parola DIVERSA ma quasi uguale ("cunosita'"/"curiosita") vale da
+prova. D'altro canto la scorciatoia per gli acronimi faceva passare come
+titoli anche SFFSITE, IEEARSI DIRLA, ST e RRAR: ora gli acronimi devono
+essere plausibili (3-5 lettere, no sequenze di tre vocali/consonanti o
+consonanti raddoppiate) e il rumore torna a "Slide N".
+
+**Report e blocco.** Il report finale veniva riscritto solo con dubbi o
+verifiche: nei run normali con `--skip-slides` restava su disco il deck
+intero mentre SRT, capitoli e riepilogo descrivevano quello mostrato. Ora la
+scrittura finale e' incondizionata. Un abort `--strict-sync` prima del
+rendering salvava un report senza il marchio "senza video": `--review`
+poteva estrarre frame da un video vecchio seguendo una timeline mai
+renderizzata; ora l'abort marca il report. Il blocco run era rilasciato da
+`__del__`: un'eccezione trattenuta dal chiamante ne teneva vivo il traceback
+e il blocco restava preso per tutta la vita del processo. Ora un wrapper
+`main()` lo rilascia in un `finally`. `--dry-run` pulisce le anteprime come
+giu' facevano `--preview` e la run normale. `--prefetch-models` e
+`--openvino-download` rilasciano il blocco durante il download, cosi' una
+run vera non aspetta 15 minuti per un'operazione che non è una pipeline.
+
+**Script e CI.** La CI non controllava l'exit code di `ffmpeg -version` e il
+tag di release collideva su un retry (stesso `GITHUB_RUN_NUMBER`). Il test
+A/B tagliava i vettori alla lunghezza minima, dichiarando EQUIVALENTE una
+candidata che non embeddava tutti i testi; il worker con la forma
+`{slides, blocks}` embeddava solo le slide. `analysis_sync.py` cercava sempre
+`video_finale.mp4` e con `--output lezione.mp4` stampava "0/0 frame coerenti"
+uscendo 0: ora accetta `--video` ed esce 2 se il video manca. `--force` del
+watcher e5 non segna piu' i nuovi candidati come gia' visti. `riga_baseline`
+legge l'originale prima di scrivere quando `--scrivi` e `--confronta`
+puntano lo stesso file. Docs e `.bat` allineati su cache rediretta, codici di
+uscita e flag reali di `prova_materiale_reale.py`.
+
+**Test che verificano davvero.** Cinque test "di regressione" dei batch
+precedenti controllavano la funzione sbagliata o il testo sorgente: ora patchano
+`_scrivi_attempts`, esercitano la guardia `--dry-run` a runtime, richiedono
+`True` esplicito per il marcatore corrotto e passano dalla funzione di
+produzione per i contatori di tempo.
+
+Verifiche: `ruff` e `mypy` puliti (96 file, win32/linux/darwin), 1630 test
+verdi (11 nuovi), `controlli.py` 6/6 e debug hardware 17/17.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -953,5 +1004,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio (batch 24): ruff pulito, mypy pulito su tre
-piattaforme, 1619 test verdi, `_debug_hardware.py` e controlli 6/6.
+Stato all'ultimo lancio (batch 25): ruff pulito, mypy pulito su tre
+piattaforme, 1630 test verdi, `_debug_hardware.py` e controlli 6/6.

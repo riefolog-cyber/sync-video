@@ -386,9 +386,12 @@ def main(argv: list | None = None) -> int:
         action, reasons = _recommendation(prev, data, known=known)
 
     # Ogni candidato osservato diventa noto: non si ripete l'allarme.
-    known |= set(data["new_candidates"])
+    if not args.force:
+        # `--force` e' solo "genera il report anche senza novita'": non deve
+        # silentare per sempre gli allarmi sui nuovi candidati.
+        known |= set(data["new_candidates"])
+        _save_state(data, known=known)
     _write_report(action, reasons, data)
-    _save_state(data, known=known)
 
     print(f"\nControllo completato. Report: {REPORT_FILE}")
     if reasons:

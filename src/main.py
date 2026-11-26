@@ -318,6 +318,13 @@ def _abort(message: str) -> NoReturn:
     sys.exit(1)
 
 
+def _abort_senza_video(report: dict[str, object], messaggio: str) -> NoReturn:
+    """Abort prima del rendering: il report salvato NON descrive un video."""
+    report["senza_video"] = True
+    _save_sync_report(report)
+    _abort(messaggio)
+
+
 def _percorso_override(indicato: str, output: Path) -> Path:
     """Dove stanno le correzioni manuali, e cosa fare se il file non c'e'.
 
@@ -2394,6 +2401,8 @@ def _resolve_flow(
 # e' del sistema operativo: quando l'altra run muore il blocco si libera da
 # solo, quindi l'attesa non e' un'attesa cieca).
 _BLOCCO_ATTESA_SECONDI = 900.0
+# Blocco preso dalla run corrente: il wrapper lo rilascia in un finally.
+_BLOCCO_ATTIVO: BloccoRun | None = None
 
 # Sotto questa durata media per pagina il podcast e' probabilmente troppo
 # sintetico: il prompt chiede sezioni da 45-180 secondi, e a 20s per pagina il
@@ -3237,7 +3246,7 @@ def _avvisa_verifica_non_eseguita(args: Any, motivo: str) -> None:
         )
 
 
-def main(argv: list | None = None) -> None:
+def _main_impl(argv: list | None = None) -> None:
     args = parse_args(argv)
     # Uno stato di processo (ripresa da un parziale) non deve riversarsi in
     # una SECONDA main() nella stessa interpreter: il report direbbe
@@ -3336,6 +3345,12 @@ def main(argv: list | None = None) -> None:
             "   File di blocco non creabile (%s): proseguo senza blocco delle run concorrenti.",
             _blocco.path,
         )
+    else:
+        # Il wrapper `main()` rilascia SEMPRE questo blocco in un finally,
+        # anche se un'eccezione viene trattenuta dal chiamante (il traceback
+        # terrebbe vivo il frame e `__del__` non scatterebbe mai).
+        global _BLOCCO_ATTIVO
+        _BLOCCO_ATTIVO = _blocco
 
     # --- Pulizia cache (OPERAZIONE DISTRUTTIVA) ---
     # Dopo il blocco run: `--clean-cache --include-models --yes` cancella
@@ -3467,21 +3482,32 @@ def main(argv: list | None = None) -> None:
     if not args.no_update_check:
         run_update_check(ask_to_update=not args.no_update)
 
-    # --- Download di TUTTI i modelli (una tantum) e uscita ---
-    if args.prefetch_models:
-        # `_prefetch_models` ritorna False se anche un solo download e' fallito:
-        # uscire 0 faceva credere a .bat e job che i modelli fossero pronti.
-        if not _prefetch_models(args):
-            sys.exit(1)
-        return
+    # I comandi che SCARICANO modelli non sono una pipeline: tenere il blocco
+    # run per 15 minuti faceva aspettare (e poi abortire) una run vera avviata
+    # mentre il download era in corso. Si rilascia il blocco per la durata del
+    # download e lo si riprende dopo.
+    blocco_download = _BLOCCO_ATTIVO
+    if (args.prefetch_models or args.openvino_download) and blocco_download is not None:
+        blocco_download.release()
+    try:
+        # --- Download di TUTTI i modelli (una tantum) e uscita ---
+        if args.prefetch_models:
+            # `_prefetch_models` ritorna False se anche un solo download e'
+            # fallito: uscire 0 faceva credere che i modelli fossero pronti.
+            if not _prefetch_models(args):
+                sys.exit(1)
+            return
 
-    # --- Download modello OpenVINO (una tantum) e uscita ---
-    if args.openvino_download:
-        from transcription import download_openvino_model
+        # --- Download modello OpenVINO (una tantum) e uscita ---
+        if args.openvino_download:
+            from transcription import download_openvino_model
 
-        download_openvino_model(Path(args.openvino_model_dir))
-        log.info("   Modello OpenVINO pronto. Puoi ora lanciare la pipeline.")
-        return
+            download_openvino_model(Path(args.openvino_model_dir))
+            log.info("   Modello OpenVINO pronto. Puoi ora lanciare la pipeline.")
+            return
+    finally:
+        if blocco_download is not None:
+            blocco_download.tenta(attesa_secondi=0)
 
     # --- Validazione input ---
     pdf_path = args.pdf_path
@@ -4961,7 +4987,8 @@ def main(argv: list | None = None) -> None:
                 # comunque il video).
                 if args.strict_sync:
                     detail = ", ".join(f"slide {s} ({d:.0f}s)" for s, d in misaligned)
-                    _abort(
+                    _abort_senza_video(
+                        sync_report,
                         f"Sincronizzazione sospetta: {detail} ha il parlato più "
                         "simile a un'altra slide (probabile allineamento errato). "
                         "Il video NON è stato generato (--strict-sync attivo): "
@@ -5005,7 +5032,8 @@ def main(argv: list | None = None) -> None:
                     slide_ids[0],
                 )
                 if args.strict_sync:
-                    _abort(
+                    _abort_senza_video(
+                        sync_report,
                         f"Sincronizzazione sospetta: la prima sezione ({durations[0]:.0f}s) "
                         f"parla di una slide diversa dalla 1 mostrata nel video. Il video "
                         "NON è stato generato (--strict-sync attivo): guarda i primi "
@@ -5203,6 +5231,9 @@ def main(argv: list | None = None) -> None:
 
         # --- Dry-run: fermati qui ---
         if args.dry_run:
+            # Anche il dry-run pulisce le anteprime della run precedente:
+            # altrimenti restano PNG di dubbi che il report dice non esistere.
+            _write_boundary_previews(args.output_video, [], CACHE_DIR / "review")
             _avvisa_verifica_non_eseguita(args, "--dry-run")
             t_total = time.time() - t_total_start
             _print_timing(
@@ -5509,6 +5540,13 @@ def main(argv: list | None = None) -> None:
             # coperto solo nel caso "dubbi piu' numerosi").
             _write_boundary_previews(args.output_video, [], CACHE_DIR / "review")
 
+        # Il report in memoria e' stato ricostruito piu' volte (skip-slides,
+        # dubbi, offset effettivo, riparazioni). Senza questa scrittura
+        # incondizionata, nei run normali senza dubbi quello su disco restava
+        # quello del deck intero scritto a inizio pipeline: SRT, capitoli e
+        # riepilogo parlavano della sequenza mostrata, il JSON no.
+        _save_sync_report(sync_report)
+
         # Pulizia cache orfana
         cleaned = _clean_orphan_cache(active_cache_keys)
         if cleaned:
@@ -5550,6 +5588,25 @@ def main(argv: list | None = None) -> None:
         # a ogni run. Best-effort: e' manutenzione, non risultato della run.
         with suppress(Exception):
             potatura_cache_embedding(cache_dir=CACHE_DIR)
+
+
+def main(argv: list | None = None) -> None:
+    """Wrapper con rilascio garantito del blocco run.
+
+    La pipeline vera e' `_main_impl`: se solleva e il chiamante conserva
+    l'eccezione, il traceback terrebbe vivo il frame e `__del__` del blocco
+    non scatterebbe mai. Qui il rilascio e' in un `finally`, indipendente
+    dalla vita del traceback.
+    """
+    global _BLOCCO_ATTIVO
+    _BLOCCO_ATTIVO = None
+    try:
+        _main_impl(argv)
+    finally:
+        blocco = _BLOCCO_ATTIVO
+        _BLOCCO_ATTIVO = None
+        if blocco is not None:
+            blocco.release()
 
 
 # =====================================================================

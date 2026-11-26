@@ -385,9 +385,10 @@ class TestCorrezioneNomiTutteLeTrascrizioni(unittest.TestCase):
 
         # Due in main (veloce + accurata) e una nel recupero zone: nessuna
         # puo' piu' chiamare la correzione senza il vocabolario del deck.
-        self.assertEqual(len(chiamate_in("main")), 2)
+        # La pipeline e' `_main_impl`: `main` e' il solo wrapper del blocco.
+        self.assertEqual(len(chiamate_in("_main_impl")), 2)
         self.assertEqual(len(chiamate_in("_recover_anchor_zones")), 1)
-        for chiamata in chiamate_in("main") + chiamate_in("_recover_anchor_zones"):
+        for chiamata in chiamate_in("_main_impl") + chiamate_in("_recover_anchor_zones"):
             self.assertGreaterEqual(len(chiamata.args), 2, "manca il vocabolario")
             self.assertIsInstance(chiamata.args[1], ast.Name)
         # La variabile e' la stessa per veloce e accurata: l'A/B confronta
@@ -395,13 +396,13 @@ class TestCorrezioneNomiTutteLeTrascrizioni(unittest.TestCase):
         self.assertEqual(
             {
                 chiamata.args[1].id
-                for chiamata in chiamate_in("main")
+                for chiamata in chiamate_in("_main_impl")
                 if isinstance(chiamata.args[1], ast.Name)
             },
             {"_vocabolario_nomi"},
         )
         calcoli = [
-            n for n in ast.walk(funzioni["main"])
+            n for n in ast.walk(funzioni["_main_impl"])
             if isinstance(n, ast.Call)
             and isinstance(n.func, ast.Name)
             and n.func.id == "vocabolario_del_deck"

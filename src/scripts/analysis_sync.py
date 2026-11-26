@@ -115,6 +115,20 @@ print(f"[Verifica] Uso timeline finale validata: {FINAL_TIMELINE.name}")
 SLIDES_FILE = _newest("slides_*.json")
 TRANSCRIPT_FILE = _newest("transcript_*.json")
 VIDEO = BASE / "video_finale.mp4"
+if "--video" in sys.argv:
+    _indice = sys.argv.index("--video")
+    if _indice + 1 < len(sys.argv):
+        VIDEO = Path(sys.argv[_indice + 1])
+if not VIDEO.is_file():
+    # Senza video il controllo dei frame non puo' girare: uscire 2 (non
+    # verificabile) e meglio di "0/0 frame coerenti" che fa credere che il
+    # video sia stato controllato.
+    print(
+        f"ERRORE: video non trovato: {VIDEO}. Usa --video percorso/file.mp4 "
+        "(la pipeline accetta --output con un nome diverso da video_finale.mp4).",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 FRAMES_DIR = BASE / ".analysis_frames"
 
 # Durata audio: dal file della run se disponibile, altrimenti dall'ultima parola.

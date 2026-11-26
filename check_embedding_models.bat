@@ -31,7 +31,9 @@ echo  2 = azione consigliata (fai il test A/B)
 echo  3 = errore di rete (ripeti il controllo)
 echo ========================================
 echo.
-echo Report: .cache\embedding_model_check_report.md
+set "CARTELLA_CACHE=.cache"
+if defined SYNC_VIDEO_CACHE_DIR set "CARTELLA_CACHE=%SYNC_VIDEO_CACHE_DIR%"
+echo Report: %CARTELLA_CACHE%\embedding_model_check_report.md
 echo.
 
 exit /b %EXIT%

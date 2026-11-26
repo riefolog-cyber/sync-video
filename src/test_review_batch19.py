@@ -68,11 +68,15 @@ class TestCacheNonUccideLaRun(unittest.TestCase):
             audio.write_bytes(b"audio")
             with (
                 mock.patch.object(transcription, "CACHE_DIR", Path(tmp)),
-                mock.patch.object(transcription, "atomic_write_text", side_effect=OSError("disco pieno")),
+                # `atomic_write_text` e' gia' protetto dentro `_scrivi_attempts`:
+                # per esercitare il guard DI QUESTA funzione si patcha chi la
+                # chiama, non la primitiva di scrittura.
+                mock.patch.object(
+                    transcription, "_scrivi_attempts", side_effect=OSError("disco pieno")
+                ),
             ):
-                # La funzione e' best-effort: se la cache non collabora non deve
-                # sollevare, altrimenti la run moriva prima di provare OpenVINO.
                 transcription._write_attempt(audio)
+                self.assertFalse(transcription._openvino_attempt_path().exists())
 
     def test_cache_aggiornamenti_non_scrivibile_non_blocca(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

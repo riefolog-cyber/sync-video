@@ -497,7 +497,8 @@ installazione: **non** fallisce con un errore incomprensibile.
 > - **EQUIVALENTE** → il pinnato viene incluso nell'aggiornamento automatico;
 > - **DIVERGENTE** → resta pinnato e si aggiornano solo gli altri pacchetti.
 >
-> Il report è salvato in `.cache/fastembed_ab.json`. Esegui manualmente con
+> Il report è salvato in `CACHE_DIR/fastembed_ab.json` (`.cache/` di default,
+> o `SYNC_VIDEO_CACHE_DIR` se impostato). Esegui manualmente con
 > `python src/scripts/check_fastembed_upgrade.py`.
 >
 > **Aggiornamento manuale dedicato.** Per fare il check + aggiornamento dei

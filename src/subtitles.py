@@ -318,8 +318,13 @@ def _qualita_titolo(riga: str) -> float:
         # Un titolo SCRITTO tutto in maiuscolo (NASA, FAQ, BISOGNI PRIMARI)
         # e' legittimo: si penalizzano solo i tuoni maiuscoli MISTI a testo
         # minuscolo, tipici dell'OCR che ha letto male una slide decorativa.
+        # Un acronimo plausibile come titolo unico non e' rumore. Le righe
+        # interamente maiuscole ma non acronimi (IEEARSI DIRLA, SFFSITE)
+        # restano penalizzate come prima del batch 24.
         tutte_maiuscole = all(p.isupper() for p in parole if any(c.isalpha() for c in p))
-        if not tutte_maiuscole:
+        if not tutte_maiuscole and not (
+            len(parole) == 1 and _acronimo_plausibile(parole[0])
+        ):
             maiuscole = sum(
                 1 for p in parole if len(p) >= 2 and p.isalpha() and p.isupper() and p != "IO"
             )
@@ -363,9 +368,19 @@ def _titolo_capitolo(testo: str, numero: int) -> str:
     if not compatto:
         return f"Slide {numero}"
     # Un acronimo ("NASA", "FAQ") ha meno di 5 caratteri ma e' un titolo
-    # ufficiale: non va confuso con una riga di rumore OCR.
-    if compatto.isalpha() and compatto.isupper() and len(compatto) >= 2:
-        return compatto
+    # ufficiale: solo se e' PLAUSIBILE (alternanza consonante/vocale, niente
+    # ripetizioni). "ST", "INTE", "RRAR" sono rumore OCR, non acronimi.
+    if all(p.isalpha() and p.isupper() for p in compatto.split()):
+        # IEEARSI DIRLA e SFFSITE sono rumore: sequenze di 3 vocali o
+        # consonanti che l'OCR ha letto male in una slide decorativa.
+        rumore = any(
+            re.search(r"[bcdfghjklmnpqrstvwxyz]{3,}|[aeiou]{3,}", p.lower())
+            for p in compatto.split()
+        )
+        if rumore:
+            return f"Slide {numero}"
+        if _acronimo_plausibile(compatto):
+            return compatto
 
     # Prima frase/segmento (solo dopo i primi caratteri, altrimenti un titolo
     # che comincia con un punto verrebbe buttato via).
@@ -413,8 +428,28 @@ def _titolo_unito(titoli: Sequence[str]) -> str:
     return tagliato.rstrip(" /") + "…"
 
 
+def _acronimo_plausibile(testo: str) -> bool:
+    """Vero per un acronimo breve (NASA, FAQ), falso per rumore maiuscolo."""
+    if not (testo.isalpha() and testo.isupper() and 3 <= len(testo) <= 5):
+        return False
+    basso = testo.lower()
+    if not any(c in "aeiou" for c in basso):
+        return False
+    return not (
+        re.search(r"[bcdfghjklmnpqrstvwxyz]{3,}", basso)
+        or re.search(r"[aeiou]{3,}", basso)
+        or re.search(r"([bcdfghjklmnpqrstvwxyz])\1", basso)
+    )
+
+
 def _simili(a: str, b: str) -> bool:
-    """Similarita' fra due parole: youngest typo OCR vs parola detta."""
+    """Vero se a e b sono DIVERSE ma quasi uguali (typo OCR).
+
+    Le parole identiche NON contano: il relatore che ripete il titolo
+    ufficiale e' la regola, non un errore dell'OCR.
+    """
+    if a == b:
+        return False
     return _a_una_lettera(a, b) or difflib.SequenceMatcher(None, a, b).ratio() >= 0.72
 
 
@@ -517,21 +552,15 @@ def build_capitoli(
             coincide = any(
                 _simili(a, b) for a in parole_ocr for b in parole_dette
             )
-            radici_ocr = {p[:4] for p in parole_ocr if len(p) > 3}
-            radici_parlato = {p[:4] for p in parole_dette if len(p) > 3}
+            # Solo una PAROLA DIVERSA MA QUASI UGUALE e' prova di errore OCR.
+            # La condivisione di radici (o la ripetizione esatta del titolo
+            # da parte del relatore) NON giustifica la sostituzione: e' il
+            # caso normale, e faceva stravolgere titoli ufficiali.
             if (
                 q_parlato >= 0.6
                 and q_parlato >= q_ocr - 0.05
                 and not parlato.startswith("Slide ")
-                and (
-                    titolo_ocr.startswith("Slide ")
-                    or coincide
-                    or (
-                        len(parole_ocr) >= 3
-                        and len(parole_dette) >= 3
-                        and radici_ocr & radici_parlato
-                    )
-                )
+                and (titolo_ocr.startswith("Slide ") or coincide)
             ):
                 titolo = parlato
         capitoli.append((inizio, titolo))

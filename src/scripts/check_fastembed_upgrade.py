@@ -393,8 +393,13 @@ def compare(
     due sequenze, `decision_match` e' 0 e il verdetto e' DIVERGENTE: il -1
     usato come segnaposto non puo' essere interpretato come "stesse decisioni".
     """
-    n = min(base.shape[0], cand.shape[0])
-    base, cand = base[:n], cand[:n]
+    # Tagliare all'array piu' corto faceva dichiarare EQUIVALENTE una
+    # candidata che non riesce a embeddare tutti i testi reali.
+    if base.shape[0] != cand.shape[0]:
+        raise ValueError(
+            f"embedding candidata incompleta: {cand.shape[0]} vettori contro {base.shape[0]}"
+        )
+    n = base.shape[0]
     norms = np.linalg.norm(base, axis=1) * np.linalg.norm(cand, axis=1)
     norms[norms == 0] = 1.0
     cosine = (base * cand).sum(axis=1) / norms

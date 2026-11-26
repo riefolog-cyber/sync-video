@@ -9,6 +9,7 @@ Esegui con: python -m unittest test_review_batch24 -v
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -106,9 +107,11 @@ class TestSegnaleGpu(unittest.TestCase):
             ir = Path(tmp) / "ir"
             ir.mkdir()
             (ir / "openvino_model_id.json").write_text("[]", encoding="utf-8")
-            self.assertIsInstance(
-                transcription.openvino_model_id_ok(ir, "qualsiasi"), bool
+            self.assertIs(transcription.openvino_model_id_ok(ir, "qualsiasi"), True)
+            (ir / "openvino_model_id.json").write_text(
+                json.dumps({"model_id": "ALTRO"}), encoding="utf-8"
             )
+            self.assertIs(transcription.openvino_model_id_ok(ir, "atteso"), False)
 
 
 class TestRiparazioneEStato(unittest.TestCase):
@@ -157,11 +160,21 @@ class TestRiparazioneEStato(unittest.TestCase):
         self.assertTrue(visti)
         self.assertLessEqual(visti[0][1][1], 55.0)
 
-    def test_dry_run_blocca_review_su_video_vecchio(self) -> None:
-        testo = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
-        self.assertIn('sync_report["senza_video"] = True', testo)
-        guardia = (ROOT / "src" / "pipeline_review.py").read_text(encoding="utf-8")
-        self.assertIn('report.get("anteprima") or report.get("senza_video")', guardia)
+    def test_review_rifiuta_report_dry_run(self) -> None:
+        import pipeline_review
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            (cache / "sync_report.json").write_text(
+                json.dumps({"senza_video": True, "segments": [{"slide": 1, "start": 0.0}]}),
+                encoding="utf-8",
+            )
+            with self.assertLogs("slide2video", level="ERROR") as log:
+                esito = pipeline_review._review_boundary_doubts(
+                    Path("video.mp4"), cache_dir=cache
+                )
+            self.assertEqual(esito, 3)
+            self.assertIn("--preview/--dry-run", "\n".join(log.output))
 
     def test_contatori_tempo_azzerati_tra_main(self) -> None:
         semantic_sync._EMBED_SECONDS = 99.0

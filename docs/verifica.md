@@ -20,12 +20,13 @@ La pipeline INTERA (PDF vero → OCR → voce vera → Whisper → ancore → MP
 in tre test lenti di `test_end_to_end_minimo.py` (annunci, ripresa a metà,
 disattivazione della ripresa): costano circa un minuto e partono con
 `SYNC_VIDEO_RUN_SLOW=1` (job notturno). Anche `prova_materiale_reale.py`
-esegue la pipeline intera e ne confronta la timeline con il riferimento. **Delimitazione:** il test forza
-`--transcriber whisper`, `--no-auto-setup` e `--no-update-check`, quindi NON
-copre la scelta automatica del motore (CUDA/OpenVINO), il controllo
-aggiornamenti su PyPI né il test A/B dei pacchetti pinnati: quelle strade vanno
-provate a mano (`--force-setup` per il motore, `aggiornamenti.bat` per gli
-aggiornamenti).
+esegue la pipeline intera e ne confronta la timeline con il riferimento.
+**Delimitazione:** i test lenti forzano `--transcriber whisper`,
+`--no-auto-setup` e `--no-update-check`; `prova_materiale_reale.py` forza
+`--no-auto-setup` e `--no-update-check` ma lascia il motore `auto`. Quindi la
+scelta automatica (CUDA/OpenVINO) e il controllo aggiornamenti non sono
+coperti in modo deterministico: vanno provati a mano (`--force-setup` per il
+motore, `aggiornamenti.bat` per gli aggiornamenti).
 
 ## 📌 Baseline delle run verdi
 

@@ -62,7 +62,12 @@ def main() -> int:
     with open(texts_path, encoding="utf-8") as f:
         data: dict[str, Any] = json.load(f)
 
-    texts = data.get("texts") or data.get("slides") or data.get("blocks") or []
+    # La forma documentata {"slides": ..., "blocks": ...} deve embeddare
+    # ENTRAMBE: con `or` il secondo gruppo veniva scartato e il confronto A/B
+    # diventava falso per costruzione.
+    texts = data.get("texts") or (
+        list(data.get("slides") or []) + list(data.get("blocks") or [])
+    )
 
     from fastembed import TextEmbedding
 

@@ -186,6 +186,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     nuova = riga(report, args.data)
 
+    # Confrontare dopo aver scritto convincerebbe sempre che non e' cambiato
+    # niente: si legge l'originale PRIMA della scrittura.
+    testo_originale: str | None = None
+    if args.scrivi and args.confronta and Path(args.scrivi) == Path(args.confronta):
+        try:
+            testo_originale = Path(args.scrivi).read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"Non riesco a leggere {args.scrivi}: {e}")
+            return 1
+
     if args.scrivi:
         path = Path(args.scrivi)
         try:
@@ -203,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.confronta:
         path = Path(args.confronta)
         try:
-            righe = path.read_text(encoding="utf-8").splitlines()
+            righe = (testo_originale if testo_originale is not None else path.read_text(encoding="utf-8")).splitlines()
         except OSError as e:
             print(f"Non riesco a leggere {path}: {e}")
             return 1
