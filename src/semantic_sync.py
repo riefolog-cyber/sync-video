@@ -2440,7 +2440,13 @@ def _record_refine(key: int, slide: int, **fields: object) -> None:
     # vecchia decisione presa per NUMERO di slide sullo stesso confine. Le due
     # occorrenze di una slide con --skip-slides hanno indici diversi e vanno
     # tenute entrambe: cancellare per numero le faceva sparire una.
-    if key != slide:
+    # Sostituire la decisione "generica" per numero SOLO se questa e' la
+    # prima occorrenza della slide: con --skip-slides una decisione guidata
+    # di una occorrenza successiva non puo' cancellare quella della prima.
+    # Una decisione guidata su un indice PRECEDENTE al numero slide sostituisce
+    # la vecchia stima per numero; un indice SUCCESSIVO e' un'altra occorrenza
+    # della stessa slide (--skip-slides) e va tenuto accanto alla prima.
+    if key < slide:
         _REFINE_DIAGNOSTICS.pop(("slide", slide), None)
     _REFINE_DIAGNOSTICS[chiave_interna] = voce
 

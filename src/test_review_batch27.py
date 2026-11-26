@@ -101,6 +101,17 @@ class TestReviewRobusta(unittest.TestCase):
 
 
 class TestStatoEParziali(unittest.TestCase):
+    def test_prima_occorrenza_con_indice_uguale_non_persa(self) -> None:
+        semantic_sync.reset_refine_diagnostics()
+        try:
+            semantic_sync._record_refine(2, 2, decision="A")
+            semantic_sync._record_refine(3, 2, decision="B")
+            self.assertEqual(
+                {v["decision"] for v in semantic_sync.refine_diagnostics()}, {"A", "B"}
+            )
+        finally:
+            semantic_sync.reset_refine_diagnostics()
+
     def test_due_occorenze_stessa_slide_restano_distinte(self) -> None:
         semantic_sync.reset_refine_diagnostics()
         try:

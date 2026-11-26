@@ -359,6 +359,21 @@ class TestConfiniBatch32(unittest.TestCase):
         self.assertEqual(subtitles._taglia_sintesi("La Corte d’"), "La Corte")
         self.assertEqual(subtitles._taglia_sintesi("La Corte d'"), "La Corte")
 
+    def test_apostrofo_digito_in_mezzo_al_titolo(self) -> None:
+        self.assertEqual(
+            subtitles._pulisci_virgolette("Crolla l’80 dei casi"), "Crolla l’80 dei casi"
+        )
+
+    def test_intestazione_titolo_case_pieno_non_taglia(self) -> None:
+        self.assertEqual(
+            subtitles._titolo_capitolo("La Corte Ha Stabilito L’Esito Del Ricorso", 1),
+            "La Corte Ha Stabilito L’Esito Del Ricorso",
+        )
+        self.assertEqual(
+            subtitles._titolo_capitolo("La vittima processata l’Esito (2020)", 1),
+            "La vittima processata",
+        )
+
     def test_virgoletta_chiusa_prima_di_cifra_resta(self) -> None:
         self.assertEqual(subtitles._pulisci_virgolette("‘Uno’2 e ‘Due’"), "‘Uno’2 e ‘Due’")
         self.assertEqual(subtitles._pulisci_virgolette("‘La legge’80"), "‘La legge’80")

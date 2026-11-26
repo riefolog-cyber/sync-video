@@ -340,11 +340,20 @@ def _pulisci_virgolette(testo: str) -> str:
         if c == "‘":
             aperti.append(i)
         elif c == "’":
+            # Fra lettere (o lettera e cifra) e' un apostrofo (d’uscita,
+            # L’80) SOLO se non c'e' un'apertura da chiudere: altrimenti e'
+            # la virgoletta di "‘La legge’80".
+            # Apostrofo fra lettere (nell’interpretazione, d’uscita), o con
+            # una cifra SUBITO dopo quando non c'e' un'apertura da chiudere
+            # (L’80). Con un'apertura pendente e' la chiusura di ‘legge’80.
+            successivo = out[i + 1] if i + 1 < len(out) else ""
             apostrofo = (
                 i > 0
-                and i + 1 < len(out)
                 and out[i - 1].isalpha()
-                and (out[i + 1].isalpha() or (out[i + 1].isdigit() and i - 1 == 0))
+                and (
+                    successivo.isalpha()
+                    or (successivo.isdigit() and not aperti)
+                )
             )
             if not apostrofo:
                 if aperti:
@@ -502,10 +511,14 @@ def _titolo_da_frammento(frammento: str, numero: int) -> str:
     # Solo l'INTESTAZIONE di sezione ("L'Esito: ...") e' un confine: la
     # stessa parola in mezzo a una frase ("ha stabilito l'esito del ricorso")
     # fa parte del titolo e non va tagliata.
+    # L'intestazione e' un confine solo se e' seguita da ":" o "(" (o e' a
+    # inizio riga): "ha stabilito l'esito del ricorso" e' normale prosa.
     if (
         sezione
-        and sezione.group(0)[:1].isupper()
-        and raw[max(0, sezione.start() - 1):sezione.start()].strip() in ("", "|")
+        and (
+            raw[sezione.end():].lstrip()[:1] in (":", "(")
+            or sezione.start() == 0
+        )
     ):
         tagli.append(sezione.start())
     for separatore in (". ", ": ", "? ", "! ", " — ", " – ", " - ", "; "):

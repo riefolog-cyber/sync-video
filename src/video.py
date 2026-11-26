@@ -580,6 +580,13 @@ def _build_video_ffmpeg(
                     enc,
                     "copiato" if copia else "AAC",
                 )
+            except BaseException:
+                # Ctrl+C/SystemExit: il temporaneo parziale resterebbe accanto
+                # al video e verrebbe scambiato per un output finito.
+                with suppress(OSError):
+                    tmp_out.unlink()
+                _ripristina_video_precedente(output_path)
+                raise
         with suppress(OSError):
             tmp_out.unlink()
         _ripristina_video_precedente(output_path)

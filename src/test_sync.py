@@ -6282,6 +6282,27 @@ class TestConfiniStimatiNonSostenuti(unittest.TestCase):
         self.assertEqual([f["slide"] for f in fatti], [2, 2, 4])
         self.assertEqual([f["sigma"] for f in fatti], [0.5, 0.5, 0.4])
 
+    def test_diagnosi_indicizzata_di_altra_occorrenza_non_finita_al_caso(self):
+        from main import _estimated_boundary_facts
+
+        refine = [
+            {
+                "slide": 3,
+                "indice": 5,
+                "sigma": 0.5,
+                "decision": "tenuto: margine dentro il rumore",
+            }
+        ]
+        fatti = _estimated_boundary_facts(
+            [100.0] * 6,
+            [1, 3, 3, 3, 3, 3],
+            {3},
+            refine,
+            indici=[0, 1, 2, 3, 4, 5],
+        )
+        self.assertEqual(len(fatti), 1)
+        self.assertEqual(fatti[0]["duration"], 100.0)
+
     def test_durata_garantita_dal_pavimento_esclusa(self):
         from main import _estimated_boundary_facts
 

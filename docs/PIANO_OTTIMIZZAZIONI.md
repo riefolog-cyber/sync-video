@@ -5,9 +5,9 @@ proposte sono state fatte o hanno una risposta esplicita. Questo file resta
 come registro delle **decisioni**, non delle operazioni — i dettagli di ogni
 cambiamento sono nei messaggi di commit e nei commenti del codice.
 
-Ultimo aggiornamento: batch 32 (checkpoint, correzioni e diagnostica mista),
-dopo il batch 31. Il piano resta un registro delle decisioni: i dettagli sono
-nei messaggi di commit e nei test.
+Ultimo aggiornamento: batch 33 (encoding, A/B e diagnostiche), dopo il batch 32.
+Il piano resta un registro delle decisioni: i dettagli sono nei messaggi di
+commit e nei test.
 
 ## Batch 5 — audit completo (2026-11)
 
@@ -1170,6 +1170,32 @@ apostrofo.
 **Docs/test.** Documentazione dei codici di uscita, del modello OpenVINO e del
 comando `controlli.py` corretta; test rafforzati su questi percorsi.
 
+## Batch 33 — encoding, A/B e diagnostiche (2026-11)
+
+Sedicesima revisione. Difetti quasi tutti sulle correzioni del batch 32.
+
+**Encoding.** Il secondo `build_video` (dopo la riparazione frame) non era
+coperto dal `try/except`: un fallimento lasciava il video vecchio presentato
+come riparato e il report senza `senza_video`. Ora un helper comune copre
+entrambi i rendering e persiste le riparazioni PRIMA del secondo tentativo.
+`encoding_fallito` e' stato aggiunto alle spiegazioni di `--review` e del
+riepilogo. Con Ctrl+C durante l'encoding ffmpeg, il temporaneo parziale restava
+accanto al video: ora viene rimosso e il video precedente ripristinato.
+
+**A/B e report.** `_run_pinned_ab_test` non gestiva il `ValueError` per forme
+di embedding diverse: il traceback interrompeva la pipeline prima dell'OCR e
+non veniva scritto alcun verdetto. Ora registra DIVERGENTE e prosegue. Le
+correzioni multi-parola dei nomi erano validate da un solo token condiviso:
+ora serve la sequenza consecutiva completa.
+
+**Diagnostiche e titoli.** Una diagnosi guidata dall'indice di un'altra
+occorrenza della stessa slide veniva applicata a tutte: ora l'indice deve
+appartenere alla slide mostrata. `_record_refine` perdeva la prima occorrenza
+quando la seconda aveva indice diverso: ora le due convivono. Le intestazioni
+di sezione si riconoscono solo se seguite da `:` o `(` (non in mezzo a una
+frase), e l'apostrofo davanti a una cifra non viene piu' confuso con una
+virgoletta.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -1266,4 +1292,4 @@ valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
 Stato all'ultimo lancio (batch 32): ruff pulito, mypy pulito su tre
-piattaforme, 1723 test verdi, `_debug_hardware.py` e controlli 6/6.
+piattaforme, 1728 test verdi, `_debug_hardware.py` e controlli 6/6.

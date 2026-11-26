@@ -152,6 +152,7 @@ def riepilogo_markdown(
             "trascrizione_troncata": "interrotto: trascrizione incompleta",
             "allineamento_sospetto": "interrotto: allineamento sospetto",
             "prima_sezione_disallineata": "interrotto: prima sezione disallineata",
+            "encoding_fallito": "interrotto: generazione del video fallita",
         }.get(motivo, f"interrotto: {motivo}")
         righe.append(f"| Esito | **{etichetta}** |")
     righe.append(f"| Pagine | {pagine} |")

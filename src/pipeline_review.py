@@ -166,6 +166,7 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
             "trascrizione_troncata": "la trascrizione era incompleta",
             "allineamento_sospetto": "l'allineamento delle slide era sospetto",
             "prima_sezione_disallineata": "la prima sezione non parlava della slide 1",
+            "encoding_fallito": "la generazione del video e' fallita",
         }.get(motivo, "la run e' stata interrotta")
         log.error(
             "\n   [Revisione] Nessun video e' stato generato con questa timeline: %s. "

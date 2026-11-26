@@ -798,7 +798,20 @@ def _run_pinned_ab_test(pkg: dict) -> str | None:
         log.warning("   ⚠️ Test A/B saltato: candidata non calcolata.")
         return None
 
-    res = ab.compare(base, cand, n_slides=len(texts["slides"]))
+    try:
+        res = ab.compare(base, cand, n_slides=len(texts["slides"]))
+    except ValueError as e:
+        # Forme diverse o candidati non costruibili: verdetto DIVERGENTE, non
+        # un traceback che interrompe la pipeline prima dell'OCR.
+        log.warning("   ⚠️ Test A/B non confrontabile: %s", e)
+        res = {
+            "verdict": "DIVERGENTE",
+            "motivo": str(e),
+            "cosine_mean": 0.0,
+            "decision_match": 0.0,
+            "argmax_match": 0.0,
+            "n_blocks": 0,
+        }
     log.info(
         "      coseno medio %.3f | decision match %.2f (timeline reale) | argmax %.2f (%d blocchi) -> %s",
         res["cosine_mean"], res["decision_match"], res["argmax_match"], int(res["n_blocks"]), res["verdict"],

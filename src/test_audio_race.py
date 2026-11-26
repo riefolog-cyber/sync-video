@@ -136,6 +136,20 @@ class TestCorrezioniEffettive(unittest.TestCase):
             main._correzioni_effettive(["casa -> caso"], [{"word": "casalinga"}]), []
         )
 
+    def test_correzione_multi_parola_non_validata_da_un_token(self) -> None:
+        self.assertEqual(
+            main._correzioni_effettive(
+                ["thomas mur -> thomas more"], [{"word": "thomas"}, {"word": "mur"}]
+            ),
+            [],
+        )
+        self.assertEqual(
+            main._correzioni_effettive(
+                ["thomas mur -> thomas more"], [{"word": "thomas"}, {"word": "more"}]
+            ),
+            ["thomas mur -> thomas more"],
+        )
+
     def test_correzioni_applicate_restano(self) -> None:
         self.assertEqual(
             main._correzioni_effettive(
@@ -316,6 +330,7 @@ class TestMotivoInterruzione(unittest.TestCase):
             ("audio_sostituito_durante_la_run", "il podcast e' stato sostituito durante la run"),
             ("allineamento_sospetto", "allineamento delle slide era sospetto"),
             ("prima_sezione_disallineata", "prima sezione non parlava della slide 1"),
+            ("encoding_fallito", "la generazione del video e' fallita"),
         ):
             with self.subTest(motivo=motivo), tempfile.TemporaryDirectory() as tmp:
                 cache = Path(tmp)

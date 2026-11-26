@@ -319,6 +319,54 @@ def _abort(message: str) -> NoReturn:
     sys.exit(1)
 
 
+def _build_video_con_gestione(
+    sync_report: dict[str, object],
+    slide_files: list[str],
+    durations: list[float],
+    audio_path: Path,
+    output_path: Path,
+    *,
+    engine: str,
+    encoder: str,
+    transitions: float,
+    reuse: bool,
+    encoder_out: list[str],
+    reused_out: list[bool],
+    video_generato: bool = False,
+) -> None:
+    """Build video marcando il report se l'encoding fallisce.
+
+    Chiamata sia al primo rendering sia a quello dopo la riparazione frame:
+    senza il secondo, un fallimento li' lasciava il video vecchio presentato
+    come riparato e il report senza `senza_video`.
+    """
+    try:
+        build_video(
+            slide_files,
+            durations,
+            audio_path,
+            output_path,
+            fps=DEFAULT_VIDEO_FPS,
+            threads=DEFAULT_VIDEO_THREADS,
+            transition_duration=transitions,
+            engine=engine,
+            encoder=encoder,
+            reuse=reuse,
+            encoder_out=encoder_out,
+            reused_out=reused_out,
+        )
+    except Exception as e:  # noqa: BLE001 - ogni encoder puo' fallire a modo suo
+        sync_report.pop("audio_invariato_durante_la_run", None)
+        _abort_senza_video(
+            sync_report,
+            f"Generazione del video fallita ({e}). Il video NON e' stato "
+            "generato con questa timeline.",
+            motivo="encoding_fallito",
+            output_path=output_path,
+            video_generato=video_generato,
+        )
+
+
 def _correzioni_effettive(
     correzioni: Sequence[str], words: Sequence[Any]
 ) -> list[str]:
@@ -327,20 +375,28 @@ def _correzioni_effettive(
     L'A/B puo' scartare la trascrizione accurata: le sue correzioni non
     devono finire nel report come se fossero state applicate.
     """
-    parole_usate = {
+    parole_usate_list = [
         p.strip(" .,;:!?\"'“”\u2018\u2019").lower()
         for w in words
         for p in str(w.get("word", "")).split()
-    }
+    ]
     valide: list[str] = []
     for correzione in dict.fromkeys(correzioni):
         parti = [p.strip() for p in re.split(r"\s*->\s*", correzione.lower()) if p.strip()]
         # Solo il RISULTATO della correzione deve essere nelle parole usate:
         # se c'e' ancora la forma sbagliata, la correzione non e' stata fatta.
         risultato = parti[-1] if parti else ""
-        if risultato and (
-            risultato in parole_usate
-            or any(p.strip(" .,;:!?\"'“”\u2018\u2019").lower() in parole_usate for p in risultato.split())
+        # Il risultato deve comparire come SEQUENZA CONSECUTIVA di parole:
+        # "thomas more" non e' validato dal solo "thomas" di una trascrizione
+        # mai corretta.
+        sequenza = [
+            p.strip(" .,;:!?\"'“”\u2018\u2019").lower()
+            for p in risultato.split()
+        ]
+        if sequenza and any(
+            elenco[i : i + len(sequenza)] == sequenza
+            for elenco in (parole_usate_list,)
+            for i in range(len(elenco) - len(sequenza) + 1)
         ):
             valide.append(correzione)
     return valide
@@ -637,6 +693,9 @@ def _estimated_boundary_facts(
         int(cast(int, voce.get("slide") or 0)): voce
         for voce in refine
         if isinstance(voce, dict)
+        # Una diagnosi guidata dall'indice riguarda UNA occorrenza: non puo'
+        # essere applicata alle altre con lo stesso numero di slide.
+        and (indici is None or voce.get("indice") is None)
     }
     mediana = _median_duration(durations)
     if mediana <= 0:
@@ -649,13 +708,13 @@ def _estimated_boundary_facts(
         d = float(durata)
         indice = indici[pos] if indici is not None and pos < len(indici) else None
         # La decisione guidata dall'indice (riparazione frame) prevale su
-        # quella per numero slide, ma se manca si usa quest'ultima:-di solito
-        # i due tipi convivono nella stessa run.
-        voce = (
-            per_indice.get(int(indice)) or per_slide.get(s, {})
-            if indice is not None
-            else per_slide.get(s, {})
-        )
+        # quella per numero slide, ma solo se appartiene ALLA STESSA slide:
+        # con --skip-slides un numero puo' comparire piu' volte e l'indice
+        # di un'altra occorrenza non puo' descrivere questo confine.
+        idx_voce = per_indice.get(int(indice)) if indice is not None else None
+        if idx_voce is not None and int(cast(int, idx_voce.get("slide") or 0)) != s:
+            idx_voce = None
+        voce = idx_voce or per_slide.get(s, {})
         decisione = str(voce.get("decision") or "")
         sigma_raw = voce.get("sigma")
         sigma = float(cast(float, sigma_raw)) if isinstance(sigma_raw, (int, float)) else None
@@ -5502,34 +5561,19 @@ def _main_impl(argv: list | None = None) -> None:
         # --- Fase 4: Assemblaggio video ---
         t_phase_start = time.time()
         _verifica_audio_invariato(sync_report, audio_path, audio_hash, Path(args.output_video))
-        try:
-            build_video(
-                slide_files,
-                durations,
-                audio_path,
-                args.output_video,
-                fps=DEFAULT_VIDEO_FPS,
-                threads=DEFAULT_VIDEO_THREADS,
-                transition_duration=args.transitions,
-                engine=args.engine,
-                encoder=encoder_video_risolto,
-                # --no-cache vuol dire "rifai tutto": quindi niente video riusato.
-                reuse=not args.no_cache,
-                encoder_out=encoder_video_effettivo,
-                reused_out=video_riutilizzato,
-            )
-        except Exception as e:  # noqa: BLE001 - ogni encoder puo' fallire a modo suo
-            # Il report e la timeline sono gia' salvati: senza questo segnale
-            # descriverebbero un video che non esiste (o il VECCHIO video),
-            # e --review/analysis_sync li confronterebbero con la timeline nuova.
-            sync_report.pop("audio_invariato_durante_la_run", None)
-            _abort_senza_video(
-                sync_report,
-                f"Generazione del video fallita ({e}). Il video NON e' stato "
-                "generato con questa timeline.",
-                motivo="encoding_fallito",
-                output_path=Path(args.output_video),
-            )
+        _build_video_con_gestione(
+            sync_report,
+            slide_files,
+            durations,
+            audio_path,
+            Path(args.output_video),
+            engine=args.engine,
+            encoder=encoder_video_risolto,
+            transitions=args.transitions,
+            reuse=not args.no_cache,
+            encoder_out=encoder_video_effettivo,
+            reused_out=video_riutilizzato,
+        )
         t_video = time.time() - t_phase_start
         t_verify = 0.0  # definito anche senza --verify-video
 
@@ -5593,6 +5637,9 @@ def _main_impl(argv: list | None = None) -> None:
                 t_verify += time.time() - inizio_riparazione
                 if repaired is not None:
                     durations, repairs = repaired
+                    # Salvarli PRIMA del secondo encoding: se questo fallisce,
+                    # l'abort deve persistere anche le riparazioni decise.
+                    sync_report["repairs"] = repairs
                     log.info(
                         "\n   [Riparazione] Rigenero il video con i confini corretti "
                         "(nuovi inizi: %s)...",
@@ -5630,22 +5677,22 @@ def _main_impl(argv: list | None = None) -> None:
                     _verifica_audio_invariato(
                         sync_report, audio_path, audio_hash, Path(args.output_video), video_generato=True
                     )
-                    build_video(
+                    _build_video_con_gestione(
+                        sync_report,
                         slide_files,
                         durations,
                         audio_path,
-                        args.output_video,
-                        fps=DEFAULT_VIDEO_FPS,
-                        threads=DEFAULT_VIDEO_THREADS,
-                        transition_duration=args.transitions,
+                        Path(args.output_video),
                         engine=args.engine,
                         encoder=encoder_video_risolto,
+                        transitions=args.transitions,
                         encoder_out=encoder_video_effettivo,
                         reused_out=video_riutilizzato,
                         # Qui i confini sono cambiati: il video da riusare
                         # sarebbe un altro, ma il riuso lo esclude da se'
                         # (l'impronta cambia coi tempi).
                         reuse=not args.no_cache,
+                        video_generato=True,
                     )
                     # SOMMA dei due encoding: con riparazione il secondo
                     # costrutto sostituiva il tempo del primo, e la tabella
