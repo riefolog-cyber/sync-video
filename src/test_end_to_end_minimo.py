@@ -252,7 +252,7 @@ class TestPipelineCompleta(unittest.TestCase):
 
     @slow("pipeline intera con --no-ripresa")
     def test_no_ripresa_decodifica_tutto(self) -> None:
-        """Con --no-ripresa il parziale resta ma non viene usato."""
+        """Con --no-ripresa il parziale viene ignorato e poi cancellato."""
         self._salta_se_manca_qualcosa()
 
         from config import DEFAULT_WHISPER_BATCH, DEFAULT_WHISPER_BEAM

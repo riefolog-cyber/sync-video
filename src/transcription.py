@@ -1810,6 +1810,14 @@ def transcribe_with_whisper(
             with contextlib.suppress(OSError):
                 sorgente.unlink(missing_ok=True)
 
+    if not riprendi:
+        # `_collect_words` riceve checkpoint_path=None con --no-ripresa (per
+        # non riscrivere il parziale): non può quindi cancellare quello
+        # scartato. Lo rimuove qui, a decodifica riuscita, così una run
+        # successiva non cucisce una trascrizione esplicitamente rifiutata.
+        with contextlib.suppress(OSError):
+            percorso_parziale(audio_path).unlink(missing_ok=True)
+
     if iniziali:
         all_words = iniziali + all_words
         log.info(
