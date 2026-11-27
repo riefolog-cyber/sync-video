@@ -204,16 +204,23 @@ def riepilogo_markdown(
     else:
         righe.append("Alcuni confini sono stimati dal contenuto (vedi le pagine senza annuncio).")
 
-    tempi = cast("dict[str, Any]", notes.get("tempi") or {})
+    # Un report vecchio/scritto a mano puo' avere questi campi con la forma
+    # sbagliata: senza i controlli di tipo, TypeError cancellava l'intero
+    # riepilogo invece di saltare solo la sezione non leggibile.
+    tempi_grezzi = notes.get("tempi")
+    tempi = tempi_grezzi if isinstance(tempi_grezzi, dict) else {}
     if tempi:
         righe += ["", "## Tempi della run", ""]
         righe.append(
             " · ".join(
-                f"{nome} {tempi[nome]}s" for nome in ("ocr", "trascrizione", "sincronizzazione") if nome in tempi
+                f"{nome} {tempi[nome]}s"
+                for nome in ("ocr", "trascrizione", "sincronizzazione")
+                if nome in tempi
             )
         )
 
-    correzioni = cast("list[Any]", notes.get("correzioni_nomi") or [])
+    correzioni_grezze = notes.get("correzioni_nomi")
+    correzioni = correzioni_grezze if isinstance(correzioni_grezze, (list, tuple)) else []
     if correzioni:
         righe += ["", "## Nomi corretti nella trascrizione", ""]
         righe += [f"- `{c}`" for c in correzioni[:20]]

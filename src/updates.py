@@ -472,8 +472,33 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
         # Rileggere l'installata per ogni voce evita di annunciare "X -> Y"
         # quando X non e' piu' quello che c'e' nell'ambiente.
         cached = list(cache.get("outdated", []))
+        # Con `outdated=[]` la validazione per voce non controllava NIENTE:
+        # un downgrade fatto fuori dal tool lasciava il certificato "tutti
+        # aggiornati" per tutto il TTL. Lo snapshot delle installate e' la
+        # prova che l'ambiente non e' cambiato dal controllo precedente.
+        snapshot = cache.get("installed")
+        ambiente_cambiato = False
+        if isinstance(snapshot, dict):
+            for nome, versione in snapshot.items():
+                try:
+                    if _installed_version(str(nome)) != versione:
+                        ambiente_cambiato = True
+                        break
+                except Exception:  # un probe rotto non e' un downgrade
+                    ambiente_cambiato = True
+                    break
         valide = _voci_cache_valide(cache)
-        if len(valide) == len(cached):
+        if len(valide) == len(cached) and not ambiente_cambiato:
+            # I vincoli delle dipendenze pero' non si snapshotsano: una
+            # dipendenza appena installata puo' bloccare la candidata che la
+            # cache dichiarava libera. Ricalcolarli e' economico (nessuna rete).
+            if valide and isinstance(snapshot, dict):
+                vincoli_cache = _installed_constraints()
+                for voce in valide:
+                    nome_cached = str(voce.get("name", ""))
+                    latest_cached = str(voce.get("latest") or "")
+                    if nome_cached and latest_cached:
+                        voce["blocked"] = _blockers(nome_cached, latest_cached, vincoli_cache)
             return valide
         # Non rinnovare il timestamp con una cache vuota (o piu' corta): e' il
         # bug del health-check fallito. pip ha installato, il controllo e' andato
@@ -566,7 +591,15 @@ def check_updates(ttl_hours: float = DEFAULT_UPDATE_TTL_HOURS) -> list[dict]:
     if non_installati:
         log.debug("   %d pacchetti non installati: saltati (non e' un errore di rete).", non_installati)
     _ULTIMO_CHECK_SENZA_RISPOSTA = 0
-    _write_cache({"ts": now, "outdated": outdated})
+    snapshot_installed: dict[str, str] = {}
+    for nome in _PACKAGES:
+        try:
+            versione = _installed_version(nome)
+        except Exception:  # un probe fallito non invalidera' la cache
+            continue
+        if versione is not None:
+            snapshot_installed[nome] = versione
+    _write_cache({"ts": now, "outdated": outdated, "installed": snapshot_installed})
     return outdated
 
 
@@ -1007,10 +1040,12 @@ def _aggiorna_pin(versioni: dict[str, str]) -> None:
     e' letto da config con le chiavi ``{"nome": "versione"}``.
     """
     req_path = BASE_DIR / "requirements.txt"
+    pin_requisiti_ok = True
     if req_path.exists():
         try:
             testo = req_path.read_text(encoding="utf-8")
         except OSError as e:
+            pin_requisiti_ok = False
             log.warning("   ⚠️ Pin non letto da requirements.txt: %s", e)
         else:
             righe = testo.splitlines()
@@ -1026,9 +1061,19 @@ def _aggiorna_pin(versioni: dict[str, str]) -> None:
                 try:
                     atomic_write_text(req_path, "\n".join(righe) + ("\n" if finale else ""))
                 except OSError as e:
+                    pin_requisiti_ok = False
                     log.warning("   ⚠️ Pin non scritto in requirements.txt: %s", e)
                 else:
                     log.info("   📌 Pin aggiornato in requirements.txt: %s", ", ".join(aggiornati))
+    if not pin_requisiti_ok:
+        # Senza questa guardia si scriveva l'override in cache mentre
+        # requirements.txt restava al pin vecchio: lo stato era diviso e il
+        # prossimo bootstrap reinstallava la versione scartata dall'A/B.
+        log.warning(
+            "   ⚠️ requirements.txt non aggiornato: lascio invariato anche "
+            "pin_overrides.json (i due file devono concordare)."
+        )
+        return
     try:
         atomic_write_text(CACHE_DIR / "pin_overrides.json", json.dumps(versioni, ensure_ascii=False, indent=2))
     except OSError as e:

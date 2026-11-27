@@ -35,6 +35,23 @@ class _Args:
     whisper_model = "small"
 
 
+def _encoding_ok(
+    out: Path, probe_stdout: str, encoder_effettivo: list[str], richiesto: str
+) -> bool:
+    """True solo se il video e' valido ED e' stato usato l'encoder richiesto.
+
+    `ffprobe` riporta `h264` anche per il ripiego libx264: senza il confronto
+    con l'encoder EFFETTIVO, il controllo sull'accelerazione hardware dava OK
+    mentre il percorso accelerato non era mai riuscito.
+    """
+    return (
+        out.exists()
+        and out.stat().st_size > 0
+        and "h264" in probe_stdout
+        and encoder_effettivo == [richiesto]
+    )
+
+
 def _check(label: str, ottenuto: object, atteso: object) -> bool:
     ok = ottenuto == atteso
     print(f"   [{'OK ' if ok else 'KO '}] {label}: {ottenuto}" + ("" if ok else f"  (atteso: {atteso})"))
@@ -241,14 +258,36 @@ def main() -> int:
         )
         for enc in hw.choose_video_encoder("intel", hw.ffmpeg_encoders()), "libx264":
             out = tmp / f"{enc}.mp4"
-            _build_video_ffmpeg([str(png)], [2.0], aud, out, 5, 12, encoder=enc)
+            encoder_effettivo: list[str] = []
+            _build_video_ffmpeg(
+                [str(png)], [2.0], aud, out, 5, 12, encoder=enc,
+                encoder_out=encoder_effettivo,
+            )
             probe = subprocess.run(
                 ["ffprobe", "-v", "error", "-select_streams", "v:0",
                  "-show_entries", "stream=codec_name,width,height", "-of", "csv=p=0", str(out)],
                 capture_output=True, text=True,
             )
-            good = out.stat().st_size > 0 and "h264" in probe.stdout
-            print(f"   [{'OK ' if good else 'KO '}] {enc}: {out.stat().st_size} byte, {probe.stdout.strip()}")
+            # ffprobe vede "h264" anche quando l'encoder richiesto e' fallito
+            # e il codice e' ripiegato su libx264: senza chiedere l'encoder
+            # EFFETTIVO il controllo 6 diceva OK mentre l'accelerazione non
+            # funzionava per niente. Il ripiego e' comunque un video valido:
+            # si segnala come AVV (la sezione 5 verifica che funzioni), non
+            # come KO, cosi' la diagnostica non boccia una macchina che produce
+            # comunque il video.
+            video_ok = out.exists() and out.stat().st_size > 0 and "h264" in probe.stdout
+            senza_ripiego = _encoding_ok(out, probe.stdout, encoder_effettivo, enc)
+            if not video_ok:
+                etichetta, good = "KO ", False
+            elif senza_ripiego:
+                etichetta, good = "OK ", True
+            else:
+                etichetta, good = "AVV", True
+                print(
+                    f"   ⚠️  {enc} non utilizzabile a runtime: ripiegato su "
+                    f"{','.join(encoder_effettivo) or 'libx264'}."
+                )
+            print(f"   [{etichetta}] {enc}: {out.stat().st_size} byte, {probe.stdout.strip()}")
             risultati.append((f"encoding reale {enc}", good))
     except Exception as e:  # noqa: BLE001
         print(f"   [KO ] encoding reale: {type(e).__name__}: {e}")

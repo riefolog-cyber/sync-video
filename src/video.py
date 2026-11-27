@@ -403,6 +403,21 @@ def _percorso_backup(output_path: Path) -> Path:
     return output_path.with_name(f"{output_path.stem} (precedente){output_path.suffix}")
 
 
+def _pulisci_temporanei_vecchi(output_path: Path, ore: float = 24.0) -> None:
+    """Rimuove i `.tmp.mp4` lasciati da un hard kill prima di un nuovo encoding.
+
+    Il nome e' unico, quindi un vecchio temporaneo non viene mai scambiato per
+    output fresco; pero' restava sul disco per sempre, un file ogni crash.
+    Si tocca solo cio' che porta lo stem dell'output di questa run.
+    """
+    scadenza = time.time() - ore * 3600
+    with suppress(OSError):
+        for candidato in output_path.parent.glob(f"{output_path.stem}.*.tmp.mp4"):
+            with suppress(OSError):
+                if candidato.is_file() and candidato.stat().st_mtime < scadenza:
+                    candidato.unlink()
+
+
 def _salva_video_precedente(output_path: Path) -> None:
     """Conserva il video gia' presente prima di sovrascriverlo.
 
@@ -412,6 +427,18 @@ def _salva_video_precedente(output_path: Path) -> None:
     costa quanto il file e non tocca il flusso.
     """
     if not output_path.exists():
+        return
+    try:
+        dimensione = output_path.stat().st_size
+    except OSError:
+        return
+    if dimensione == 0:
+        # Un output vuoto (disco pieno, antivirus, interruzione) NON e' un
+        # video da conservare: copiarlo sopra il backup distruggeva l'unica
+        # copia buona proprio quando il ripristino serve.
+        log.warning(
+            "   ⚠️ Video finale vuoto: backup precedente lasciato intatto."
+        )
         return
     copia = _percorso_backup(output_path)
     with suppress(OSError):
@@ -503,6 +530,7 @@ def _build_video_ffmpeg(
         raise FileNotFoundError(f"File audio non trovato: {audio}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    _pulisci_temporanei_vecchi(output_path)
     if encoder_out is not None:
         encoder_out.clear()
     total_duration = sum(durations)
@@ -706,7 +734,11 @@ def build_video(
         encoder,
         threads,
     )
-    if reuse and video_riutilizzabile(output_path, _chiave, encoder_out=encoder_out):
+    # Senza un percorso audio la chiave non copre il CONTENUTO dell'audio:
+    # due clip Distinti con le stesse slide davano "video riusato" e il
+    # secondo video finiva con l'audio del primo. In quel caso si ricodifica.
+    riuso_possibile = reuse and audio_path is not None
+    if riuso_possibile and video_riutilizzabile(output_path, _chiave, encoder_out=encoder_out):
         if reused_out is not None:
             reused_out[:] = [True]
         log.info(
@@ -750,7 +782,10 @@ def build_video(
     # l'encoder buono e' l'ULTIMO, non il primo (main.py usa [-1] per il
     # riepilogo). Prendere [0] rimetteva "GPU" nella marca di riuso.
     encoder_effettivo = encoder_out[-1] if encoder_out else encoder
-    segna_video(output_path, _chiave, encoder=encoder_effettivo)
+    if audio_path is not None:
+        # Senza audio identificabile non scrivere la marca: la run dopo non
+        # puo' dimostrare che l'audio e' lo stesso, quindi rifa' il video.
+        segna_video(output_path, _chiave, encoder=encoder_effettivo)
 
 
 def _build_video_moviepy(
@@ -767,6 +802,7 @@ def _build_video_moviepy(
     Accetta un AudioFileClip già aperto (di proprietà del chiamante, NON
     viene chiuso) oppure un percorso audio (aperto e chiuso qui).
     """
+    _pulisci_temporanei_vecchi(output_path)
     clips = [
         ImageClip(_resize_for_video(slide_path, *DEFAULT_VIDEO_RES)).with_duration(durations[i])
         for i, slide_path in enumerate(slide_files)

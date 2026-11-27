@@ -136,6 +136,7 @@ class TestKeepCacheStems(_CacheTemp):
                     "hardware",
                     "openvino_attempt",
                     "pin_overrides",
+                    "embedding_model_check",
                 }
             ),
         )

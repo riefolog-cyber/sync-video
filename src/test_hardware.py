@@ -271,10 +271,12 @@ class TestEncoderCache(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as d,
             self._con_cache(Path(d)),
-            # Parent non scrivibile (lettura sola): deve essere silenzioso.
-            patch.object(Path, "write_text", side_effect=OSError("read-only")),
+            # `_write_encoder_cache` scrive con mkstemp + os.replace, NON con
+            # Path.write_text: patchare quest'ultima non esercitava nulla.
+            patch.object(hw.tempfile, "mkstemp", side_effect=OSError("read-only")),
         ):
             hw._write_encoder_cache(frozenset({"libx264"}))  # non deve sollevare
+            self.assertEqual(list(Path(d).glob("*.tmp")), [])
 
 
 class TestNessunaDipendenzaEsterna(unittest.TestCase):

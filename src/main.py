@@ -453,11 +453,17 @@ def _verifica_audio_invariato(
     (prima del report) non copre i minuti di verifica frame e riparazione.
     """
     if _audio_cambiato_durante_la_run(audio_path, audio_hash):
+        esito_video = (
+            "Il video gia' presente e' quello della versione precedente del "
+            "podcast: la verifica/riparazione NON e' stata applicata."
+            if video_generato
+            else "Il video NON e' stato generato."
+        )
         _abort_senza_video(
             report,
             "Il file audio e' cambiato mentre la pipeline era in esecuzione: "
             "trascrizione e timeline sono state calcolate sulla versione "
-            "precedente. Il video NON e' stato generato. Rilancia la "
+            "precedente. " + esito_video + " Rilancia la "
             "pipeline con il podcast definitivo.",
             motivo="audio_sostituito_durante_la_run",
             output_path=output_path,
@@ -3682,6 +3688,14 @@ def _main_impl(argv: list | None = None) -> None:
     # `WHISPER_DEVICE=cuda` nel .env deve far avvisare se CUDA non si puo' usare.
     args.whisper_device_explicit = (
         args.whisper_device != "cpu" or "WHISPER_DEVICE" in os.environ
+    )
+
+    # Stesso criterio di `whisper_device_explicit`: un `--openvino-device CPU`
+    # (o `OPENVINO_DEVICE=CPU` nel .env) e' una scelta dell'utente e l'auto-setup
+    # non deve riscriverla con la raccomandazione della macchina.
+    args.openvino_device_explicit = (
+        str(getattr(args, "openvino_device", "GPU")).upper() != "GPU"
+        or "OPENVINO_DEVICE" in os.environ
     )
 
     # --- Rilevamento hardware automatico al primo avvio ---

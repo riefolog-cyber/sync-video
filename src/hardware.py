@@ -27,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import json
+import math
 import os
 import platform
 import shutil
@@ -369,6 +370,11 @@ def _read_encoder_cache() -> frozenset[str] | None:
     # invece di ricalcolarlo. Una cache non e' mai un errore fatale.
     ts = data.get("ts", 0)
     if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return None
+    # `json.loads` accetta NaN/Infinity: `time.time() - nan` e' nan e la
+    # scadenza settimanale non scatta mai, fissando per sempre una lista di
+    # encoder anche dopo un aggiornamento di ffmpeg.
+    if not math.isfinite(float(ts)):
         return None
     if time.time() - float(ts) > _CACHE_VALID_SECONDS:
         return None

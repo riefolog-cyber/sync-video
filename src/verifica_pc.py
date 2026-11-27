@@ -19,6 +19,7 @@ Esegui con: python src/verifica_pc.py
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -241,28 +242,47 @@ def prova_ffmpeg(r: Relazione) -> None:
     # (compreso Gyan su Windows) li includono tutti, anche su PC senza GPU.
     # La scelta reale la fa `choose_video_encoder`, che incrocia la famiglia GPU e
     # encoder disponibili: usare la stessa funzione evita due verita' diverse.
+    determinabile = True
     try:
         from hardware import choose_video_encoder
         from machine_setup import _video_vendor, detect_gpus
 
         scelto = choose_video_encoder(
-            _video_vendor(detect_gpus()), frozenset(encoder_compilati) | {"libx264"}
+            _video_vendor(detect_gpus() or []), frozenset(encoder_compilati) | {"libx264"}
         )
+        # L'override documentato VIDEO_ENCODER e' quello che la run userebbe
+        # davvero: senza leggerlo il referto annunciava h264_nvenc su una
+        # macchina configurata per libx264, e l'utente cercava la lentezza
+        # nella GPU invece che nella scelta di configurazione.
+        override = os.environ.get("VIDEO_ENCODER", "").strip()
+        if override and override.lower() != "auto":
+            scelto = override
         utilizzabile = scelto != "libx264"
-    except Exception:  # noqa: BLE001 - il referto non deve morire per un probe
-        scelto = ""
-        utilizzabile = bool(encoder_compilati)
+    except Exception as e:  # noqa: BLE001 - il referto non deve morire per un probe
+        # Non confondere "encoder non utilizzabile" con "non determinabile":
+        # gli encoder COMPILATI non provano che siano usabili, e un import
+        # rotto di machine_setup non e' un ok con campo effettivo vuoto.
+        determinabile = False
+        scelto = "libx264"
+        utilizzabile = False
+        print(f"   Encoder effettivo non determinabile: {e}", file=sys.stderr)
     dettaglio = f"{Path(exe).name}, " + (
         ", ".join(encoder_compilati) if encoder_compilati else "solo encoder software"
     )
     if not utilizzabile:
+        rimedio = (
+            "Impossibile determinare l'encoder effettivo: il rilevamento hardware non "
+            "e' disponibile. Controlla che le dipendenze del programma siano integre."
+            if not determinabile
+            else "Nessun encoder accelerato USABILE su questa GPU: il video si produce, "
+            "ma molto piu' lentamente. Gli encoder compilati non bastano senza la GPU."
+        )
         r.aggiungi(
             Esito(
                 "ffmpeg",
                 AVV,
                 dettaglio + f" — encoder effettivo: {scelto or 'libx264'}",
-                "Nessun encoder accelerato USABILE su questa GPU: il video si produce, "
-                "ma molto piu' lentamente. Gli encoder compilati non bastano senza la GPU.",
+                rimedio,
             )
         )
     else:

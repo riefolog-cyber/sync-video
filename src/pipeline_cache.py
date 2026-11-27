@@ -35,6 +35,10 @@ KEEP_CACHE_STEMS = frozenset(
         # applicare il pin approvato da un A/B. Cancellarlo come orfano
         # faceva tornare il vecchio pin e disinstallare l'aggiornamento.
         "pin_overrides",
+        # Stato del monitor modelli embedding (scripts/check_embedding_models.py):
+        # cancellarlo a ogni run faceva ripartire da zero la cronologia dei
+        # candidati gia' valutati, con lo stesso allarme a ogni avvio.
+        "embedding_model_check",
     }
 )
 

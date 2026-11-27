@@ -84,7 +84,14 @@ _CPU_FALLBACK = {
 }
 
 
+# True quando l'ultima probe e' FALLITA (comando assente, ACL, timeout): e'
+# diverso da "comando riuscito ma nessuna GPU". Serve a non persistere un
+# `gpus: []` fasullo dopo un errore transiente di PowerShell.
+_ULTIMO_PROBE_FALLITO = False
+
+
 def _run(cmd: list[str], timeout: int = 30) -> str:
+    global _ULTIMO_PROBE_FALLITO
     try:
         # Senza encoding esplicito, su Windows si usa la codepage della console
         # (cp1252): un nome GPU con caratteri non ASCII sollevava
@@ -97,8 +104,12 @@ def _run(cmd: list[str], timeout: int = 30) -> str:
             errors="replace",
             timeout=timeout,
         )
+        if res.returncode != 0:
+            _ULTIMO_PROBE_FALLITO = True
+            return ""
         return res.stdout or ""
     except Exception:
+        _ULTIMO_PROBE_FALLITO = True
         return ""
 
 
@@ -265,7 +276,11 @@ def _provision_openvino(model_dir: Path) -> bool:
     try:
         import openvino_genai  # noqa: F401
     except ImportError:
-        if not _pip_install("openvino-genai"):
+        # `requirements.txt` vieta la serie 2026 (API in movimento): installare
+        # l'ultima versione pubblicata metteva il progetto in uno stato che lui
+        # stesso dichiara non supportato, e il guasto compariva solo in
+        # trascrizione, dopo OCR e rendering.
+        if not _pip_install("openvino-genai<2026"):
             return False
         # Riverifica: `pip install` avvenuto DOPO il tentativo di import in
         # questa run, quindi il modulo puo' non essere ancora importabile (il
@@ -540,7 +555,10 @@ def _apply(args: _TranscriberArgs, rec: dict) -> None:
         args.whisper_compute_type = "int8"
     else:
         args.whisper_compute_type = rec.get("whisper_compute_type", "int8")
-    if rec.get("openvino_device"):
+    if rec.get("openvino_device") and not getattr(args, "openvino_device_explicit", False):
+        # Come per `--whisper-device`, la scelta esplicita (CLI o .env) vince
+        # sulla raccomandazione automatica: l'utente puo' volere CPU proprio
+        # per evitare un device GPU instabile.
         args.openvino_device = rec["openvino_device"]
 
 
@@ -661,10 +679,23 @@ def machine_setup(args: _TranscriberArgs, force: bool = False) -> None:
     gpus = None if force else _read_hardware()
     if gpus is None:
         fresh_detection = True
+        global _ULTIMO_PROBE_FALLITO
+        _ULTIMO_PROBE_FALLITO = False
         log.info("🔧 Rilevamento configurazione hardware al primo avvio...")
         gpus = detect_gpus()
-        _write_hardware(gpus)
-        log.info("   GPU rilevate: %s", ", ".join(gpus) if gpus else "(nessuna)")
+        if _ULTIMO_PROBE_FALLITO:
+            # Un `[]` scritto ora sarebbe letto come "macchina senza GPU" per
+            # sempre (test_empty_gpu_list_is_valid): non persisterlo e non
+            # provisioningare. La prox run riprova perche' il file non c'e'.
+            log.warning(
+                "   ⚠️ Rilevamento GPU non riuscito (comando di sistema): uso CPU "
+                "per questa run e riprovo al prossimo avvio."
+            )
+            gpus = []
+            fresh_detection = False
+        else:
+            _write_hardware(gpus)
+            log.info("   GPU rilevate: %s", ", ".join(gpus) if gpus else "(nessuna)")
     else:
         fresh_detection = False
 

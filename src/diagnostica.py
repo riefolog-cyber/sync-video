@@ -14,8 +14,10 @@ Esegui con: python src/diagnostica.py (o diagnostica.bat)
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -95,6 +97,33 @@ def _versioni() -> dict[str, object]:
     return {"python": python, "app": app, "pacchetti": pacchetti}
 
 
+def _solo_numeri(valore: object, profondita: int = 0) -> object | None:
+    """Sottoinsieme di un report con SOLI numeri/flag, mai testo libero.
+
+    Il bundle e' fatto per essere inviato a chi assiste: il report grezzo
+    conteneva `correzioni_nomi` (parole dell'audio), `sorgenti` e i percorsi
+    assoluti delle anteprime, mentre la console prometteva "solo numeri".
+    Qui si conservano conteggi, tempi e esiti; tutto il resto si perde.
+    """
+    if isinstance(valore, bool):
+        return valore
+    if isinstance(valore, (int, float)):
+        return valore if math.isfinite(float(valore)) else None
+    if profondita >= 2:
+        return None
+    if isinstance(valore, dict):
+        pulito = {
+            str(k): v
+            for k, v in ((k, _solo_numeri(v, profondita + 1)) for k, v in valore.items())
+            if v is not None
+        }
+        return pulito or None
+    if isinstance(valore, list):
+        voci = [v for v in (_solo_numeri(v, profondita + 1) for v in valore[:50]) if v is not None]
+        return voci or None
+    return None
+
+
 def _conta_parole(cache: Path) -> dict[str, object]:
     """Quante parole nelle cache di trascrizione (conteggi, mai il testo)."""
     try:
@@ -159,9 +188,22 @@ def _stato_run(radice: Path) -> dict[str, object]:
     try:
         report_raw = (cache / "sync_report.json").read_text(encoding="utf-8")
         report = json.loads(report_raw)
-        stato["report"] = report
     except (OSError, ValueError):
         stato["report"] = None
+    else:
+        # Whitelist negativa: solo numeri/flag, mai stringhe libere, nomi
+        # corretti dall'audio o percorsi delle anteprime.
+        if isinstance(report, dict):
+            pulito = {
+                chiave: valore
+                for chiave, valore in (
+                    (k, _solo_numeri(v)) for k, v in report.items()
+                )
+                if valore is not None
+            }
+            stato["report"] = pulito or None
+        else:
+            stato["report"] = None
     try:
         righe = (cache / "timing_history.jsonl").read_text(encoding="utf-8").splitlines()
         stato["timing_ultime"] = righe[-5:]
@@ -187,8 +229,10 @@ def scrivi_bundle(radice: Path) -> Path:
     nota invece di far saltare tutto.
     """
     marca = time.strftime("%Y%m%d-%H%M%S")
-    cartella = radice / f"diagnostica-{marca}"
-    cartella.mkdir(parents=True, exist_ok=True)
+    # Nome UNIVOCO: `mkdir(exist_ok=True)` su un nome prevedibile riadottava
+    # una cartella lasciata da un avvio/interruzione precedente, e lo zip
+    # archiviava (e poi cancellava!) file arbitrari dell'utente.
+    cartella = Path(tempfile.mkdtemp(prefix=f"diagnostica-{marca}-", dir=str(radice)))
     try:
         try:
             (cartella / "verifica.txt").write_text(

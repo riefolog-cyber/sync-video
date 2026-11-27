@@ -44,6 +44,7 @@ KEEP_STEMS = frozenset(
         "hardware",
         "openvino_attempt",
         "pin_overrides",
+        "embedding_model_check",
     }
 )
 

@@ -23,6 +23,7 @@ Tre esiti (``tenta``), perche' "occupato" e "non creabile" sono cose diverse:
 
 from __future__ import annotations
 
+import errno
 import os
 import threading
 import time
@@ -172,9 +173,18 @@ class BloccoRun:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             elif msvcrt is not None:
                 msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-        except OSError:
+        except OSError as e:
             fh.close()
-            return OCCUPATO
+            # Solo la contesa e' "un'altra run". Un filesystem di rete o
+            # virtuale che non supporta il locking solleva per esempio
+            # WinError 50: mandare OCCUPATO faceva aspettare 15 minuti e poi
+            # abortire con una frase falsa. Il contratto del modulo riserva
+            # NON_DISPONIBILE proprio a questi casi.
+            codice = getattr(e, "winerror", None) or e.errno
+            if codice in (errno.EACCES, errno.EAGAIN, 33):
+                return OCCUPATO
+            log.debug("   Blocco run non disponibile (%s): proseguo senza blocco.", e)
+            return NON_DISPONIBILE
         self._file = fh
         stato = _BloccoCondiviso(fh)
         self._stato = stato

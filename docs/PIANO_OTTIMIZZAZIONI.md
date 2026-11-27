@@ -1274,6 +1274,44 @@ la scrittura e' fallita. L'abort prima del rendering dice "nessun video
 generato per questa timeline" invece di "assente dalla cartella" quando il
 file vecchio e' li'. `format_time` gestisce le ore e i negativi.
 
+## Batch 36 — aggiornamenti, hardware, video e privacy (2026-11)
+
+Diciannovesima revisione: aggiornamenti/bootstrap, hardware/verifica PC,
+video/encoding/abort e cache/diagnostica. Quattro revisioni parallele, 19
+difetti tutti corretti con test dedicati in `test_review_batch36.py`.
+
+**Aggiornamenti.** La cache con `outdated=[]` certificava "tutti aggiornati"
+anche dopo un downgrade esatto fuori dal tool: ora si salva uno snapshot delle
+versioni installate e un cambiamento invalida il TTL. I vincoli delle
+dipendenze vengono ricalcolati sullo snapshot, e i blocchi non diventano
+falsamente "liberi". `openvino-genai` viene installato con il cap `<2026`
+dichiarato in requirements.txt. Un guasto di scrittura di requirements.txt
+non lascia piu' l'override pin in uno stato diviso.
+
+**Hardware e referto.** `verifica_pc` ora legge `VIDEO_ENCODER`: il referto
+dice l'encoder che la run usera' davvero. Un'impossibilita' di rilevare
+l'encoder e' AVV con rimedio, non un OK con campo vuoto. Il rilevamento GPU
+fallito per un errore transiente di PowerShell non viene piu' persistito come
+"nessuna GPU" per sempre. `--openvino-device` esplicito non viene riscritto
+dall'auto-setup. La cache encoder con `ts` NaN/Inf non ha piu' scadenza
+infinita. Il controllo 6 distingue il ripiego a runtime dal successo
+dell'encoder richiesto.
+
+**Video e abort.** Un output vuoto non sovrascrive piu' il backup con
+l'unico video buono. Un clip audio senza percorso non riusa il video di un
+altro clip e non scrive una marca non dimostrabile. La sezione 4 della
+diagnostica hardware segnala il ripiego; un lock non supportato dal
+filesystem non fa piu' aspettare 15 minuti gridando "altra run in corso".
+I temporanei `.tmp.mp4` dei crash vengono puliti. L'abort dopo il primo
+rendering non dice piu' "video non generato" quando il video c'e'.
+
+**Privacy e cache.** Il bundle diagnostico esporta solo numeri/flag del
+report: niente nomi corretti dal parlato, sorgenti o percorsi assoluti. La
+cartella di lavoro e' unica (`mkdtemp`), quindi file preesistenti non
+finiscono nello zip né vengono cancellati. `embedding_model_check.json`
+e' housekeeping e sopravvive a `--clean-cache`. Un report con `tempi` o
+`correzioni_nomi` di forma sbagliata non cancella piu' il riepilogo.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -1369,5 +1407,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio (batch 35): ruff pulito, mypy pulito su tre
-piattaforme, 1768 test verdi, `_debug_hardware.py` e controlli 6/6.
+Stato all'ultimo lancio (batch 36): ruff pulito, mypy pulito su tre
+piattaforme, 1787 test verdi, `_debug_hardware.py` e controlli 6/6.
