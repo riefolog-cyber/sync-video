@@ -7,6 +7,7 @@ continua a funzionare per tutti i test esistenti.
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -38,10 +39,18 @@ def format_time(seconds: float) -> str:
     cifra. Ora la regola e' UNA, il troncamento, che preserva i tempi storici
     del referto (16m57s resta 16m57s).
     """
-    interi = int(seconds)
+    try:
+        valore = float(seconds)
+    except (TypeError, ValueError, OverflowError):
+        valore = 0.0
+    interi = max(0, int(valore)) if math.isfinite(valore) else 0
     if interi < 60:
         return f"{interi}s"
-    m, s = divmod(interi, 60)
+    ore, resto = divmod(interi, 3600)
+    if ore:
+        m, s = divmod(resto, 60)
+        return f"{ore}h{m:02d}m{s:02d}s"
+    m, s = divmod(resto, 60)
     return f"{m}m{s:02d}s"
 
 

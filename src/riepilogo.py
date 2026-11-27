@@ -129,7 +129,14 @@ def riepilogo_markdown(
         # posto dove l'utente lo legge.
         manca = ""
         if not video_presente and not dry_run:
-            manca = " — **assente dalla cartella**"
+            # Un abort prima del rendering NON dice che il file manca: il
+            # vecchio video puo' essere li' accanto. Il problema e' che per
+            # QUESTA timeline nessun video e' stato generato.
+            manca = (
+                " — **nessun video generato per questa timeline**"
+                if motivo
+                else " — **assente dalla cartella**"
+            )
         righe.append(f"Video: `{nome_video}`{manca}")
     if data:
         righe.append(f"Lezione del {data}")

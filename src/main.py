@@ -146,6 +146,7 @@ from ocr import (
     azzera_dpi_effettivo,
     convert_presentation_to_pdf,
     extract_slides_text_ocr,
+    slide_png_valida,
     ultimo_dpi_effettivo,
 )
 
@@ -3892,7 +3893,7 @@ def _main_impl(argv: list | None = None) -> None:
             cached
             and "slide_files" in cached
             and "slide_texts" in cached
-            and all(Path(f).exists() for f in cached["slide_files"])
+            and all(slide_png_valida(f) for f in cached["slide_files"])
         ):
             # Cache valida: i file immagine esistono ancora
             slide_files = cached["slide_files"]
@@ -5399,13 +5400,18 @@ def _main_impl(argv: list | None = None) -> None:
             if not words_raw or not isinstance(sync_notes.get("anchors"), dict):
                 return []
             _declared: dict[int, float] = {}
+            _tutte: dict[int, list[float]] = {}
             _cursor = 0.0
             for _sid, _dur in zip(slide_ids, durations, strict=True):
-                # Con --skip-slides una slide puo' comparire piu' volte: tenere
-                # la PRIMA occorrenza faceva dire "il video e' in anticipo"
-                # quando l'annuncio parlava della seconda. Si conserva l'ultima.
-                _declared[int(_sid)] = _cursor
+                # Con --skip-slides una slide puo' comparire piu' volte: si
+                # confronta con l'ULTIMA occorrenza (quella dell'annuncio piu'
+                # tardo), ma le occorrenze precedenti restano come alternative:
+                # un annuncio coerente con una di esse non e' un dubbio.
+                _n = int(_sid)
+                _declared[_n] = _cursor
+                _tutte.setdefault(_n, []).append(_cursor)
                 _cursor += float(_dur)
+            _alternative = {s: ts for s, ts in _tutte.items() if len(ts) > 1}
             # `--review` ricalcola i dubbi su report vecchi: senza l'offset
             # EFFETTIVO (utente + correzione automatica del mapping) non puo'
             # riprodurre il controllo fatto qui.
@@ -5431,6 +5437,7 @@ def _main_impl(argv: list | None = None) -> None:
                     _declared,
                     total_slides,
                     slide_offset=_offset_utente + _offset_mapping,
+                    starts_alternativi=_alternative,
                 )
             ]
 

@@ -660,12 +660,32 @@ def _embed_list_cached(
             with np.load(path) as data:
                 arr = np.asarray(data["emb"], dtype=np.float32)
                 saved = float(np.asarray(data["seconds"]).reshape(()))
+                # Il percorso ESATTO della cache deve avere le stesse garanzie
+                # del riuso parziale: senza queste due letture un npz con la
+                # forma giusta ma modello/chiavi diversi veniva accettato, e
+                # vettori di un altro embedder entravano nella matrice sim.
+                modello = str(np.asarray(data["model"]).reshape(()))
+                chiavi = np.asarray(data["keys"]).astype("U16")
         except (OSError, ValueError, KeyError) as e:
             log.debug("   [%s] Cache embedding illeggibile (%s): ricalcolo.", context, e)
         else:
-            # La forma è la verifica di integrità: file troncato o chiave
-            # riusata con contenuti diversi devono portare al ricalcolo.
-            if arr.ndim == 2 and arr.shape[0] == len(texts):
+            attese = [_chiave_testo(t) for t in texts]
+            identita_ok = modello == embed_id
+            chiavi_ok = len(chiavi) == len(attese) and all(
+                str(chiavi[i]) == attesa for i, attesa in enumerate(attese)
+            )
+            # Un vettore non finito non è un embedding: iniettarlo in `sim`
+            # faceva dire ai guard-rail che l'allineamento era perfetto.
+            finito_ok = bool(np.isfinite(arr).all()) and math.isfinite(saved)
+            # La forma e' la verifica di integrita', identita' e chiavi quella
+            # di provenienza: tutto cio' che non combacia porta al ricalcolo.
+            if (
+                arr.ndim == 2
+                and arr.shape[0] == len(texts)
+                and identita_ok
+                and chiavi_ok
+                and finito_ok
+            ):
                 _EMBED_MEMO[key] = (arr, saved)
                 # La potatura è un LRU per mtime: senza questo tocco una voce
                 # riusata a ogni run resta "vecchia" e viene eliminata prima di
@@ -917,6 +937,12 @@ def _embed_and_report(
         return None
 
     sim = block_emb @ slide_emb.T  # (B, N) cosine
+    # Un embedding non finito (cache iniettata, output ONNX rotto) dava un
+    # `sim` con NaN: `argmax` sceglieva il primo NaN e i guard-rail dichiaravano
+    # concordanza 1.0 (allineamento perfetto) su un segnale inutilizzabile.
+    if not np.isfinite(sim).all():
+        log.warning("   [%s] Similarita' non finita: ripiego senza allineamento.", context)
+        return None
     return sim, signal_quality_report(sim, slide_emb)
 
 
@@ -1063,6 +1089,11 @@ def signal_quality_report(
       la misura non significa nulla.
     """
     _, N = sim.shape
+    if not np.isfinite(sim).all():
+        # Con un NaN, `argmax` lo sceglie come picco e ogni coppia risulta in
+        # ordine: concordanza 1.0 su dati sporchi. Meglio dichiarare segnale
+        # debole (0.0), così `weak_signal` avvisa invece di rassicurare.
+        return {"concordance": 0.0, "confusability": 1.0}
     peaks = [int(np.argmax(sim[:, s])) for s in range(N)]
     concord = 0
     for i in range(N):
@@ -1088,6 +1119,10 @@ def confusability_slides(
     """
     if slide_emb is None or slide_emb.ndim != 2:
         return 0.0
+    if not np.isfinite(slide_emb).all():
+        # Non fabbricare "0 duplicati" da vettori NaN: le norme non valgono
+        # `_CENTRO_NULLO` e il confronto con la soglia e' sempre falso.
+        return 1.0
     N = slide_emb.shape[0]
     if N < 2:
         return 0.0
@@ -2391,6 +2426,10 @@ REFINE_PERTURBATION_SCALE = 1.5
 # normale. Accumula fra le chiamate della stessa run tenendo l'ULTIMA decisione
 # per chiave, che e' quella applicata.
 _REFINE_DIAGNOSTICS: dict[tuple[str, int], dict[str, object]] = {}
+# Prima occorrenza di ogni slide nelle decisioni guidate per INDICE: con
+# --skip-slides lo stesso numero puo' comparire piu' volte, e solo la prima
+# puo' sostituire la stima generica registrata per numero di slide.
+_REFINE_PRIMI_INDICI: dict[int, int] = {}
 
 
 def refine_diagnostics() -> list[dict[str, object]]:
@@ -2413,9 +2452,12 @@ def refine_diagnostics() -> list[dict[str, object]]:
 def reset_refine_diagnostics() -> None:
     """Azzera la diagnostica (usato dai test, come per gli altri stati di modulo)."""
     _REFINE_DIAGNOSTICS.clear()
+    _REFINE_PRIMI_INDICI.clear()
 
 
-def _record_refine(key: int, slide: int, **fields: object) -> None:
+def _record_refine(
+    key: int, slide: int, *, by_index: bool = False, **fields: object
+) -> None:
     """Registra la decisione su un confine nella voce indicizzata da `key`.
 
     `key` e' la chiave di lavoro (numero della slide, o indice del segmento con
@@ -2429,24 +2471,22 @@ def _record_refine(key: int, slide: int, **fields: object) -> None:
     # indice 3 sovrascriveva la voce della slide 3 con la decisione della
     # slide 4. Si indicizza SEMPRE per numero di slide, che e' cio' che il
     # report mostra, tenendo l'indice come campo informativo.
+    if by_index:
+        _REFINE_PRIMI_INDICI.setdefault(slide, key)
     voce: dict[str, object] = {"slide": slide, **fields}
-    if key != slide:
+    if by_index or key != slide:
         voce["indice"] = key
     # Due occorrenze della STESSA slide (--skip-slides) hanno indici diversi
     # e confini diversi: tenerle separate evita che la seconda decisione
-    # cancelli la prima dal report.
-    chiave_interna = ("idx", key) if key != slide else ("slide", slide)
-    # Il raffinamento guidato dai frame (per INDICE) sostituisce soltanto la
-    # vecchia decisione presa per NUMERO di slide sullo stesso confine. Le due
-    # occorrenze di una slide con --skip-slides hanno indici diversi e vanno
-    # tenute entrambe: cancellare per numero le faceva sparire una.
-    # Sostituire la decisione "generica" per numero SOLO se questa e' la
-    # prima occorrenza della slide: con --skip-slides una decisione guidata
-    # di una occorrenza successiva non puo' cancellare quella della prima.
-    # Una decisione guidata su un indice PRECEDENTE al numero slide sostituisce
-    # la vecchia stima per numero; un indice SUCCESSIVO e' un'altra occorrenza
-    # della stessa slide (--skip-slides) e va tenuto accanto alla prima.
-    if key < slide:
+    # cancelli la prima dal report. `by_index` e' esplicito: confrontare un
+    # indice 0-based con un numero di slide 1-based (`key < slide`) era
+    # un'euristica che, con le slide ripetute, cancellava la prima occorrenza.
+    chiave_interna = ("idx", key) if (by_index or key != slide) else ("slide", slide)
+    prima_occorrenza = by_index and _REFINE_PRIMI_INDICI.get(slide) == key
+    # Le chiamate storiche senza `by_index` ma con key != slide mantengono la
+    # vecchia euristica (usata dai test e dai percorsi non guidati).
+    compat = not by_index and key != slide and key < slide
+    if prima_occorrenza or compat:
         _REFINE_DIAGNOSTICS.pop(("slide", slide), None)
     _REFINE_DIAGNOSTICS[chiave_interna] = voce
 
@@ -2623,7 +2663,7 @@ def refine_segment_boundaries(
             hi = min(float(out[i]["end"]) - min_segment_seconds, float(whi))
         if hi <= lo:
             _record_refine(
-                key, int(out[i]["slide"]),
+                key, int(out[i]["slide"]), by_index=by_index,
                 from_slide=prev_slide + 1,
                 current=round(t_current, 2),
                 decision="non valutabile: nessun punto dove spostare il confine",
@@ -2640,7 +2680,7 @@ def refine_segment_boundaries(
             candidates = sorted(sampled)
         if len(candidates) < 2:
             _record_refine(
-                key, int(out[i]["slide"]),
+                key, int(out[i]["slide"]), by_index=by_index,
                 from_slide=prev_slide + 1,
                 current=round(t_current, 2),
                 decision="non valutabile: un solo timestamp candidato",
@@ -2661,7 +2701,7 @@ def refine_segment_boundaries(
             cand_pairs.append((t, before, after))
         if len(cand_pairs) < 2:
             _record_refine(
-                key, int(out[i]["slide"]),
+                key, int(out[i]["slide"]), by_index=by_index,
                 from_slide=prev_slide + 1,
                 current=round(t_current, 2),
                 decision="non valutabile: finestre di parlato vuote (silenzi)",
@@ -2671,7 +2711,7 @@ def refine_segment_boundaries(
         if cur_pair is None:
             # finestre vuote anche sul confine attuale: niente confronto equo
             _record_refine(
-                key, int(out[i]["slide"]),
+                key, int(out[i]["slide"]), by_index=by_index,
                 from_slide=prev_slide + 1,
                 current=round(t_current, 2),
                 decision="non valutabile: nessun confronto equo col confine attuale",
@@ -2698,7 +2738,7 @@ def refine_segment_boundaries(
             embs = np.asarray(_embed_list(embed_fn, texts, "Refine finestre"), dtype=np.float32)
             if embs.ndim != 2 or embs.shape[0] != len(texts):
                 _record_refine(
-                    key, int(out[i]["slide"]),
+                    key, int(out[i]["slide"]), by_index=by_index,
                     from_slide=prev_slide + 1,
                     current=round(t_current, 2),
                     decision="non valutabile: embedding delle finestre con forma inattesa",
@@ -2708,7 +2748,7 @@ def refine_segment_boundaries(
         except Exception as e:  # noqa: BLE001 - embed_fn è iniettabile/esterno
             log.warning("   [Refine] Embedding finestre non disponibile: confini invariati (%s).", e)
             _record_refine(
-                key, int(out[i]["slide"]),
+                key, int(out[i]["slide"]), by_index=by_index,
                 from_slide=prev_slide + 1,
                 current=round(t_current, 2),
                 decision="non valutabile: embedding delle finestre fallito",
@@ -2741,13 +2781,13 @@ def refine_segment_boundaries(
         }
         if best_idx == cur_idx:
             _record_refine(
-                key, int(out[i]["slide"]), **record, decision="tenuto: nessun candidato migliore"
+                key, int(out[i]["slide"]), by_index=by_index, **record, decision="tenuto: nessun candidato migliore"
             )
             continue
         record["guided"] = guided
         if not guided and delta < needed:
             _record_refine(
-                key, int(out[i]["slide"]), **record, decision="tenuto: margine dentro il rumore"
+                key, int(out[i]["slide"]), by_index=by_index, **record, decision="tenuto: margine dentro il rumore"
             )
             log.info(
                 "   [Refine] Confine TENUTO a %.1fs: il candidato migliore (%.1fs) "
@@ -2780,7 +2820,7 @@ def refine_segment_boundaries(
                     break
             if violates:
                 _record_refine(
-                    key, int(out[i]["slide"]), **record, decision="tenuto: violerebbe un'ancora"
+                    key, int(out[i]["slide"]), by_index=by_index, **record, decision="tenuto: violerebbe un'ancora"
                 )
                 continue
         # Prova di stabilità: il vincitore deve vincere anche guardando più
@@ -2798,7 +2838,7 @@ def refine_segment_boundaries(
             context_seconds,
         ):
             _record_refine(
-                key, int(out[i]["slide"]), **record, decision="tenuto: vince solo a finestra stretta"
+                key, int(out[i]["slide"]), by_index=by_index, **record, decision="tenuto: vince solo a finestra stretta"
             )
             log.info(
                 "   [Refine] Confine TENUTO a %.1fs: il candidato %.1fs vince con la "
@@ -2814,7 +2854,7 @@ def refine_segment_boundaries(
         out[i - 1]["end"] = best_t
         moved += 1
         _record_refine(
-            key, int(out[i]["slide"]),
+            key, int(out[i]["slide"]), by_index=by_index,
             **record,
             decision="spostato (guidato dall'evidenza)" if guided else "spostato",
         )

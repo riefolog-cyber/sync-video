@@ -7,6 +7,7 @@ scarta i silenzi). Il loop di raggruppamento è condiviso: cambia solo la
 politica di filtro/formato del chiamante.
 """
 
+import math
 from bisect import bisect_left
 from collections.abc import Sequence
 from typing import TypedDict
@@ -67,6 +68,25 @@ def build_windows(
     # una finestra da 1s degrada la qualita' dell'allineamento, ma produce
     # comunque una timeline, mentre l'eccezione uccide la run su un refuso.
     step = max(min_window_seconds, float(window_seconds))
+    # La durata arriva dai metadati audio, quindi puo' essere `inf` (stream
+    # senza fine) o `NaN` (JSON sporco): il `while` qui sotto non aveva alcun
+    # tetto e con `inf` girava per sempre appendendo finestre vuote. Con una
+    # durata inutilizzabile si usa l'ultimo timestamp delle parole + una
+    # finestra: si perde il silenzio finale, ma la run termina e lo dice.
+    try:
+        durata = float(total_duration)
+    except (TypeError, ValueError, OverflowError):
+        durata = 0.0
+    if not math.isfinite(durata) or durata <= 0:
+        tempi: list[float] = []
+        for w in words:
+            try:
+                t = float(w["start"])
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(t):
+                tempi.append(t)
+        durata = (max(tempi) if tempi else 0.0) + step
     windows: list[WordWindow] = []
     # `TimeIndex` tollera parole non ordinate e ripiega su scansione lineare:
     # qui il puntatore `idx` dava per scontato l'ordine, e un solo timestamp
@@ -77,7 +97,7 @@ def build_windows(
     idx = 0
     n = len(words)
     start = 0.0
-    while start < total_duration - 1e-6:
+    while start < durata - 1e-6:
         end = start + step
         chunk_words: list[str] = []
         first_time: float | None = None
@@ -89,7 +109,7 @@ def build_windows(
         windows.append(
             {
                 "start": start,
-                "end": min(end, total_duration),
+                "end": min(end, durata),
                 "first_time": first_time if first_time is not None else start,
                 "words": chunk_words,
                 "text": " ".join(chunk_words) if chunk_words else "...",

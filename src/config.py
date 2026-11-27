@@ -199,6 +199,31 @@ def _env_float(name: str, default: float) -> float:
     return numero
 
 
+def _env_float_con_minimo(
+    name: str, default: float, minimo: float, incluso: bool = True
+) -> float:
+    """Come `_env_float`, ma applica lo stesso range della CLI.
+
+    I flag semantici della CLI rifiutano i valori fuori range con un errore che
+    nomina il flag; i corrispondenti valori del .env li accettavano in silenzio
+    (min_z negativo disattivava l'avviso, temperature negativa diventava un
+    argmax). .env e CLI non possono divergere sullo stesso parametro.
+    """
+    valore = _env_float(name, default)
+    valido = valore >= minimo if incluso else valore > minimo
+    if not valido:
+        log.warning(
+            "   Variabile %s non valida ('%s'): deve essere %s %s; uso default %s.",
+            name,
+            os.environ.get(name),
+            ">=" if incluso else ">",
+            minimo,
+            default,
+        )
+        return default
+    return valore
+
+
 def _env_float_positivo(name: str, default: float) -> float:
     """Come `_env_float`, ma scarta zero e negativi (serve a SEMANTIC_WINDOW)."""
     valore = _env_float(name, default)
@@ -2162,7 +2187,7 @@ DEFAULT_EMBED_THREADS = auto_thread_budget("embed")
 DEFAULT_EMBED_BATCH = _env_int_positivo("EMBED_BATCH", {"basso": 16, "medio": 32}.get(_RAM_TIER, 64))
 
 DEFAULT_SEMANTIC_WINDOW = _env_float_positivo("SEMANTIC_WINDOW", 4.0)  # secondi per blocco
-DEFAULT_SEMANTIC_MIN_DURATION = _env_float("SEMANTIC_MIN_DURATION", 3.0)  # durata minima slide
+DEFAULT_SEMANTIC_MIN_DURATION = _env_float_con_minimo("SEMANTIC_MIN_DURATION", 3.0, 0.0)  # durata minima slide
 # Pavimento di leggibilità dell'anti-flicker: sotto questi secondi una slide
 # a video è un lampo illeggibile. La soglia effettiva è max(fondo, 2x durata
 # minima semantica), vedi timeline.anti_flicker_floor. Override con
@@ -2186,12 +2211,12 @@ DEFAULT_MIN_SEGMENT_SECONDS = _env_float("MIN_SEGMENT_SECONDS", 8.0)
 # 0.45 = nessuna variante sbagliata accettata, nessun deck con contenuto
 # per-slide rifiutato. Sotto questa soglia NON si scarta la timeline: si segnala
 # (--strict-sync, riepilogo finale).
-DEFAULT_SEMANTIC_MIN_Z = _env_float("SEMANTIC_MIN_Z", 0.45)
+DEFAULT_SEMANTIC_MIN_Z = _env_float_con_minimo("SEMANTIC_MIN_Z", 0.45, 0.0)
 # Temperatura della "competizione softmax" tra slide per blocco: più è bassa,
 # più il posizionamento privilegia i picchi locali (evita che una slide-riepilogo
 # con similarità uniforme catturi metà dell'audio).
 # 0.15 = bilanciamento ottimale trovato con test A/B su podcast reale.
-DEFAULT_SEMANTIC_TEMPERATURE = _env_float("SEMANTIC_TEMPERATURE", 0.15)
+DEFAULT_SEMANTIC_TEMPERATURE = _env_float_con_minimo("SEMANTIC_TEMPERATURE", 0.15, 0.0, incluso=False)
 # Copertura minima delle ancore 'slide N' come frazione delle transizioni
 # (slide 2..N). Sotto soglia la timeline sarebbe stimata per contenuto, con
 # durate inaffidabili e possibili micro-segmenti (run del 06/10: 4 ancore su 13

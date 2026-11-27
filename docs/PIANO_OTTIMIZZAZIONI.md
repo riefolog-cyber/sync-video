@@ -1233,6 +1233,47 @@ Nel bundle diagnostico un singolo file sparito fra elenco e ``stat`` cancellava
 tutti gli altri nomi, e un JSON di trascrizione con la forma sbagliata
 sollevava ``AttributeError``: ora entrambi i casi sono tollerati.
 
+## Batch 35 — ripresa, cache e segnali sporchi (2026-11)
+
+Diciottesima revisione: trascrizione/audio, semantic/embedding, OCR/slide e
+sottotitoli/report. Quattro revisioni parallele, 20 difetti candidati, 16
+corretti con test; scartati il marcatore OpenVINO (decisione gia' presa nel
+batch 24), la race degli attempt (migrazione della cache invasiva) e due
+candidati di basso valore su numerazione/prompt.
+
+**Trascrizione.** Nella ripresa la soglia per scartare i doppioni era
+l'ultima parola salvata: una parola saltata dal decoder veloce dentro la
+sovrapposizione veniva cancellata anche dalla seconda passata. Ora si scarta
+solo cio' che sta prima del taglio, e i doppioni restano gestiti dal testo.
+Il parziale con tempi scritti come stringhe o parole non-testo non viene piu'
+accettato e normalizzato a meta': si ricalcola tutto, senza TypeError lontano
+dalla cache. L'elenco dei materiali non dice piu' "cartella vuota" quando un
+solo file e' bloccato da antivirus.
+
+**Cache semantica e segnale.** L'hit ESATTO dell'embedding controllava solo la
+forma dell'array: un npz con modello o chiavi diversi veniva riusato in
+silenzio. Ora identita' e chiavi devono combaciare e i vettori devono essere
+finiti. Con NaN in `sim`, `argmax` sceglieva il primo valore e i guard-rail
+dichiaravano concordanza 1.0: ora segnale non finito vuol dire allineamento
+non affidabile. `build_windows` con durata `inf` girava per sempre: la durata
+viene ricalcolata dalle parole quando non e' finita. I parametri semantici
+del .env non possono piu' essere negativi mentre la CLI li rifiuta.
+
+**OCR.** La cache hit delle slide controllava solo `exists()`: una PNG
+troncata arrivava al video. Ora si usa lo stesso `verify()` del rendering.
+Il pavimento di 72 dpi annullava il tetto sui pixel nelle pagine immense
+(400 MP invece di 16): rimosso. Una pagina con testo nativo illeggibile non
+butta piu' via il testo di tutte le altre.
+
+**Report e sottotitoli.** Con `--skip-slides` un numero ripetuto veniva
+confrontato solo con l'ultima occorrenza: un annuncio coerente con la prima
+sembrava "in ritardo". Ora le occorrenze precedenti sono alternative valide.
+Un tempo NaN/Infinity in un SRT faceva perdere sottotitoli e capitoli:
+sono scartati, e `scrivi_sottotitoli` non dichiara piu' file scritti quando
+la scrittura e' fallita. L'abort prima del rendering dice "nessun video
+generato per questa timeline" invece di "assente dalla cartella" quando il
+file vecchio e' li'. `format_time` gestisce le ore e i negativi.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -1328,5 +1369,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio (batch 34): ruff pulito, mypy pulito su tre
-piattaforme, 1742 test verdi, `_debug_hardware.py` e controlli 6/6.
+Stato all'ultimo lancio (batch 35): ruff pulito, mypy pulito su tre
+piattaforme, 1768 test verdi, `_debug_hardware.py` e controlli 6/6.

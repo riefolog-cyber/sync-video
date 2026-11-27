@@ -152,9 +152,20 @@ _MATERIALI_VISTI_LIMITE = 12
 def _nomi_file_visti(directory: Path, limite: int = _MATERIALI_VISTI_LIMITE) -> tuple[list[str], int]:
     """Nomi dei file nella directory (ordinati) + quanti restano fuori dal limite."""
     try:
-        nomi = sorted(p.name for p in directory.iterdir() if p.is_file())
+        voci = list(directory.iterdir())
     except OSError:
         return [], 0
+    # Il guard intorno a tutta la lista faceva dire "cartella vuota" quando un
+    # solo file era bloccato da antivirus/OneDrive: si protegge la SINGOLA voce,
+    # come in find_audio_file, e si elencano tutti gli altri.
+    nomi: list[str] = []
+    for p in voci:
+        try:
+            if p.is_file():
+                nomi.append(p.name)
+        except OSError:
+            continue
+    nomi.sort()
     return nomi[:limite], max(0, len(nomi) - len(nomi[:limite]))
 
 
@@ -166,18 +177,34 @@ def _materiali_nei_sottocartelle(directory: Path, limite: int = 4) -> list[str]:
     giusto. Solo un livello: scendere ricorsivi elencherebbe anche .cache/.
     """
     try:
-        sottocartelle = sorted(p for p in directory.iterdir() if p.is_dir() and not p.name.startswith("."))
+        voci = list(directory.iterdir())
     except OSError:
         return []
+    sottocartelle: list[Path] = []
+    for p in voci:
+        try:
+            if p.is_dir() and not p.name.startswith("."):
+                sottocartelle.append(p)
+        except OSError:
+            continue
+    sottocartelle.sort(key=lambda p: p.name)
     audio_est = AUDIO_SEARCH_SUFFIXES
     trovati: list[str] = []
     for sub in sottocartelle:
         if sub.name == "temp_slides":
             continue
         try:
-            dentro = sorted(p for p in sub.iterdir() if p.is_file())
+            dentro_voci = list(sub.iterdir())
         except OSError:
             continue
+        dentro: list[Path] = []
+        for p in dentro_voci:
+            try:
+                if p.is_file():
+                    dentro.append(p)
+            except OSError:
+                continue
+        dentro.sort(key=lambda p: p.name)
         for p in dentro:
             if p.suffix.lower() in PRESENTATION_ACCEPTED_SUFFIXES or p.suffix.lower() in audio_est:
                 trovati.append(f"{sub.name}/{p.name}")

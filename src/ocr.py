@@ -630,6 +630,22 @@ def _set_dpi_effettivo(dpi: int) -> None:
     _ULTIMO_DPI_EFFETTIVO = dpi
 
 
+def slide_png_valida(path: str | Path) -> bool:
+    """True se il PNG esiste ED e' un'immagine intera (non troncata).
+
+    ``exists()`` non basta: una copia interrotta, un antivirus che ha tagliato
+    il file o un disco pieno lasciano un PNG con l'estensione giusta ma non
+    leggibile. Il percorso di rendering lo verifica gia' con ``verify()``; il
+    ramo cache hit di main.py saltava quel controllo e usava l'immagine rotta.
+    """
+    try:
+        with Image.open(str(path)) as immagine:
+            immagine.verify()
+    except (OSError, ValueError, SyntaxError):
+        return False
+    return True
+
+
 def _render_page(args: tuple[str, int, str, int]) -> tuple[str, int]:
     """Renderizza una singola pagina PDF in PNG (eseguita in processo separato).
 
@@ -648,7 +664,12 @@ def _render_page(args: tuple[str, int, str, int]) -> tuple[str, int]:
         base_h = max(1, int(rect.height * dpi / 72))
         if base_w * base_h > MAX_RENDER_PIXELS:
             scale = (MAX_RENDER_PIXELS / (base_w * base_h)) ** 0.5
-            dpi = max(72, int(dpi * scale))
+            # Il vecchio pavimento `max(72, ...)` annullava il tetto sulle
+            # pagine immense: 20000x20000 point a 300 dpi richiesti diventava
+            # 72 dpi -> 400 MP, OOM/disco pieno pur dicendo "tetton abbassato".
+            # Il tetto e' un vincolo, non un suggerimento: sotto 72 si puo'
+            # scendere, purche' il risultato resti entro MAX_RENDER_PIXELS.
+            dpi = max(1, int(dpi * scale))
         pix = page.get_pixmap(dpi=dpi)
         pix.save(str(output_path))
     finally:
@@ -783,7 +804,11 @@ def _testo_nativo(doc: Any) -> list[str]:
             grezzo = doc.load_page(i).get_text("text")
         except Exception as e:  # un PDF strano non ferma la run
             log.debug("   Testo nativo non leggibile a pagina %d: %s", i + 1, e)
-            return []
+            # Prima si tornava [] e si perdeva il testo di TUTTE le pagine:
+            # una sola pagina strana faceva OCRare l'intero deck (e, senza
+            # Tesseract, fermare la run). Solo quella pagina va in OCR.
+            testi.append("")
+            continue
         testi.append(_normalizza(grezzo))
     return testi
 
@@ -833,11 +858,9 @@ def extract_slides_text_ocr(
         output_path = output_dir / f"slide_{page_num:03d}.png"
         valid_cache = False
         if output_path.exists():
-            try:
-                with Image.open(str(output_path)) as test_img:
-                    test_img.verify()
+            if slide_png_valida(output_path):
                 valid_cache = True
-            except (OSError, ValueError, SyntaxError):
+            else:
                 log.debug("   Cache corrotta per %s, ri-renderizzo.", output_path.name)
                 output_path.unlink(missing_ok=True)
         if not valid_cache:

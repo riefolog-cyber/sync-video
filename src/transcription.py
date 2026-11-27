@@ -1323,11 +1323,22 @@ def _prepara_ripresa(
     parole: list[Word] = []
     if isinstance(grezze, list):
         for w in grezze:
-            if not (isinstance(w, dict) and "word" in w and "start" in w):
-                continue
-            # Un timestamp non numerico (parziale vecchio o corrotto) verrebbe
-            # scartato solo dopo il taglio audio, e `float()` esploderebbe in
-            # `_collect_words`: si butta via il parziale e si riparte da capo.
+            # Un parziale corrotto non deve essere ACCETTATO: controlvare il
+            # timestamp ma rimettere il dict originale faceva arrivare stringhe
+            # numeriche (`"50.0"`) o parole non-stringa fino a `_compress_words`
+            # e `_write_raw_transcript`, dove esplodevano con TypeError/
+            # ValueError lontano dal punto in cui il dato era entrato.
+            if not (
+                isinstance(w, dict)
+                and isinstance(w.get("word"), str)
+                and w["word"].strip()
+                and "start" in w
+            ):
+                log.info(
+                    "   [Trascrizione] Parziale con voce non valida: "
+                    "decodifico tutto da capo."
+                )
+                return [], audio_path, 0.0
             try:
                 istante = float(w["start"])
             except (TypeError, ValueError, OverflowError):
@@ -1338,7 +1349,10 @@ def _prepara_ripresa(
                     "decodifico tutto da capo."
                 )
                 return [], audio_path, 0.0
-            parole.append(cast("Word", w))
+            # Normalizza: il tipo e' verificato, ma il valore grezzo puo' essere
+            # una stringa che `float()` accetta e che i consumatori non sanno
+            # gestire (formattazione `%.2f`, sottrazione, `.lower()`).
+            parole.append({"word": w["word"].strip(), "start": istante})
     try:
         coperto = float(dati.get("coperto_fino") or 0.0)
     except (TypeError, ValueError, OverflowError):
@@ -1407,10 +1421,12 @@ def _collect_words(
     segmenti = 0
     coperto = offset
     # La ripresa riascolta qualche secondo gia' trascritto per avere contesto:
-    # quelle parole sarebbero doppioni. Si scarta tutto cio' che non sta dopo
-    # l'ultima parola salvata (le parole salvate coprono l'audio fino al punto
-    # di ripresa, quindi non si perde nulla di vero).
-    limite = max((float(w["start"]) for w in gia_fatte), default=None)
+    # le parole che stanno PRIMA del taglio sono doppioni e si scartano. Non si
+    # puo' usare come soglia l'ultima parola salvata: il decoder veloce puo'
+    # aver saltato una parola proprio nel mezzo della sovrapposizione, e la
+    # seconda passata e' l'unica occasione per recuperarla. I doppioni veri
+    # restano gestiti da `_gia_detto` (testo + finestra temporale stretta).
+    limite: float | None = offset if gia_fatte else None
     # Indice delle parole salvate per testo: la coda viene riascoltata per
     # parecchi secondi e una parola puo' essere riconosciuta di nuovo con un
     # inizio di pochi centesimi successivo a quello gia' salvato (misurato:
@@ -1436,7 +1452,7 @@ def _collect_words(
         if hasattr(seg, "words") and seg.words:
             for w in seg.words:
                 inizio = float(w.start) + offset
-                if limite is not None and inizio <= limite:
+                if limite is not None and inizio < limite:
                     continue
                 if _gia_detto(w.word, inizio):
                     continue
@@ -1448,7 +1464,7 @@ def _collect_words(
         else:
             for token in seg.text.strip().split():
                 inizio = float(seg.start) + offset
-                if limite is not None and inizio <= limite:
+                if limite is not None and inizio < limite:
                     continue
                 if _gia_detto(token, inizio):
                     continue

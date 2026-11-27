@@ -9,8 +9,9 @@ citazioni a posteriori), la timeline viene completata usando le ancore reali
 """
 
 import bisect
+import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from itertools import pairwise
 from typing import cast
 
@@ -985,6 +986,7 @@ def announcements_off_timeline(
     tolerance: float = 5.0,
     lookback: int = 6,
     slide_offset: int = 0,
+    starts_alternativi: Mapping[int, Sequence[float]] | None = None,
 ) -> list[tuple[int, float, float]]:
     """Annunci "slide N" lontani dal confine dichiarato per quella slide.
 
@@ -1017,6 +1019,9 @@ def announcements_off_timeline(
             considerati in contraddizione. Un'ancora vera sta a frazioni di
             secondo dal proprio annuncio (``_reference_boundary``), quindi la
             soglia può essere larga senza falsi allarmi.
+        starts_alternativi: altri inizi della stessa slide (con
+            ``--skip-slides``): un annuncio coerente con uno di questi non e'
+            un dubbio anche se `starts` tiene solo l'ultima occorrenza.
 
     Returns:
         ``[(slide, tempo_annuncio, inizio_dichiarato), ...]`` in ordine di tempo.
@@ -1082,6 +1087,15 @@ def announcements_off_timeline(
             continue
         if abs(boundary - float(declared)) <= tolerance:
             continue
+        if starts_alternativi:
+            # Con --skip-slides lo stesso numero compare piu' volte: un
+            # annuncio puo' essere coerente con una delle occorrenze diverse
+            # da quella scelta come `starts` (l'ultima). Senza questo, la
+            # seconda occorrenza (spesso il rimpiazzo di una slide saltata,
+            # mai pronunciata) generava un falso "video in ritardo".
+            occorrenze = starts_alternativi.get(pagina, ())
+            if any(abs(boundary - float(t)) <= tolerance for t in occorrenze):
+                continue
         found.append((pagina, boundary, float(declared)))
     # Un "slide slide 10" o un richiamo voluto produceva voci duplicate:
     # il riepilogo contava due dubbi per lo stesso confine. `discarded_citations`
@@ -1832,7 +1846,18 @@ def repetition_loops(
     singole.
     """
     norm = [_normalize(str(w.get("word", ""))) for w in words]
-    times = [float(w.get("start", 0.0)) for w in words]
+    # Le parole arrivano anche dalla cache: un tempo scritto come stringa o
+    # corrotto faceva sollevare ValueError qui, durante la ricerca delle zone
+    # da ritrascrivere, interrompendo la pipeline prima di qualsiasi avviso.
+    # La lista deve restare allineata a `norm`, quindi si usa 0.0 per la voce
+    # non databile invece di saltarla.
+    times: list[float] = []
+    for w in words:
+        try:
+            istante = float(w.get("start", 0.0))
+        except (TypeError, ValueError, OverflowError):
+            istante = 0.0
+        times.append(istante if math.isfinite(istante) else 0.0)
     n = len(norm)
     zone: list[tuple[float, float]] = []
     for size in range(1, max_cycle + 1):

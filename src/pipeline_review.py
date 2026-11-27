@@ -188,13 +188,18 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
         log.error("   [Revisione] Il report non contiene segmenti leggibili.")
         return 1
     starts: dict[int, float] = {}
+    tutte: dict[int, list[float]] = {}
     for seg in segments:
         slide = _intero_sicuro(seg.get("slide"))
         # Ultima occorrenza: con --skip-slides la stessa slide puo' comparire
-        # piu' volte, e l'annuncio Pronunciato piu' tardi parla dell'ultima.
-        # Tenere la prima faceva dire "video in anticipo" e piazzava
-        # l'anteprima sul confine sbagliato.
-        starts[slide] = _numero_sicuro(seg.get("start"))
+        # piu' volte, e l'annuncio pronunciato piu' tardi parla dell'ultima.
+        # Le occorrenze precedenti restano come alternative: se l'annuncio
+        # combacia con una di esse non e' un dubbio (tipico: pagina saltata e
+        # sostituita dalla slide precedente, mai annunciata).
+        inizio = _numero_sicuro(seg.get("start"))
+        starts[slide] = inizio
+        tutte.setdefault(slide, []).append(inizio)
+    starts_alternativi = {s: ts for s, ts in tutte.items() if len(ts) > 1}
     if not starts:
         log.error("   [Revisione] Il report non contiene segmenti: niente da rivedere.")
         return 1
@@ -288,6 +293,7 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
                             starts,
                             total_slides_review,
                             slide_offset=offset,
+                            starts_alternativi=starts_alternativi,
                         )
                     ]
                     ricalcolati = True

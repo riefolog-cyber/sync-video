@@ -94,7 +94,14 @@ def timestamp_srt(secondi: float) -> str:
     millesimi a parte costringeva a gestire a mano il riporto a 1.000, e un
     ``59.9996`` diventava ``00:00:59,1000``.
     """
-    ms = max(0, round(secondi * 1000))
+    # `json.loads` accetta NaN/Infinity: una cache trascrizione sporca li
+    # portava fino a `round()`,che sollevava ValueError e faceva perdere SRT e
+    # capitoli dell'intera run. Un tempo non finito non e' un istante: 0.
+    try:
+        valore = float(secondi)
+    except (TypeError, ValueError, OverflowError):
+        valore = 0.0
+    ms = max(0, round(valore * 1000)) if math.isfinite(valore) else 0
     ore, resto = divmod(ms, 3_600_000)
     minuti, resto = divmod(resto, 60_000)
     sec, millesimi = divmod(resto, 1000)
@@ -216,7 +223,12 @@ def costruisci_cue(
             continue  # una parola senza tempo non puo' stare in un sottotitolo
         try:
             t = float(w["start"])
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(t):
+            # Le parole non databili vengono messe in fondo da `_tempo`, ma
+            # arrivavano qui lo stesso: `chiudi(inf)` stirava il cue precedente
+            # a `max_secondi`, e NaN esplodeva in `timestamp_srt`.
             continue
         ultimo = t
         coda = _fine_dichiarata(w)  # solo l'ultima conta: le altre sono gia' chiuse
@@ -1047,24 +1059,36 @@ def scrivi_sottotitoli(
     # `.stem` toglie SOLO l'ultima estensione: "video.v2.mp4" -> "video.v2",
     # e il nome consueto "video_finale.mp4" resta "video_finale.srt".
     base = output_path.with_name(output_path.stem)
+    # Calcola TUTTO prima di scrivere: scrivere l'SRT e poi scoprire che i
+    # capitoli non sono costruibili lasciava un file sul disco mentre la
+    # funzione dichiarava "(None, None) — non scritti". Il contratto dice
+    # "percorsi SCRITTI": o sono scritti entrambi, o nessuno dei due.
+    try:
+        contenuto_srt = build_srt(words, durata=durata)
+        contenuto_capitoli = (
+            build_capitoli(timeline, slide_texts, numeri_slide, words=words) + "\n"
+            if timeline
+            else None
+        )
+    except (TypeError, ValueError, OverflowError) as e:
+        log.warning("   Sottotitoli/capitoli non scritti (%s).", e)
+        return None, None
     srt: Path | None = None
     capitoli: Path | None = None
     try:
-        contenuto = build_srt(words, durata=durata)
-        if contenuto:
-            srt = base.with_name(base.name + ".srt")
-            atomic_write_text(srt, contenuto)
-        if timeline:
-            capitoli = base.with_name(base.name + ".capitoli.txt")
-            atomic_write_text(
-                capitoli, build_capitoli(timeline, slide_texts, numeri_slide, words=words) + "\n"
-            )
-    except (OSError, TypeError, ValueError, OverflowError) as e:
+        if contenuto_srt:
+            destinazione = base.with_name(base.name + ".srt")
+            atomic_write_text(destinazione, contenuto_srt)
+            srt = destinazione  # solo DOPO la scrittura riuscita
+        if contenuto_capitoli is not None:
+            destinazione = base.with_name(base.name + ".capitoli.txt")
+            atomic_write_text(destinazione, contenuto_capitoli)
+            capitoli = destinazione
+    except OSError as e:
         log.warning("   Sottotitoli/capitoli non scritti (%s).", e)
-        # Non restituire un file VECCHIO che sta ancora li': il contratto
-        # dice "percorsi SCRITTI", e un chiamante che li controlla crederebbe
-        # che questa run abbia prodotto i sottotitoli.
-        return None, None
+        # Restituisce solo cio' che e' stato scritto davvero in QUESTA run: un
+        # file vecchio rimasto sul disco non deve essere dichiarato nostro.
+        return srt, capitoli
     if srt:
         log.info("   Sottotitoli: %s", srt.name)
     if capitoli:
