@@ -25,7 +25,7 @@ import hashlib
 import json
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from config import CACHE_DIR, DEFAULT_VIDEO_BUFFER_SEC, DEFAULT_VIDEO_RES, atomic_write_text, log
 
@@ -110,6 +110,23 @@ def chiave_video(
     return h.hexdigest()
 
 
+def _intero_marca(valore: object, default: int) -> int:
+    """Intero da una marca JSON, o ``default`` se il valore e' sporco.
+
+    La marca e' una cache: un file scritto a meta', modificato a mano o
+    corrotto non deve interrompere la run. Prima ``int("abc")`` sollevava
+    ``ValueError`` e il controllo del riuso faceva fallire la pipeline prima
+    ancora dell'encoding; qui il valore sporco vale come "marca non valida"
+    e il video si rifa'.
+    """
+    if isinstance(valore, bool):
+        return default
+    try:
+        return int(cast("str | int | float", valore))
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def _percorso_marca(output_path: Path, cache_dir: Path | None = None) -> Path:
     base = cache_dir if cache_dir is not None else CACHE_DIR
     h = hashlib.sha1(str(output_path.resolve()).encode("utf-8")).hexdigest()[:16]
@@ -142,10 +159,11 @@ def video_riutilizzabile(
     except OSError:
         return False
     # Dimensione diversa: il file e' stato sostituito, si rifa senza leggerlo.
-    if int(dati.get("size", -1)) != stat.st_size:
+    # Un valore sporco nella marca vale come "non combacia" (si rifa).
+    if _intero_marca(dati.get("size"), -1) != stat.st_size:
         return False
     # mtime uguale: percorso rapido, e' il caso normale (nessuna lettura del video).
-    if int(dati.get("mtime_ns", -1)) == stat.st_mtime_ns:
+    if _intero_marca(dati.get("mtime_ns"), -1) == stat.st_mtime_ns:
         _ripristina_encoder(dati, encoder_out)
         return True
     # mtime diverso ma dimensione uguale: puo' essere un semplice "touch" di

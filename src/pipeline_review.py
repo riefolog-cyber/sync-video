@@ -43,6 +43,14 @@ def _numero_sicuro(valore: object) -> float:
     return numero if math.isfinite(numero) else 0.0
 
 
+def _intero_o_none(valore: object) -> int | None:
+    """Intero da un report sporco, o None se il valore non e' un numero."""
+    try:
+        return int(cast("str | int | float", valore))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _boundary_preview_moments(item: dict[str, object]) -> list[tuple[str, float]]:
     """I due istanti di un confine dubbio: l'annuncio e il confine dichiarato.
 
@@ -256,17 +264,33 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
                 motivo_non_fatto = "offset del mapping automatico non noto"
                 controllo_non_fatto = True
             else:
-                offset = int(cast("int", effective if effective is not None else (anchors.get("spoken_offset") or 0)))
-                items = [
-                    {"slide": s, "mention": m, "declared": d}
-                    for s, m, d in announcements_off_timeline(
-                        words,
-                        starts,
-                        total_slides_review,
-                        slide_offset=offset,
+                sorgente_offset = (
+                    effective if effective is not None else (anchors.get("spoken_offset") or 0)
+                )
+                offset = _intero_o_none(sorgente_offset)
+                if offset is None:
+                    # Un report modificato a mano (o scritto da una versione
+                    # diversa) puo' avere un offset non numerico: con il
+                    # vecchio ``int()`` diretto, --review moriva con un
+                    # ValueError. Senza un offset affidabile non si
+                    # ricalcolano i dubbi: meglio dirlo che inventarli.
+                    log.warning(
+                        "   Offset del report non numerico (%r): non ricalcolo i dubbi.",
+                        sorgente_offset,
                     )
-                ]
-                ricalcolati = True
+                    motivo_non_fatto = "offset del report non numerico"
+                    controllo_non_fatto = True
+                else:
+                    items = [
+                        {"slide": s, "mention": m, "declared": d}
+                        for s, m, d in announcements_off_timeline(
+                            words,
+                            starts,
+                            total_slides_review,
+                            slide_offset=offset,
+                        )
+                    ]
+                    ricalcolati = True
 
     quando = ""
     with suppress(OSError):

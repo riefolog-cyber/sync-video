@@ -1196,6 +1196,43 @@ di sezione si riconoscono solo se seguite da `:` o `(` (non in mezzo a una
 frase), e l'apostrofo davanti a una cifra non viene piu' confuso con una
 virgoletta.
 
+## Batch 34 — cache, riuso e input sporchi (2026-11)
+
+Diciassettesima revisione, sulle aree non coperte dai batch recenti:
+timeline/override, video/hardware, config/updates/cache e diagnostica.
+
+**Riuso del video.** Il marcatore JSON nella cache e' una cache, non un
+contratto: un ``size`` o un ``mtime_ns`` non numerico (file scritto a meta',
+modificato a mano) faceva sollevare ``ValueError`` e interrompeva la pipeline
+prima ancora dell'encoding. Un valore sporco ora vale come "marca non valida"
+e il video si rifa'.
+
+**Fallback del transcript.** ``[1.2.3s]`` passava la regex del tempo ma non
+``float()``: il fallback Whisper moriva su una riga troncata. La riga cattiva
+viene saltata e le altre lette; un transcript RAW illeggibile (file sparito in
+corsa con l'antivirus, codifica diversa) restituisce ``None`` con un avviso
+invece di un traceback.
+
+**Cache e manutenzione.** L'``OSError`` puo' arrivare dall'ITERAZIONE di
+``iterdir``/``rglob``/``glob`` (ACL negate, share sparita), non solo dallo
+``stat`` del singolo file: ``--cache-du`` e ``--clean-cache`` ora conservano i
+conteggi parziali invece di fallire, e la pulizia degli orfani e' protetta
+allo stesso modo.
+
+**Override e confini.** Con la timeline vuota un override su una slide
+inesistente produceva ``max() arg is an empty sequence``: ora il messaggio dice
+che la timeline e' vuota e che non c'e' nulla da correggere. In
+``boundary_snap`` un tempo ``NaN``/``inf`` avvelenava l'ordinamento del vettore
+usato da ``bisect`` e poteva spostare un confine a caso: i valori non finiti
+sono scartati come le parole senza tempo.
+
+**Review e bundle.** Un ``effective_offset`` non numerico in un report scritto
+a mano faceva morire ``--review`` con ``ValueError``: ora l'offset viene
+validato e, se non e' un numero, il programma lo dice e non ricalcola i dubbi.
+Nel bundle diagnostico un singolo file sparito fra elenco e ``stat`` cancellava
+tutti gli altri nomi, e un JSON di trascrizione con la forma sbagliata
+sollevava ``AttributeError``: ora entrambi i casi sono tollerati.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -1291,5 +1328,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio (batch 32): ruff pulito, mypy pulito su tre
-piattaforme, 1728 test verdi, `_debug_hardware.py` e controlli 6/6.
+Stato all'ultimo lancio (batch 34): ruff pulito, mypy pulito su tre
+piattaforme, 1742 test verdi, `_debug_hardware.py` e controlli 6/6.

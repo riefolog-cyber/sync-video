@@ -199,6 +199,15 @@ class TestApplicazione(unittest.TestCase):
         nuova, _ = applica_override(self.TIMELINE, {4: 918.0}, 921.0, 3.0)
         self.assertEqual(nuova[4], 918.0)
 
+    def test_timeline_vuota_dice_cosa_fare(self) -> None:
+        # Con nessuna slide il vecchio `max(nuove)` sollevava
+        # "max() arg is an empty sequence", che non dice ne' cosa e' successo
+        # ne' cosa correggere. L'errore deve parlare di timeline vuota.
+        with self.assertRaises(ValueError) as ctx:
+            applica_override({}, {2: 10.0}, 100.0, 3.0)
+        self.assertIn("vuota", str(ctx.exception))
+        self.assertIn("override", str(ctx.exception))
+
     def test_le_ancore_pronunciate_vengono_segnalate(self) -> None:
         _, mosse = applica_override(self.TIMELINE, {3: 140.0}, 921.0, 3.0)
         self.assertEqual(mosse, [(3, 132.0, 140.0)])

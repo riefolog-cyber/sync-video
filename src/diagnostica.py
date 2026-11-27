@@ -50,6 +50,20 @@ def _sicuro(nome: str) -> bool:
     return nome not in _ESCLUSI_NOMI
 
 
+def _mtime_sicuro(path: Path) -> float:
+    """mtime, o -inf se il file e' sparito/irraggiungibile.
+
+    Antivirus e OneDrive possono togliere un file fra l'elenco e lo ``stat``:
+    un solo candidato illeggibile non deve far sparire TUTTI gli altri (ne'
+    far credere che il video non esista). Stessa regola di
+    ``pipeline_inputs._mtime_legibile``.
+    """
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return float("-inf")
+
+
 def _righe_verifica(radice: Path) -> list[str]:
     """Il referto verifica_pc come righe di testo (mai un'eccezione)."""
     rep = Relazione()
@@ -84,17 +98,23 @@ def _versioni() -> dict[str, object]:
 def _conta_parole(cache: Path) -> dict[str, object]:
     """Quante parole nelle cache di trascrizione (conteggi, mai il testo)."""
     try:
-        files = sorted(cache.glob("transcript_*.json"), key=lambda p: p.stat().st_mtime)
+        files = sorted(cache.glob("transcript_*.json"), key=_mtime_sicuro)
     except OSError:
         return {"file": None, "parole": None, "nota": "cache non leggibile"}
     if not files:
         return {"file": None, "parole": None, "nota": "nessuna trascrizione in cache"}
     try:
         dati = json.loads(files[-1].read_text(encoding="utf-8"))
-        parole = dati.get("words_raw") or []
-        return {"file": files[-1].name, "parole": len(parole)}
     except (OSError, ValueError):
         return {"file": files[-1].name, "parole": None, "nota": "file illeggibile"}
+    # Un JSON valido ma con la forma sbagliata (lista, oppure "words_raw" non
+    # lista) non deve sollevare AttributeError/TypeError dentro il bundle.
+    if not isinstance(dati, dict):
+        return {"file": files[-1].name, "parole": None, "nota": "formato inatteso"}
+    parole = dati.get("words_raw")
+    if not isinstance(parole, list):
+        return {"file": files[-1].name, "parole": None, "nota": "formato inatteso"}
+    return {"file": files[-1].name, "parole": len(parole)}
 
 
 def _stato_run(radice: Path) -> dict[str, object]:
@@ -107,13 +127,19 @@ def _stato_run(radice: Path) -> dict[str, object]:
     cache = CACHE_DIR
     stato: dict[str, object] = {}
     try:
-        materiali = [
-            {"nome": p.name, "byte": p.stat().st_size}
-            for p in sorted(radice.iterdir())
-            if p.is_file() and not p.name.startswith(".") and _sicuro(p.name)
-        ]
+        voci = sorted(radice.iterdir())
     except OSError:
-        materiali = []
+        voci = []
+    materiali: list[dict[str, object]] = []
+    for p in voci:
+        if p.name.startswith(".") or not _sicuro(p.name):
+            continue
+        try:
+            if p.is_file():
+                materiali.append({"nome": p.name, "byte": p.stat().st_size})
+        except OSError:
+            # Un file sparito non deve cancellare l'elenco degli altri.
+            continue
     stato["file_in_cartella"] = materiali
     try:
         # `--output lezione.mp4` e' una scelta supportata: il bundle non puo'
@@ -122,9 +148,11 @@ def _stato_run(radice: Path) -> dict[str, object]:
         # le copie "(precedente)" del backup.
         video = max(
             (p for p in radice.glob("*.mp4") if "precedente" not in p.name),
-            key=lambda p: p.stat().st_mtime,
+            key=_mtime_sicuro,
             default=None,
         )
+        if video is not None and _mtime_sicuro(video) == float("-inf"):
+            video = None
         stato["video"] = {"byte": video.stat().st_size} if video is not None else None
     except OSError:
         stato["video"] = None

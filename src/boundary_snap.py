@@ -24,6 +24,7 @@ illeggibile).
 from __future__ import annotations
 
 import bisect
+import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -38,15 +39,25 @@ DURATA_PAROLA_DEFAULT = 0.30
 
 
 def _starts(words: Sequence[Mapping[str, Any]]) -> list[float]:
-    """Tempi di inizio ordinati, scartando le voci illeggibili."""
+    """Tempi di inizio ordinati, scartando le voci illeggibili.
+
+    ``NaN`` e ``inf`` sono valori che ``float()`` accetta ma che rompono
+    l'ordinamento e ``bisect``: un solo ``NaN`` rendeva il vettore non
+    ordinato, e la ricerca del confine poteva saltare parole vere. Un tempo
+    non finito non e' una parola databile, quindi si scarta come le stringhe
+    non numeriche.
+    """
     tempi: list[float] = []
     for w in words:
         if "start" not in w:
             continue  # senza tempo non e' una parola databile
         try:
-            tempi.append(float(w["start"]))
+            inizio = float(w["start"])
         except (TypeError, ValueError):
             continue
+        if not math.isfinite(inizio):
+            continue
+        tempi.append(inizio)
     tempi.sort()
     return tempi
 

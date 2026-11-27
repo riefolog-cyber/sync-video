@@ -11,6 +11,7 @@ pipeline_cache / pipeline_report).
 from __future__ import annotations
 
 import contextlib
+import math
 import re
 from pathlib import Path
 
@@ -93,14 +94,32 @@ def _parse_transcript_raw(raw_path: Path) -> list[Word] | None:
     Formato atteso: 'parola [X.Xs]' per riga."""
     if not raw_path.exists():
         return None
+    try:
+        testo = raw_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as e:
+        # Il file puo' sparire fra ``exists`` e la lettura, o essere stato
+        # scritto a meta' in una codifica diversa: e' un fallback, non una
+        # fonte indispensabile. Meglio nessuna parola che una run interrotta.
+        log.warning("   [Avviso] transcript RAW illeggibile (%s): %s", raw_path.name, e)
+        return None
     words: list[Word] = []
     # Whisper puo' emettere token con spazi ("New York [1.0s]"): `\S+`
     # buttava via l'intera parola. La cattura non-greedy si ferma al tempo.
     pattern = re.compile(r"^(.+?)\s+\[([\d.]+)s\]\s*$")
-    for line in raw_path.read_text(encoding="utf-8").splitlines():
+    for line in testo.splitlines():
         m = pattern.match(line.strip())
-        if m:
-            words.append({"word": m.group(1), "start": float(m.group(2))})
+        if not m:
+            continue
+        # La regex accetta anche "1.2.3" (solo cifre e punti): float() allora
+        # solleva ValueError. Un file di appoggio troncato o corrotto non deve
+        # far fallire il fallback: si salta la riga, le altre restano.
+        try:
+            inizio = float(m.group(2))
+        except ValueError:
+            continue
+        if not math.isfinite(inizio):
+            continue
+        words.append({"word": m.group(1), "start": inizio})
     return words if words else None
 
 

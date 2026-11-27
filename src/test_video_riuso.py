@@ -15,6 +15,7 @@ Esegui con: python -m unittest test_video_riuso -v
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -357,6 +358,46 @@ class TestTentativiEncoding(unittest.TestCase):
             _tentativi_encoding("h264_qsv", True, False),
             [("h264_qsv", False), ("libx264", False)],
         )
+
+
+class TestMarcaDiRiusoCorrotta(unittest.TestCase):
+    """Una marca JSON sporca non puo' interrompere la pipeline.
+
+    La marca e' una cache: se un valore non e' numerico, il video va rifatto.
+    Prima ``int(dati.get(...))`` sollevava ValueError prima dell'encoding.
+    """
+
+    def test_size_non_numerico_rifa_il_video(self) -> None:
+        from video_riuso import _percorso_marca
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            out = base / "video_finale.mp4"
+            out.write_bytes(b"video")
+            cache = base / "cache"
+            marca = _percorso_marca(out, cache)
+            marca.parent.mkdir(parents=True)
+            marca.write_text(
+                json.dumps({"chiave": "k", "size": "abc", "mtime_ns": 1}),
+                encoding="utf-8",
+            )
+            self.assertFalse(video_riutilizzabile(out, "k", cache_dir=cache))
+
+    def test_mtime_non_numerico_senza_hash_rifa_il_video(self) -> None:
+        from video_riuso import _percorso_marca
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            out = base / "video_finale.mp4"
+            out.write_bytes(b"video")
+            cache = base / "cache"
+            marca = _percorso_marca(out, cache)
+            marca.parent.mkdir(parents=True)
+            marca.write_text(
+                json.dumps({"chiave": "k", "size": out.stat().st_size, "mtime_ns": "boh"}),
+                encoding="utf-8",
+            )
+            self.assertFalse(video_riutilizzabile(out, "k", cache_dir=cache))
 
 
 if __name__ == "__main__":

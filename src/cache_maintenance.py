@@ -66,14 +66,23 @@ def _model_dirs(cache_dir: Path) -> list[str]:
 
 
 def _dir_size(cartella: Path) -> int:
-    """Somma i byte dei file sotto una cartella (ignora errori di lettura)."""
+    """Somma i byte dei file sotto una cartella (ignora errori di lettura).
+
+    L'``OSError`` puo' arrivare anche dall'ITERAZIONE di ``rglob`` (una
+    sottocartella con ACL negate), non solo dallo ``stat`` del singolo file:
+    in quel caso si tiene la somma parziale gia' calcolata invece di far
+    fallire ``--cache-du``.
+    """
     totale = 0
-    for f in cartella.rglob("*"):
-        try:
-            if f.is_file():
-                totale += f.stat().st_size
-        except OSError:
-            continue
+    try:
+        for f in cartella.rglob("*"):
+            try:
+                if f.is_file():
+                    totale += f.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return totale
     return totale
 
 
@@ -82,7 +91,13 @@ def cache_disk_usage(cache_dir: Path) -> list[tuple[str, int]]:
     righe: list[tuple[str, int]] = []
     if not cache_dir.exists():
         return righe
-    for voce in sorted(cache_dir.iterdir(), key=lambda p: p.name):
+    try:
+        voci = sorted(cache_dir.iterdir(), key=lambda p: p.name)
+    except OSError:
+        # La misura della cache e' un'informazione, non una run: una cartella
+        # con ACL negate non deve far fallire il comando con un traceback.
+        return righe
+    for voce in voci:
         with contextlib.suppress(OSError):
             if voce.is_dir() and not voce.is_symlink():
                 righe.append((voce.name + "/", _dir_size(voce)))
@@ -167,7 +182,11 @@ def clean_cache(
     if clean_verify_frames:
         vf = cache_dir / "verify_frames"
         if vf.exists():
-            for f in vf.glob("*.png"):
+            try:
+                frames = list(vf.glob("*.png"))
+            except OSError:
+                frames = []
+            for f in frames:
                 # Conta solo cio' che e' stato davvero rimosso: un file bloccato
                 # (antivirus, ACL, share) resta sul disco, e dire "N frame
                 # rimossi" quando N=0 faceva credere che lo spazio fosse libero.
@@ -194,7 +213,11 @@ def clean_cache(
     parziali = cache_dir / PARZIALI_DIR
     if parziali.exists():
         scadenza = time.time() - PARZIALI_MAX_GIORNI * 86400
-        for f in list(parziali.glob("*")):
+        try:
+            voci_parziali = list(parziali.glob("*"))
+        except OSError:
+            voci_parziali = []
+        for f in voci_parziali:
             with contextlib.suppress(OSError):
                 if f.is_file() and f.stat().st_mtime < scadenza:
                     f.unlink()

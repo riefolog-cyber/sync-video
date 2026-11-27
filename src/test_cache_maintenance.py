@@ -8,8 +8,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from cache_maintenance import cache_disk_usage, clean_cache, descrizione_pulizia_cache, format_bytes
+from cache_maintenance import (
+    _dir_size,
+    cache_disk_usage,
+    clean_cache,
+    descrizione_pulizia_cache,
+    format_bytes,
+)
 
 
 class TestFormatBytes(unittest.TestCase):
@@ -217,6 +224,46 @@ class TestCleanCache(unittest.TestCase):
             self.assertEqual(esito["embed_npz"], 1)
             self.assertFalse(vecchio.exists())
             self.assertEqual(prima_vera, dopo_vera, "la cache vera non va toccata")
+
+
+class TestCacheNonLeggibile(unittest.TestCase):
+    """ACL, share sparite e file in corsa non devono uccidere la manutenzione."""
+
+    def test_cache_du_con_iterdir_negato_restituisce_vuoto(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(Path, "iterdir", side_effect=OSError("ACL")),
+        ):
+            self.assertEqual(cache_disk_usage(Path(tmp)), [])
+
+    def test_dir_size_con_rglob_negato_restituisce_zero(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(Path, "rglob", side_effect=OSError("ACL")),
+        ):
+            self.assertEqual(_dir_size(Path(tmp)), 0)
+
+    def test_clean_cache_con_glob_negato_non_solleva(self) -> None:
+        # Anche l'ITERAZIONE di glob puo' fallire (non solo lo stat dei file):
+        # --clean-cache deve finire con i conteggi a zero, non con un traceback.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "parziali").mkdir()
+            (base / "parziali" / "vecchio.json").write_text("{}", encoding="utf-8")
+            with mock.patch.object(Path, "glob", side_effect=OSError("ACL")):
+                esito = clean_cache(base)
+            self.assertEqual(esito["orphan_json"], 0)
+            self.assertEqual(esito["verify_frames"], 0)
+            self.assertEqual(esito["parziali"], 0)
+
+    def test_orfani_con_glob_negato_non_sollevano(self) -> None:
+        from pipeline_cache import clean_orphan_cache
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(Path, "glob", side_effect=OSError("ACL")),
+        ):
+            self.assertEqual(clean_orphan_cache(set(), cache_dir=Path(tmp)), 0)
 
 
 if __name__ == "__main__":

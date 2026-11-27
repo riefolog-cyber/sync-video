@@ -181,5 +181,21 @@ class TestReviewPersisteGliArtefatti(unittest.TestCase):
             riepilogo.assert_called_once()
 
 
+class TestReportSporco(unittest.TestCase):
+    def test_offset_non_numerico_non_fa_fallire_la_revisione(self) -> None:
+        # Un report scritto a mano (o da un'altra versione) puo' avere
+        # `effective_offset` non numerico: il vecchio `int()` diretto faceva
+        # morire --review con ValueError prima di stampare qualsiasi cosa.
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            report = _report()
+            cast("dict[str, object]", report["anchors"])["effective_offset"] = "boh"
+            cache = _cache(td, report, words=_parole_che_dicono_slide_2())
+            with self.assertLogs("slide2video", level="INFO") as logs:
+                _review_boundary_doubts(cache / "video_assente.mp4", cache_dir=cache)
+            out = "\n".join(logs.output)
+        self.assertIn("non numerico", out)
+
+
 if __name__ == "__main__":
     unittest.main()

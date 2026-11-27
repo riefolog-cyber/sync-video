@@ -49,8 +49,15 @@ def clean_orphan_cache(active_keys: set[str], cache_dir: Path | None = None) -> 
     cd = cache_dir if cache_dir is not None else CACHE_DIR
     if not cd.exists():
         return 0
+    try:
+        # Anche l'ITERAZIONE di ``glob`` puo' sollevare OSError (cartella con
+        # ACL negate o share sparita): la pulizia e' housekeeping e non deve
+        # far fallire l'avvio con un traceback.
+        file_cache = list(cd.glob("*.json"))
+    except OSError:
+        return 0
     removed = 0
-    for cache_file in cd.glob("*.json"):
+    for cache_file in file_cache:
         key = cache_file.stem
         if key in KEEP_CACHE_STEMS:
             continue

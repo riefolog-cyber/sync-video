@@ -171,5 +171,28 @@ class TestVettoreStartsRiutilizzato(unittest.TestCase):
             )
 
 
+class TestTempiNonFiniti(unittest.TestCase):
+    def test_nan_e_infinito_non_entrano_nel_vettore_ordinato(self) -> None:
+        # `float("nan")` passa il vecchio controllo sul tipo e avvelena
+        # l'ordinamento: con un NaN in mezzo, `bisect` non trova piu' le
+        # parole vere e il confine puo' essere spostato a caso.
+        parole: list[dict[str, object]] = [
+            {"start": float("nan")},
+            {"start": 2.0},
+            {"start": float("inf")},
+            {"start": 1.0},
+            {"start": float("-inf")},
+            {"start": "non un numero"},
+        ]
+        self.assertEqual(boundary_snap.starts_parole(parole), [1.0, 2.0])
+
+    def test_con_solo_tempi_non_finiti_non_si_sposta_nessun_confine(self) -> None:
+        timeline = {1: 0.0, 2: 5.0}
+        parole = [{"start": float("nan")}, {"start": float("inf")}]
+        nuova, mosse = aggancia_confini(timeline, {}, parole, min_secondi=1.0)
+        self.assertEqual(nuova, timeline)
+        self.assertEqual(mosse, [])
+
+
 if __name__ == "__main__":
     unittest.main()

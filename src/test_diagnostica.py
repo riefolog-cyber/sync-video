@@ -13,6 +13,7 @@ import unittest
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any, cast
 from unittest import mock
 
 import diagnostica
@@ -101,6 +102,34 @@ class TestBundleRobusto(unittest.TestCase):
             self.assertEqual(
                 [p.name for p in radice.iterdir() if p.is_dir()], []
             )
+
+
+class TestBundleConFileCheScompaiono(unittest.TestCase):
+    def test_un_file_irraggiungibile_non_cancella_gli_altri(self) -> None:
+        with TemporaryDirectory() as tmp:
+            radice = Path(tmp)
+            (radice / "buono.txt").write_bytes(b"x")
+            (radice / "sparito.txt").write_bytes(b"y")
+            reale = Path.stat
+
+            def stat_finto(self: Any, *a: Any, **k: Any) -> Any:
+                if self.name == "sparito.txt":
+                    raise OSError("sparito")
+                return reale(self, *a, **k)
+
+            with mock.patch.object(Path, "stat", stat_finto):
+                stato = diagnostica._stato_run(radice)
+            nomi = [f["nome"] for f in cast("list[dict[str, object]]", stato["file_in_cartella"])]
+            self.assertIn("buono.txt", nomi)
+            self.assertNotIn("sparito.txt", nomi)
+
+    def test_transcript_con_formato_inatteso_non_solleva(self) -> None:
+        with TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            (cache / "transcript_sporco.json").write_text("[1, 2, 3]", encoding="utf-8")
+            conteggio = diagnostica._conta_parole(cache)
+        self.assertEqual(conteggio["parole"], None)
+        self.assertEqual(conteggio["nota"], "formato inatteso")
 
 
 if __name__ == "__main__":

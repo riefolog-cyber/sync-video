@@ -151,6 +151,13 @@ def applica_override(
         return dict(timeline), []
 
     nuove = {int(s): float(t) for s, t in timeline.items()}
+    if not nuove:
+        # Senza timeline ogni slide "non esiste", e il vecchio `max(nuove)`
+        # trasformava l'errore in "max() arg is an empty sequence": un
+        # messaggio che non dice ne' cosa fare ne' cosa e' successo.
+        raise ValueError(
+            "la timeline e' vuota: non c'e' nessuna slide da correggere con un override"
+        )
     mosse: list[tuple[int, float, float]] = []
     for slide in sorted(override):
         if slide == 1:
