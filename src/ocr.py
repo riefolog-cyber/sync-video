@@ -406,7 +406,15 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza
     if pdf_path.exists() and marker_path.exists():
         motivo = "sorgente cambiato"
         try:
-            if marker_path.read_text(encoding="ascii").strip() == _file_md5(ppt_path):
+            marca = marker_path.read_text(encoding="ascii").strip()
+            if "|fallback" in marca and not fallback_senza_grafica:
+                # Il PDF era stato ricostruito dal solo testo quando non c'era
+                # alcun converter. Installare LibreOffice dopo non bastava:
+                # il marker MD5 invariato faceva riusare per sempre il PDF
+                # degradato, senza piu' avvisi. Si riconverte col converter
+                # nativo ora che e' disponibile.
+                motivo = "ricostruito senza grafica"
+            elif marca.split("|", 1)[0] == _file_md5(ppt_path):
                 # Il marker dice che il sorgente e' invariato, ma il PDF puo'
                 # essere stato danneggiato DOPO la conversione (copia
                 # interrotta, disco pieno). Riusarlo senza aprirlo significava
@@ -566,7 +574,9 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza
     if fallback_senza_grafica:
         log.info("   Conversione %s -> PDF (fallback Python python-pptx+PyMuPDF)...", ext_upper)
         if _pptx_fallback_to_pdf(ppt_path, pdf_path):
-            marker_path.write_text(_file_md5(ppt_path), encoding="ascii")
+            # Il suffisso distingue il PDF degradato da quello nativo: se in
+            # seguito arriva un converter, la cache non deve piu' riusarlo.
+            marker_path.write_text(_file_md5(ppt_path) + "|fallback", encoding="ascii")
             log.info("   -> PDF convertito (fallback): %s", pdf_path)
             log.warning(
                 "   ATTENZIONE: slide ricostruite SENZA layout, colori e sfondi. "
@@ -596,7 +606,7 @@ def convert_presentation_to_pdf(ppt_path: Path, out_dir: Path, *, fallback_senza
         " 3) Se il tuo file e' davvero solo testo e ti va bene cosi', rilancia con\n"
         "    --fallback-senza-grafica per accettare le slide ricostruite.\n"
         "\n"
-        f"    py -3.11 {config_module_path()} --pdf \"{ppt_path.parent / (ppt_path.stem + '.pdf')}\""
+        f"    py -3.11 \"{config_module_path()}\" --pdf \"{ppt_path.parent / (ppt_path.stem + '.pdf')}\""
     )
 
 
@@ -833,12 +843,24 @@ def extract_slides_text_ocr(
         if total_pages == 0:
             raise RuntimeError(f"Il PDF non contiene pagine: {pdf_path}")
         testi_nativi = _testo_nativo(doc)
+        # Una didascalia lunga non basta a dire che la pagina e' digitale:
+        # puo' essere lo screenshot di una slide con una legenda sotto. In quel
+        # caso l'OCR e' l'unico modo per leggere cio' che c'e' DENTRO l'immagine.
+        pagine_con_immagini: set[int] = set()
+        for i in range(total_pages):
+            try:
+                if doc.load_page(i).get_images(full=True):
+                    pagine_con_immagini.add(i)
+            except Exception:  # un PDF strano non deve bloccare l'estrazione
+                continue
 
-    # Pagine con testo digitale sufficiente: li' l'OCR e' solo lavoro in piu'
-    # (e una fonte di errori). Sul deck esportato come immagini non se ne usa
-    # nessuna e il percorso resta quello di sempre.
+    # Pagine con testo digitale sufficiente e senza immagini: li' l'OCR e'
+    # solo lavoro in piu' (e una fonte di errori). Sul deck esportato come
+    # immagini non se ne usa nessuna e il percorso resta quello di sempre.
     nativi = {
-        i: t for i, t in enumerate(testi_nativi) if len(t) >= MIN_CARATTERI_TESTO_NATIVO
+        i: t
+        for i, t in enumerate(testi_nativi)
+        if len(t) >= MIN_CARATTERI_TESTO_NATIVO and i not in pagine_con_immagini
     }
     # Gli indici da OCR servono gia' al preflight delle lingue, che sta prima
     # del ciclo: senza, una pagina senza OCR chiederebbe comunque a Tesseract
@@ -943,7 +965,19 @@ def extract_slides_text_ocr(
             for future in as_completed(futures):
                 idx = futures[future]
                 try:
-                    slide_texts[idx] = future.result()
+                    riconosciuto = future.result()
+                    # Tesseract c'e' ma non riconosce nulla (font stilizzato,
+                    # lingua mancante): il segnaposto non deve cancellare il
+                    # titolo digitale certo che la pagina conteneva.
+                    breve = nativi_brevi.get(idx, "").strip()
+                    if riconosciuto.strip() == _TESTO_NESSUN_TESTO:
+                        if breve:
+                            riconosciuto = breve
+                    elif breve and breve not in riconosciuto:
+                        # Testo digitale breve + OCR dell'immagine: si tiene
+                        # tutto, non solo la didascalia sotto lo screenshot.
+                        riconosciuto = breve + "\n" + riconosciuto
+                    slide_texts[idx] = riconosciuto
                 except OSError as e:
                     # TesseractNotFoundError eredita da OSError ed e' l'unica
                     # OSError che _ocr_single_slide lascia uscire: gli altri

@@ -1312,6 +1312,44 @@ finiscono nello zip né vengono cancellati. `embedding_model_check.json`
 e' housekeeping e sopravvive a `--clean-cache`. Un report con `tempi` o
 `correzioni_nomi` di forma sbagliata non cancella piu' il riepilogo.
 
+## Batch 37 — ancore, finestre e flag (2026-11)
+
+Ventesima revisione: timeline/confini, chunk/embedding, prompt/OCR e
+orchestrazione/CLI. Quattro revisioni parallele, 19 difetti unici corretti
+con test in `test_review_batch37.py` (il controllo `MIN_ANCHOR_COVERAGE` era
+segnalato da due aree e conta una sola correzione).
+
+**Timeline e confini.** Un conteggio con preposizione articolata
+("nelle 13 slide") rubava l'unica transizione vera. Un richiamo a posteriori
+("come dicevo nella slide 15") diventava l'ancora finale. Due numeri prima
+della stessa parola "slide" producevano due ancore con lo stesso timestamp,
+poi spostate dal clamp. Un tempo NaN diventava un'ancora e un errore
+"slide 1 non crescente" fuorviante. Il verbo di transizione lontano dalla
+parola "slide" non veniva piu' segnalato come contraddizione annuncio/confine.
+
+**Chunk e embedding.** Un NaN nelle parole bloccava il puntatore di
+`build_windows` e faceva sparire tutte le parole successive; i tempi oltre la
+durata dichiarata andavano persi. `TimeIndex.window` con un bound NaN
+restituiva tutte le parole invece di nessuna. Un vettore con `inf` diventava
+NaN nella normalizzazione L2. `MIN_ANCHOR_COVERAGE` da .env ora e' una
+frazione [0,1] come la CLI, e i default derivati dall'ambiente vengono
+ricontrollati contro i `choices` dell'argparse.
+
+**OCR e prompt.** Il PDF ricostruito dal fallback restava in cache per
+sempre dopo l'installazione di un converter: il marker ora distingue la
+conversione degradata e forza la riconversione. Un titolo digitale breve non
+verra' piu' sostituito dal segnaposto quando l'OCR non riconosce nulla; una
+didascalia sopra la soglia non disattiva l'OCR su una pagina con immagini.
+Il numero stampato in basso a sinistra viene letto anche in coda al testo, e
+il comando suggerito negli errori virgoletta il percorso con spazi.
+
+**Orchestrazione.** I gate che abortivano prima del rendering lasciavano il
+report della run precedente: ora report e timeline vengono invalidati,
+cosi' `--review` non rassicura su un video mai prodotto. Un fallimento della
+seconda codifica rimuove la timeline appena riparata. `--clean-cache`
+viene rifiutato insieme ai comandi a uscita anticipata. Un 429 su HuggingFace
+per il modello preferito non distrugge piu' la baseline del monitor.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -1407,5 +1445,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio (batch 36): ruff pulito, mypy pulito su tre
-piattaforme, 1787 test verdi, `_debug_hardware.py` e controlli 6/6.
+Stato all'ultimo lancio (batch 37): ruff pulito, mypy pulito su tre
+piattaforme, 1805 test verdi, `_debug_hardware.py` e controlli 6/6.

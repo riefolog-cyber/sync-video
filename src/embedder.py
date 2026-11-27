@@ -71,6 +71,10 @@ class _FastEmbedEmbedder:
             # `frombuffer`): in quel caso la copia e' obbligatoria, negli altri
             # casi si normalizza in place senza duplicare la matrice.
             out = out.copy()
+        # Un backend puo' restituire inf (overflow float32): `inf/inf` dava
+        # NaN, violando il contratto e avvelenando la matrice di similarita'
+        # dei consumer. Si azzerano i valori non finiti PRIMA della norma.
+        np.copyto(out, 0.0, where=~np.isfinite(out))
         norme = np.linalg.norm(out, axis=1, keepdims=True)
         # `np.maximum` e' la guardia sullo zero: un vettore nullo non ha
         # direzione e resta nullo, senza produrre NaN nella cache dei punteggi.

@@ -173,10 +173,18 @@ def _gather(api: Any, known: set[str] | None = None) -> dict:
                 "lastModified": info.lastModified.isoformat() if info.lastModified else None,
                 "downloads": info.downloads,
             }
-        except Exception as e:  # noqa: BLE001 - un modello mancante non deve bloccare il resto
+        except Exception as e:  # un modello mancante non deve bloccare il resto
             tracked[mid] = {"lastModified": None, "downloads": None, "error": str(e)}
             if _is_network_error(e):
                 network_errors.append(f"{mid}: {e}")
+                if mid == PREFERRED_MODEL:
+                    # Un 429/timeout sul modello PREFERITO non puo' essere
+                    # scambiato per "baseline sconosciuta": scrivendo None
+                    # si perdeva per sempre l'avviso "modello aggiornato,
+                    # rifai l'A/B", che e' lo scopo dello script.
+                    raise NetworkError(
+                        f"{mid}: {e} (baseline del modello preferito non verificabile)"
+                    ) from e
 
     new_candidates = {}
     search_network_error = False

@@ -42,6 +42,7 @@ from config import (
     DEFAULT_WHISPER_THREADS,
     STOPWORDS_ITA,
     WHISPER_REVISIONI,
+    atomic_write_text,
     bootstrap,
     log,
     openvino_model_complete,
@@ -311,8 +312,36 @@ def _save_cache(key: str, data: dict) -> None:
 # =====================================================================
 # ERRORE FATALE: blocca il pipeline con messaggio uniforme
 # =====================================================================
-def _abort(message: str) -> NoReturn:
+def _invalida_artefatti_run(messaggio: str, *, timeline_valida: bool = False) -> None:
+    """Segna come non validi report e timeline della run precedente.
+
+    I gate che chiamano `_abort` prima della costruzione del report lasciavano
+    il `sync_report.json` della run buona precedente: `--review` rispondeva 0
+    e rassicurava ("niente da rivedere") su un video mai prodotto.
+    """
+    rapporto = CACHE_DIR / "sync_report.json"
+    try:
+        dati = json.loads(rapporto.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        dati = None
+    gia_segnato = False
+    if isinstance(dati, dict):
+        gia_segnato = bool(dati.get("senza_video"))
+        dati["senza_video"] = True
+        dati["motivo_interruzione"] = dati.get("motivo_interruzione") or messaggio
+        with suppress(OSError):
+            atomic_write_text(rapporto, json.dumps(dati, ensure_ascii=False, indent=2))
+    # Se `_abort_senza_video` ha gia' deciso che la timeline e' valida
+    # (video generato con quella timeline), non cancellarla: il caso e'
+    # l'abort DOPO il rendering, dove la timeline finale descrive il video.
+    if not gia_segnato and not timeline_valida:
+        with suppress(OSError):
+            (CACHE_DIR / "timeline_finale.json").unlink(missing_ok=True)
+
+
+def _abort(message: str, *, timeline_valida: bool = False) -> NoReturn:
     """Logga l'errore in un blocco uniforme ed esce con codice 1."""
+    _invalida_artefatti_run(message, timeline_valida=timeline_valida)
     log.error("\n" + "=" * 70)
     log.error(" [ESECUZIONE INTERROTTA] ")
     log.error(" %s", message)
@@ -358,6 +387,12 @@ def _build_video_con_gestione(
         )
     except Exception as e:  # noqa: BLE001 - ogni encoder puo' fallire a modo suo
         sync_report.pop("audio_invariato_durante_la_run", None)
+        # L'encoding e' fallito per QUESTA timeline (puo' essere quella appena
+        # riparata): la timeline finale salvata prima del rendering non
+        # descrive il video ripristinato. analysis_sync la confronterebbe col
+        # video vecchio e segnalerebbe falsi mismatch.
+        with suppress(OSError):
+            (CACHE_DIR / "timeline_finale.json").unlink(missing_ok=True)
         _abort_senza_video(
             sync_report,
             f"Generazione del video fallita ({e}). Il video NON e' stato "
@@ -437,7 +472,7 @@ def _abort_senza_video(
             data=time.strftime("%d/%m/%Y"),
             video_presente=video_generato,
         )
-    _abort(messaggio)
+    _abort(messaggio, timeline_valida=video_generato)
 
 
 def _verifica_audio_invariato(
@@ -1812,6 +1847,9 @@ def _segment_content_verdict(
 # Solo se è plausibile come indice di slide: un anno ("2024. Lezioni") o
 # qualsiasi numero più grande del numero di pagine non è un'etichetta.
 _NUMERO_STAMPATO = re.compile(r"^\s*(\d{1,3})\s*[.):\-]\s")
+# Il prompt del progetto mette il numero in basso a sinistra: dopo la
+# normalizzazione finisce in CODA al testo, non in testa.
+_NUMERO_STAMPATO_FINE = re.compile(r"\s(\d{1,3})\s*[.):\-]\s*$")
 
 
 def _numeri_stampati(slide_texts: Sequence[str]) -> list[int | None]:
@@ -1823,7 +1861,7 @@ def _numeri_stampati(slide_texts: Sequence[str]) -> list[int | None]:
     """
     trovati: list[int | None] = []
     for testo_slide in slide_texts:
-        m = _NUMERO_STAMPATO.match(testo_slide)
+        m = _NUMERO_STAMPATO.match(testo_slide) or _NUMERO_STAMPATO_FINE.search(testo_slide)
         n = int(m.group(1)) if m else None
         trovati.append(n if n is not None and 1 <= n <= len(slide_texts) else None)
     return trovati

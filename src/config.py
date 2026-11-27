@@ -224,6 +224,27 @@ def _env_float_con_minimo(
     return valore
 
 
+def _env_frazione(name: str, default: float, minimo: float = 0.0, massimo: float = 1.0) -> float:
+    """Come `_env_float`, ma richiede un valore dentro [minimo, massimo].
+
+    `argparse` applica il `type` ai default che sono stringhe ma non il
+    controllo sui valori numerici: `MIN_ANCHOR_COVERAGE=2` nel .env faceva
+    scattare il gate su OGNI run, mentre lo stesso valore in CLI dava exit 2.
+    """
+    valore = _env_float(name, default)
+    if not minimo <= valore <= massimo:
+        log.warning(
+            "   Variabile %s non valida ('%s'): deve stare tra %s e %s; uso default %s.",
+            name,
+            os.environ.get(name),
+            minimo,
+            massimo,
+            default,
+        )
+        return default
+    return valore
+
+
 def _env_float_positivo(name: str, default: float) -> float:
     """Come `_env_float`, ma scarta zero e negativi (serve a SEMANTIC_WINDOW)."""
     valore = _env_float(name, default)
@@ -2224,7 +2245,7 @@ DEFAULT_SEMANTIC_TEMPERATURE = _env_float_con_minimo("SEMANTIC_TEMPERATURE", 0.1
 # pagina DEVE essere annunciata, quindi il gate vale sempre quando l'audio
 # dichiara un flusso (vedi main._anchor_coverage_ok).
 # 0.5 = almeno meta' transizioni ancorate; 0 disattiva (procede sempre).
-DEFAULT_MIN_ANCHOR_COVERAGE = _env_float("MIN_ANCHOR_COVERAGE", 0.5)
+DEFAULT_MIN_ANCHOR_COVERAGE = _env_frazione("MIN_ANCHOR_COVERAGE", 0.5)
 
 # Flusso ASSUNTO quando la trascrizione non annuncia le slide (nessun
 # riferimento "slide N" ne' "blocco successivo"): la run prosegue lo
@@ -3171,6 +3192,35 @@ def parse_args(argv: list | None = None) -> argparse.Namespace:
     """Parsa gli argomenti e applica il post-processing (percorsi, log, clamp)."""
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # `argparse` applica il `type` ai default ma NON `choices`: un refuso nel
+    # .env (`WHISPER_MODEL=smal`, `TRANSCRIBER=openvin`) sopravviveva al
+    # parsing e falliva solo al download. Un valore CLI invalido e' gia'
+    # stato rifiutato da argparse, quindi quello che arriva qui viene
+    # dall'ambiente.
+    for nome, ripiego in (("transcriber", "auto"), ("whisper_model", "small")):
+        azione = next((a for a in parser._actions if a.dest == nome), None)
+        scelte = getattr(azione, "choices", None)
+        if not scelte:
+            continue
+        valore = getattr(args, nome, ripiego)
+        if valore not in scelte:
+            log.warning(
+                "   %s da .env non valido ('%s'): uso '%s'.", nome.upper(), valore, ripiego
+            )
+            setattr(args, nome, ripiego)
+
+    # I comandi a uscita anticipata non eseguono la pulizia: accettare
+    # `--review --clean-cache --include-models --yes` faceva credere che i
+    # modelli fossero stati rimossi mentre restavano intatti.
+    uscita_anticipata = ("review", "solo_riepilogo", "cache_du")
+    if args.clean_cache and any(getattr(args, flag, False) for flag in uscita_anticipata):
+        log.error(
+            "\n❌ --clean-cache non puo' essere usato insieme a %s: quei comandi "
+            "escono prima della pulizia. Rilancia senza --clean-cache.",
+            " / ".join("--" + f.replace("_", "-") for f in uscita_anticipata),
+        )
+        sys.exit(2)
 
     # --clean-cache --include-models cancella i modelli (GB di re-download):
     # senza terminale la conferma di main non puo' essere posta, e prima

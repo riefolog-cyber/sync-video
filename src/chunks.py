@@ -77,23 +77,34 @@ def build_windows(
         durata = float(total_duration)
     except (TypeError, ValueError, OverflowError):
         durata = 0.0
+    # Un NaN in `sorted()` lascia il puntatore `idx` bloccato (ogni confronto
+    # con NaN e' falso) e tutte le parole dopo la prima parola corrotta
+    # spariscono. Le parole non databili si scartano qui, una volta per tutte.
+    tempi: list[float] = []
+    date: list[Word] = []
+    for w in words:
+        try:
+            t = float(w["start"])
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(t):
+            tempi.append(t)
+            date.append(w)
     if not math.isfinite(durata) or durata <= 0:
-        tempi: list[float] = []
-        for w in words:
-            try:
-                t = float(w["start"])
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if math.isfinite(t):
-                tempi.append(t)
-        durata = (max(tempi) if tempi else 0.0) + step
+        durata = 0.0
+    # Un timestamp oltre la durata dichiarata (ASR che sborda sull'audio) non
+    # deve essere perso: si allarga il tetto quanto basta a consumarlo.
+    if tempi:
+        # Basta un epsilon: allargare di un'intera finestra creerebbe un
+        # ultimo riquadro vuoto quando l'ultima parola e' gia' dentro duration.
+        durata = max(durata, max(tempi) + 1e-6)
     windows: list[WordWindow] = []
     # `TimeIndex` tollera parole non ordinate e ripiega su scansione lineare:
     # qui il puntatore `idx` dava per scontato l'ordine, e un solo timestamp
     # fuori posto (correzione ASR/OCR) risucchiava tutte le parole seguenti
     # nella finestra sbagliata. Ordinare una volta e' equivalente nel caso
     # normale e corretto in quello patologico.
-    words = sorted(words, key=lambda w: float(w["start"]))
+    words = sorted(date, key=lambda w: float(w["start"]))
     idx = 0
     n = len(words)
     start = 0.0
@@ -150,6 +161,10 @@ class TimeIndex:
         ``[w["word"] for w in words if start <= w["start"] < end]``."""
         if end <= start:
             return []
+        if not math.isfinite(start) or not math.isfinite(end):
+            # Con un bound NaN `bisect_left` restituisce len(times), quindi il
+            # ramo ordinato prendeva TUTTE le parole invece di nessuna.
+            return [str(w["word"]) for w in self.words if start <= float(w["start"]) < end]
         if not self.ordered:
             return [str(w["word"]) for w in self.words if start <= float(w["start"]) < end]
         lo = bisect_left(self.times, start)

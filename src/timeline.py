@@ -821,6 +821,13 @@ def _collect_slide_references(
 _COUNT_DETERMINERS = frozenset(
     {
         "le", "la", "i", "gli", "delle", "della", "dei", "degli",
+        # Preposizioni articolate: "nelle 13 slide" e' un conteggio quanto
+        # "le 13 slide". Senza queste, l'unica transizione pronunciata veniva
+        # scartata e sostituita dal numero dell'introduzione.
+        # Solo le forme PLURALI: "passiamo alla tre slide" contiene "alla"
+        # ma e' una transizione, non un conteggio.
+        "nelle", "negli", "nell", "sulle", "sugli", "dalle", "dagli",
+        "alle", "agli", "colle",
         "questo", "questa", "questi", "queste",
         "tutto", "tutta", "tutti", "tutte",
         "un", "una", "uno", "quel", "quella",
@@ -866,6 +873,11 @@ def _collect_slide_mention_kinds(
     """
     min_slide = 1 if include_slide_one else 2
     refs: dict[int, list[tuple[float, bool]]] = {}
+    # Una parola "slide" puo' essere rivendicata da PIU' numeri che la
+    # precedono ("cinque tre slide"): senza questa memoria due slide diverse
+    # ricevevano lo stesso timestamp e il clamp di monotonicita' ne spostava
+    # una a mano, violando la precisione dell'ancora pronunciata.
+    slide_rivendicate: set[int] = set()
     for i, w in enumerate(words):
         w_norm = _normalize(w["word"])
         if _is_slide_word(w["word"]):
@@ -945,6 +957,9 @@ def _collect_slide_mention_kinds(
             ):
                 for j in range(i + 1, min(i + 7, len(words))):
                     if _is_slide_word(words[j]["word"]):
+                        if j in slide_rivendicate:
+                            break
+                        slide_rivendicate.add(j)
                         if _is_closing_recap(words, j):
                             log.info(
                                 "   [Ancore] 'slide %d' a %.1fs: citazione di chiusura, scartata.",
@@ -1073,7 +1088,12 @@ def announcements_off_timeline(
                     break
                 candidata = num + slide_offset
                 if 1 < candidata <= total_slides:
-                    slide_num, pagina, mention_idx = num, candidata, i
+                    # Il verbo puo' stare PRIMA del numero ("passiamo e
+                    # come abbiamo detto prima quattro alla slide"): usare
+                    # l'indice della parola 'slide' faceva sparire l'annuncio
+                    # dal controllo incrociato pur essendo stato usato come
+                    # ancora. Si guarda dal numero, che e' piu' vicino al verbo.
+                    slide_num, pagina, mention_idx = num, candidata, j
                     boundary = _reference_boundary(words, i)
                 break
         if slide_num is None or boundary is None or pagina is None:
@@ -1197,10 +1217,31 @@ def _reference_boundary(words: list[Word], last_word_idx: int, max_gap: float = 
     lunga), l'ancora resta all'inizio della parola: in quel caso non c'è
     niente da spezzare dopo il taglio.
     """
-    start = words[last_word_idx]["start"]
+    try:
+        start = float(words[last_word_idx]["start"])
+    except (TypeError, ValueError, OverflowError):
+        start = float("nan")
+    if not math.isfinite(start):
+        # Un tempo non finito (cache JSON sporca o ASR rotto) diventava
+        # un'ancora NaN: `max(0.0, nan)` la trasformava in 0.0 e il chiamante
+        # segnalava un falso errore "slide 1 non crescente". Si recupera il
+        # primo tempo finito prima della parola; se non c'e', 0.0.
+        for k in range(last_word_idx - 1, -1, -1):
+            try:
+                candidato = float(words[k]["start"])
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(candidato):
+                start = candidato
+                break
+        else:
+            start = 0.0
     if last_word_idx + 1 < len(words):
-        nxt = words[last_word_idx + 1]["start"]
-        if 0.0 <= nxt - start <= max_gap:
+        try:
+            nxt = float(words[last_word_idx + 1]["start"])
+        except (TypeError, ValueError, OverflowError):
+            nxt = start
+        if math.isfinite(nxt) and 0.0 <= nxt - start <= max_gap:
             return nxt
     return start
 
@@ -1302,7 +1343,38 @@ def out_of_range_tail_anchor(
         # confine pronunciato.
         if n <= total_slides or n > total_slides + 2:
             continue
-        after = [t for t, is_count in items if t > last_known and not is_count]
+        after: list[float] = []
+        for t, is_count in items:
+            if is_count or t <= last_known:
+                continue
+            # Un richiamo a posteriori ("come dicevo nella slide 15") non e'
+            # una transizione: senza questo filtro diventava l'ancora
+            # ad alta precisione dell'ultima slide, con il video che si
+            # chiudeva al tempo di un ricordo verbale.
+            indice_slide: int | None = None
+            for k, parola in enumerate(words):
+                if not _is_slide_word(parola["word"]):
+                    continue
+                try:
+                    inizio = float(parola["start"])
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if math.isfinite(inizio) and abs(inizio - t) <= 2.0:
+                    indice_slide = k
+                    break
+            if indice_slide is None:
+                continue
+            # Non serve un verbo di transizione qui ("slide 15" da solo e'
+            # il caso coperto dai test): basta escludere i richiami espliciti
+            # ("come dicevo nella slide 15"), che non sono una transizione.
+            indizi_richiamo = {"dicevo", "dicevamo", "detto", "ricordo", "richiamo"}
+            finestra = [
+                _normalize(str(words[k]["word"]))
+                for k in range(max(0, indice_slide - 4), indice_slide)
+            ]
+            if any(parola in indizi_richiamo for parola in finestra):
+                continue
+            after.append(t)
         if after:
             return {total_slides: min(after)}
     return {}
@@ -2184,7 +2256,13 @@ def reconcile_timeline(
             raise ValueError(
                 f"Slide {s_num} mancante dalla timeline. Impossibile sincronizzare senza tutti i timestamp."
             )
-        starts[s_num] = max(0.0, timeline_raw[s_num])
+        valore = timeline_raw[s_num]
+        if isinstance(valore, bool) or not isinstance(valore, (int, float)) or not math.isfinite(float(valore)):
+            raise ValueError(
+                f"Slide {s_num}: timestamp non finito o non numerico ({valore!r}). "
+                "Controlla la trascrizione e la timeline prima di rigenerare il video."
+            )
+        starts[s_num] = max(0.0, float(valore))
 
     # Precisione assoluta: ordine strettamente crescente obbligatorio.
     # Se violato la sincronizzazione è impossibile → interrompi.
