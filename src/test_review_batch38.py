@@ -82,9 +82,20 @@ class TestScriptAusiliari(unittest.TestCase):
 
     def test_aggiorna_rifiuta_riferimento_vuoto(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            riferimento = Path(tmp) / "rif.json"
+            base = Path(tmp)
+            riferimento = base / "rif.json"
+            # Il test deve girare anche su un checkout senza podcast: `main`
+            # cerca il materiale e lancia la pipeline PRIMA di controllare la
+            # timeline. Senza questi due patch, in CI usciva SystemExit(2)
+            # dal materiale mancante invece di arrivare al rifiuto atteso.
+            pdf = base / "presentazione.pdf"
+            audio = base / "podcast.m4a"
+            pdf.write_bytes(b"pdf")
+            audio.write_bytes(b"audio")
             with (
                 mock.patch.object(pmr, "_timeline", return_value=[]),
+                mock.patch.object(pmr, "_materiale", return_value=(pdf, audio)),
+                mock.patch.object(pmr, "_pipeline"),
                 mock.patch.object(pmr, "RIFERIMENTO", riferimento),
             ):
                 esito = pmr.main(["--aggiorna"])
