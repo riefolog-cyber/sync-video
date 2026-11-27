@@ -114,7 +114,13 @@ def _timeline() -> list[dict[str, object]]:
         # "timeline CAMBIATA": qui non c'e' niente da confrontare, quindi e'
         # MATERIALE NON VERIFICABILE (2).
         raise SystemExit(ESITO_NON_VERIFICABILE) from e
-    return list(dati) if isinstance(dati, list) else []
+    if not isinstance(dati, list):
+        # Un JSON con forma sbagliata non e' una timeline vuota: trasformarlo
+        # in [] faceva accettare un riferimento vuoto che rendeva tutti i
+        # controlli futuri verdi a prescindere dalla timeline prodotta.
+        print(f"Timeline con formato inatteso in {path}: attesa una lista.")
+        raise SystemExit(ESITO_NON_VERIFICABILE)
+    return list(dati)
 
 
 def _ancore() -> int:
@@ -195,6 +201,13 @@ def main(argv: list[str] | None = None) -> int:
             riferimento = {}
 
     if args.aggiorna:
+        if not segmenti:
+            print(
+                "Nessun segmento nella timeline: rifiuto di scrivere un riferimento "
+                "vuoto (renderebbe ogni controllo futuro cieco).",
+                file=sys.stderr,
+            )
+            return ESITO_NON_VERIFICABILE
         # Scrittura atomica come tutto il resto del progetto: un crash a meta'
         # lascerebbe un riferimento mezzo scritto che poi "legge" come
         # materiale diverso.

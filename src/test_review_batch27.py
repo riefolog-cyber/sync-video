@@ -135,7 +135,7 @@ class TestStatoEParziali(unittest.TestCase):
             semantic_sync.reset_refine_diagnostics()
 
     def test_parziale_coperto_nan_scartato(self) -> None:
-        transcription._ULTIMA_RIPRESA = 0.0
+        transcription.azzera_ripresa()
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             audio = base / "podcast.m4a"
@@ -158,7 +158,7 @@ class TestStatoEParziali(unittest.TestCase):
                 )
                 iniziali, sorgente, offset = transcription._prepara_ripresa(audio, params=None)
             self.assertEqual((iniziali, sorgente, offset), ([], audio, 0.0))
-            self.assertEqual(transcription._ULTIMA_RIPRESA, 0.0)
+            self.assertEqual(transcription.ultima_ripresa(), 0.0)
 
 
 class TestVerdettoAB(unittest.TestCase):

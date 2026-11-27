@@ -1088,8 +1088,17 @@ def whisper_repo(model: str) -> str | None:
         from faster_whisper.utils import _MODELS
 
         risolto = _MODELS.get(model)
-    except Exception:  # senza la mappa vale il default Systran
+    except Exception:  # dipendenza assente: usa la tabella minima qui sotto
         risolto = None
+    if risolto is None:
+        # `turbo` NON esiste sotto Systran: senza faster-whisper installato
+        # (primo avvio, ARM64, diagnostica su PC rotto) il fallback indovinato
+        # portava a un 404 e a un prefetch inutile.
+        speciali = {
+            "turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+            "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+        }
+        risolto = speciali.get(model)
     # Una mappa parziale o una entry vuota non devono togliere il default.
     return risolto or f"Systran/faster-whisper-{model}"
 
@@ -1870,6 +1879,19 @@ def installa_dipendenze_se_mancano() -> bool:
     Tesseract, ffmpeg e i modelli NON vengono toccati qui: sono compiti di
     `bootstrap()`, che gira dopo e li copre con i messaggi di primo avvio.
     """
+    # La finestra di Python va controllata QUI, prima di ogni metadata/pip:
+    # farlo solo dentro bootstrap() (che gira piu' avanti) faceva partire
+    # decine di `pip install` destinati a fallire su Python troppo recente,
+    # con minuti di compilazioni dai sorgenti e messaggi di toolchain.
+    if sys.version_info[:2] < _PYTHON_MIN:
+        log.error(
+            "❌ Serve Python %d.%d o piu' nuovo (hai %s).",
+            _PYTHON_MIN[0],
+            _PYTHON_MIN[1],
+            platform.python_version(),
+        )
+        raise SystemExit(1)
+    _rifiuta_python_troppo_recente()
     if not any(_missing_or_old(req) for req in _active_required_packages().values()):
         return False
     log.info("🔧 Primo avvio su questo PC: installo i pacchetti necessari...")

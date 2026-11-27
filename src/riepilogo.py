@@ -195,14 +195,20 @@ def riepilogo_markdown(
         # essere troncata: in quel caso c'e' COMUNQUE qualcosa da controllare.
         if dubbi:
             righe += dubbi
+        elif pagine == 0:
+            righe.append("Nessuna pagina: nessun confine da controllare.")
         else:
             righe.append("Una sola pagina: non c'è nessun confine da controllare.")
     elif dubbi:
         righe += dubbi
     elif transitions and anchored >= transitions:
         righe.append("Niente: tutti i confini sono quelli annunciati a voce.")
-    else:
+    elif transitions:
         righe.append("Alcuni confini sono stimati dal contenuto (vedi le pagine senza annuncio).")
+    else:
+        # Senza conteggio delle ancore la tabella "pagine senza annuncio" non
+        # viene stampata: non puntare l'utente a una riga inesistente.
+        righe.append("Alcuni confini sono stimati dal contenuto.")
 
     # Un report vecchio/scritto a mano puo' avere questi campi con la forma
     # sbagliata: senza i controlli di tipo, TypeError cancellava l'intero

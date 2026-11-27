@@ -338,6 +338,9 @@ def _review_boundary_doubts(video_path: Path, *, cache_dir: Path) -> int:
             "Rilancia la pipeline per ricostruire il referto.",
             motivo_non_fatto or "report senza 'mentions_off' e nessuna trascrizione leggibile in cache",
         )
+        # Anche quando il controllo non e' girato, le anteprime della run
+        # precedente non devono restare a indicare dubbi mai verificati.
+        _write_boundary_previews(video_path, [], cache_dir / "review")
         return 3
     if not items:
         log.info(

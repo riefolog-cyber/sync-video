@@ -49,13 +49,23 @@ rem NOTA: mantenere questo file in SOLO ASCII. I caratteri accentati
 rem (UTF-8 multibyte) confondono il parser di cmd.exe anche con chcp 65001
 rem e fanno eseguire i commenti come comandi.
 
+rem Il percorso del progetto passa alla sonda Python tramite variabile
+rem d'ambiente: interpollarlo dentro una stringa Python (r'...') rompeva
+rem la sonda se la cartella conteneva un apostrofo (O'Brien, D'Angelo).
+set "SYNC_VIDEO_SRC=%~dp0src"
+set "_SONDA=import os,platform,sys;sys.path.insert(0,os.environ.get('SYNC_VIDEO_SRC',''));from hardware import PYTHON_MAX as _MAX,PYTHON_MIN as _MIN;sys.exit(0 if _MIN <= sys.version_info[:2] <= _MAX and not (os.environ.get('SYNC_VIDEO_ARCH')=='ARM64' and platform.machine()=='ARM64') else 1)"
+
 if "%SYNC_VIDEO_NO_VENV%"=="1" goto senza_venv
 
 rem Le virgolette fanno parte del valore di PY_CMD: il percorso del progetto
 rem puo' contenere spazi, e i chiamanti usano %PY_CMD% cosi' com'e'.
+rem Anche la .venv va sondata: una venv creata con Python 3.14/3.15 o con
+rem Python ARM64 nativo faceva saltare tutti i controlli della finestra.
 if exist "%~dp0.venv\Scripts\python.exe" (
-    set "PY_CMD="%~dp0.venv\Scripts\python.exe""
-    exit /b 0
+    "%~dp0.venv\Scripts\python.exe" -c "%_SONDA%" >NUL 2>&1 && (
+        set "PY_CMD="%~dp0.venv\Scripts\python.exe""
+        exit /b 0
+    )
 )
 
 :senza_venv
@@ -151,7 +161,9 @@ rem --retry/--max-time: su una rete lenta il download non deve finire troncato
 rem (un installer a meta' non si puo' verificare e non va eseguito).
 where curl >NUL 2>&1 && curl -L --fail --retry 3 --max-time 300 -o "%_SETUP_EXE%" "%_SETUP_URL%" >NUL 2>&1 && set "_SETUP_SCARICATO=1"
 if "%_SETUP_SCARICATO%"=="1" goto install_esegui
-where powershell >NUL 2>&1 && powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri '%_SETUP_URL%' -OutFile '%_SETUP_EXE%' -TimeoutSec 300" >NUL 2>&1 && set "_SETUP_SCARICATO=1"
+set "SYNC_SETUP_EXE=%_SETUP_EXE%"
+where powershell >NUL 2>&1 && powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri '%_SETUP_URL%' -OutFile \"$env:SYNC_SETUP_EXE\" -TimeoutSec 300" >NUL 2>&1 && set "_SETUP_SCARICATO=1"
+set "SYNC_SETUP_EXE="
 if "%_SETUP_SCARICATO%"=="" goto install_fallito_scaricamento
 
 :install_esegui
@@ -258,6 +270,7 @@ set "_PY_ORDINE="
 set "_PY_PKG="
 set "_PY_FULL="
 set "_SONDA="
+set "SYNC_VIDEO_SRC="
 set "SYNC_VIDEO_ARCH="
 set "_WINGET_ARCH="
 set "_SETUP_URL="
@@ -274,6 +287,7 @@ set "_PY_ORDINE="
 set "_PY_PKG="
 set "_PY_FULL="
 set "_SONDA="
+set "SYNC_VIDEO_SRC="
 set "SYNC_VIDEO_ARCH="
 set "_WINGET_ARCH="
 set "_SETUP_URL="
@@ -296,7 +310,7 @@ rem hardware.py (unica fonte, stessa di bootstrap e verifica_pc): se src/
 rem manca, la sonda fallisce e l'interprete si scarta.
 rem Senza punti esclamativi (i chiamanti usano l'espansione ritardata) e
 rem senza % (dentro un for andrebbero raddoppiati).
-set "_SONDA=import os,platform,sys;sys.path.insert(0,r'%~dp0src');from hardware import PYTHON_MAX as _MAX,PYTHON_MIN as _MIN;sys.exit(0 if _MIN <= sys.version_info[:2] <= _MAX and not (os.environ.get('SYNC_VIDEO_ARCH')=='ARM64' and platform.machine()=='ARM64') else 1)"
+rem _SONDA e' gia' impostata all'inizio con il percorso via SYNC_VIDEO_SRC.
 
 rem 1) Preferisce un Python che abbia gia' fastembed installato: risparmia
 rem    di ricaricare qualche centinaio di MB solo perche' sul PC c'era

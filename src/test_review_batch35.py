@@ -61,6 +61,20 @@ class TestRipresaTrascrizione(unittest.TestCase):
         out = _collect_words([seg], offset=7.0, precedenti=[{"word": "fine", "start": 10.0}])
         self.assertEqual(out, [])
 
+    def test_parola_attaccata_al_taglio_non_e_un_doppione(self) -> None:
+        # Il decoder della coda assegna la sua prima parola esattamente a
+        # `offset` (7.89s), anche quando e' un doppione spostato di "La" a
+        # 9.69s: il confronto col testo non lo becca perche' dista 1.8s.
+        # Con il limite esclusivo la ripresa restituiva 58 parole invece di
+        # 57 (test lento test_ripresa_equivalente, nightly del 27/11/2026).
+        seg = FakeSegment([("La", 0.0), ("ha", 3.02)], "La ha", 0.0, 3.3)
+        out = _collect_words(
+            [seg],
+            offset=7.89,
+            precedenti=[{"word": "La", "start": 9.69}, {"word": "libertà", "start": 9.91}],
+        )
+        self.assertEqual([w["word"] for w in out], ["ha"])
+
     def test_senza_ripresa_la_parola_a_zero_non_si_perde(self) -> None:
         seg = FakeSegment([("ciao", 0.0)], "ciao", 0.0, 0.3)
         out = _collect_words([seg])

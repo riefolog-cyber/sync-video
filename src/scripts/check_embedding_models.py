@@ -295,6 +295,19 @@ def _save_state(data: dict, known: set[str] | None = None) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     # Persiste i modelli già visti: al secondo run non deve scattare di nuovo
     # lo stesso "nuovo candidato" (e non va riscritto lo stato se la rete manca).
+    # Un 404/mancata lettura di un singolo modello non deve cancellare la
+    # baseline: senza, il run dopo non avvertiva piu' che il modello preferito
+    # era stato aggiornato e lo script diventava cieco per sempre.
+    precedente = _load_state() or {}
+    vecchi = precedente.get("tracked") if isinstance(precedente, dict) else None
+    correnti = data.get("tracked") if isinstance(data, dict) else None
+    if isinstance(vecchi, dict) and isinstance(correnti, dict):
+        for nome, info in correnti.items():
+            if not isinstance(info, dict) or info.get("lastModified") is not None:
+                continue
+            vecchio = vecchi.get(nome)
+            if isinstance(vecchio, dict) and vecchio.get("lastModified"):
+                info["lastModified"] = vecchio["lastModified"]
     models = sorted(set(KNOWN_MODELS) | (known or set()))
     _atomic_write(
         STATE_FILE,

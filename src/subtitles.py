@@ -114,7 +114,14 @@ def timestamp_capitolo(secondi: float) -> str:
     YouTube accetta anche le ore, ma solo quando servono: ``0:04:12`` funziona,
     ``00:04:12`` e' rumore per l'occhio.
     """
-    interi = max(0, int(secondi))
+    # `timestamp_srt` e' gia' protetto, ma qui un tempo non finito (JSON
+    # sporco) o una stringa sollevavano ValueError/OverflowError e facevano
+    # perdere capitoli e riepilogo per una sola slide.
+    try:
+        valore = float(secondi)
+    except (TypeError, ValueError, OverflowError):
+        valore = 0.0
+    interi = max(0, int(valore)) if math.isfinite(valore) else 0
     ore, resto = divmod(interi, 3600)
     minuti, sec = divmod(resto, 60)
     if ore:
@@ -935,7 +942,14 @@ def build_capitoli(
     il fallback "Slide N" deve usare il numero vero della slide li' mostrata.
     """
     capitoli: list[tuple[float, str]] = []
-    inizi = [float(timeline[s]) for s in sorted(timeline)]
+    def _inizio_sicuro(valore: object) -> float:
+        try:
+            t = float(valore)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+        return t if math.isfinite(t) else 0.0
+
+    inizi = [_inizio_sicuro(timeline[s]) for s in sorted(timeline)]
     if inizi:
         inizi[0] = 0.0
     for pos, slide in enumerate(sorted(timeline)):

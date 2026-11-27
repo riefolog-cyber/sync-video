@@ -109,7 +109,10 @@ def _solo_numeri(valore: object, profondita: int = 0) -> object | None:
         return valore
     if isinstance(valore, (int, float)):
         return valore if math.isfinite(float(valore)) else None
-    if profondita >= 2:
+    # Il guard va DOPO i numeri e a profondita' 3: i segmenti del report
+    # sono dict di numeri a profondita' 2 e con il vecchio limite 2
+    # sparivano tutti dal bundle, proprio i dati per diagnosticare il video.
+    if profondita >= 3:
         return None
     if isinstance(valore, dict):
         pulito = {
@@ -257,7 +260,10 @@ def scrivi_bundle(radice: Path) -> Path:
             (cartella / "run.json").write_text(
                 json.dumps({"errore": str(e)}, ensure_ascii=False), encoding="utf-8"
             )
-        base_zip = str(radice / f"diagnostica-{marca}")
+        # La cartella temporanea ha un suffisso unico: metterlo anche nello
+        # zip evita che due bundle nello stesso secondo si sovrascrivano.
+        suffisso = cartella.name.rsplit("-", 1)[-1]
+        base_zip = str(radice / f"diagnostica-{marca}-{suffisso}")
         return Path(shutil.make_archive(base_zip, "zip", root_dir=str(radice), base_dir=cartella.name))
     finally:
         shutil.rmtree(cartella, ignore_errors=True)

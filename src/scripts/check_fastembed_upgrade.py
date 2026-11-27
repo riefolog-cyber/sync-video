@@ -227,6 +227,10 @@ def collect_real_texts(
     slides: list[str] = []
     try:
         sd = json.loads(slides_path.read_text(encoding="utf-8"))
+        # Un JSON valido ma con la forma sbagliata (lista, numero) faceva
+        # sollevare AttributeError qui, uccidendo il controllo aggiornamenti.
+        if not isinstance(sd, dict):
+            return None
         slides = [str(t) for t in sd.get("slide_texts", [])][:max_slides]
     except (OSError, json.JSONDecodeError):
         return None
@@ -234,6 +238,8 @@ def collect_real_texts(
     words: list[dict] = []
     try:
         td = json.loads(transcript_path.read_text(encoding="utf-8"))
+        if not isinstance(td, dict):
+            return None
         words = [w for w in td.get("words_raw", []) if isinstance(w, dict) and w.get("word")]
     except (OSError, json.JSONDecodeError):
         return None

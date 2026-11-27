@@ -90,7 +90,13 @@ if exist "src" for /d /r "src" %%D in (__pycache__) do @if exist "%%D" (
         echo   rimossa %%~fD
     )
 )
-del /s /q "src\*.pyc" >NUL 2>NUL
+if exist "src\*.pyc" (
+    del /s /q "src\*.pyc" >NUL 2>NUL
+    if errorlevel 1 (
+        echo   NON rimossi src\*.pyc
+        set "ERRORI=1"
+    )
+)
 
 echo --- prodotti della run ---
 rem Elenco chiuso, niente wildcard sui nomi: un file dell'utente che per
@@ -108,8 +114,20 @@ for %%F in ("video_finale.mp4" "video_finale.srt" "video_finale.capitoli.txt" "r
         )
     )
 )
-del /q /f "*.log" 2>NUL
-del /q /f "diagnostica-*.zip" 2>NUL
+if exist "*.log" (
+    del /q /f "*.log" 2>NUL
+    if errorlevel 1 (
+        echo   NON rimossi *.log
+        set "ERRORI=1"
+    )
+)
+if exist "diagnostica-*.zip" (
+    del /q /f "diagnostica-*.zip" 2>NUL
+    if errorlevel 1 (
+        echo   NON rimossi diagnostica-*.zip
+        set "ERRORI=1"
+    )
+)
 
 echo.
 if "!ERRORI!"=="1" (

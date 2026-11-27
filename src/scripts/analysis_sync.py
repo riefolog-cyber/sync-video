@@ -134,8 +134,17 @@ TRANSCRIPT_FILE = _newest("transcript_*.json")
 VIDEO = BASE / "video_finale.mp4"
 if "--video" in sys.argv:
     _indice = sys.argv.index("--video")
-    if _indice + 1 < len(sys.argv):
-        VIDEO = Path(sys.argv[_indice + 1])
+    _valore = sys.argv[_indice + 1] if _indice + 1 < len(sys.argv) else ""
+    # Senz'argomento (o con un'altra flag presa per percorso) il vecchio
+    # codice verificava silenziosamente il video di DEFAULT e riportava OK:
+    # un falso positivo su un video mai controllato.
+    if not _valore or _valore.startswith("-"):
+        print(
+            "ERRORE: --video richiede un percorso (es. --video lezione.mp4).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    VIDEO = Path(_valore)
 if not VIDEO.is_file():
     # Senza video il controllo dei frame non puo' girare: uscire 2 (non
     # verificabile) e meglio di "0/0 frame coerenti" che fa credere che il

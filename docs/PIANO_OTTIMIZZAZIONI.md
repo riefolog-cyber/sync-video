@@ -1350,6 +1350,35 @@ seconda codifica rimuove la timeline appena riparata. `--clean-cache`
 viene rifiutato insieme ai comandi a uscita anticipata. Un 429 su HuggingFace
 per il modello preferito non distrugge piu' la baseline del monitor.
 
+## Batch 38 — script, avvio e segnali (2026-11)
+
+Ventunesima revisione: script ausiliari, script Windows/avvio, trascrizione
+avanzata e report/diagnostica. Quattro revisioni parallele, 21 difetti (20
+unici) corretti con test in `test_review_batch38.py`.
+
+**Script.** Un 404 passeggero sul modello preferito non cancella piu' la
+baseline del monitor embedding. `analysis_sync --video` senza percorso non
+verifica piu' il video di default. `--aggiorna` rifiuta timeline vuote o con
+forma sbagliata (un riferimento vuoto rendeva tutti i controlli futuri verdi),
+e una cache JSON valida ma di forma sbagliata non fa piu' schattare l'A/B.
+
+**Avvio Windows.** Il percorso del progetto passa alla sonda Python tramite
+variabile d'ambiente: apostrofi in `O'Brien` non rompono piu' tutti i .bat.
+Anche la `.venv` viene sondata per versione/architettura. La guardia "Python
+troppo recente" scatta prima di ogni pip, non dopo. Il download PowerShell
+usa `$env:SYNC_SETUP_EXE`. `pulisci.bat` controlla l'esito di ogni `del`.
+
+**Trascrizione.** Un lock protegge il read-modify-write del segnale GPU
+concorrente. `--no-ripresa` non scrive piu' parziali che la run successiva
+riutilizzerebbe. I numeri punteggiati dall'ASR ("3.", "4,") non vengono piu'
+buttati via dalla compressione. Lo stato di ripresa e' thread-local e il
+punto `coperto_fino` non regredisce dopo il riascolto.
+
+**Report.** Il bundle diagnostico conserva i segmenti numerici (il batch 36
+li scartava), i due bundle nello stesso secondo hanno nomi distinti, e
+`--review` con esito 3 rimuove le anteprime stale. Il riepilogo distingue zero
+pagine da una pagina e non rimanda piu' a una tabella che non stampa.
+
 ## Stato delle voci
 
 | # | Voce | Stato |
@@ -1445,5 +1474,5 @@ e fa fallire la CI su tutte e tre le versioni di Python, perché mypy
 valuta la condizione e sul ramo non-Windows il nome risulta non definito.
 È successo, e i test in CI non erano nemmeno arrivati a girare.
 
-Stato all'ultimo lancio (batch 37): ruff pulito, mypy pulito su tre
-piattaforme, 1805 test verdi, `_debug_hardware.py` e controlli 6/6.
+Stato all'ultimo lancio (batch 38): ruff pulito, mypy pulito su tre
+piattaforme, 1827 test verdi, `_debug_hardware.py` e controlli 6/6.

@@ -124,6 +124,14 @@ def installa_dipendenze_se_mancano(argv: Sequence[str] | None = None) -> bool:
     molto prima di poter stampare la versione o l'aiuto.
     """
     global _dipendenze_verificate
+    # Anche i comandi che "non toccano niente" devono rifiutare una versione
+    # di Python fuori finestra PRIMA di qualsiasi pip o import pesante.
+    if sys.version_info[:2] < _config._PYTHON_MIN:
+        log.error(
+            "❌ Serve Python %d.%d o piu' nuovo.", _config._PYTHON_MIN[0], _config._PYTHON_MIN[1]
+        )
+        raise SystemExit(1)
+    _config._rifiuta_python_troppo_recente()
     if _dipendenze_verificate:
         return False
     argomenti = list(sys.argv[1:] if argv is None else argv)

@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -95,9 +96,12 @@ def _compress_words(
         # Le parole di transizione NON vengono mai filtrate
         is_transition = word_text in transition_words
 
-        # Non filtrare i numeri ("1", "2", "3"): sono cruciali per le ancore
+        # Non filtrare i numeri ("1", "2", "3"): sono cruciali per le ancore.
+        # L'ASR li emette spesso punteggiati ("3.", "2,"): `isdigit()` li
+        # scartava e la trascrizione compatta perdeva l'annuncio della slide.
+        numero = word_text.strip(".,;:!?\"'()[]").isdigit()
         if not is_transition and (
-            word_text in stopwords or (len(word_text) < min_word_len and not word_text.isdigit())
+            word_text in stopwords or (len(word_text) < min_word_len and not numero)
         ):
             continue
 
@@ -781,6 +785,12 @@ def _read_attempt_for(audio_path: Path) -> dict[str, Any] | None:
     return next((r for r in _read_attempts() if _same_audio(r, audio_path)), None)
 
 
+# Due run concorrenti in processi diversi condividono la cache: senza un lock
+# attorno a tutta la sequenza leggi-modifica-scrivi, la cancellazione di A
+# poteva sovrascrivere il segnale di crash appena scritto da B.
+_ATTEMPT_LOCK = threading.RLock()
+
+
 def _write_attempt(audio_path: Path) -> None:
     """Registra l'inizio di un tentativo GPU (sovrascrive il precedente).
 
@@ -792,7 +802,7 @@ def _write_attempt(audio_path: Path) -> None:
     """
     # Si AGGIUNGE il record di questo audio senza toccare gli altri: cosi'
     # anche un secondo podcast puo' registrare il proprio crash GPU.
-    with contextlib.suppress(OSError):
+    with _ATTEMPT_LOCK, contextlib.suppress(OSError):
         info = audio_path.stat()
         records = [r for r in _read_attempts() if not _same_audio(r, audio_path)]
         records.append(
@@ -821,12 +831,13 @@ def _clear_attempt(audio_path: Path | None = None) -> None:
         return
     # Si rimuove SOLO il record di questo audio: un segnale di crash di un
     # altro podcast resta intatto.
-    records = [r for r in _read_attempts() if not _same_audio(r, audio_path)]
-    if records:
-        _scrivi_attempts(records)
-    else:
-        with contextlib.suppress(OSError):
-            _openvino_attempt_path().unlink(missing_ok=True)
+    with _ATTEMPT_LOCK:
+        records = [r for r in _read_attempts() if not _same_audio(r, audio_path)]
+        if records:
+            _scrivi_attempts(records)
+        else:
+            with contextlib.suppress(OSError):
+                _openvino_attempt_path().unlink(missing_ok=True)
 
 
 def _same_audio(segnalato: object, audio_path: Path) -> bool:
@@ -1253,18 +1264,18 @@ _SOVRAPPOSIZIONE_RIPRESA = 3.0
 
 # Fino a che secondo e' stata ripresa l'ultima trascrizione (0 = da capo).
 # Letta dal report: una lezione trascritta in due passate deve dirlo.
-_ULTIMA_RIPRESA = 0.0
+_STATO_RIPRESA = threading.local()
 
 
 def ultima_ripresa() -> float:
     """Il secondo da cui e' ripartita l'ultima trascrizione (0 se da capo)."""
-    return _ULTIMA_RIPRESA
+    return float(getattr(_STATO_RIPRESA, "coperto", 0.0))
 
 
 def azzera_ripresa() -> None:
-    """Azzera il segnale all'inizio di una nuova run nello stesso processo."""
-    global _ULTIMA_RIPRESA
-    _ULTIMA_RIPRESA = 0.0
+    """Azzera il segnale all'inizio di una nuova run nello stesso thread."""
+    _STATO_RIPRESA.coperto = 0.0
+    _STATO_RIPRESA.coperto_iniziale = 0.0
 
 
 def _prepara_ripresa(
@@ -1282,7 +1293,6 @@ def _prepara_ripresa(
     dare contesto al motore. Le parole riascoltate in quella sovrapposizione
     le scarta ``_collect_words``, perche' sono gia' nel parziale.
     """
-    global _ULTIMA_RIPRESA
     # NON si azzera qui: main chiama la trascrizione piu' di una volta (la
     # seconda, "accurata", usa un beam diverso e quindi non riprende).
     # Azzerare a ogni chiamata cancellava il dato della prima, e il riepilogo
@@ -1390,7 +1400,10 @@ def _prepara_ripresa(
         len(parole),
         coperto - taglio,
     )
-    _ULTIMA_RIPRESA = coperto
+    _STATO_RIPRESA.coperto = coperto
+    # Il punto SALVATO e' quello da non perdere: la coda riascoltata puo'
+    # finire prima (giunto, segmenti brevi) e non deve erodere il progresso.
+    _STATO_RIPRESA.coperto_iniziale = coperto
     return parole, resto, taglio
 
 
@@ -1419,13 +1432,18 @@ def _collect_words(
     all_words: list[Word] = []
     gia_fatte = list(precedenti or [])
     segmenti = 0
-    coperto = offset
+    # Il punto gia' coperto dal parziale e' un progresso: la coda riascoltata
+    # puo' finire prima (giunto, segmenti brevi) e non deve eroderlo.
+    iniziale = float(getattr(_STATO_RIPRESA, "coperto_iniziale", offset))
+    coperto = max(offset, iniziale) if gia_fatte else offset
     # La ripresa riascolta qualche secondo gia' trascritto per avere contesto:
     # le parole che stanno PRIMA del taglio sono doppioni e si scartano. Non si
     # puo' usare come soglia l'ultima parola salvata: il decoder veloce puo'
     # aver saltato una parola proprio nel mezzo della sovrapposizione, e la
     # seconda passata e' l'unica occasione per recuperarla. I doppioni veri
-    # restano gestiti da `_gia_detto` (testo + finestra temporale stretta).
+    # restano gestiti da `_gia_detto` (testo + finestra temporale stretta),
+    # con la regola aggiuntiva `_doppione_al_taglio` per la prima parola
+    # della coda, che il decoder attacca esattamente a `offset`.
     limite: float | None = offset if gia_fatte else None
     # Indice delle parole salvate per testo: la coda viene riascoltata per
     # parecchi secondi e una parola puo' essere riconosciuta di nuovo con un
@@ -1443,6 +1461,25 @@ def _collect_words(
             if abs(inizio - inizio_salvato) <= 0.6:
                 return True
         return False
+
+    def _doppione_al_taglio(testo: str, inizio: float) -> bool:
+        """La prima parola della coda puo' essere un doppione spostato.
+
+        Il decoder tagliato le assegna l'inizio del file (``offset``): se il
+        suo testo e' gia' tra le parole salvate DENTRO la sovrapposizione, e'
+        l'artefatto misurato sul materiale di prova ("La" a 7.89s, doppione
+        di "La" a 9.69s: 57 -> 58 parole al giunto). Non si scarta invece una
+        parola nuova che comincia davvero sul taglio (nessun riscontro nel
+        testo gia' salvato).
+        """
+        if limite is None or inizio > limite:
+            return False
+        fine_sovrapposizione = limite + _SOVRAPPOSIZIONE_RIPRESA
+        return any(
+            limite <= inizio_salvato <= fine_sovrapposizione
+            for inizio_salvato in gia_per_testo.get(testo.strip().lower(), ())
+        )
+
     for seg in segments:
         segmenti += 1
         fine = offset + float(getattr(seg, "end", 0.0) or 0.0)
@@ -1454,7 +1491,7 @@ def _collect_words(
                 inizio = float(w.start) + offset
                 if limite is not None and inizio < limite:
                     continue
-                if _gia_detto(w.word, inizio):
+                if _gia_detto(w.word, inizio) or _doppione_al_taglio(w.word, inizio):
                     continue
                 if w.word.strip():
                     # float(): i timestamp di faster-whisper sono np.float64, e
@@ -1466,7 +1503,7 @@ def _collect_words(
                 inizio = float(seg.start) + offset
                 if limite is not None and inizio < limite:
                     continue
-                if _gia_detto(token, inizio):
+                if _gia_detto(token, inizio) or _doppione_al_taglio(token, inizio):
                     continue
                 all_words.append({"word": token, "start": inizio})
         if audio_path is not None and segmenti % _CHECKPOINT_OGNI_SEGMENTI == 0:
@@ -1760,7 +1797,10 @@ def transcribe_with_whisper(
             vad_filter=vad_filter,
             vad_parameters=vad_params,
             batch_size=batch_size,
-            checkpoint_path=audio_path,
+            # Con --no-ripresa NON va scritto un nuovo parziale: la run
+            # successiva senza il flag lo leggerebbe e cucirebbe una
+            # decodifica che l'utente aveva esplicitamente scartato.
+            checkpoint_path=audio_path if riprendi else None,
             offset=offset,
             precedenti=iniziali,
             params=_params,
